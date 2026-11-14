@@ -367,6 +367,17 @@ updates:
   # repository files, via an explicit dispatcher, with paired source/runtime
   # publication and recorded legal approval. An automated base-image bump
   # cannot satisfy that process, so it must stay a human-initiated refresh.
+  #
+  # FOUR TIERS, ONE BLOCK EACH. A base-image bump is reviewed for what it can
+  # break, and that differs by tier, so each tier arrives as its own pull
+  # request with its own merge decision. Do not merge two tiers into one block:
+  # the grouped pull request that results hides which decision is being made.
+  # scripts/security/audit-dependabot-coverage.sh fails when a tracked
+  # Dockerfile is in no block; it does not check that tiers stay apart.
+  #
+  # Tier 1 — runtime services. The control-plane and media-plane images, which
+  # this repository builds and ships. A bump here changes the base of a shipped
+  # service image, so it carries `risk: security`.
   - package-ecosystem: "docker"
     directories:
       - "/services/control-plane"
@@ -383,18 +394,21 @@ updates:
     labels:
       - "area: deps"
       - "area: ci-cd"
+      - "risk: security"
     open-pull-requests-limit: 5
     groups:
       base-images:
         patterns:
           - "*"
 
-  # Postgres is split out of the block above ONLY so its `ignore` can be scoped.
-  # An ignore under a `directories:` LIST is emitted once per directory by
-  # scripts/security/check-pin-exceptions.mjs, so leaving it there would demand a
-  # register entry for `postgres` in control-plane, media-plane and buildtools —
-  # three entries describing an image none of them builds. Same schedule, labels,
-  # cooldown and grouping as the block above; the split is scoping, not policy.
+  # Tier 2 — database. A PostgreSQL major is a data migration (held back
+  # below), so this image is never grouped with a service image.
+  #
+  # The separate block also scopes the `ignore` below. An ignore under a
+  # `directories:` LIST is emitted once per directory by
+  # scripts/security/check-pin-exceptions.mjs, so sharing the runtime block
+  # would demand a register entry for `postgres` in control-plane and
+  # media-plane — entries describing an image neither of them builds.
   - package-ecosystem: "docker"
     directory: "/infrastructure/docker/postgres"
     schedule:
@@ -437,8 +451,37 @@ updates:
         patterns:
           - "*"
 
-  # The deploy-test image is split out of the docker block for the same scoping
-  # reason as postgres above. It may only move between Ubuntu LTS releases
+  # Tier 3 — build tooling. This Dockerfile's parent becomes the parent of the
+  # next published builder image, and the media-plane builder stage compiles in
+  # that image once the consumer pin moves. A bump here reaches production only
+  # through a publish and a consumer pin change, but it reaches every build
+  # after that, so it gets its own merge decision. See
+  # docs/runbooks/refresh-buildtools-base.md.
+  - package-ecosystem: "docker"
+    directory: "/infrastructure/docker/buildtools"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    open-pull-requests-limit: 5
+    groups:
+      base-images:
+        patterns:
+          - "*"
+
+  # Tier 4 — deploy tests. A test-only image: a bump can break the deploy test
+  # suite and nothing that ships.
+  #
+  # The separate block also scopes the `ignore` below, for the same reason as
+  # postgres above. The image may only move between Ubuntu LTS releases
   # (YY.04 with an even YY). Interim releases get 9 months of support, so a
   # bump to one ships an image that is end-of-life within the year. #3879
   # proposed 25.10, past its July 2026 end of life, after #3842 (26.04) was

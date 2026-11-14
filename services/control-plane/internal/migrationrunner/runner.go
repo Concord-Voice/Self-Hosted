@@ -1,6 +1,8 @@
 // Package migrationrunner applies golang-migrate migrations and refuses a dirty
 // recorded version (#3587 PR-0). The control plane's database.RunMigrations
 // calls it; the account authority's binary calls RunSource (#3587 PR-B2).
+// ReadStatus and Verify are read-only siblings of Run and must never build the
+// migrate driver, which takes the advisory lock and can create the version table.
 package migrationrunner
 
 import (

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "dockerfiles": {
+    "app.df": {
+      "stages": [
+        {
+          "registry": "docker.io",
+          "repository": "library/alpine",
+          "tag": "^3\\.[0-9]+$"
+        }
+      ]
+    }
+  }
+}

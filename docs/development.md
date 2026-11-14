@@ -21,9 +21,9 @@ See [SETUP_GITHUB.md](./SETUP_GITHUB.md) for full GitHub collaboration workflow.
   `client/admin` need **Node.js >= 24.15.0**, and `services/media-plane` needs
   **>= 24.11.0**. Node 26 is included. Each workspace's `package.json` `engines`
   field is authoritative. Go-only work does not require Node.js
-- **Go** 1.27.3 (the supported toolchain, recorded in `services/control-plane/go.mod`)
-  Select this exact release with `GOTOOLCHAIN=go1.27.3` if a newer Go is installed;
-  CI and all three Docker builders use the same version. pre-commit builds the
+- **Go** 1.27.4 (the supported toolchain, recorded in `services/control-plane/go.mod`)
+  Select this exact release with `GOTOOLCHAIN=go1.27.4` if a newer Go is installed;
+  CI and all four Docker builders use the same version. pre-commit builds the
   golangci-lint hook with your system Go, so a system Go older than 1.27 makes that
   hook fail; upgrade Go, then run `pre-commit clean` so the hook rebuilds
 - **Docker** and **Docker Compose**
@@ -214,6 +214,115 @@ verification, and commissioning live in the dedicated
 - There is no development API proxy. Use tests for mocked API flows, or the
   control-plane production image for same-origin integration
 
+### Changing a Docker Base Image
+
+`.github/base-images.json` declares which image each stage of each tracked
+Dockerfile is built from: registry, repository and a tag pattern. A static
+check compares every `FROM`, every `COPY --from=` or `ADD --from=`, and every
+`RUN --mount=...,from=` with it:
+
+```bash
+python3 .github/scripts/check-base-images.py
+```
+
+It checks every tracked path that contains `dockerfile` in any letter case. It
+needs no Docker daemon and no network. It runs as a pre-commit hook on every
+commit, so deleting or renaming a Dockerfile is caught too. In CI it runs
+twice:
+
+- The `Protected base-image identity check` job of the required PR build
+  blocks the merge. It runs the checker from protected `main` against the pull
+  request's Dockerfiles and manifest, so a change to the checker takes effect
+  only after it merges. Keep a checker change compatible with the current
+  manifest and Dockerfiles. If it cannot be, land it in two pull requests: the
+  checker first, then the manifest or Dockerfiles that need it.
+- The `workflow-lint` job runs the pull request's own copy. It is advisory, and
+  it is where a change to the checker is tested.
+
+Each violation is one line, `<file>:<line>: <rule>: <message>`, and the exit
+code is 1. Exit code 2 means the check could not complete, for example because
+it cannot parse the manifest. Fix that first.
+
+An entry is keyed by the Dockerfile's path from the repository root:
+
+```json
+"services/example/Dockerfile": {
+  "stages": [
+    { "alias": "builder", "registry": "docker.io", "repository": "library/golang", "tag": "^1\\.27\\.[0-9]+-alpine$" },
+    { "scratch": true }
+  ]
+}
+```
+
+- `stages` has one item for each `FROM`, in file order. `alias` is the `AS`
+  name, when the stage has one.
+- `tag` is a Python regular expression. It must start with `^` and end with
+  `$`. Escape each dot, and double each backslash for JSON.
+- A `FROM scratch` stage is `{"scratch": true}`.
+- Optional keys of the entry: `build_contexts` (names that `COPY --from=` may
+  use) and `syntax` (the exact value of the `# syntax=` line).
+
+| Change | Rule reported | Manifest edit |
+|---|---|---|
+| New digest, same tag | None | None |
+| New tag that still matches the stage's `tag` pattern | None | None |
+| New tag outside the pattern (a new minor, major or flavor) | `tag-mismatch` | Edit `tag` |
+| New repository or registry | `identity-mismatch` | Edit `registry` and `repository` |
+| Stage added, removed or reordered, or an `AS` name changed | `stage-mismatch` | Edit `stages` to match the file |
+| New Dockerfile | `unlisted-dockerfile` | Add an entry |
+| Dockerfile deleted or renamed | `stale-entry`, and `unlisted-dockerfile` for a new name | Remove or rename the entry |
+| New `COPY --from=<build context>` | `external-copy-source` | Add the name to `build_contexts` |
+
+Make the manifest edit in the same pull request as the Dockerfile change. The
+patterns differ by image: one accepts any patch (`^1\.27\.[0-9]+-alpine$`),
+another accepts one exact tag (`^3\.24$`). Read the entry before you bump.
+
+The check also reports:
+
+- `missing-tag`, `missing-digest`: every image reference needs a tag and a
+  `@sha256:` digest. A `FROM` that names an earlier stage (`FROM builder AS
+  final`) is not supported and is reported as `missing-tag`.
+- `variable-reference`: a reference built from an `ARG`.
+- `external-copy-source`: a `COPY --from=`, `ADD --from=` or mount that names
+  an external image; a stage index in `RUN --mount` (BuildKit reads it as an
+  image name); and any such source in an `ONBUILD` instruction, which the child
+  build resolves.
+- `syntax-directive`: a `# syntax=` line that differs from the `syntax` value
+  of the entry, or that is not at the top of the file and unindented, where
+  BuildKit ignores it.
+
+It refuses what it cannot read the way BuildKit does: a heredoc or any `<<`
+(`heredoc`), an `# escape=` directive (`escape-directive`), a line that starts
+with `//` (`syntax-directive`), a control character or a non-ASCII character
+outside a comment line (`unsupported-character`), and a quote or a backslash in
+`FROM` or in the flags of `COPY`, `ADD` and `RUN`. Write
+`COPY --chown=1000:1000`, not `COPY --chown="1000:1000"`.
+
+The manifest has a code owner. A pull request that changes a Dockerfile and
+its manifest entry together passes the check, so review of the manifest diff
+is the control: read it as a change of supplier. A green result is evidence
+only when the pull request changes none of the checker, the manifest, the CI
+workflow and the CI path filter. All four are code-owned.
+
+The check reads text and nothing else. It does not cover:
+
+- Image signatures and image contents.
+- Whether a digest belongs to its tag. A digest-only edit can point a stage at
+  another flavor of the same repository, so review a digest change as well.
+- `image:` references in Compose files, and build contexts supplied from
+  outside the Dockerfile (Compose `additional_contexts`,
+  `docker build --build-context`), which can replace a named context or an
+  image. A declared build context that the build command does not supply is
+  pulled by BuildKit as an image of that name.
+- A Compose `build:` entry that takes its Dockerfile from somewhere else: a
+  remote `context`, `dockerfile_inline`, or a `dockerfile:` path that does not
+  contain `dockerfile`.
+- A Dockerfile written inline by a script, and `ADD` from a URL or a git
+  repository.
+
+A tracked Dockerfile that is a symbolic link or a submodule entry stops the
+check with exit code 2.
+
 ### Database Migrations
 
 Current migrations run automatically on startup. For production, use a migration tool:
@@ -228,6 +337,30 @@ migrate create -ext sql -dir services/control-plane/migrations -seq add_users_ta
 # Run migrations
 migrate -path services/control-plane/migrations -database "postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable" up
 ```
+
+#### Checking migration status
+
+`control-plane migrations status` reports whether the database schema matches the migrations built into the binary. It is read-only: it never applies a migration, never takes the migration lock and never creates the version table. It reads only `DATABASE_URL` and does not load the rest of the configuration. Run it from `services/control-plane`, because it reads the `migrations` directory there:
+
+```bash
+cd services/control-plane
+DATABASE_URL="postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable" \
+  go run ./cmd/server migrations status
+```
+
+In a built image the same subcommand is `./main migrations status`. It prints one line and exits within 15 seconds:
+
+| Stdout | Exit | Meaning |
+|---|---|---|
+| `current <n>` | 0 | The schema is at version `<n>`, the latest this binary has |
+| `pending <db> <latest>` | 3 | The database is behind the binary |
+| `ahead <db> <latest>` | 3 | The database is newer than the binary |
+| `dirty <db>` | 3 | A migration at version `<db>` failed part-way |
+| `uninitialised <latest>` | 3 | No migration has ever run |
+| none (stderr: `migrations status: unavailable`) | 1 | The database could not be read. The message never includes the DSN or a driver error |
+| none (stderr: usage line) | 64 | Wrong arguments |
+
+The deploy controller's control-plane blue-green rail uses this check as its migration gate. See [architecture.md](architecture.md#control-plane-blue-green-deploys).
 
 ### Accessing Database
 
@@ -338,6 +471,20 @@ not prevent this; it only prevents the separate schema-divergence hazard. Give t
 second worktree its own `DATABASE_URL`, or run the two serially. See the same
 rules file, and [#2790](internal development reference omitted)
 for the fix.
+
+### Deploy Controller
+
+The control-plane blue-green rail in `infrastructure/deploy/concord-ctl.sh` has two test scripts. Run them from the repository root:
+
+```bash
+# Hermetic: the real controller against PATH stubs
+bash infrastructure/deploy/tests/test-control-plane-bluegreen.sh
+
+# Real nginx: zero non-200 responses and WebSocket survival across a flip
+bash infrastructure/deploy/tests/test-control-plane-bluegreen-nginx.sh
+```
+
+Some cases need Linux. The rail-on and lock re-entry cases need `/usr/bin/flock`, and the compose one-off contract case needs a running Docker daemon. The nginx script needs `nginx` and `python3` on `PATH` and free loopback ports 8080, 8081 and 18088. macOS has no `/usr/bin/flock`, so the flock cases print `SKIP` there; any other missing prerequisite also skips its cases locally. With `CI` set, a missing prerequisite is a failure, not a skip. CI runs both scripts through the deploy-test step's `infrastructure/deploy/tests/test-*.sh` glob.
 
 ### Media Plane
 
@@ -486,6 +633,7 @@ directory belong to the intended service.
 | `CONTROL_PLANE_REPLICA_COUNT` | unset (Compose: `1`) | Explicit control-plane replica contract. Since #2178 it is enforced **unconditionally at startup**, not only under the Activity History gate: any explicitly set value other than `1` fails `Load()` with a fatal error, on every environment. The WebSocket hub holds per-connection session state and channel interest maps in process memory, so a second replica silently drops cross-replica fanout. Horizontal scaling is tracked in #2757. Leaving it unset is fine — the guard only fires on an explicit value |
 | `ACTIVITY_HISTORY_OPERATOR_NAME` | empty | Self-host disclosure operator. Required before new Activity History opt-in becomes available (SaaS uses `Concord Voice LLC`) |
 | `ACTIVITY_HISTORY_PRIVACY_POLICY_URL` | empty | Self-host disclosure URL. Absolute HTTPS applies outside loopback development and test |
+| `MIGRATIONS_MODE` | empty (`apply`) | What startup does with migrations. Empty or `apply` runs them as before. `verify` refuses to start unless the schema is current and writes nothing. Any other value fails startup before the database is opened. Only the deploy controller's transient green container sets it, to `verify`; it is not in `.env.example` |
 
 On managed hosts, `concord-ctl.sh nginx-reload` reads the canonical Compose-quoted value from `/opt/concord/.env`. It validates that value before sudo. It then renders nginx as the public HSTS owner. The nginx config hides Go's upstream STS field and emits one server-level policy. It repeats that policy in the three locations whose own `add_header` directives suppress inheritance.
 
@@ -504,6 +652,14 @@ opt-in unavailable. It does not prevent existing history reads or deletion.
 | `OPS_METRICS_SHARED_SECRET` | (empty) | Snapshot-signing secret of at least 32 bytes. Required when enabled |
 | `OPS_METRICS_INTERVAL` | `15s` | Sampling interval from 5 seconds through 5 minutes |
 | `OPS_METRICS_ROLE` | `local` | Local storage role. Reserve `aggregator` for #1504 |
+
+### Deploy Controller (managed hosts)
+
+Set in the deploy env file (`deploy.env.local` in the deploy directory), not in `.env`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTROL_PLANE_DEPLOY_PROFILE` | `control-plane-single` | `control-plane-bluegreen` turns on the control-plane blue-green rail. Honoured only on a managed production or staging selection; forced to `control-plane-single` everywhere else, including every `concord-selfhost` install. An invalid value exits 2. Do not turn it on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 are released. See [architecture.md](architecture.md#control-plane-blue-green-deploys) |
 
 ### Media Plane
 

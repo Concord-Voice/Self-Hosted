@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from scan_revision_fixture import WorkflowConsumer, twin_merges, workflow
-from test_ci_scan_verdict import selection
+from test_ci_scan_verdict import commit_files, run_git, selection
 
 SCANNERS = ('semgrep', 'eslint', 'govulncheck')
 PRIVATE = 'synthetic-private-http-detail'
@@ -19,7 +19,9 @@ class ScanRevisionPreflightTests(unittest.TestCase):
         self.repo = Path(temporary.name)
         self.base, self.head, self.event, self.selected = twin_merges(self.repo)
         self.selection = selection(dict(semgrep_custom=True, semgrep_community=True, eslint=True, govulncheck=True))
-        self.selection.update(base_sha=self.base, head_sha=self.head, merge_sha=self.selected)
+        merge_base = run_git(self.repo, 'show', '-s', '--format=%P', self.selected).split()[0]
+        self.selection.update(base_sha=self.base, head_sha=self.head, merge_sha=self.selected,
+                              merge_base_sha=merge_base)
 
     def consumer(self, *, external=True):
         return WorkflowConsumer(self.repo, self.selection, self.event, external=external)
@@ -47,10 +49,80 @@ class ScanRevisionPreflightTests(unittest.TestCase):
                 self.assertEqual([
                     ['api', 'repos/Concord-Voice/Self-Hosted/pulls/3691'],
                     ['api', 'repos/Concord-Voice/Self-Hosted/commits/' + self.selected],
+                    ['api', 'repos/Concord-Voice/Self-Hosted/git/ref/heads/main'],
+                    ['api', 'repos/Concord-Voice/Self-Hosted/compare/' + self.selection['merge_base_sha'] + '...' + self.selection['merge_base_sha']],
                 ], outcome.calls)
                 self.assertEqual([(scanner, self.selected)], consumer.checkouts)
                 self.assertTrue(consumer.execution_boundaries, 'positive control reaches actual declared scan/install boundaries')
                 self.assertTrue(all(upload['commit_sha'] == self.selected for upload in consumer.uploads))
+
+    def test_fresh_api_base_can_lag_protected_synthetic_merge_parent(self):
+        """The API base remains an identity field; merge^1 is scan provenance.
+
+        This runs the real external-workflow preflight.  It deliberately gives
+        the API an older base while the synthetic merge has a later protected
+        main parent, so the current failure is the old ordered-parent check,
+        not an absent future merge-base input.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            base, head, _event, _selected = twin_merges(repo)
+            run_git(repo, 'checkout', '-q', '--detach', base)
+            merge_base = commit_files(repo, 'protected main advances', {'main-only.txt': 'trusted\n'})
+            run_git(repo, 'update-ref', 'refs/heads/main', merge_base)
+            run_git(repo, 'checkout', '-q', '--detach', merge_base)
+            run_git(repo, 'merge', '-q', '--no-ff', '--no-edit', '-m', 'synthetic merge', head)
+            synthetic_merge = run_git(repo, 'rev-parse', 'HEAD')
+
+            selection = dict(self.selection, base_sha=base, head_sha=head, merge_sha=synthetic_merge,
+                             merge_base_sha=merge_base)
+            self.assertEqual([merge_base, head],
+                             run_git(repo, 'show', '-s', '--format=%P', synthetic_merge).split())
+            self.assertNotEqual(base, merge_base, 'fixture must model an API base that legitimately lags merge^1')
+
+            for scanner in SCANNERS:
+                with self.subTest(scanner=scanner):
+                    consumer = WorkflowConsumer(repo, selection, synthetic_merge)
+                    consumer.run_scanner(scanner)
+                    self.assertEqual(1, len(consumer.preflights))
+                    outcome = consumer.preflights[0][1]
+                    self.assertEqual(0, outcome.returncode, outcome.stdout + outcome.stderr)
+                    self.assertEqual([
+                        ['api', 'repos/Concord-Voice/Self-Hosted/pulls/3691'],
+                        ['api', 'repos/Concord-Voice/Self-Hosted/commits/' + synthetic_merge],
+                        ['api', 'repos/Concord-Voice/Self-Hosted/git/ref/heads/main'],
+                        ['api', 'repos/Concord-Voice/Self-Hosted/compare/' + merge_base + '...' + merge_base],
+                    ], outcome.calls)
+                    self.assertEqual([(scanner, synthetic_merge)], consumer.checkouts)
+
+    def test_nonprotected_merge_parent_and_missing_main_proof_refuse_before_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            base, head, _event, _selected = twin_merges(repo)
+            run_git(repo, 'checkout', '-q', '--detach', base)
+            main = commit_files(repo, 'protected main advances', {'main-only.txt': 'trusted\n'})
+            run_git(repo, 'update-ref', 'refs/heads/main', main)
+            run_git(repo, 'checkout', '-q', '--detach', base)
+            forged = commit_files(repo, 'unprotected parent', {'forged.txt': 'no trust\n'})
+            run_git(repo, 'checkout', '-q', '--detach', forged)
+            run_git(repo, 'merge', '-q', '--no-ff', '--no-edit', '-m', 'forged merge', head)
+            forged_merge = run_git(repo, 'rev-parse', 'HEAD')
+            selection = dict(self.selection, base_sha=base, head_sha=head, merge_sha=forged_merge,
+                             merge_base_sha=forged)
+
+            for scanner in SCANNERS:
+                with self.subTest(scanner=scanner, case='nonprotected parent'):
+                    self.reject(scanner, WorkflowConsumer(repo, selection, forged_merge), calls=4)
+                with self.subTest(scanner=scanner, case='malformed protected main response'):
+                    consumer = WorkflowConsumer(repo, selection, forged_merge)
+                    consumer.main_reply = {'ref': 'refs/heads/main', 'object': {'type': 'tree', 'sha': main}}
+                    self.reject(scanner, consumer, calls=3)
+
+    def test_missing_or_malformed_selected_merge_base_refuses_before_http(self):
+        for scanner in SCANNERS:
+            for value in ('', 'not-a-sha', 'x' * 40):
+                with self.subTest(scanner=scanner, value=value):
+                    self.reject(scanner, self.consumer(), {'selected-merge-base-sha': value}, calls=0)
 
     def test_missing_malformed_and_unadmitted_tuples_refuse_without_checkout(self):
         variants = [
@@ -170,6 +242,9 @@ class ScanRevisionPreflightTests(unittest.TestCase):
                     self.assertEqual([
                         ['api', 'repos/Concord-Voice/Self-Hosted/pulls/3691'],
                         ['api', 'repos/Concord-Voice/Self-Hosted/commits/' + self.selected],
+                        ['api', 'repos/Concord-Voice/Self-Hosted/git/ref/heads/main'],
+                        ['api', 'repos/Concord-Voice/Self-Hosted/compare/' + self.selection['merge_base_sha'] +
+                         '...' + self.selection['merge_base_sha']],
                     ], outcome.calls)
                     self.assertEqual([(scanner, self.selected)], consumer.checkouts)
                     self.assertTrue(consumer.execution_boundaries)

@@ -2,6 +2,7 @@ package managedredis
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -60,6 +61,17 @@ func TestOperatorAllowsOnlyReviewedMediaCommands(t *testing.T) {
 		{"wrong room", []string{"EVAL", cleanupRoomScript, "2", "voice:room_owner:" + room, "voice:room_live:" + otherRoom, "blue"}, false},
 		{"unknown script", []string{"EVAL", "return 1", "2", "voice:room_owner:" + room, "voice:room_live:" + room, "blue"}, false},
 		{"extra argument", []string{"DEL", "media:colour_draining:blue", "media:active_colour"}, false},
+		{"pause read", []string{"GET", "media:legacy_join_pause"}, true},
+		{"pause arm", []string{"SET", "media:legacy_join_pause", "1700000000:1700007200", "NX"}, true},
+		{"pause test user", []string{"SET", "media:legacy_join_pause", "1700000000:1700007200:" + room, "XX"}, true},
+		{"pause resume", []string{"EVAL", resumePauseScript, "1", "media:legacy_join_pause", "1700000000:1700007200"}, true},
+		{"pause plain set", []string{"SET", "media:legacy_join_pause", "1700000000:1700007200"}, false},
+		{"pause bad mode", []string{"SET", "media:legacy_join_pause", "1700000000:1700007200", "GET"}, false},
+		{"pause bad value", []string{"SET", "media:legacy_join_pause", "soon", "NX"}, false},
+		{"pause uppercase user", []string{"SET", "media:legacy_join_pause", "1700000000:1700007200:0000000A-0000-4000-8000-000000000001", "XX"}, false},
+		{"pause delete", []string{"DEL", "media:legacy_join_pause"}, false},
+		{"pause unknown script", []string{"EVAL", "return redis.call('DEL', KEYS[1])", "1", "media:legacy_join_pause", "1700000000:1700007200"}, false},
+		{"pause script other key", []string{"EVAL", resumePauseScript, "1", "media:active_colour", "1700000000:1700007200"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			admin.operatorArgs = nil
@@ -74,4 +86,20 @@ func TestOperatorAllowsOnlyReviewedMediaCommands(t *testing.T) {
 			require.Equal(t, tc.args, admin.operatorArgs)
 		})
 	}
+}
+
+// The operator only admits scripts byte for byte, so a reworded script in
+// concord-ctl.sh would be refused under managed credentials.
+func TestOperatorScriptsMatchConcordCtl(t *testing.T) {
+	raw, err := os.ReadFile("../../../../infrastructure/deploy/concord-ctl.sh")
+	require.NoError(t, err)
+	for _, script := range []string{cleanupRoomScript, resumePauseScript} {
+		require.Contains(t, string(raw), script)
+	}
+}
+
+// concord-ctl.sh media-legacy-pause reaches Redis through the operator user, so
+// that user's rule must cover the pause key.
+func TestOperatorACLCoversJoinPause(t *testing.T) {
+	require.Contains(t, strings.Fields(operatorACLRule()), "~media:legacy_join_pause")
 }

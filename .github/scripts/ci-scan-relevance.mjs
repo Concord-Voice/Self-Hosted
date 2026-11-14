@@ -53,6 +53,7 @@ export function composeSelection(filters, metadata, options) {
   const validFilters = filters !== null && typeof filters === 'object' && !Array.isArray(filters);
   const validPR = validMetadata && metadata.event_name === 'pull_request'
     && ['head_sha', 'base_sha', 'merge_sha'].every(key => sha(metadata[key]))
+    && (mode === 'legacy' || sha(metadata.merge_base_sha))
     && Number.isSafeInteger(metadata.changed_files)
     && metadata.changed_files >= 0 && metadata.changed_files <= 3000;
   const validPush = validMetadata && metadata.event_name === 'push'
@@ -70,7 +71,7 @@ export function composeSelection(filters, metadata, options) {
     && validMetadata && typeof metadata.hotfix === 'boolean'
     && validFilterSet;
 
-  if (!known) return { version: 1, known: false, mode, policy_sha: policySha };
+  if (!known) return { version: mode === 'legacy' ? 1 : 2, known: false, mode, policy_sha: policySha };
 
   const selected = Object.fromEntries(ANALYSIS_KEYS.map(key => [key, filters[key] === 'true']));
   const full = mode !== 'required-relevant' || metadata.hotfix || validSchedule;
@@ -92,12 +93,13 @@ export function composeSelection(filters, metadata, options) {
   }
 
   const result = {
-    version: 1,
+    version: mode === 'legacy' ? 1 : 2,
     known: true,
     mode,
     ...(validPR ? {
       head_sha: metadata.head_sha,
       base_sha: metadata.base_sha,
+      merge_base_sha: metadata.merge_base_sha,
       merge_sha: metadata.merge_sha,
       changed_files: metadata.changed_files,
     } : validPush ? { before: metadata.before, after: metadata.after } : { head_sha: metadata.head_sha }),

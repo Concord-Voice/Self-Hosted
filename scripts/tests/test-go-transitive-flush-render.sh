@@ -109,7 +109,7 @@ render_case() {
   if [ "$got" = "$want" ]; then
     ok "$name — counts render as ${want_bump}/${want_new}/${want_orph}"
   else
-    bad "$name — wrong counts" "want: $want"$'\n'"got:  ${got:-<no count line found>}"
+    bad "$name — wrong counts" "want: $want"$'\n'"got:  ${got:-no count line found}"
   fi
 }
 
@@ -157,13 +157,25 @@ render_case "directive churn is not counted as modules" \
   $'module x\n\ngo 1.26.6\n\ntoolchain go1.26.6\n\nrequire (\n\tgithub.com/foo/bar v1.0.0\n)\n' \
   0 0 0
 
-# ── the body must carry the CI re-trigger warning ────────────────────────────
-# pr-ci.yml does not fire for GITHUB_TOKEN-authored PRs, so the body is the only
-# place a reviewer learns the checklist is unsatisfiable until they act.
-if grep -q "Close and reopen this PR" /tmp/pr-body.md; then
-  ok "body carries the CI re-trigger instruction"
+# ── the body must NOT tell the reviewer to re-trigger CI ─────────────────────
+# The PR is opened with an App installation token, so `pull_request` workflows
+# start on their own. A leftover re-trigger instruction would send the reviewer
+# to close and reopen a PR whose checks are already running.
+for stale in "Close and reopen this PR" "GITHUB_TOKEN"; do
+  if grep -qF -- "$stale" /tmp/pr-body.md; then
+    bad "body still contains '$stale'"
+  else
+    ok "body does not contain '$stale'"
+  fi
+done
+
+# A bare issue reference in a PR body autolinks to THIS repository's issue of
+# that number, whatever the author meant. The body is generated, so it must
+# carry none.
+if grep -qE '(^|[^[:alnum:]&/])#[0-9]+' /tmp/pr-body.md; then
+  bad "body contains a bare issue reference" "$(grep -nE '(^|[^[:alnum:]&/])#[0-9]+' /tmp/pr-body.md)"
 else
-  bad "body is missing the CI re-trigger instruction"
+  ok "body contains no bare issue reference"
 fi
 
 # ── the body must render a REAL stamp, not the hardcoded cron literals ───────
@@ -180,6 +192,122 @@ if grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}' /tmp/pr-body.md; then
   ok "body renders a real generation stamp (ISO date present)"
 else
   bad "body has no real date — the generation stamp is hardcoded again"
+fi
+
+# ── static: no write credential shares a job with the module refresh ────────
+# A job receives every secret it references, and its GITHUB_TOKEN, when the job
+# STARTS, whatever the step order and whatever `if:` a step carries. Minting
+# late inside one job would therefore still put the App private key on the
+# runner while `go get -u` downloads and resolves third-party modules. The lock
+# is structural, in three jobs:
+#   guard    the only GITHUB_TOKEN write scope (pull-requests), no Go tooling
+#   refresh  fetches modules; read-only token, no secret of any name
+#   open-pr  holds the App key; runs no Go tooling
+job_block() { # $1 = job id; prints that job's lines with comment lines dropped
+  awk -v j="  $1:" '
+    $0 == j                  { p = 1; next }
+    p && /^  [^ #]/          { exit }
+    p && !/^[[:space:]]*#/   { print }
+  ' "$WORKFLOW"
+}
+code_lines() { grep -v '^[[:space:]]*#' "$WORKFLOW"; }
+code_count() { code_lines | grep -cF -- "$1" || true; }
+GO_TOOLING='setup-go|(^|[^[:alnum:]_-])go [a-z]+'
+
+GUARD_JOB=$(job_block guard)
+REFRESH_JOB=$(job_block refresh)
+OPEN_JOB=$(job_block open-pr)
+
+# A fourth job would be outside every per-job assertion below.
+job_ids=$(awk '/^jobs:/ { p = 1; next } p && /^  [^ #]/ { sub(/:.*/, ""); sub(/^  /, ""); printf "%s ", $0 }' "$WORKFLOW")
+if [ "$job_ids" = "guard refresh open-pr " ]; then
+  ok "the workflow has exactly the jobs guard, refresh and open-pr"
+else
+  bad "the job set changed; every job needs a credential assertion here" "jobs: $job_ids"
+fi
+
+# `secrets` with no dot also catches `secrets: inherit` and `toJSON(secrets)`.
+if grep -qF 'go get -u' <<<"$REFRESH_JOB" \
+   && ! grep -qE 'secrets|github\.token|PUBLIC_MIRROR_APP_|create-github-app-token|create-pull-request|write' <<<"$REFRESH_JOB"; then
+  ok "the refresh job fetches modules and holds no secret and no write scope"
+else
+  bad "the refresh job is missing, or references a secret, a token or a write scope"
+fi
+
+if grep -qE '^    needs: guard$' <<<"$REFRESH_JOB" \
+   && grep -qxF "    if: needs.guard.outputs.deferred != 'true'" <<<"$REFRESH_JOB" \
+   && [ -n "$GUARD_JOB" ] \
+   && ! grep -qE "$GO_TOOLING|PUBLIC_MIRROR_APP_|create-github-app-token" <<<"$GUARD_JOB"; then
+  ok "the guard job runs first, with no Go tooling and no App credential"
+else
+  bad "the guard job is missing, is not a gate on refresh, or does more than query pull requests"
+fi
+
+# Whole-line match on the `if:`, so `… == 'true' || always()` does not pass.
+# shellcheck disable=SC2016  # literal GitHub expression, not a shell expansion
+if grep -qF 'has_changes: ${{ steps.refresh.outputs.has_changes }}' <<<"$REFRESH_JOB" \
+   && grep -qF 'echo "has_changes=true" >> "$GITHUB_OUTPUT"' <<<"$REFRESH_JOB" \
+   && grep -qE '^    needs: refresh$' <<<"$OPEN_JOB" \
+   && grep -qxF "    if: needs.refresh.outputs.has_changes == 'true'" <<<"$OPEN_JOB"; then
+  ok "the open-pr job runs only when the refresh job reports a change"
+else
+  bad "the open-pr job is missing, or is not gated on the refresh job's has_changes output"
+fi
+
+if [ -n "$OPEN_JOB" ] && ! grep -qE "$GO_TOOLING" <<<"$OPEN_JOB"; then
+  ok "the open-pr job runs no Go tooling"
+else
+  bad "the job that holds the App key must not run Go tooling"
+fi
+
+# The payload crosses the job boundary as an artifact: same name and directory
+# on both sides, module files copied (never executed), body read in place.
+# shellcheck disable=SC2016  # literal GitHub expressions, not shell expansions
+if [ "$(grep -cxF '          name: go-transitive-flush' <<<"$REFRESH_JOB")" -eq 1 ] \
+   && [ "$(grep -cxF '          name: go-transitive-flush' <<<"$OPEN_JOB")" -eq 1 ] \
+   && [ "$(grep -cxF '          path: ${{ runner.temp }}/flush' <<<"$REFRESH_JOB")" -eq 1 ] \
+   && [ "$(grep -cxF '          path: ${{ runner.temp }}/flush' <<<"$OPEN_JOB")" -eq 1 ] \
+   && grep -qF 'cp "$RUNNER_TEMP/flush/go.mod" "$RUNNER_TEMP/flush/go.sum" services/control-plane/' <<<"$OPEN_JOB" \
+   && grep -qxF '          body-path: ${{ runner.temp }}/flush/pr-body.md' <<<"$OPEN_JOB"; then
+  ok "the payload artifact is uploaded and consumed under one name and path"
+else
+  bad "the artifact name, its path, the module-file copy or body-path no longer agree between the jobs"
+fi
+
+mints=$(code_count 'actions/create-github-app-token@')
+keys=$(code_count 'PUBLIC_MIRROR_APP_PRIVATE_KEY')
+if [ "$mints" -eq 1 ] && [ "$keys" -eq 1 ] \
+   && grep -qF 'PUBLIC_MIRROR_APP_PRIVATE_KEY' <<<"$OPEN_JOB"; then
+  ok "one mint step and one key reference, both in the open-pr job"
+else
+  bad "expected exactly one mint step and one key reference, in the open-pr job" "mints=$mints keys=$keys"
+fi
+
+# `app-token` appears three times in code: the mint action's name, the step id
+# and the one consumer. Counting the id (not `steps.app-token.outputs`) also
+# covers `steps['app-token']`. The consumer must be the `token:` input of the
+# create-pull-request step itself.
+# shellcheck disable=SC2016  # literal GitHub expression, not a shell expansion
+if grep -A2 -F 'uses: peter-evans/create-pull-request@' <<<"$OPEN_JOB" \
+     | grep -qxF '          token: ${{ steps.app-token.outputs.token }}' \
+   && [ "$(code_count 'app-token')" -eq 3 ] \
+   && ! grep -qE 'github\.token|GITHUB_TOKEN' <<<"$OPEN_JOB"; then
+  ok "the PR is opened with the App token, and only the PR step consumes it"
+else
+  bad "create-pull-request must take the App token, and nothing else may consume it"
+fi
+
+# Every way to give GITHUB_TOKEN a write scope: a `scope: write` line (quoted or
+# not), `write-all`, or any inline value on a `permissions:` line. The mint
+# step's `permission-*: write` inputs scope the App token and are excluded.
+writes=$(code_lines \
+  | grep -E "write-all|^[[:space:]]*permissions:[[:space:]]*[^[:space:]]|^[[:space:]]+[a-z-]+:[[:space:]]*[\"']?write" \
+  | grep -vE '^[[:space:]]+permission-[a-z-]+: write$' || true)
+if [ "$writes" = "      pull-requests: write" ] \
+   && grep -qxF '      pull-requests: write' <<<"$GUARD_JOB"; then
+  ok "the only GITHUB_TOKEN write scope is pull-requests, in the guard job"
+else
+  bad "GITHUB_TOKEN may hold one write scope only: pull-requests, in the guard job" "$writes"
 fi
 
 echo "─────────────────────────────────"

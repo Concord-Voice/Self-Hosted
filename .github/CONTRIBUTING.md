@@ -37,7 +37,7 @@ See [GETTING_STARTED.md](../docs/GETTING_STARTED.md) for detailed setup instruct
 ### Prerequisites
 
 - Node.js 24.15+ (the highest `engines` floor across the Node workspaces)
-- Go 1.27.3 (the `go` directive in `services/control-plane/go.mod`; CI and all three Docker builders match it)
+- Go 1.27.4 (the `go` directive in `services/control-plane/go.mod`; CI and all four Docker builders match it)
 - Python 3
 - pre-commit (`pip install pre-commit` or `brew install pre-commit`)
 - Docker Desktop
@@ -331,7 +331,10 @@ The hooks are configured in `.pre-commit-config.yaml` via the Python `pre-commit
 | General    | check-added-large-files, check-case-conflict, check-merge-conflict, check-yaml, check-json, end-of-file-fixer, trailing-whitespace, mixed-line-ending |
 | Go         | golangci-lint, go vet, gofmt, go build                                                                                                                |
 | TypeScript | prettier, eslint, tsc --noEmit                                                                                                                        |
+| Docker     | check-base-images (every image source matches `.github/base-images.json`) and its self-test                                                           |
 | Commit     | commit-msg-format (conventional commits)                                                                                                              |
+
+A change to a Dockerfile `FROM` line can need a matching edit to `.github/base-images.json`. See [Changing a Docker base image](../docs/development.md#changing-a-docker-base-image).
 
 ### CI: GitHub Actions (Mandatory)
 

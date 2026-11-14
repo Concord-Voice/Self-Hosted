@@ -229,7 +229,38 @@ _None yet._
 
 ### Instance-Specific Entries
 
-_None yet._
+#### `go.lang.security.audit.database.string-formatted-query.string-formatted-query` — migration status version read (#253)
+
+| Field | Value |
+|---|---|
+| File | `services/control-plane/internal/migrationrunner/status.go`, lines 104–105 (the `nosemgrep` comment is on line 103) |
+| First recorded | 2026-11-11, PR #259 |
+| Suppressed by | `// nosemgrep:` with the rule ID on the line above `versionSQL` (also `#nosec G202`) |
+| Rationale | The table name is `pq.QuoteIdentifier(current_schema()) + "." + pq.QuoteIdentifier("schema_migrations")`: the schema comes from the server, the table name is a constant, and both are driver-quoted. A table name cannot be a bind parameter. The read must be schema-qualified to match the table golang-migrate writes; an unqualified name could resolve to another schema on the `search_path`. |
+| Verification | Inspected the flagged line; the existence check one statement earlier passes the same qualified name to `to_regclass($1)` as a bound value. |
+| Disposition | Rule-specific inline suppression for this line only. Revisit if the schema or table name ever comes from configuration or a request. |
+
+#### `python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1` — WebSocket test upstream (#253)
+
+| Field | Value |
+|---|---|
+| File | `infrastructure/deploy/tests/control_plane_bluegreen_upstream.py`, line 50 |
+| First recorded | 2026-11-11, PR #259 |
+| Suppressed by | Trailing `# nosemgrep:` with the rule ID on the same line |
+| Rationale | The stub upstream computes `Sec-WebSocket-Accept`, which RFC 6455 section 4.2.2 defines as base64(SHA-1(key + GUID)). It is a protocol handshake value, not a security hash, and SHA-256 would break the handshake. Test-only file. |
+| Verification | The local community rulesets reported the finding before the marker and none after it. Code Scanning alert #493 was dismissed as a false positive on 2026-11-11 with Mark's approval, because the PR scan verifier does not honour in-source suppressions. |
+| Disposition | Rule-specific inline suppression for this line only. |
+
+#### `generic.nginx.security.request-host-used.request-host-used` — blue-green nginx test vhost (#253)
+
+| Field | Value |
+|---|---|
+| File | `infrastructure/deploy/tests/test-control-plane-bluegreen-nginx.sh`, line 173 |
+| First recorded | 2026-11-11, PR #259 |
+| Suppressed by | Trailing `# nosemgrep:` with the rule ID on the same line, inside the generated nginx config |
+| Rationale | The line is a stand-in for the shipped vhost's `$validated_host` map so the cut locations render. The test nginx listens on loopback only and serves stub upstreams; no production config is generated from it. |
+| Verification | The local community rulesets reported two findings on the line before the marker and none after it. Code Scanning alerts #494/#495 were dismissed as false positives on 2026-11-11 with Mark's approval, because the PR scan verifier does not honour in-source suppressions. |
+| Disposition | Rule-specific inline suppression for this test line only. A `$host` use in a shipped vhost is still a real finding. |
 
 ## Adding a new entry
 

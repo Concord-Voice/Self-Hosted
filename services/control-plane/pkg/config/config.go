@@ -757,6 +757,10 @@ func (c *Config) validateActivityHistory() error {
 // *Config, so calling it twice is idempotent. Do not delete either call as
 // "the redundant one": at both sites the guard is deliberately ordered ahead of
 // validateActivityHistory for the shadowing reason above.
+// It reads configuration only. The default-off control-plane blue-green rail
+// (docs/architecture.md, "Control-plane blue-green deploys") briefly runs two
+// processes that both read CONTROL_PLANE_REPLICA_COUNT=1; that overlap is an
+// activation gate for the rail, and this check does not and cannot see it.
 func (c *Config) validateControlPlaneReplicaCount() error {
 	if c.ControlPlaneReplicaCountExplicit && c.ControlPlaneReplicaCount != 1 {
 		return fmt.Errorf(
@@ -1491,7 +1495,18 @@ func (c *Config) validateProduction() error {
 // (an org anyone can register a lookalike of), or an unterminated
 // "repo:Owner/Repo" (which HasPrefix-matches "repo:Owner/Repo-Evil:") each
 // collapse that binding. The trailing colon is load-bearing (#2021).
-var oidcSubjectPrefixShape = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*:`)
+//
+// Two forms are accepted: the name form "repo:<owner>/<repo>:" and the
+// immutable form "repo:<owner>@<id>/<repo>@<id>:" that GitHub issues when a
+// repository uses immutable subject claims. The ids are decimal and must be on
+// both segments or neither; a half-immutable prefix matches no token GitHub
+// mints. Keep this pattern identical to subjectPrefixShape in
+// internal/attestation/oidc.go.
+var oidcSubjectPrefixShape = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*|@[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*@[1-9][0-9]*):`)
+
+// oidcImmutableSubjectPrefix matches a prefix that starts with the immutable
+// owner@id/repo@id form, the immutable branch of oidcSubjectPrefixShape.
+var oidcImmutableSubjectPrefix = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*@[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*@[1-9][0-9]*:`)
 
 func (c *Config) validateAttestation() error {
 	if err := c.validateAppAttest(); err != nil {
@@ -1507,7 +1522,17 @@ func (c *Config) validateAttestation() error {
 		return fmt.Errorf("ATTESTATION_OIDC_SUBJECT_PREFIX must be set when REQUIRE_CLIENT_ATTESTATION=true")
 	}
 	if !oidcSubjectPrefixShape.MatchString(c.OIDCSubjectPrefix) {
-		return fmt.Errorf("ATTESTATION_OIDC_SUBJECT_PREFIX must start with %q — a fully-qualified %q prefix (GitHub OIDC sub claim shape), got %q", "repo:", "repo:<owner>/<repo>:", c.OIDCSubjectPrefix)
+		return fmt.Errorf("ATTESTATION_OIDC_SUBJECT_PREFIX must start with %q — a fully-qualified %q or %q prefix (GitHub OIDC sub claim shape), got %q", "repo:", "repo:<owner>/<repo>:", "repo:<owner>@<id>/<repo>@<id>:", c.OIDCSubjectPrefix)
+	}
+	// A prefix that does not start with the immutable form is the name-only
+	// form. Test the start, not for any "@": the shape check reads only the
+	// start, so a name-only prefix may carry an "@" later (a ref such as
+	// "release@2026") and must still warn. Name binding is open to reuse after
+	// a rename or deletion; id binding is not. Advisory: a repository without
+	// immutable subject claims has no other form to configure. The value is
+	// not logged.
+	if !oidcImmutableSubjectPrefix.MatchString(c.OIDCSubjectPrefix) {
+		log.Printf("WARN: ATTESTATION_OIDC_SUBJECT_PREFIX uses the name-only form repo:<owner>/<repo>:, which is open to organization or repository name reuse and matches no token from a repository that issues immutable subject claims; prefer the immutable form repo:<owner>@<id>/<repo>@<id>: when the repository issues them")
 	}
 	if c.Environment == "production" && c.OIDCIssuer != "https://token.actions.githubusercontent.com" {
 		return fmt.Errorf("ATTESTATION_OIDC_ISSUER must be the canonical GitHub issuer in production")

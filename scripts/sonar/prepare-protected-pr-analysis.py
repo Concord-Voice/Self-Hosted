@@ -14,7 +14,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
@@ -44,6 +44,10 @@ SOURCE_DIRS = (
 SELECTION_KEYS = {"codeql_actions", "codeql_go", "codeql_js", "eslint", "govulncheck", "osv",
                   "semgrep_custom", "semgrep_community", "semgrep_canary", "sonar",
                   "sonar_force_all", "sonar_desktop", "sonar_control_plane", "sonar_media_plane", "sonar_admin"}
+V2_PAYLOAD_SELECTION_KEYS = {"version", "known", "mode", "head_sha", "base_sha", "merge_sha",
+                             "merge_base_sha", "changed_files", "policy_sha", "hotfix", "selected",
+                             "advisory", "workers", "npm_workspaces", "license_go",
+                             "coverage_required", "codeql_matrix"}
 SUPPORT = {"package.json", "packages/e2ee-client/tsconfig.json", "packages/e2ee-client/package.json",
            "packages/protocol/tsconfig.json", "packages/protocol/package.json",
            "client/admin/tsconfig.json", "client/admin/tsconfig.app.json",
@@ -202,8 +206,16 @@ class GitHub:
                     if response.url != location:
                         raise Reject("artifact redirected again")
                     result = response.read(limit + 1)
-            except (HTTPError, OSError):
-                raise Reject("artifact download failed") from None
+            except HTTPError as exc:
+                code = exc.code
+                status = str(code) if type(code) is int and 100 <= code <= 599 else "unknown"
+                raise Reject(f"artifact download failed: HTTP status {status}") from None
+            except TimeoutError:
+                raise Reject("artifact download failed: timeout") from None
+            except URLError:
+                raise Reject("artifact download failed: url-error") from None
+            except OSError:
+                raise Reject("artifact download failed: os-error") from None
         except OSError:
             raise Reject("GitHub API unavailable") from None
         if len(result) > limit:
@@ -303,7 +315,12 @@ def validate_evidence(candidate, verified, run, pr, jobs):
         raise Reject("current PR revision moved")
     selection = payload.get("selection")
     verdicts, coverage = payload.get("jobs"), payload.get("coverage")
-    if (not isinstance(selection, dict) or selection.get("version") != 1 or selection.get("known") is not True
+    version = selection.get("version") if isinstance(selection, dict) else None
+    if (not isinstance(selection, dict) or type(version) is not int or version not in (1, 2)
+            or (version == 1 and "merge_base_sha" in selection)
+            or (version == 2 and (set(selection) != V2_PAYLOAD_SELECTION_KEYS
+                                  or not sha(selection.get("merge_base_sha"))))
+            or selection.get("known") is not True
             or selection.get("mode") not in ("required-full", "required-relevant")
             or any(selection.get(k) != candidate[v] for k, v in (("head_sha", "expected_head_sha"),
                                                                    ("base_sha", "expected_base_sha")))
@@ -385,7 +402,9 @@ def prepare_git(repo, claims, payload, candidate, token):
     ancestors = set(lineage.decode().splitlines())
     local_main = git(ROOT, "rev-parse", "HEAD").decode().strip()
     if (claims["workflow_sha"] not in ancestors or payload["selection"]["policy_sha"] not in ancestors
-            or candidate["expected_base_sha"] not in ancestors or local_main not in ancestors):
+            or candidate["expected_base_sha"] not in ancestors or local_main not in ancestors
+            or (payload["selection"]["version"] == 2
+                and payload["selection"]["merge_base_sha"] not in ancestors)):
         raise Reject("protected workflow or policy is not on main first-parent history")
     git(repo, "fetch", "--no-tags", "origin", f"+refs/pull/{candidate['pr_number']}/head:refs/remotes/origin/pr",
         limit=1024, env=fetch_env)

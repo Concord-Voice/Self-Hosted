@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -21,6 +22,9 @@ import (
 func CheckAAGUIDForTest(aaguid []byte, allowed []string) error {
 	return checkAAGUID(aaguid, allowed)
 }
+
+// WindowForLevelForTest exposes the lock-escalation schedule (#221).
+func WindowForLevelForTest(level int64) time.Duration { return windowForLevel(level) }
 
 // EnrollBaseURLForTest exposes the unexported enrollBaseURL helper to the
 // external admin_test package so table tests can exercise both branches
@@ -46,6 +50,7 @@ func RunAdminCtlForTest(
 		repo:          NewAdminRepo(db),
 		audit:         NewAuditLog(db),
 		enroll:        NewEnrollmentStore(rdb),
+		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: enrollBaseURL,
 		stdin:         stdin,
 		stdout:        stdout,
@@ -60,6 +65,7 @@ func RunAdminCtlWithWriterForTest(ctx context.Context, db *sql.DB, rdb *redis.Cl
 		repo:          NewAdminRepo(db),
 		audit:         NewAuditLog(db),
 		enroll:        NewEnrollmentStore(rdb),
+		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: baseURL,
 		stdin:         stdin,
 		stdout:        stdout,
@@ -71,3 +77,6 @@ func RunAdminCtlWithWriterForTest(ctx context.Context, db *sql.DB, rdb *redis.Cl
 func UseServerAgentForTest(h *Handler, sock string) {
 	h.server.agent = unixClient(sock)
 }
+
+// ServerStepUpPrefix exposes the step-up handle key prefix for the ACL manifest test.
+const ServerStepUpPrefix = serverStepUpPrefix

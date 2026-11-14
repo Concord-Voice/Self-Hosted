@@ -170,7 +170,7 @@ gh pr list \
 # Workflow-opened PRs authored by a GitHub App (OPTIONAL — only if the repo has such a
 # routine). The author queries above miss them; query by the label the workflow applies.
 gh pr list \
-  --search 'label:"<routine-label>" is:open' \
+  --search 'label:"routine: go-transitive-hygiene" is:open' \
   --json number,title,labels,headRefName,mergeable,mergeStateStatus,statusCheckRollup,files,reviews,reviewRequests,isDraft,createdAt,updatedAt \
   --limit 5
 ```

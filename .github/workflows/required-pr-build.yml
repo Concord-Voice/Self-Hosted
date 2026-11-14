@@ -16,7 +16,7 @@ jobs:
   pr-ci:
     name: Protected scan enforcement
     # Reviewed main commit keeps the reusable graph immutable in ruleset runs.
-    uses: Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@5fa007d8e1979c3368181dc6f79e3fb1c8235beb
+    uses: Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@6614ec9fbcc8aa19f76cf8cd8dd326ef06cf4979
     with:
       trusted-source: true
       enforcement-only: true
@@ -128,7 +128,9 @@ jobs:
     uses: Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@52a73e362484c4590928ca4dd34ed9c5fbf16c5a
     with:
       protected-pr: true
-      base-sha: ${{ fromJSON(needs.pr-ci.outputs.report-selection).base_sha }}
+      # v2 scans from the proven merge parent. Only the deployed v1 producer
+      # retains API-base compatibility until the separate reviewed pin activation.
+      base-sha: ${{ (toJSON(fromJSON(needs.pr-ci.outputs.report-selection).version) == '2' && fromJSON(needs.pr-ci.outputs.report-selection).merge_base_sha) || (toJSON(fromJSON(needs.pr-ci.outputs.report-selection).version) == '1' && fromJSON(needs.pr-ci.outputs.report-selection).policy_sha == '5fa007d8e1979c3368181dc6f79e3fb1c8235beb' && fromJSON(needs.pr-ci.outputs.report-selection).base_sha) || '' }} # pragma: allowlist secret -- public immutable Git commit, not credential
       merge-sha: ${{ fromJSON(needs.pr-ci.outputs.report-selection).merge_sha }}
       hotfix: ${{ fromJSON(needs.pr-ci.outputs.report-selection).hotfix }}
     permissions:
@@ -306,9 +308,54 @@ jobs:
           "$HOME/.local/bin/squawk" --version
           "$HOME/.local/bin/squawk" --config "$RUNNER_TEMP/squawk.toml" "${files[@]}"
 
+  # #252: every image source in a tracked Dockerfile must match the identity in
+  # .github/base-images.json. No needs and no if: it installs nothing, so it does
+  # not wait on pr-ci's IOC gate, and it runs on every PR so `result` can require
+  # success. The checker comes from the protected revision that defines this
+  # workflow, never from the PR, so a PR cannot loosen the check it is judged by
+  # and no assumption about the merge commit's parents is needed. The Dockerfiles
+  # and manifest come from the PR merge commit. pr-ci's advisory workflow-lint
+  # step runs the PR's own copy; keep both.
+  base-image-lint:
+    name: Protected base-image identity check
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the PR merge commit as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: pr
+
+      - name: Check out the checker from the protected workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          ref: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          persist-credentials: false
+          path: protected
+          sparse-checkout: .github/scripts/check-base-images.py
+          sparse-checkout-cone-mode: false
+
+      # -I: isolated mode, so no PR-root module or PYTHON* variable is loaded.
+      - name: Check base images with the protected checker
+        env:
+          WORKFLOW_REPOSITORY: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$WORKFLOW_REPOSITORY" != Concord-Voice/Self-Hosted || ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$(git -C protected rev-parse HEAD)" != "$WORKFLOW_SHA" ]]; then
+            echo "::error::Protected checker source is unavailable or does not match the workflow revision."
+            exit 1
+          fi
+          python3 -I protected/.github/scripts/check-base-images.py --root "$GITHUB_WORKSPACE/pr"
+
   result:
     name: Required PR build result
-    needs: [pr-ci, protected-sonar, osv, publish-install-script-warnings, migration-lint]
+    needs: [pr-ci, protected-sonar, osv, publish-install-script-warnings, migration-lint, base-image-lint]
     # always() prevents a failed or skipped dependency from hiding this result.
     if: ${{ always() }}
     permissions:
@@ -440,10 +487,11 @@ jobs:
           VERIFIER_OUTCOME: ${{ steps.verify.outcome }}
           PINS_OUTCOME: ${{ steps.pins.outcome }}
           MIGRATION_LINT_RESULT: ${{ needs.migration-lint.result }}
+          BASE_IMAGE_LINT_RESULT: ${{ needs.base-image-lint.result }}
         run: |
-          if [[ "$PR_CI_RESULT" == success && ( "$MIGRATION_LINT_RESULT" == success || "$MIGRATION_LINT_RESULT" == skipped ) && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled && "$SONAR_RESULT" != failure && "$SONAR_RESULT" != cancelled ]]; then
+          if [[ "$PR_CI_RESULT" == success && ( "$MIGRATION_LINT_RESULT" == success || "$MIGRATION_LINT_RESULT" == skipped ) && "$BASE_IMAGE_LINT_RESULT" == success && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled && "$SONAR_RESULT" != failure && "$SONAR_RESULT" != cancelled ]]; then
             echo "::notice::Required PR scan verdict succeeded."
           else
-            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, migration-lint=${MIGRATION_LINT_RESULT}, publisher=${PUBLISH_RESULT}, sonar=${SONAR_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
+            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, migration-lint=${MIGRATION_LINT_RESULT}, base-image-lint=${BASE_IMAGE_LINT_RESULT}, publisher=${PUBLISH_RESULT}, sonar=${SONAR_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
             exit 1
           fi

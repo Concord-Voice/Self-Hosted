@@ -120,6 +120,9 @@ Verbs:
                guarded disable/checkpoint/immutable old-image rollback
   down         stop AND remove containers + network (docker compose down)
   stop         pause containers, leave them in place (docker compose stop)
+               up, down and stop also manage the account-key authority once
+               authority init or upgrade has run; up migrates it, and an
+               authority failure there is a warning, not a failure
   status [--json]
                per-service container state (docker compose ps); --json prints
                one object: {"schema":1,"services":[{service,name,state,health,
@@ -129,9 +132,12 @@ Verbs:
                --no-follow rejects explicit follow flags
   health       probe control-plane over 127.0.0.1 and check live port bindings
                against the self-host posture (#3538), then prove the coturn
-               TLS listener serves the selected certificate on port 5349
+               TLS listener serves the selected certificate on port 5349,
+               and, once authority init has run, warn from 21 days before
+               the authority delegation expires (fail once it has)
                --json prints one object on stdout: {"schema":1,"ok":bool,
-               "checks":[{"name":...,"ok":bool}]}; reasons stay on stderr
+               "checks":[{"name":...,"ok":bool}]}, plus "warnings":[name...]
+               when there is one; reasons stay on stderr
   backup [--out DIR] [--json]
                write a 0600 archive (database dump, bundled MinIO data, .env,
                checksummed manifest) to DIR (default ./backups, mode 0700)
@@ -146,6 +152,13 @@ Verbs:
                as root, once: create the account-key authority's keys, first
                delegation and database, export the encrypted recovery keys to
                DIR, then start it (dormant until the client integration ships)
+  authority upgrade --export-dir DIR
+               as init, for an install that already has accounts; it never
+               seals: sealing them comes with the client integration
+  authority renew
+               as root: sign the next delegation (new RSK and CAK, 180 days)
+               with primaries A and B, install it and restart the authority;
+               if the authority does not stay up, keep it and fix the cause
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.
@@ -156,6 +169,7 @@ USAGE
 # Fixed check names only: --json never carries free text, so nothing from the
 # host (paths, addresses, Compose output) can reach a machine reader.
 HEALTH_RESULTS=()
+HEALTH_WARNINGS=()
 health_record() { HEALTH_RESULTS+=("$1:$2"); }
 
 health_json() {
@@ -168,7 +182,15 @@ health_json() {
     printf '%s{"name":"%s","ok":%s}' "$sep" "${entry%%:*}" "$ok"
     sep=','
   done
-  printf '],"ok":%s}\n' "$all"
+  printf ']'
+  # Present only when there is one, so the object is unchanged without them.
+  if (( ${#HEALTH_WARNINGS[@]} )); then
+    printf ',"warnings":['
+    sep=''
+    for entry in "${HEALTH_WARNINGS[@]}"; do printf '%s"%s"' "$sep" "$entry"; sep=','; done
+    printf ']'
+  fi
+  printf ',"ok":%s}\n' "$all"
 }
 
 verb_health() {
@@ -186,8 +208,9 @@ verb_health() {
 }
 
 health_checks() {
-  local code rc=0 tls_helper
+  local code rc=0 tls_helper authority_rc=0
   HEALTH_RESULTS=()
+  HEALTH_WARNINGS=()
   if ! selfhost_storage_resolve "$PROJECT_ROOT"; then
     health_record storage_model 1
     return 1
@@ -237,6 +260,17 @@ health_checks() {
     health_record coturn_tls 1
     rc=1
   fi
+  # The account-key authority's delegation, once authority init has run:
+  # a warning from 21 days before it expires, a failure once it has.
+  # shellcheck source=selfhost-authority.sh
+  { declare -F _authority_health >/dev/null || source "$SCRIPT_DIR/selfhost-authority.sh"; } \
+    && _authority_health || authority_rc=$?
+  case "$authority_rc" in
+    0) health_record authority_delegation 0 ;;
+    2) health_record authority_delegation 0; HEALTH_WARNINGS+=(authority_delegation_expiring) ;;
+    3) ;;
+    *) health_record authority_delegation 1; rc=1 ;;
+  esac
   return "$rc"
 }
 
@@ -372,11 +406,23 @@ except (KeyError, TypeError, ValueError):
   fi
 }
 
+# authority_lifecycle up|stop|down — the account-key authority follows the
+# stack once authority init or upgrade has run (selfhost-authority.sh).
+authority_lifecycle() {
+  # shellcheck source=selfhost-authority.sh
+  { declare -F _authority_lifecycle >/dev/null || source "$SCRIPT_DIR/selfhost-authority.sh"; } \
+    && _authority_lifecycle "$1" && return 0
+  # ponytail: a warning, not a failure, while nothing calls the authority, so
+  # update does not roll back a healthy stack. Make it fatal with the client
+  # integration.
+  echo "WARNING: the stack's $1 finished, but the account-key authority's did not (see above)" >&2
+}
+
 # ── Verb dispatch ──────────────────────────────────────────────────────
 
 main() {
   case "${1:-}" in
-    up)         require_security_log_boundary && guarded_ctl rebuild ;;
+    up)         require_security_log_boundary && guarded_ctl rebuild && authority_lifecycle up ;;
     activity-history-activate)
       shift
       guarded_ctl activity-history-activate "$@"
@@ -385,8 +431,8 @@ main() {
       shift
       guarded_ctl activity-history-rollback "$@"
       ;;
-    down)       compose down ;;
-    stop)       compose stop ;;
+    down)       compose down && authority_lifecycle down ;;
+    stop)       compose stop && authority_lifecycle stop ;;
     status)     shift; verb_status "$@" ;;
     logs)       shift; verb_logs "$@" ;;
     health)     shift; verb_health "$@" ;;

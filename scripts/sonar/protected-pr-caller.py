@@ -97,8 +97,14 @@ def validate_payload(payload):
     if payload["pr_ci_result"] != "success":
         raise Invalid("PR CI did not succeed")
     selection = payload["selection"]
-    if (not isinstance(selection, dict) or set(selection) != set(SELECTION_KEYS)
-            or type(selection["version"]) is not int or selection["version"] != 1
+    version = selection.get("version") if isinstance(selection, dict) else None
+    keys = set(SELECTION_KEYS)
+    if version == 2:
+        keys.add("merge_base_sha")
+    if (not isinstance(selection, dict) or set(selection) != keys
+            or type(version) is not int or version not in (1, 2)
+            or (version == 2 and (not isinstance(selection.get("merge_base_sha"), str)
+                                  or not SHA.fullmatch(selection["merge_base_sha"])))
             or selection.get("known") is not True
             or selection.get("mode") not in ("required-full", "required-relevant")
             or type(selection["changed_files"]) is not int

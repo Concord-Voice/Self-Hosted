@@ -62,3 +62,5 @@ The `.env` check exists because the database and its keys must come from the sam
 5. It checks out the tag (detached), then runs the **tag's own** `concord-selfhost up` and `health`.
 
 If health fails, the command prints the two commands to roll back: check out the previous commit, then restore the backup it just took. A backup can only be restored onto the release that wrote it, so check out the previous commit first.
+
+Once `concord-selfhost authority init` or `upgrade` has run, `up` also migrates the account-key authority's database. Backups do not include that database, so a rollback leaves the authority's schema where the newer release put it. If the older release's authority then refuses that schema, `up` warns and the rest of the stack still runs; nothing calls the authority until the client integration ships.
