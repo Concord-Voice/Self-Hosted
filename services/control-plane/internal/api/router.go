@@ -187,11 +187,9 @@ func (a *permissionCheckerAdapter) FilterVisibleUserIDsForChannelFresh(
 // preserving anti-spoof semantics.
 func configureTrustedProxies(router *gin.Engine, cfg *config.Config, log *logger.Logger) {
 	if err := router.SetTrustedProxies(cfg.TrustedProxyCIDRs); err != nil {
-		log.Fatal("Failed to configure trusted proxies", "error", err)
+		log.Fatal("Failed to configure trusted proxies")
 	}
-	log.Info("Trusted proxies configured",
-		"cidrs", cfg.TrustedProxyCIDRs,
-		"count", len(cfg.TrustedProxyCIDRs))
+	log.Info("Trusted proxies configured", "count", len(cfg.TrustedProxyCIDRs))
 }
 
 // testEnvAuthFlowCap is the per-IP auth-flow rate-limit cap applied when the

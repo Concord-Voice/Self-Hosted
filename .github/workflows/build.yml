@@ -1091,7 +1091,9 @@ jobs:
       DOMAIN: ci-stub.invalid
       SMTP_HOST: smtp.ci-stub.invalid
       SMTP_FROM: ci-stub@invalid.example
-      TRUSTED_PROXY_CIDRS: 10.0.0.0/8
+      # Compose expands both required proxy settings before build; no stack starts here.
+      TRUSTED_PROXY_CIDRS: 127.0.0.1/32
+      TRUSTED_PROXIES: 127.0.0.1/32
       PUBLIC_IP: 127.0.0.1
       # Feedback handler (#158, PR #1547) — docker-compose.production.yml
       # uses ${VAR:?...} fail-loud interpolation; cache-cold compose-build

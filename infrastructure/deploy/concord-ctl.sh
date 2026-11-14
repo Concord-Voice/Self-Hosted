@@ -119,7 +119,7 @@ if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
   unset INSTANCE_TYPE ACTIVITY_HISTORY_CLUSTER_ENABLED \
     CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME \
     ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE \
-    COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+    COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE TRUSTED_PROXY_CIDRS TRUSTED_PROXIES
   COMPOSE_OVERRIDE=docker-compose.production.yml
   unset COMPOSE_PROFILES
 fi
@@ -1378,7 +1378,7 @@ selfhost_posture_verdict() {
       # A publication is fixed by the compose model or by up; a network attachment is not.
       if grep -qvE ' network(_mode)?=' <<<"$violations"; then
         if [[ "$mode" == --rendered ]]; then
-          echo "  Either Compose is too old to honour !override in docker-compose.selfhost.yml (upgrade to >= 2.24.5)," >&2
+          echo "  Either Compose is too old to honour !override or gw_priority in docker-compose.selfhost.yml (upgrade to >= 2.33.1)," >&2
           echo "  or a compose file was changed to publish this. Revert that change." >&2
         else
           echo "  Run ./infrastructure/deploy/concord-selfhost up to recreate the listed services (never a two-file docker compose up)." >&2
@@ -6689,6 +6689,12 @@ case "${1:-help}" in
     ;;
 
   restart)
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      # Restart does not recreate containers, so it cannot apply migrated env.
+      # Only an already exact live stack may use this direct controller verb.
+      source "$SCRIPT_DIR/selfhost-proxy.sh" || exit 1
+      selfhost_proxy_restart_preflight || exit 1
+    fi
     redis_managed_host_preflight || exit 1
     turn_managed_restart_guard || exit 1
     turn_managed_init_schema_before_coturn || exit 1
@@ -6711,6 +6717,7 @@ case "${1:-help}" in
     if [[ "$REDIS_CREDENTIAL_MODE" == managed && "$MEDIA_DEPLOY_PROFILE" == media-single ]]; then
       redis_managed_restart_bound_stack || exit 1
       selfhost_post_up_check || exit 1
+      [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
       selfhost_tls_ready_gate || exit 1
       echo "Done."
       exit 0
@@ -6722,6 +6729,7 @@ case "${1:-help}" in
     voice_enforcement_rollout_activate || exit 1
     voice_enforcement_rollout_wait_media productive || exit 1
     selfhost_post_up_check || exit 1
+    [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
     selfhost_tls_ready_gate || exit 1
     echo "Done."
     ;;
@@ -7063,12 +7071,20 @@ else:
       west_stage_prepare_owned_stack || exit 1
     fi
 
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      # All ordinary admission guards ran under the deploy lock. Establish the
+      # selected bridge before the canonical rebuild can start either app.
+      source "$SCRIPT_DIR/selfhost-proxy.sh" || exit 1
+      selfhost_prepare_trusted_proxy_provenance || exit 1
+    fi
+
     # Unscoped — or escalated from a scoped call whose peers were not up — runs
     # every service in order (#3524). The image-selector clear happens inside
     # the paired handoff, immediately before the control-plane build.
     if [[ $_rebuild_scoped -eq 0 ]]; then
       rebuild_unscoped
       selfhost_post_up_check || exit 1
+      [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
       [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
       echo "Done."
       exit 0
@@ -7084,6 +7100,7 @@ else:
         voice_enforcement_rollout_media_rebuild || exit 1
       fi
       selfhost_post_up_check || exit 1
+      [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
       [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
       echo "Done."
       exit 0
@@ -7139,6 +7156,7 @@ else:
       managed_compose_build up -d --build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
     fi
     selfhost_post_up_check || exit 1
+    [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
     [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
     echo "Done."
     ;;
@@ -7233,6 +7251,16 @@ else:
     fi
     selfhost_live_port_check || exit 1
     echo "selfhost-posture: live port bindings match the self-host allowlist"
+    ;;
+
+  selfhost-proxy-check)
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost || $# -ne 1 ]]; then
+      echo 'selfhost-proxy-check runs only in the self-host contract mode (use concord-selfhost health)' >&2
+      exit 2
+    fi
+    source "$SCRIPT_DIR/selfhost-proxy.sh" || exit 1
+    selfhost_proxy_restart_preflight || exit 1
+    echo 'selfhost-proxy: live gateway and application trust match the persisted route'
     ;;
 
   media-shared-listeners-check)
@@ -8475,6 +8503,7 @@ else:
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
     echo "  media-shared-listeners-check  validate a lab Compose JSON render on stdin; does not admit deployment"
     echo "  selfhost-port-check  Self-host only: refuse live port bindings outside the posture allowlist (#3538)"
+    echo "  selfhost-proxy-check Self-host only: verify persisted proxy trust against the live gateway"
     echo "  attachment-probe  Validate the armed attachment backend without pulling images"
     echo "  attachment-probe-cron-install  Idempotently install the nightly attachment probe"
     echo "  nginx-reload   Validate/render HSTS, atomically swap main/admin nginx files,"

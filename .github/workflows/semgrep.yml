@@ -283,7 +283,7 @@ jobs:
             echo "::warning::Semgrep community scan failed (exit $SCAN_EXIT) — treating as non-blocking"
           fi
           SCAN_EXIT="$SCAN_EXIT" python3 <<'PY'
-          import json, os
+          import json, os, sys
           # A failed scan or an unreadable report is 'unavailable', never 0: a crash
           # must not read as a clean run in the PR comment. Still non-blocking.
           try:
@@ -296,6 +296,10 @@ jobs:
               results, count = [], 'unavailable'
           else:
               if os.environ.get('EXTERNAL_VERDICT') == 'true' and data.get('errors'):
+                  for error in data['errors']:
+                      details = error if isinstance(error, dict) else {'message': error}
+                      print(f"Semgrep scanner error: {str(details.get('type', 'unknown'))[:80]}: "
+                            f"{str(details.get('message', 'no message'))[:500]}", file=sys.stderr)
                   raise SystemExit(f"community scan reported {len(data['errors'])} scanner error(s)")
               results = data.get('results', [])
               if not isinstance(results, list):

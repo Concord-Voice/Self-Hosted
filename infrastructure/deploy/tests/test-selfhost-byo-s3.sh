@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real, config-only Compose models and deployment packaging for fresh BYO storage.
 # Run --require-compose in the completion gate; --compose-bin selects a supported
-# standalone CLI (for example the 2.24.5 floor). No daemon/container/provider calls.
+# standalone CLI (for example the 2.33.1 floor). No daemon/container/provider calls.
 # Literal Docker Config.Env equality is separate Task-1 boundary evidence. Compose
 # JSON is reusable serialization: never undouble dollars here to claim byte parity.
 set -uo pipefail
@@ -89,8 +89,8 @@ except ImportError:
 # Keep explicit digests so source
 # changes require baseline review. Snapshot all inputs to detect test-side mutations.
 SOURCE_HASHES = {
-    "docker-compose.yml": "".join(('e986aa7d', 'fecc2036', 'c70fbe96', 'bc87bdd0', 'abca9050', '81861760', '4fce4887', 'ffc84780')),
-    "docker-compose.production.yml": "".join(('202534de', '21456e81', '8bd169e6', 'eb9574a2', 'd73fc561', '38240ebd', '835729e6', '41bded6d')),
+    "docker-compose.yml": "".join(('6ddb13ff', 'e83d4e6a', '114632bb', '2d05f787', '278da56c', 'cbfe2b41', 'dc25e570', 'c5f2ae6d')),
+    "docker-compose.production.yml": "".join(('d2752890', '91362580', '437ada7a', '65d6f9bc', '3d841829', '8ff5a7c4', 'be2ab616', 'ca06a7ef')),
 }
 SOURCE_FILES = tuple(SOURCE_HASHES) + ("docker-compose.selfhost.yml",)
 if not check("all shared Compose source inputs are available",
@@ -118,6 +118,7 @@ SYNTHETIC = {
     "PUBLIC_IP": "203.0.113.12",
     "FEEDBACK_REPO": "synthetic-owner/synthetic-feedback",
     "TRUSTED_PROXY_CIDRS": "10.0.0.0/8",
+    "TRUSTED_PROXIES": "10.0.0.0/8",
     "POSTGRES_PASSWORD": "-".join(('synthetic', 'postgres', 'password')),
     "REDIS_PASSWORD": "-".join(('synthetic', 'redis', 'password')),
     "JWT_SECRET": "-".join(('synthetic', 'jwt', 'secret')),
@@ -311,11 +312,11 @@ def run():
     elif shutil.which("docker-compose"):
         cli = [shutil.which("docker-compose")]
     else:
-        prerequisite("Docker Compose >= 2.24.5 is required (no daemon needed)")
+        prerequisite("Docker Compose >= 2.33.1 is required (no daemon needed)")
     version = capture("compose-version", cli + ["version", "--short"], BASE_ENV)
     match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?\s*", version.stdout)
-    if version.returncode != 0 or match is None or tuple(map(int, match.groups())) < (2, 24, 5):
-        prerequisite("supported Compose >= 2.24.5 is required")
+    if version.returncode != 0 or match is None or tuple(map(int, match.groups())) < (2, 33, 1):
+        prerequisite("supported Compose >= 2.33.1 is required")
     print("INFO: config-only Compose " + ".".join(match.groups()))
     # Run the independent cache-cold build-env oracle with this same admitted CLI.
     # The oracle discovers `docker compose`, so a private wrapper also carries an

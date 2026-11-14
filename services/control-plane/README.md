@@ -143,14 +143,13 @@ JWT_SECRET=your-secret-key
 NATS_URL=nats://localhost:4222
 MEDIA_PLANE_URL=http://localhost:3000
 
-# TRUSTED_PROXY_CIDRS — Comma-separated IPv4/IPv6 CIDRs whose X-Forwarded-For
-# and X-Real-IP headers c.ClientIP() honors. REQUIRED in production (startup
-# fails if unset); in non-production (development/staging/CI) falls back to
-# 172.16.0.0/12 (broad RFC1918 Docker range). Malformed CIDRs fail startup in
-# all envs. Two-layer default: the Go code falls back to 172.16.0.0/12; the
-# deployment surface (.env.example + docker-compose.yml) pins the tighter
-# 172.19.0.0/16 that matches the docker-compose bridge network — docker-compose.production.yml
-# requires an explicit value (no default) to avoid silently inheriting a dev CIDR.
+# TRUSTED_PROXY_CIDRS — Comma-separated IPv4/IPv6 proxy peers whose
+# X-Forwarded-For and X-Real-IP headers c.ClientIP() honors. Production requires
+# exact /32 or /128 routes and fails startup for an unset, broad, malformed, or
+# empty value. The self-host `up` lifecycle measures the selected Docker bridge
+# gateway and writes the exact peer to root .env. Only development and test
+# fall back to 172.16.0.0/12 when unset; other environments trust no peer.
+# IPv4-mapped IPv6 entries are rejected; use canonical IPv4 or IPv6.
 TRUSTED_PROXY_CIDRS=172.19.0.0/16
 ```
 

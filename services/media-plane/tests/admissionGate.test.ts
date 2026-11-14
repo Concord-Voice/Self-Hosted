@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   compileTrustedProxies,
   createAdmissionGate,
+  parseTrustedProxyEntry,
   resolveClientIp,
   HANDSHAKE_BURST,
   MAX_TRACKED_IPS,
@@ -63,10 +64,8 @@ describe('resolveClientIp', () => {
     expect(resolveClientIp(peerlessReq({}), trust('10.0.0.9'))).toBeNull();
   });
 
-  // Production trusts the whole RFC1918 space, so every container and LAN host
-  // that reaches this port directly is INSIDE the trusted set. Without a parse
-  // guard each one could name its own counter key and churn the bounded store
-  // (#2032 red-team FIX 4). Defence in depth — nginx always sets a real address.
+  // A trusted peer that sends invalid forwarding headers cannot nominate an
+  // arbitrary counter key. nginx normally supplies a valid address.
   // Behaviour change (#2793 Gitar review): a TRUSTED peer with no attributable
   // client address now fails OPEN rather than falling through to the proxy's own
   // address. The old form put every such request in one shared bucket, so a
@@ -103,9 +102,19 @@ describe('resolveClientIp', () => {
   });
 });
 
-// A docker bridge address is not a stable literal, so exact-match trust cannot
-// work here — these lock the CIDR semantics that replaced it.
+// Development retains CIDR matching; production configuration admits host routes.
 describe('compileTrustedProxies', () => {
+  it('parses bare and exact host routes without changing the matcher contract', () => {
+    expect(parseTrustedProxyEntry('10.0.0.9')).toEqual({ address: '10.0.0.9', prefix: 32, family: 'ipv4' });
+    expect(parseTrustedProxyEntry('10.0.0.9/32')).toEqual({ address: '10.0.0.9', prefix: 32, family: 'ipv4' });
+    expect(parseTrustedProxyEntry('2001:db8::1/128')).toEqual({ address: '2001:db8::1', prefix: 128, family: 'ipv6' });
+    expect(parseTrustedProxyEntry('172.16.0.0/12')?.prefix).toBe(12);
+    expect(parseTrustedProxyEntry('::/0')).toBeNull();
+    expect(parseTrustedProxyEntry('::ffff:10.0.0.9')).toBeNull();
+    expect(parseTrustedProxyEntry('0:0:0:0:0:ffff:a00:9/128')).toBeNull();
+    expect(parseTrustedProxyEntry('not-an-ip')).toBeNull();
+    expect(trust('10.0.0.9/32').has('::ffff:10.0.0.9')).toBe(true);
+  });
   it('trusts a peer inside a configured CIDR block', () => {
     const r = req({ 'x-real-ip': '203.0.113.7' }, '172.18.0.5');
     expect(resolveClientIp(r, trust('172.16.0.0/12'))).toBe('203.0.113.7');

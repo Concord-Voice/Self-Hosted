@@ -1,5 +1,6 @@
 import type { RouterRtpCodecCapability } from 'mediasoup/types';
 import { isIP } from 'node:net';
+import { parseTrustedProxyEntry } from '../lib/admissionGate.js';
 
 // Node 24+ native .env loading, replacing the third-party `dotenv` package.
 // `process.loadEnvFile()` reads ./.env and THROWS when the file is absent,
@@ -655,17 +656,8 @@ export const config = {
     .map((s: string) => s.trim())
     .filter(Boolean),
 
-  // Peer addresses or CIDR blocks whose X-Real-IP / X-Forwarded-For may be
-  // trusted by the #2032 admission gate (`lib/admissionGate.ts`). nginx fronts
-  // the media-plane over a docker bridge, so entries are matched by RANGE — a
-  // bridge address is not a stable literal. Mirrors the control-plane's
-  // TRUSTED_PROXY_CIDRS; both compose files set a literal.
-  //
-  // An empty list makes the gate INERT (allow unconditionally, track nothing)
-  // rather than attributing every client to the proxy and sharing one handshake
-  // budget deployment-wide. Hence no fatal-exit guard: the misconfiguration
-  // degrades to the pre-gate behaviour and is logged once at startup, where a
-  // startup exit would take voice down.
+  // nginx's backend-visible peer. Production accepts one or more exact host
+  // routes; development also accepts CIDRs for local topologies.
   trustedProxies: (process.env.TRUSTED_PROXIES ?? '')
     .split(',')
     .map((s: string) => s.trim())
@@ -698,6 +690,17 @@ if (config.environment === 'production' && config.jwtSecret === DEV_JWT_SECRET) 
       'The default dev secret is not allowed.'
   );
   process.exit(1);
+}
+
+if (config.environment === 'production') {
+  const entries = (process.env.TRUSTED_PROXIES ?? '').split(',');
+  for (const [index, raw] of entries.entries()) {
+    const parsed = parseTrustedProxyEntry(raw);
+    if (!parsed || parsed.prefix !== (parsed.family === 'ipv4' ? 32 : 128)) {
+      console.error(`FATAL: TRUSTED_PROXIES entry at position ${index + 1} must be an exact host route.`);
+      process.exit(1);
+    }
+  }
 }
 
 if (config.opsMetrics.enabled) {

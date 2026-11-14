@@ -35,7 +35,7 @@ This runs the same checks as `health` and prints one object on stdout:
 {"schema":1,"checks":[{"name":"storage_model","ok":true},{"name":"control_plane","ok":true}],"ok":true}
 ```
 
-The check names are `storage_model`, `storage_minio_inactive`, `control_plane`, `port_posture`, `coturn_tls` and `authority_delegation` (only after `concord-selfhost authority init` or `upgrade`). When there is a warning, the object also has `"warnings":[...]` before `ok`. The only warning is `authority_delegation_expiring`, from 21 days before the delegation expires; `ok` stays true. A check that did not run because an earlier step failed is absent from the list. The exit code matches plain `health`.
+The check names are `storage_model`, `storage_minio_inactive`, `control_plane`, `port_posture`, `proxy_provenance`, `coturn_tls` and `authority_delegation` (only after `concord-selfhost authority init` or `upgrade`). `proxy_provenance` verifies that the running bridge gateway, both application containers, and their proxy trust match the exact route persisted by `up`. A mismatch sets the check to `false` and makes `health` fail. When there is a warning, the object also has `"warnings":[...]` before `ok`. The only warning is `authority_delegation_expiring`, from 21 days before the delegation expires; `ok` stays true. A check that did not run because an earlier step failed is absent from the list. The exit code matches plain `health`.
 
 ## `concord-selfhost backup --json` and `restore --json`
 

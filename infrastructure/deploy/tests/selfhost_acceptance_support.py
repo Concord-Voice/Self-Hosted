@@ -449,7 +449,7 @@ class SelfhostAcceptanceTests(unittest.TestCase):
     def test_evidence_refuses_symlink_and_unsafe_fields(self):
         safe = {"schema": 1, "candidate_sha": "a" * 40, "run_id": "run-17",
                 "runner_os": "ubuntu-24.04", "tool_versions": {"docker": "29.8.2",
-                                                                      "compose": "2.24.5"},
+                                                                      "compose": "2.33.1"},
                 "local_only": True,
                 "checks": [{"stage": "observe", "assertion": "selected_stack",
                             "status": "PASS", "code": "OK"}],

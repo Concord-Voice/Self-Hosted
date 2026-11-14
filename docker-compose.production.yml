@@ -1,5 +1,5 @@
 # Public self-host production settings. Layer with docker-compose.yml and
-# docker-compose.selfhost.yml using Compose >= 2.24.5 and --profile services.
+# docker-compose.selfhost.yml using Compose >= 2.33.1 and --profile services.
 # The final self-host layer owns the reviewed published-port posture.
 # Host nginx, certificates and root security-log preparation are prerequisites.
 # This overlay contains no managed release, SPA or credential-directory mounts.
@@ -257,7 +257,9 @@ services:
       NUM_WORKERS: "3"
       MEDIASOUP_ENABLE_TCP: "false"
       MEDIASOUP_SHARED_WEBRTC_SERVER: "false"
-      TRUSTED_PROXIES: "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
+      # A config-only build may have only the control-plane stub. Runtime
+      # validation still rejects empty or broad peers; self-host up pins both.
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-${TRUSTED_PROXY_CIDRS:?TRUSTED_PROXY_CIDRS must name the exact observed nginx peer}}"
     ports:
       - "40000-41999:40000-41999/udp"
     volumes:

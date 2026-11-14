@@ -28,6 +28,32 @@ The selected verified release guide defines its supported storage choices and th
 
 The exact target release guide supplies its verification, backup, compatibility and update procedure.
 
+### Trusted proxy gateway provenance
+
+For a verified release carrying this source contract, the installer owns the
+root `.env` schema and fresh file publication. It writes exact loopback
+placeholders for `TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES`; the deploy-lock
+`up` path then measures the Docker services bridge and atomically replaces only
+those two values with its gateway's canonical IPv4 `/32` or IPv6 `/128` host route before the
+application rebuild. Existing installs with the known legacy broad defaults
+are migrated there. A custom broad value, ambiguous network, or unverified
+gateway stops the start. Direct `restart` requires an already exact, matching
+running stack and otherwise directs the operator to `concord-selfhost up`.
+IPv4-mapped IPv6 trust entries (`::ffff:`) are rejected by both services.
+
+Both application services select `concordvoice-services` as their default
+gateway through Compose `gw_priority: 1`; this requires Compose 2.33.1 or
+newer. `down` can remove that network, so a later `up` measures its new gateway
+instead of reusing the previous route. A stopped container cannot hold a Docker
+network; when needed, the locked path starts only NATS to hold the measured
+bridge before updating trust. A failed live endpoint check reports failure and
+leaves exact under-trust in place. `concord-selfhost health` also refuses a
+running gateway or application trust mismatch; `health --json` reports the
+`proxy_provenance` check with `ok: false` (see [machine-readable
+output](selfhost-machine-output.md)). Verify host-nginx attribution at the edge
+for the selected release. Generic Cloudflare traffic remains attributed to
+the edge until authenticated origin provenance is supplied by #80.
+
 ### WebSocket event-budget preparation
 
 The fresh installer prepares `WS_EVENT_BUDGET_ENABLED=false` and
