@@ -94,6 +94,7 @@ Android.
 
 ### Security
 
+- **Accounts:** Registration confirmation now binds each email code to the current normalized pending email, so a rotated address cannot be verified with an earlier code ([#298](https://github.com/Concord-Voice/Self-Hosted/pull/298)).
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
 - **Accounts:** MFA step-up attempts now share a per-account limit across session, security, ownership and DM purge actions; recovery and registration code guesses retain their limits across new-code and email changes. Exhausted budgets return 429 with a retry delay, and unavailable budget checks fail closed ([#285](https://github.com/Concord-Voice/Self-Hosted/pull/285)).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).

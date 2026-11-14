@@ -1569,7 +1569,9 @@ paths:
       - Auth
       summary: Confirm a pending registration
       description: 'Validate the emailed verification code and promote the pending registration to a full
-        user account.
+        user account. Confirmation binds the code to the current normalized pending-registration email;
+        UUID case variants identify the same pending registration. A code for an earlier email returns
+        the existing 401 `invalid_code` response.
 
         Rate limit: 10 requests per 15 minutes (IP-based).
 

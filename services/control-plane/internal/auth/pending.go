@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -22,13 +23,15 @@ const (
 
 // Sentinel errors for pending registration operations.
 var (
-	ErrPendingNotFound      = errors.New("pending registration not found")
-	ErrPendingExpired       = errors.New("pending registration expired")
-	ErrResendCooldown       = errors.New("resend cooldown active")
-	ErrResendsExhausted     = errors.New("resend limit reached")
-	ErrEmailAlreadyRegister = errors.New("email already registered")
-	ErrEmailPending         = errors.New("email pending verification")
-	ErrUsernameTaken        = errors.New("username taken")
+	ErrPendingNotFound          = errors.New("pending registration not found")
+	ErrPendingExpired           = errors.New("pending registration expired")
+	ErrResendCooldown           = errors.New("resend cooldown active")
+	ErrResendsExhausted         = errors.New("resend limit reached")
+	ErrEmailAlreadyRegister     = errors.New("email already registered")
+	ErrEmailPending             = errors.New("email pending verification")
+	ErrUsernameTaken            = errors.New("username taken")
+	ErrVerificationEmailChanged = errors.New("verification recipient no longer matches pending registration")
+	ErrVerificationCodeReplaced = errors.New("verification code was replaced")
 )
 
 // PendingRegistration holds an in-progress registration awaiting email verification.
@@ -311,19 +314,45 @@ func (r *PendingRepo) GetByID(ctx context.Context, id string) (*PendingRegistrat
 }
 
 // IncrementResend increments the resend counter for a pending registration, enforcing
-// cooldown and max-resend limits. Returns the new resend count.
-func (r *PendingRepo) IncrementResend(ctx context.Context, id string) (int, time.Time, error) {
+// cooldown and max-resend limits. It returns the recipient read under the same
+// row lock as the reservation. publish runs before that lock is released, so a
+// delayed resend cannot overwrite a newer change-email verification code.
+func (r *PendingRepo) IncrementResend(ctx context.Context, id string, publish func(*sql.Tx, string) error) (int, time.Time, string, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, time.Time{}, err
+		return 0, time.Time{}, "", err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	count, err := pendingResendCount(ctx, tx, id)
-	if err != nil {
-		return 0, time.Time{}, err
+	var count int
+	var lastResendAt sql.NullTime
+	var expiresAt time.Time
+	var email string
+
+	if err = tx.QueryRowContext(ctx,
+		`SELECT resend_count, last_resend_at, expires_at, email
+		   FROM pending_registrations
+		  WHERE id = $1
+		  FOR UPDATE`,
+		id,
+	).Scan(&count, &lastResendAt, &expiresAt, &email); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, time.Time{}, "", ErrPendingNotFound
+		}
+		return 0, time.Time{}, "", err
 	}
 
+	if time.Now().After(expiresAt) {
+		return 0, time.Time{}, "", ErrPendingExpired
+	}
+
+	if count >= MaxResends {
+		return 0, time.Time{}, "", ErrResendsExhausted
+	}
+
+	if lastResendAt.Valid && time.Since(lastResendAt.Time) < ResendCooldown {
+		return 0, time.Time{}, "", ErrResendCooldown
+	}
 	var reservedAt time.Time
 	if err = tx.QueryRowContext(ctx,
 		`UPDATE pending_registrations
@@ -332,14 +361,19 @@ func (r *PendingRepo) IncrementResend(ctx context.Context, id string) (int, time
 		  RETURNING last_resend_at`,
 		id,
 	).Scan(&reservedAt); err != nil {
-		return 0, time.Time{}, err
+		return 0, time.Time{}, "", err
+	}
+	if publish != nil {
+		if err = publish(tx, email); err != nil {
+			return 0, time.Time{}, "", err
+		}
 	}
 
 	if err = tx.Commit(); err != nil {
-		return 0, time.Time{}, err
+		return 0, time.Time{}, "", err
 	}
 
-	return count + 1, reservedAt, nil
+	return count + 1, reservedAt, email, nil
 }
 
 // RevertResend decrements the resend counter by one (minimum 0) and clears the
@@ -376,11 +410,11 @@ func (r *PendingRepo) RevertResendIfCurrent(ctx context.Context, id string, coun
 // UpdateEmail replaces the email on a pending registration and consumes the
 // same row-locked resend budget as an ordinary resend.
 func (r *PendingRepo) UpdateEmail(ctx context.Context, id, newEmail string) error {
-	_, _, err := r.updateEmail(ctx, id, newEmail)
+	_, _, err := r.updateEmail(ctx, id, newEmail, nil)
 	return err
 }
 
-func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string) (int, time.Time, error) {
+func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string, publish func(*sql.Tx, string) error) (int, time.Time, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, time.Time{}, err
@@ -417,7 +451,6 @@ func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string) (int
 	if userExists {
 		return 0, time.Time{}, ErrEmailAlreadyRegister
 	}
-
 	var reservedAt time.Time
 	if err = tx.QueryRowContext(ctx,
 		`UPDATE pending_registrations
@@ -427,6 +460,11 @@ func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string) (int
 		lowerEmail, id,
 	).Scan(&reservedAt); err != nil {
 		return 0, time.Time{}, err
+	}
+	if publish != nil {
+		if err = publish(tx, lowerEmail); err != nil {
+			return 0, time.Time{}, fmt.Errorf("publish new verification code: %w", err)
+		}
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -464,7 +502,7 @@ func pendingResendCount(ctx context.Context, tx *sql.Tx, id string) (int, error)
 // Promote atomically converts a pending registration into a full user account,
 // inserting rows into users, user_keys, and public_keys, then deleting the
 // pending row. Returns the new user ID.
-func (r *PendingRepo) Promote(ctx context.Context, id string) (userID string, err error) {
+func (r *PendingRepo) Promote(ctx context.Context, id, expectedEmail string, verifyCodeCurrent func() error) (userID string, err error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -496,6 +534,14 @@ func (r *PendingRepo) Promote(ctx context.Context, id string) (userID string, er
 
 	if time.Now().After(p.ExpiresAt) {
 		return "", ErrPendingExpired
+	}
+	if !strings.EqualFold(strings.TrimSpace(p.Email), strings.TrimSpace(expectedEmail)) {
+		return "", ErrVerificationEmailChanged
+	}
+	if verifyCodeCurrent != nil {
+		if err = verifyCodeCurrent(); err != nil {
+			return "", err
+		}
 	}
 
 	// Step 2: insert into users
