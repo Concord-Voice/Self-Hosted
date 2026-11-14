@@ -546,6 +546,70 @@ func TestSecurity166_MalformedBatchChannelIDFailsBeforeDatabaseWork(t *testing.T
 	}, "malformed channel IDs must be rejected before opening a database transaction")
 }
 
+// Security #166 canonicalizes every resolver boundary before a cache or
+// database lookup, so alternate UUID spellings cannot change authorization.
+func TestSecurity166_ResolverEntryPointsCanonicalizeServerAndMemberIDs(t *testing.T) {
+	resolver, ts := setupResolver(t)
+	ctx := context.Background()
+	owner := ts.CreateTestUser(t, "uuidresolverowner")
+	member := ts.CreateTestUser(t, "uuidresolvermember")
+	serverID := ts.CreateTestServer(t, owner.ID, "UUID resolver entries")
+	ts.AddMemberToServer(t, serverID, member.ID, "member")
+
+	upperServerID := strings.ToUpper(serverID)
+	upperMemberID := strings.ToUpper(member.ID)
+	expected, err := resolver.ResolveEffectivePermissionsFresh(ctx, serverID, member.ID, "")
+	require.NoError(t, err)
+
+	got, err := resolver.GetEffectivePermissions(ctx, upperServerID, upperMemberID, "")
+	require.NoError(t, err)
+	assert.Equal(t, expected, got)
+
+	got, err = resolver.ResolveEffectivePermissionsFresh(ctx, upperServerID, upperMemberID, "")
+	require.NoError(t, err)
+	assert.Equal(t, expected, got)
+
+	tx, err := ts.DB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	got, err = resolver.ResolveServerPermissionsTx(ctx, tx, upperServerID, upperMemberID)
+	require.NoError(t, err)
+	assert.Equal(t, expected, got)
+}
+
+func TestSecurity166_ResolverRejectsMalformedIDsBeforeDependencies(t *testing.T) {
+	resolver := rbac.NewResolver(nil, nil, nil)
+	validServerID := uuid.NewString()
+	validUserID := uuid.NewString()
+
+	for name, resolve := range map[string]func() error{
+		"cache first server": func() error {
+			_, err := resolver.GetEffectivePermissions(context.Background(), "bad-server", validUserID, "")
+			return err
+		},
+		"fresh user": func() error {
+			_, err := resolver.ResolveEffectivePermissionsFresh(context.Background(), validServerID, "bad-user", "")
+			return err
+		},
+		"uncached channel": func() error {
+			_, err := resolver.ResolveEffectivePermissionsUncached(context.Background(), validServerID, validUserID, "bad-channel")
+			return err
+		},
+		"transactional server": func() error {
+			_, err := resolver.ResolveServerPermissionsTx(context.Background(), nil, "bad-server", validUserID)
+			return err
+		},
+		"transactional channel": func() error {
+			_, err := resolver.ResolveChannelPermissionsTx(context.Background(), nil, validServerID, validUserID, "bad-channel")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, resolve())
+		})
+	}
+}
+
 func TestResolveEffectivePermissionsForChannelsFreshDoesNotRefillCache(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	cache := rbac.NewPermissionCache(ts.Redis)

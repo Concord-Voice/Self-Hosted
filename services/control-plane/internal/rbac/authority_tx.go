@@ -794,6 +794,37 @@ func dedupeAuthorityCandidateIDs(userIDs []string) []string {
 	return unique
 }
 
+func canonicalChannelKeyCandidates(channelIDs []string, candidates ChannelKeyCandidates) ([]string, ChannelKeyCandidates, error) {
+	canonicalCandidates := make(ChannelKeyCandidates, len(candidates))
+	for channelID, userIDs := range candidates {
+		canonicalChannelID, err := requestid.Canonical(channelID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid candidate channel ID: %w", err)
+		}
+		for _, userID := range userIDs {
+			canonicalUserID, err := requestid.Canonical(userID)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid candidate user ID: %w", err)
+			}
+			canonicalCandidates[canonicalChannelID] = append(canonicalCandidates[canonicalChannelID], canonicalUserID)
+		}
+		canonicalCandidates[canonicalChannelID] = dedupeAuthorityCandidateIDs(canonicalCandidates[canonicalChannelID])
+	}
+	canonicalChannelIDs := make([]string, 0, len(channelIDs))
+	seenChannels := make(map[string]struct{}, len(channelIDs))
+	for _, channelID := range channelIDs {
+		canonicalChannelID, err := requestid.Canonical(channelID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid channel ID: %w", err)
+		}
+		if _, duplicate := seenChannels[canonicalChannelID]; !duplicate {
+			seenChannels[canonicalChannelID] = struct{}{}
+			canonicalChannelIDs = append(canonicalChannelIDs, canonicalChannelID)
+		}
+	}
+	return canonicalChannelIDs, canonicalCandidates, nil
+}
+
 // RevokeDeniedChannelKeyCandidatesTx rotates every changed synchronized
 // channel exactly once, and purges only the bounded durable recipients that
 // fail a fresh post-mutation VIEW check.
@@ -809,32 +840,9 @@ func (h *Handler) RevokeDeniedChannelKeyCandidatesTx(
 	if err != nil {
 		return nil, nil, err
 	}
-	canonicalCandidates := make(ChannelKeyCandidates, len(candidates))
-	for channelID, userIDs := range candidates {
-		channelID, err = requestid.Canonical(channelID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid candidate channel ID: %w", err)
-		}
-		for _, userID := range userIDs {
-			userID, err = requestid.Canonical(userID)
-			if err != nil {
-				return nil, nil, fmt.Errorf("invalid candidate user ID: %w", err)
-			}
-			canonicalCandidates[channelID] = append(canonicalCandidates[channelID], userID)
-		}
-		canonicalCandidates[channelID] = dedupeAuthorityCandidateIDs(canonicalCandidates[channelID])
-	}
-	canonicalChannelIDs := make([]string, 0, len(channelIDs))
-	seenChannels := make(map[string]struct{}, len(channelIDs))
-	for _, channelID := range channelIDs {
-		channelID, err = requestid.Canonical(channelID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid channel ID: %w", err)
-		}
-		if _, duplicate := seenChannels[channelID]; !duplicate {
-			seenChannels[channelID] = struct{}{}
-			canonicalChannelIDs = append(canonicalChannelIDs, channelID)
-		}
+	canonicalChannelIDs, canonicalCandidates, err := canonicalChannelKeyCandidates(channelIDs, candidates)
+	if err != nil {
+		return nil, nil, err
 	}
 	rotations := make([]keyrotation.Rotation, 0, len(canonicalChannelIDs))
 	deniedByChannel := make(map[string][]string)

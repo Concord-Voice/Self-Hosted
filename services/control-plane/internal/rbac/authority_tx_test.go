@@ -348,6 +348,41 @@ func TestSecurity166_UppercaseVisibleCandidateKeepsChannelKey(t *testing.T) {
 	assert.Equal(t, 1, retained, "a visible member's durable key must remain")
 }
 
+func TestSecurity166_CanonicalChannelKeyCandidatesMergeUUIDAliases(t *testing.T) {
+	channelID := uuid.NewString()
+	userID := uuid.NewString()
+
+	channels, candidates, err := canonicalChannelKeyCandidates(
+		[]string{strings.ToUpper(channelID), "{" + channelID + "}", channelID},
+		ChannelKeyCandidates{
+			strings.ToUpper(channelID): {strings.ToUpper(userID), userID},
+			"{" + channelID + "}":      {userID},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{channelID}, channels, "one channel rotation per UUID regardless of spelling")
+	assert.Equal(t, ChannelKeyCandidates{channelID: {userID}}, candidates,
+		"candidate aliases must merge into one canonical, deduplicated recipient set")
+}
+
+func TestSecurity166_CanonicalChannelKeyCandidatesRejectMalformedIDs(t *testing.T) {
+	channelID := uuid.NewString()
+	userID := uuid.NewString()
+	for name, tc := range map[string]struct {
+		channelIDs []string
+		candidates ChannelKeyCandidates
+	}{
+		"candidate channel": {nil, ChannelKeyCandidates{"bad-channel": {userID}}},
+		"candidate user":    {nil, ChannelKeyCandidates{channelID: {"bad-user"}}},
+		"requested channel": {[]string{"bad-channel"}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := canonicalChannelKeyCandidates(tc.channelIDs, tc.candidates)
+			require.Error(t, err)
+		})
+	}
+}
+
 func advisoryKeyForTest(domain string) int64 {
 	digest := sha256.Sum256([]byte(domain))
 	return int64(binary.BigEndian.Uint64(digest[:8])) //nolint:gosec // test-local mirror of the production derivation

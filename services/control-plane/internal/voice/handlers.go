@@ -42,7 +42,7 @@ const (
 	voiceAdmissionActivationRequestPurpose  = "concord/voice-admission-activate/request/v1"
 	voiceAdmissionActivationResponsePurpose = "concord/voice-admission-activate/response/v1"
 	voiceAdmissionActivationNotReadyPurpose = "concord/voice-admission-activate/response/not-ready/v1"
-	errMsgInvalidVoiceJoinRequestBody       = "Invalid request body"
+	errMsgInvalidVoiceRequestBody           = "Invalid request body"
 	errMsgVoiceChannelAccessDenied          = "Channel not found or access denied"
 )
 
@@ -121,12 +121,12 @@ func parseVoiceJoinAdmission(c *gin.Context, channelID string) (voiceJoinAdmissi
 
 	var admission voiceJoinAdmission
 	if err := c.ShouldBindJSON(&admission); err != nil || admission.SocketID == "" || len(admission.SocketID) > 128 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceJoinRequestBody})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
 		return voiceJoinAdmission{}, false
 	}
 	parsedAdmissionID, err := uuid.Parse(admission.AdmissionID)
 	if err != nil || parsedAdmissionID == uuid.Nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceJoinRequestBody})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
 		return voiceJoinAdmission{}, false
 	}
 	return admission, true
@@ -905,12 +905,12 @@ func (h *Handler) AuthorizeVoiceAction(c *gin.Context) {
 		TargetUserID string `json:"target_user_id" binding:"required,uuid"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
 		return
 	}
 	req.TargetUserID, err = requestid.Canonical(req.TargetUserID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
 		return
 	}
 
