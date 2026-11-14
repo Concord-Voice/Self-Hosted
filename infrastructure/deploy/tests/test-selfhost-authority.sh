@@ -347,16 +347,28 @@ fi
 tls_keys() { python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['authority_tls_keys']))" "$1"; }
 tls4="$(tls_keys "$AUTH/ceremony/delegation-4.json")"; tls_key4="$(cat "$AUTH/secrets/tls-key")"
 # A swap that fails on the TLS key puts every old file back.
-: >"$CALLS"; docker_set SALT=z; trust4="$(cat "$AUTH/public/trust")"
+: >"$CALLS"; docker_set SALT=z; trust4="$(cat "$AUTH/public/trust")"; rsk4="$(cat "$AUTH/secrets/rsk")"; cak4="$(cat "$AUTH/cp/cak")"
 if SWAP_FAIL="$AUTH/secrets/tls-key" VERB=renew run_init '' --rotate-tls; then
   fail "renew accepted a failed TLS key swap"
-elif [[ "$(cat "$AUTH/public/trust")" == "$trust4" && "$(cat "$AUTH/secrets/tls-key")" == "$tls_key4" && ! -e "$AUTH/ceremony/delegation-5.json" ]] \
+elif [[ "$(cat "$AUTH/public/trust")" == "$trust4" && "$(cat "$AUTH/secrets/tls-key")" == "$tls_key4" && ! -e "$AUTH/ceremony/delegation-5.json" \
+        && "$(cat "$AUTH/secrets/rsk")" == "$rsk4" && "$(cat "$AUTH/cp/cak")" == "$cak4" ]] \
      && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]]; then
   pass "a TLS key swap that fails puts the old trust and keys back"
 else
   fail "a failed TLS key swap: $(cat "$ROOT/out")"
 fi
 rm -f "$ROOT/swap-failed"
+# A TLS key left in the stage as a symlink: renew refuses and changes nothing.
+: >"$CALLS"; docker_set "LINK=tls-key:$ROOT/outside"
+if VERB=renew run_init '' --rotate-tls; then
+  fail "renew installed a symlinked TLS key"
+elif grep -qF 'is not a regular file' "$ROOT/out" && [[ "$(cat "$AUTH/secrets/tls-key")" == "$tls_key4" && "$(cat "$AUTH/public/trust")" == "$trust4" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]]; then
+  pass "renew --rotate-tls refuses a TLS key left in the stage as a symlink"
+else
+  fail "symlinked TLS key: $(cat "$ROOT/out")"
+fi
+docker_set LINK=
 : >"$CALLS"; docker_set SALT=5
 if VERB=renew run_init '' --rotate-tls; then
   new_tls="$(tls_keys "$AUTH/ceremony/delegation-5.json")"
