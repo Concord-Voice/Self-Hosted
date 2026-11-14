@@ -20,6 +20,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
 	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
 
@@ -293,9 +294,20 @@ func TestInvalidatePermissionState_TOTPDisable(t *testing.T) {
 	})
 }
 
-func runWebAuthnDelete(t *testing.T, h *Handler, userID, credentialID string) (int, map[string]interface{}) {
+func mintWebAuthnDeleteProof(t *testing.T, h *Handler, userID string) string {
 	t.Helper()
-	body := fmt.Sprintf(`{"password":%q}`, iuPassword)
+	proof, e := stepup.MintToken(context.Background(), h.db, userID, stepup.FactorWebAuthn, stepup.PurposeWebAuthnDelete, "")
+	require.Nil(t, e)
+	return proof
+}
+
+func runWebAuthnDelete(t *testing.T, h *Handler, userID, credentialID string, proof ...string) (int, map[string]interface{}) {
+	t.Helper()
+	code := mintWebAuthnDeleteProof(t, h, userID)
+	if len(proof) > 0 {
+		code = proof[0]
+	}
+	body := fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, code)
 	c, w := iuGinContext(http.MethodDelete, "/api/v1/mfa/webauthn/credentials/"+credentialID, body, userID, "")
 	c.Params = gin.Params{{Key: "id", Value: credentialID}}
 	h.WebAuthnDeleteCredential(c)
@@ -485,9 +497,10 @@ func TestInvalidatePermissionState_CommitErrorStillBumps(t *testing.T) {
 		spy.reset()
 		userID := iuCreateUser(t, db, iuPassword)
 		credentialID := insertWebAuthnCredential(t, db, userID)
+		proof := mintWebAuthnDeleteProof(t, h, userID)
 		failCommitsOn(t, db, i5FailCommitWebAuthn, i5FailCommitWebAuthnDrop)
 
-		code, body := runWebAuthnDelete(t, h, userID, credentialID)
+		code, body := runWebAuthnDelete(t, h, userID, credentialID, proof)
 		require.Equal(t, http.StatusInternalServerError, code, i5BodyFmt, body)
 		require.Equal(t, errMsgFailedDeleteCredential, body["error"])
 		spy.requireOneBump(t, userID)

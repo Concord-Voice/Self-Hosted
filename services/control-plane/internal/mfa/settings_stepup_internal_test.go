@@ -805,6 +805,7 @@ func TestHandlers_PoolSafety_GreenButProspective(t *testing.T) {
 	factorSecret := iuEnrollTOTP(t, db, kr, factorUser)
 	iuAddWebAuthnCredential(t, db, factorUser)
 	factorCredentialID := iuWebAuthnCredentialID(t, db, factorUser)
+	webAuthnProof := mintWebAuthnDeleteProof(t, h, factorUser)
 
 	// iuMountHandler bypasses AuthRequired exactly like case 3's
 	// iuGinContext (same "user_id" + middleware.JWTClaimsContextKey shape),
@@ -867,9 +868,9 @@ func TestHandlers_PoolSafety_GreenButProspective(t *testing.T) {
 			handler: h.TOTPDisable,
 		},
 		{
-			name: "WebAuthnDeleteCredential, password", userID: factorUser,
+			name: "WebAuthnDeleteCredential, fresh WebAuthn proof", userID: factorUser,
 			method: http.MethodDelete, path: "/webauthn/credentials/" + factorCredentialID, route: "/webauthn/credentials/:id",
-			body:    fmt.Sprintf(`{"password":%q}`, iuPassword),
+			body:    fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, webAuthnProof),
 			handler: h.WebAuthnDeleteCredential,
 		},
 	}
@@ -1260,8 +1261,9 @@ func TestD1_LastInlineFactorWhileEmailOrSmsIsOn(t *testing.T) {
 	deleteKey := func(t *testing.T, h *Handler, userID string) *httptest.ResponseRecorder {
 		t.Helper()
 		credentialID := iuWebAuthnCredentialID(t, db, userID)
+		proof := mintWebAuthnDeleteProof(t, h, userID)
 		c, w := iuGinContext(http.MethodDelete, "/api/v1/mfa/webauthn/credentials/"+credentialID,
-			fmt.Sprintf(`{"password":%q}`, iuPassword), userID, "")
+			fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, proof), userID, "")
 		c.Params = gin.Params{{Key: "id", Value: credentialID}}
 		h.WebAuthnDeleteCredential(c)
 		return w
