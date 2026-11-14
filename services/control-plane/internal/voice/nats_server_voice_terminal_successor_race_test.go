@@ -13,6 +13,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/erasuretest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	concordws "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -331,7 +332,7 @@ func TestServerVoiceTerminalOutbox_RemoteErasureClearInvalidatesAdmission(t *tes
 	hubB := concordws.NewHub(ts.DB, ts.Redis)
 	erasing := users.NewAccountService(ts.DB, logger.New("erasing-replica"))
 	erasing.SetAudienceFence(hubB)
-	require.NoError(t, erasing.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, erasedUser.ID), erasedUser.ID))
+	erasuretest.New(t, ts.DB).MustErase(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, erasedUser.ID), t, erasing, erasedUser.ID)
 	envelope, err := erasureclear.Seal(erasureKey, erasedUser.ID, 0, nil)
 	require.NoError(t, err)
 	clearEvent, err := json.Marshal(map[string]any{

@@ -7,9 +7,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
@@ -19,6 +22,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehook"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
@@ -37,6 +41,40 @@ var ErrErasureCandidateSetDrifted = errors.New(
 	"account erasure active-call candidate set changed under lock",
 )
 
+// ErrErasureOwnedServerSetDrifted reports the canonical protected server set
+// the actor must acknowledge before account erasure can proceed.
+type ErrErasureOwnedServerSetDrifted struct {
+	RequiredOwnedServerIDs []string
+}
+
+func (e *ErrErasureOwnedServerSetDrifted) Error() string {
+	return "account erasure owned-server confirmation set changed under lock"
+}
+
+// AccountErasureRequest is the closed service input for account erasure. The
+// handler reserves PasswordAttempt and charges MFA before opening the service
+// transaction; this request carries that admitted work to its transaction owner.
+type AccountErasureRequest struct {
+	Actor                   loginfamily.AccessIdentity
+	Password                string
+	MFACode                 string
+	PasswordAttempt         *stepup.PasswordAttempt
+	ConfirmedOwnedServerIDs []uuid.UUID
+	// testBypassProof is only set by DeleteAccountForTest in a _test.go file,
+	// preserving legacy data-cleanup test coverage without a proofless exported
+	// production entry point.
+	testBypassProof bool
+}
+
+// EmailErasureConfirmation is the authority snapshot bound to an unverified
+// account's emailed intent after fresh proof has committed.
+type EmailErasureConfirmation struct {
+	Recipient       string
+	FamilyID        string
+	CredentialEpoch string
+	OwnedServerIDs  []string
+}
+
 const maxErasurePrivateCallSubjects = 16
 
 type erasureCandidateQuerier interface {
@@ -47,7 +85,11 @@ type erasureCandidateQuerier interface {
 // Declared here so privacy can import it without pulling the concrete
 // service (and its database handle) into the handler's test surface.
 type AccountDeleter interface {
-	DeleteAccount(ctx context.Context, userID string) error
+	PrepareAccountErasure(ctx context.Context, userID, password, mfaCode string) (*stepup.PasswordAttempt, *stepup.Error)
+	EmailVerified(ctx context.Context, userID string) (bool, error)
+	EmailErasureConfirmationBinding(ctx context.Context, request AccountErasureRequest) (EmailErasureConfirmation, error)
+	PrepareEmailErasureConfirmation(ctx context.Context, request AccountErasureRequest) (EmailErasureConfirmation, error)
+	DeleteAccount(ctx context.Context, request AccountErasureRequest) error
 }
 
 // ChannelDeletedBroadcaster notifies connected server members after account
@@ -168,7 +210,9 @@ type committedAccountDeletion struct {
 // activity cleanup has completed.
 type AccountService struct {
 	db              *sql.DB
+	redis           *redis.Client
 	log             *logger.Logger
+	mfaVerifier     stepup.MFATxCodeVerifier
 	activityCleanup *Handler
 	channelDeleted  ChannelDeletedBroadcaster
 
@@ -224,6 +268,133 @@ type AccountService struct {
 func NewAccountService(db *sql.DB, log *logger.Logger) *AccountService {
 	return &AccountService{db: db, log: log}
 }
+
+// SetRedis wires the fail-closed shared dangerous-action budget.
+func (s *AccountService) SetRedis(client *redis.Client) { s.redis = client }
+
+// SetMFAVerifier wires transactional MFA verification for erasure proofs.
+func (s *AccountService) SetMFAVerifier(verifier stepup.MFATxCodeVerifier) { s.mfaVerifier = verifier }
+
+// PrepareAccountErasure performs all Redis work required before the erasure
+// transaction: password-lockout reservation and shared MFA attempt charge.
+func (s *AccountService) PrepareAccountErasure(
+	ctx context.Context, userID, password, mfaCode string,
+) (*stepup.PasswordAttempt, *stepup.Error) {
+	attempt, err := stepup.ReserveUserPasswordAttempt(ctx, s.db, s.redis, userID, password)
+	if err != nil {
+		return nil, err
+	}
+	if err := stepup.Charge(ctx, stepup.DangerousActionBudget(s.redis), userID, mfaCode); err != nil {
+		return nil, err
+	}
+	return attempt, nil
+}
+
+// EmailVerified is an advisory branch selector. The authoritative unverified
+// preparation re-reads the value inside its proof transaction.
+func (s *AccountService) EmailVerified(ctx context.Context, userID string) (bool, error) {
+	var verified bool
+	if err := s.db.QueryRowContext(ctx, `SELECT email_verified FROM users WHERE id = $1`, userID).Scan(&verified); err != nil {
+		return false, fmt.Errorf("read erasure email verification: %w", err)
+	}
+	return verified, nil
+}
+
+// EmailErasureConfirmationBinding reads the live binding used to claim a
+// second-cycle confirmation before the final deletion transaction. The final
+// transaction repeats the protected-set comparison; a race therefore releases
+// the claim on its proven rollback rather than deleting with stale authority.
+func (s *AccountService) EmailErasureConfirmationBinding(
+	ctx context.Context, request AccountErasureRequest,
+) (EmailErasureConfirmation, error) {
+	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
+	if !ok || !sameErasureActor(identity, request.Actor) {
+		return EmailErasureConfirmation{}, errors.Join(credepoch.ErrEpochMismatch, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil))
+	}
+	var result EmailErasureConfirmation
+	var verified bool
+	if err := s.db.QueryRowContext(ctx, `SELECT email, email_verified FROM users WHERE id = $1`, request.Actor.UserID).Scan(&result.Recipient, &verified); err != nil {
+		return EmailErasureConfirmation{}, fmt.Errorf("read erasure email-confirmation binding: %w", err)
+	}
+	if verified {
+		return EmailErasureConfirmation{}, ErrErasureEmailAlreadyVerified
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT family_id FROM login_family_sids WHERE user_id = $1 AND sid = $2`, request.Actor.UserID, request.Actor.SID).Scan(&result.FamilyID); err != nil {
+		return EmailErasureConfirmation{}, fmt.Errorf("read erasure email-confirmation family: %w", err)
+	}
+	result.CredentialEpoch = request.Actor.CredentialEpoch
+	result.OwnedServerIDs = stringifyUUIDs(request.ConfirmedOwnedServerIDs)
+	return result, nil
+}
+
+// PrepareEmailErasureConfirmation verifies an unverified account's first
+// fresh proof and binds the resulting intent to the same locked authority and
+// protected owned-server set. It changes no deletion state.
+func (s *AccountService) PrepareEmailErasureConfirmation(
+	ctx context.Context, request AccountErasureRequest,
+) (prepared EmailErasureConfirmation, returnErr error) {
+	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
+	if !ok || !sameErasureActor(identity, request.Actor) {
+		return EmailErasureConfirmation{}, errors.Join(credepoch.ErrEpochMismatch, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil))
+	}
+	defer func() {
+		if err := request.PasswordAttempt.Settle(context.Background()); err != nil && s.log != nil {
+			s.log.Warn("Could not settle account-erasure email-confirmation password attempt", "error", err)
+		}
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EmailErasureConfirmation{}, fmt.Errorf("prepare erasure email confirmation: begin tx: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			returnErr = errors.Join(returnErr, fmt.Errorf("prepare erasure email confirmation: rollback: %w", rbErr))
+		}
+	}()
+	actorID, _, err := lockErasureSubjects(ctx, tx, request.Actor.UserID.String(), nil)
+	if err != nil {
+		return EmailErasureConfirmation{}, err
+	}
+	if err := guardErasureActorTx(ctx, tx, actorID); err != nil {
+		return EmailErasureConfirmation{}, err
+	}
+	protected, err := lockProtectedErasureOwnedServersTx(ctx, tx, actorID)
+	if err != nil {
+		return EmailErasureConfirmation{}, err
+	}
+	if err := s.verifyErasureStepUpTx(ctx, tx, actorID, request); err != nil {
+		return EmailErasureConfirmation{}, err
+	}
+	if !equalUUIDSets(request.ConfirmedOwnedServerIDs, protected) {
+		return EmailErasureConfirmation{}, &ErrErasureOwnedServerSetDrifted{RequiredOwnedServerIDs: stringifyUUIDs(protected)}
+	}
+	var verified bool
+	if err := tx.QueryRowContext(ctx, `SELECT email, email_verified FROM users WHERE id = $1`, actorID).Scan(&prepared.Recipient, &verified); err != nil {
+		return EmailErasureConfirmation{}, fmt.Errorf("prepare erasure email confirmation: read locked email: %w", err)
+	}
+	if verified {
+		return EmailErasureConfirmation{}, ErrErasureEmailAlreadyVerified
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT family_id FROM login_family_sids WHERE user_id = $1 AND sid = $2`, actorID, request.Actor.SID).Scan(&prepared.FamilyID); err != nil {
+		return EmailErasureConfirmation{}, fmt.Errorf("prepare erasure email confirmation: read actor family: %w", err)
+	}
+	prepared.CredentialEpoch = request.Actor.CredentialEpoch
+	prepared.OwnedServerIDs = stringifyUUIDs(protected)
+	if err := tx.Commit(); err != nil {
+		return EmailErasureConfirmation{}, fmt.Errorf("prepare erasure email confirmation: commit: %w", err)
+	}
+	if request.MFACode != "" {
+		if err := stepup.DangerousActionBudget(s.redis).Clear(context.Background(), actorID.String()); err != nil && s.log != nil {
+			s.log.Warn("Could not clear account-erasure email-confirmation MFA attempt budget", "error", err)
+		}
+	}
+	return prepared, nil
+}
+
+// ErrErasureEmailAlreadyVerified is returned when an account switched to a
+// verified address while preparing its confirmation. The caller must restart
+// with a fresh proof rather than silently changing the proof flow.
+var ErrErasureEmailAlreadyVerified = errors.New("account erasure email is already verified")
 
 // SetActivitySettingsCleanupHandler binds the same sender coordinator and
 // suppression service used by presence-settings writers.
@@ -283,14 +454,13 @@ func (s *AccountService) AudienceFenceWired() bool {
 //
 // On failure at any stage the deferred rollback restores the pre-call
 // state; callers may retry safely (idempotent).
-func (s *AccountService) DeleteAccount(
-	ctx context.Context,
-	userID string,
-) error {
-	creatorID, err := uuid.Parse(userID)
-	if err != nil {
-		return fmt.Errorf("delete account: invalid user id: %w", err)
+func (s *AccountService) DeleteAccount(ctx context.Context, request AccountErasureRequest) error {
+	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
+	if !ok || !sameErasureActor(identity, request.Actor) {
+		return errors.Join(credepoch.ErrEpochMismatch, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil))
 	}
+	creatorID := request.Actor.UserID
+	userID := creatorID.String()
 	candidates, overflow, err := readErasurePrivateCallCandidates(ctx, s.db, creatorID)
 	if err != nil {
 		return fmt.Errorf("delete account: read private-call candidates: %w", err)
@@ -301,9 +471,14 @@ func (s *AccountService) DeleteAccount(
 	if len(candidates) > 0 && (s.activityCleanup == nil || s.activePlans == nil) {
 		return errors.New("delete account: private-call erasure wiring unavailable")
 	}
+	defer func() {
+		if err := request.PasswordAttempt.Settle(context.Background()); err != nil && s.log != nil {
+			s.log.Warn("Could not settle account-erasure password attempt", "error", err)
+		}
+	}()
 	survivorSubjects := append([]uuid.UUID(nil), candidates...)
 	committed, operationErr := s.deleteAccountWithActivityCleanup(
-		ctx, userID, creatorID, candidates, &survivorSubjects,
+		ctx, request, creatorID, candidates, &survivorSubjects,
 	)
 	if committed != nil {
 		s.closeErasedFamilies(ctx, committed.familyOwners)
@@ -312,8 +487,17 @@ func (s *AccountService) DeleteAccount(
 		if s.seatsErased != nil && len(committed.seats) > 0 && !committed.commitUnresolved {
 			s.seatsErased(ctx, committed.seats)
 		}
+		if !committed.commitUnresolved && request.MFACode != "" {
+			if err := stepup.DangerousActionBudget(s.redis).Clear(context.Background(), userID); err != nil && s.log != nil {
+				s.log.Warn("Could not clear account-erasure MFA attempt budget", "error", err)
+			}
+		}
 	}
 	return operationErr
+}
+
+func sameErasureActor(a, b loginfamily.AccessIdentity) bool {
+	return a.UserID == b.UserID && a.SID == b.SID && a.CredentialEpoch == b.CredentialEpoch
 }
 
 // closeErasedFamilies fences the erased user's sockets before the request
@@ -330,8 +514,7 @@ func (s *AccountService) closeErasedFamilies(ctx context.Context, owners []login
 }
 
 func (s *AccountService) deleteAccountWithActivityCleanup(
-	ctx context.Context,
-	userID string,
+	ctx context.Context, request AccountErasureRequest,
 	creatorID uuid.UUID,
 	candidates []uuid.UUID,
 	survivorSubjects *[]uuid.UUID,
@@ -343,7 +526,7 @@ func (s *AccountService) deleteAccountWithActivityCleanup(
 		// closure until the fence has closed.
 		defer s.audienceFence.BeginAudienceRevocation()()
 		var err error
-		committed, err = s.deleteAccount(ctx, userID, candidates, survivorSubjects)
+		committed, err = s.deleteAccount(ctx, request, candidates, survivorSubjects)
 		return s.completeErasurePrivateCallPlans(ctx, committed, err)
 	}
 	if s.activityCleanup == nil {
@@ -420,7 +603,7 @@ func readErasurePrivateCallCandidates(
 }
 
 func (s *AccountService) deleteAccount(
-	ctx context.Context, userID string, candidates []uuid.UUID, survivorSubjects *[]uuid.UUID,
+	ctx context.Context, request AccountErasureRequest, candidates []uuid.UUID, survivorSubjects *[]uuid.UUID,
 ) (*committedAccountDeletion, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -435,7 +618,7 @@ func (s *AccountService) deleteAccount(
 	}()
 	var seats []ErasedSeat
 	var familyOwners []loginfamily.DeliveryOwner
-	channelIDs, serverIDs, plan, drained, stranded, err := s.deleteAccountTx(ctx, tx, userID, candidates, survivorSubjects, &seats, &familyOwners)
+	channelIDs, serverIDs, plan, drained, stranded, err := s.deleteAccountTx(ctx, tx, request, candidates, survivorSubjects, &seats, &familyOwners)
 	if err != nil {
 		// CauseWriteFailed and friends prove no commit happened, so Abandon does
 		// NOT disconnect anyone on those causes -- the deferred rollback discards
@@ -568,18 +751,32 @@ func (s *AccountService) transferDrainedActivePlans(
 func (s *AccountService) deleteAccountTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	userID string,
+	request AccountErasureRequest,
 	candidates []uuid.UUID,
 	survivorSubjects *[]uuid.UUID,
 	seats *[]ErasedSeat,
 	familyOwners *[]loginfamily.DeliveryOwner,
 ) (pq.StringArray, pq.StringArray, presencecapture.Plan, drainedObligation, erasedMedia, error) {
-	creatorID, userAuthority, err := lockErasureSubjects(ctx, tx, userID, candidates)
+	creatorID, userAuthority, err := lockErasureSubjects(ctx, tx, request.Actor.UserID.String(), candidates)
 	if err != nil {
 		return nil, nil, nil, drainedObligation{}, erasedMedia{}, err
 	}
 	if err := guardErasureActorTx(ctx, tx, creatorID); err != nil {
 		return nil, nil, nil, drainedObligation{}, erasedMedia{}, err
+	}
+	if !request.testBypassProof {
+		protectedOwnedServers, err := lockProtectedErasureOwnedServersTx(ctx, tx, creatorID)
+		if err != nil {
+			return nil, nil, nil, drainedObligation{}, erasedMedia{}, err
+		}
+		if err := s.verifyErasureStepUpTx(ctx, tx, creatorID, request); err != nil {
+			return nil, nil, nil, drainedObligation{}, erasedMedia{}, err
+		}
+		if !equalUUIDSets(request.ConfirmedOwnedServerIDs, protectedOwnedServers) {
+			return nil, nil, nil, drainedObligation{}, erasedMedia{}, &ErrErasureOwnedServerSetDrifted{
+				RequiredOwnedServerIDs: stringifyUUIDs(protectedOwnedServers),
+			}
+		}
 	}
 	// Terminal evidence must precede conversations and every users cascade.
 	targets, err := loginfamily.CaptureUserTargetsTx(ctx, tx, userAuthority, nil)
@@ -778,6 +975,153 @@ func guardErasureActorTx(ctx context.Context, tx *sql.Tx, userID uuid.UUID) erro
 		return err
 	}
 	return nil
+}
+
+var accountErasureStepUpCopy = stepup.Copy{
+	NoFactors:          "No authentication factor is available",
+	CredentialRequired: "Current password is required",
+}
+
+// verifyErasureStepUpTx verifies the fresh proof against the actor row already
+// locked by lockErasureSubjects. It must not call LockSubjectTx: that helper
+// would attempt to establish a second users-lock authority after the erasure's
+// complete canonical user set has been acquired.
+func (s *AccountService) verifyErasureStepUpTx(
+	ctx context.Context, tx *sql.Tx, actorID uuid.UUID, request AccountErasureRequest,
+) error {
+	if request.Password == "" && request.MFACode == "" {
+		return &stepup.Error{Status: http.StatusForbidden, Body: gin.H{
+			"error_code": "step_up_required", "password_required": true,
+		}}
+	}
+
+	var subject stepup.Subject
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(password_hash, '') FROM users WHERE id = $1`, actorID,
+	).Scan(&subject.PasswordHash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return &stepup.Error{Status: http.StatusUnauthorized, Body: gin.H{"error": stepup.ErrMsgSessionNoLongerValid}}
+		}
+		return fmt.Errorf("delete account: read locked step-up subject: %w", err)
+	}
+	methods, err := stepup.InlineMFAMethods(ctx, tx, actorID.String())
+	if err != nil {
+		return fmt.Errorf("delete account: read locked step-up factors: %w", err)
+	}
+	subject.MFAMethods = methods
+	subject.MFAEnabled = len(methods) > 0
+	if e := stepup.VerifyPasswordFactor(request.PasswordAttempt, subject, request.Password, accountErasureStepUpCopy); e != nil {
+		return e
+	}
+	if !subject.MFAEnabled {
+		return nil
+	}
+	if s.mfaVerifier == nil {
+		return &stepup.Error{
+			Status: http.StatusInternalServerError,
+			Body:   gin.H{"error": stepup.ErrMsgVerificationFailed},
+			Cause:  errors.New("account-erasure MFA verifier is not configured"),
+		}
+	}
+	if e := stepup.VerifyMFAFactorTx(ctx, tx, s.mfaVerifier, actorID.String(), stepup.PurposeAccountErase,
+		request.MFACode, subject.MFAMethods); e != nil {
+		return e
+	}
+	return nil
+}
+
+// lockProtectedErasureOwnedServersTx serializes ownership and membership
+// changes with erasure. Locking each server first also blocks a concurrent
+// membership insert through its foreign key before the member rows are read.
+func lockProtectedErasureOwnedServersTx(
+	ctx context.Context, tx *sql.Tx, actorID uuid.UUID,
+) ([]uuid.UUID, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM servers WHERE owner_id = $1 ORDER BY id FOR UPDATE`, actorID)
+	if err != nil {
+		return nil, fmt.Errorf("delete account: lock owned servers: %w", err)
+	}
+	owned := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var serverID uuid.UUID
+		if err := rows.Scan(&serverID); err != nil {
+			if closeErr := rows.Close(); closeErr != nil {
+				return nil, errors.Join(fmt.Errorf("delete account: scan owned server: %w", err), closeErr)
+			}
+			return nil, fmt.Errorf("delete account: scan owned server: %w", err)
+		}
+		owned = append(owned, serverID)
+	}
+	if err := rows.Err(); err != nil {
+		if closeErr := rows.Close(); closeErr != nil {
+			return nil, errors.Join(fmt.Errorf("delete account: iterate owned servers: %w", err), closeErr)
+		}
+		return nil, fmt.Errorf("delete account: iterate owned servers: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("delete account: close owned servers: %w", err)
+	}
+
+	protected := make([]uuid.UUID, 0, len(owned))
+	for _, serverID := range owned {
+		memberRows, err := tx.QueryContext(ctx,
+			`SELECT user_id FROM server_members WHERE server_id = $1 ORDER BY user_id FOR UPDATE`, serverID)
+		if err != nil {
+			return nil, fmt.Errorf("delete account: lock owned server members: %w", err)
+		}
+		hasOtherMember := false
+		for memberRows.Next() {
+			var memberID uuid.UUID
+			if err := memberRows.Scan(&memberID); err != nil {
+				if closeErr := memberRows.Close(); closeErr != nil {
+					return nil, errors.Join(
+						fmt.Errorf("delete account: scan owned server member: %w", err),
+						fmt.Errorf("delete account: close owned server members: %w", closeErr),
+					)
+				}
+				return nil, fmt.Errorf("delete account: scan owned server member: %w", err)
+			}
+			if memberID != actorID {
+				hasOtherMember = true
+			}
+		}
+		if err := memberRows.Err(); err != nil {
+			if closeErr := memberRows.Close(); closeErr != nil {
+				return nil, errors.Join(
+					fmt.Errorf("delete account: iterate owned server members: %w", err),
+					fmt.Errorf("delete account: close owned server members: %w", closeErr),
+				)
+			}
+			return nil, fmt.Errorf("delete account: iterate owned server members: %w", err)
+		}
+		if err := memberRows.Close(); err != nil {
+			return nil, fmt.Errorf("delete account: close owned server members: %w", err)
+		}
+		if hasOtherMember {
+			protected = append(protected, serverID)
+		}
+	}
+	return protected, nil
+}
+
+func equalUUIDSets(provided, required []uuid.UUID) bool {
+	if len(provided) != len(required) {
+		return false
+	}
+	for i := range provided {
+		if provided[i] != required[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func stringifyUUIDs(ids []uuid.UUID) []string {
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
+	return result
 }
 
 // lockErasureSubjects retains the sender/audience prefix held by the caller,
