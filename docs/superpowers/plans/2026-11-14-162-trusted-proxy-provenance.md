@@ -48,6 +48,12 @@ the running endpoints match.
 - Discovery and guarded rebuild are one deploy-lock transaction. Never create,
   recreate, stop, or prebuild an application service merely to discover its
   future gateway.
+- A stopped container does not pin a Docker network (Moby #48851). An empty
+  membership map after `up --no-start` is expected; exact trust is not
+  published until a running allowed member pins the same inspected network.
+- Direct self-host `restart` is verification-only. It refuses legacy or
+  mismatched canonical/container values and directs the operator to `up`;
+  restart never performs migration.
 - An `.env` rewrite failure must preserve the old file byte-for-byte and
   start no service.
 - Removing generic Cloudflare real-IP restoration must leave direct-origin
@@ -214,8 +220,10 @@ the running endpoints match.
   `rebuild` path after the deploy transaction lock is acquired and before the
   first Compose mutation that can build, recreate, or start an application
   service.
-- The helper writes only root `.env` keys `TRUSTED_PROXY_CIDRS` and
-  `TRUSTED_PROXIES`, then exports both for the current process.
+- `install-selfhost.sh` remains the root `.env` schema authority and fresh
+  publisher. The helper is its private, deploy-lock migration seam: it writes
+  only `TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES`, then exports both for the
+  current process. Do not expose a generic dotenv setter.
 
 - [ ] **Step 1: Write lifecycle failures first.** Cover Compose 2.33.0 refusal
   and 2.33.1 admission, fresh network, known legacy broad values, network
@@ -224,13 +232,17 @@ the running endpoints match.
   membership mismatch, absent/equal/wrong `GwPriority`, endpoint/network
   gateway mismatch, invalid gateway, inspect failure, atomic replacement
   failure, and an unknown custom broad value. Add a fresh-install case with no
-  application images and an upgrade case with running application containers.
-  Before canonical handoff, assert there is no app build, create, recreate,
-  stop, or start. Every pre-start error asserts no service start/rebuild.
+  application images, empty network membership after stopped materialization,
+  network ID/gateway change between materialization and holder start, and an
+  upgrade case with running application containers. Before canonical handoff,
+  assert there is no app build, create, recreate, stop, or start. Every
+  pre-application error asserts no application start/rebuild.
 - [ ] **Step 2: Write file-safety tests.** The successful rewrite changes only
   the two values, preserves all other bytes and secret lines, owner, mode, and
-  final newline. Failure leaves the original byte-identical and removes its
-  staging file.
+  final newline. A recognized legacy installer file may gain the missing media
+  key; a missing control-plane key, duplicate, unknown broad value, third-key
+  mutation request, symlink, or inode race is refused. Failure leaves the
+  original byte-identical and removes its staging file.
 - [ ] **Step 3: Make gateway selection explicit and raise the floor.** Convert
   both application services to network long syntax with
   `concordvoice-services: { gw_priority: 1 }` and every other endpoint at the
@@ -248,18 +260,23 @@ the running endpoints match.
   `selfhost_live_port_check` and the stage-network gate. Render and assert the
   gateway-priority model. When the owned services network is absent, prove the
   project has no containers and run only
-  `docker compose up --no-start --no-deps --pull missing nats`; when an existing
-  owned network has no member, use the same stopped NATS seed to pin it. Never
-  create or prebuild control-plane/media-plane here. Require the network's
-  Compose labels, bridge driver, allowed project-only members, and one valid
-  IPAM gateway. Convert that gateway to an exact route using the existing
-  Python standard-library fixture style; do not add a parser dependency.
+  `docker compose up --no-start --no-deps --pull missing nats` to materialize
+  it. Accept empty membership after that command; stopped containers do not
+  pin networks. Require the network's Compose labels, bridge driver, allowed
+  running project-only members, and one valid IPAM gateway, then record its ID
+  and gateway. If no running allowed member already pins it, start only NATS
+  with `up -d --no-deps --no-build --pull missing --wait --wait-timeout 180`,
+  and require the same ID+gateway plus running membership afterward. Never
+  create or prebuild control-plane/media-plane here. Convert the gateway to an
+  exact route using the existing Python standard-library fixture style; do not
+  add a parser dependency.
 - [ ] **Step 6: Implement fresh-install and upgrade migration.** The installer
-  no longer asks for or emits a broad default and writes both variables. The
-  resolver recognizes only the spec's legacy default strings; a different
-  broad value gets a fixed refusal message. `update`'s existing backup
-  remains before the tag switch; the new tag's `up` performs migration
-  before services start.
+  remains the schema authority, no longer asks for or emits a broad default,
+  and fresh-publishes both variables. The resolver is only the locked
+  derived-value migration seam and recognizes only the spec's legacy default
+  strings; a different broad value gets a fixed refusal message. `update`'s
+  existing backup remains before the tag switch; the new tag's `up` performs
+  migration before services start.
 - [ ] **Step 7: Preserve the canonical build/start and prove live endpoints.**
   After atomic persistence, export the exact values in the current controller
   process and continue through the existing guarded rebuild; it remains the
@@ -272,7 +289,13 @@ the running endpoints match.
   before accepting the target. Run installer, lifecycle, port-posture,
   storage-mode, acceptance, and publication-manifest fixtures selected by the
   changed writers.
-- [ ] **Step 8: Commit.** `fix: pin self-host proxy trust to the published-port bridge`
+- [ ] **Step 8: Guard direct self-host restart.** Before restart mutates any
+  container, require canonical exact trust values, both live application
+  container environment values, and both endpoint network-ID/gateway/priority
+  proofs to agree. On any legacy or mismatched state, refuse and direct the
+  operator to `concord-selfhost up`. Re-run endpoint proof after a permitted
+  restart. Parse inspected environment internally and never log its values.
+- [ ] **Step 9: Commit.** `fix: pin self-host proxy trust to the published-port bridge`
 
 ---
 
@@ -327,17 +350,23 @@ the running endpoints match.
 
 - [ ] **Step 1: Document the contract.** Explain exact host routes, lifecycle
   discovery, known-legacy migration, unknown-broad refusal, network recreation,
-  the Compose 2.33.1 floor, explicit default-gateway selection, and rollback.
-  State that generic Cloudflare self-host traffic is attributed to the edge
-  until #80 supplies authenticated origin provenance.
+  the Compose 2.33.1 floor, explicit default-gateway selection, writer
+  ownership, and rollback. State that the installer owns the Self-Hosted env
+  schema and fresh publication while the deploy-lock helper migrates only its
+  two derived trust keys. Keep both keys in service examples. State that generic
+  Cloudflare self-host traffic is attributed to the edge until #80 supplies
+  authenticated origin provenance.
 - [ ] **Step 2: Write the Hosted handoff.** List every mirrored source/config
   file, require independent control/media peer measurement, and prohibit
   copying the Self-Hosted gateway. Keep merge, deployment, and live canary
   evidence separate.
 - [ ] **Step 3: Run drift probes.** `rg` must find no production broad trust
   literal and no application proxy location using an append/pass-through
-  header. Run `./scripts/update-claude-md-counts.sh` if present; otherwise
-  record that the extracted repository has no local count artifact.
+  header. A writer census must show only installer fresh publication and the
+  locked two-key migrator for root `.env`, and every installer/Compose/example
+  schema surface must carry both variables. Run
+  `./scripts/update-claude-md-counts.sh` if present; otherwise record that the
+  extracted repository has no local count artifact.
 - [ ] **Step 4: Run the complete selected test matrix.** Go tests/race/lint,
   media tests/typecheck/lint, nginx fixture, installer/lifecycle/deployment
   fixtures, `git diff --check`, and the repository quality gate. Record

@@ -299,7 +299,7 @@ services:
       BILLING_PURCHASE_ALLOWLIST: ${BILLING_PURCHASE_ALLOWLIST:-}
       FOUNDERS_PRICING_ENDS_AT: ${FOUNDERS_PRICING_ENDS_AT:-}
       STRIPE_AUTOMATIC_TAX: ${STRIPE_AUTOMATIC_TAX:-}
-      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.19.0.0/16}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.1/32}
       # Activity History is deployed dormant. First activation is performed only
       # through the drained concord-ctl preflight; ordinary Compose starts must
       # never infer activation from binary support.
@@ -364,8 +364,9 @@ services:
       minio:
         condition: service_started
     networks:
-      - concordvoice-data
-      - concordvoice-services
+      concordvoice-data: {}
+      concordvoice-services:
+        gw_priority: 1
     profiles:
       - services
 
@@ -430,19 +431,9 @@ services:
       # Shared listeners require the separate, explicitly validated lab overlay.
       # An ambient shell/.env value must not migrate an ordinary deployment.
       MEDIASOUP_SHARED_WEBRTC_SERVER: "false"
-      # Peers whose X-Real-IP / X-Forwarded-For the #2032 admission gate trusts
-      # (src/lib/admissionGate.ts). Matched by CIDR, not string equality — the
-      # media-plane is reached through a docker bridge whose address is not a
-      # stable literal. 172.16.0.0/12 is docker's default address pool, so it
-      # covers both an nginx container on this network and the bridge gateway a
-      # host-level nginx arrives from; it is the same value the control-plane
-      # uses as its dev/CI TRUSTED_PROXY_CIDRS default.
-      #
-      # Unset would NOT be fail-safe in the useful sense: the gate turns itself
-      # off (allow-all, track nothing) rather than bucket every client under the
-      # proxy address, so the per-source-IP handshake ceiling simply stops
-      # existing. Same literal-not-interpolation rationale as NUM_WORKERS above.
-      TRUSTED_PROXIES: "172.16.0.0/12"
+      # Self-host lifecycle measures the published-port gateway and persists
+      # this exact peer before startup. Development defaults to under-trust.
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-127.0.0.1/32}"
     ports:
       - "3000:3000"
       - "40000-40099:40000-40099/udp"  # RTC ports (limited range for dev)
@@ -466,8 +457,9 @@ services:
       retries: 5
       start_period: 30s
     networks:
-      - concordvoice-services
-      - concordvoice-data
+      concordvoice-services:
+        gw_priority: 1
+      concordvoice-data: {}
     profiles:
       - services
       - media-single

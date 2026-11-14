@@ -126,6 +126,7 @@ class _OwnedExecutor:
         self.daemon_endpoint = "unix:///var/run/docker.sock"
         self.engine_os = "linux"
         self.docker_version_result = self._result(stdout="29.8.2\n")
+        self.compose_version_result = self._result(stdout="2.33.1\n")
         self.daemon_cpus = 2
         self.capacity_model_mutation = None
         self.route_variant: str | None = None
@@ -250,7 +251,7 @@ class _OwnedExecutor:
         if argv and Path(argv[0]).name == "git" and "diff" in argv:
             return finish(self._result(1 if self.git_dirty else 0))
         if "docker" in argv and "compose" in argv and "version" in argv:
-            return finish(self._result(stdout="2.24.5\n"))
+            return finish(self.compose_version_result)
         identity_argv = ["docker", "compose", "--project-directory", str(self.workspace),
                          "--env-file", "/dev/null", "-f", "-", "config", "--format", "json"]
         if argv == identity_argv:
@@ -839,7 +840,7 @@ class AcceptanceRunnerTests(unittest.TestCase):
                     "#!" + sys.executable + "\nimport sys\n"
                     "args = sys.argv[1:]\n"
                     "if args in (['compose', 'version'], ['compose', 'version', '--short']):\n"
-                    " print('2.29.1'); raise SystemExit(0)\n"
+                    " print('2.33.1'); raise SystemExit(0)\n"
                     "if args != ['version', '--format', '{{.Server.Version}}']: raise SystemExit(97)\n"
                     "sys.stdout.buffer.write(" + repr(payload) + ")\n"
                     "raise SystemExit(" + repr(query_status) + ")\n")
@@ -1380,7 +1381,7 @@ verb_logs "$@"
                 self.executor = _OwnedExecutor(self.workspace)
                 self.executor.docker_version_result = acceptance.CommandResult(0, stdout, "")
                 result = self.run_admitted()
-                self.assertEqual(result["tool_versions"], {"docker": canonical, "compose": "2.24.5"})
+                self.assertEqual(result["tool_versions"], {"docker": canonical, "compose": "2.33.1"})
                 recorded = json.loads((self.evidence / "evidence.json").read_text())
                 self.assertEqual(recorded["tool_versions"]["docker"], canonical)
 
@@ -1401,6 +1402,17 @@ verb_logs "$@"
                 self.assertEqual(caught.exception.code, "TOOL_VERSION_INVALID")
                 record = self.assert_failure_evidence("TOOL_VERSION_INVALID")
                 self.assertNotIn("REGISTRY_SENTINEL", json.dumps(record))
+                self.assert_no_mutations()
+
+    def test_compose_gateway_priority_floor_refuses_before_mutation(self):
+        for value in ("2.24.5\n", "2.33.0\n", "garbage\n"):
+            with self.subTest(compose=value):
+                self.reset_install_state()
+                self.executor = _OwnedExecutor(self.workspace)
+                self.executor.compose_version_result = acceptance.CommandResult(0, value, "")
+                with self.assertRaises(acceptance.AcceptanceError) as caught:
+                    self.run_admitted()
+                self.assertEqual(caught.exception.code, "TOOL_VERSION_INVALID")
                 self.assert_no_mutations()
 
     def test_nginx_activation_failure_uses_finite_boundary_context(self):
@@ -2906,7 +2918,7 @@ class InstallerFailureEvidenceTests(unittest.TestCase):
     def test_actual_colored_preflight_output_keeps_plain_udp_guard_classification(self):
         stdout = ("\x1b[0;34mRunning preflight (no files written yet)...\x1b[0m\n"
                   "\x1b[0;32m✓ OS ubuntu 24.04\x1b[0m\n"
-                  "\x1b[0;32m✓ docker 29.8.2 + compose 2.24.5 + python3\x1b[0m\n"
+                  "\x1b[0;32m✓ docker 29.8.2 + compose 2.33.1 + python3\x1b[0m\n"
                   "\x1b[0;32m✓ resources ok\x1b[0m\n"
                   "\x1b[0;32m✓ logrotate\x1b[0m\n")
         aborted = "\x1b[0;31mPreflight failed — aborting before any change.\x1b[0m\n"

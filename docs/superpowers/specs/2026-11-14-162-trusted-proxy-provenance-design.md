@@ -148,6 +148,7 @@ References:
 - <https://docs.docker.com/reference/compose-file/services/#gw_priority>
 - <https://docs.docker.com/reference/api/engine/version-history/#v148-api-changes>
 - <https://github.com/moby/moby/discussions/53256>
+- <https://github.com/moby/moby/issues/48851>
 
 The selected gateway is stable across ordinary container restarts while the
 Compose network remains. It can change when `down` removes the network and a
@@ -165,20 +166,27 @@ Before a self-host `up` or the post-switch start in `update`:
    `gw_priority: 1`, with every other attached network lower;
 4. identify the one Compose-owned `concordvoice-services` bridge by its project
    and network labels. If it does not exist, first prove that the project has
-   no containers, then use the pinned NATS service as a stopped network seed:
-   `docker compose up --no-start --no-deps --pull missing nats`. If the network
-   exists but has no member, use the same seed so an attached stopped container
-   pins it for the rest of the transaction. This command neither needs the
-   locally built application images nor starts NATS;
+   no containers, then use NATS as a stopped network materializer:
+   `docker compose up --no-start --no-deps --pull missing nats`. This command
+   neither needs the locally built application images nor starts NATS. Moby
+   #48851 means the stopped container is not reported in network membership and
+   does not pin the network; an empty `Containers` map is expected here;
 5. inspect the resulting network and require the expected ownership labels,
-   bridge driver, allowed project-only membership, and exactly one valid IPAM
-   gateway. A missing network with any project container is inconsistent and
-   refused rather than repaired;
-6. convert the inspected network gateway to an exact `/32` or `/128` route;
-7. atomically replace only `TRUSTED_PROXY_CIDRS` and
+   bridge driver, allowed running project-only membership, exactly one valid
+   IPAM gateway, and record both its immutable ID and gateway. A missing network
+   with any project container is inconsistent and refused rather than repaired;
+6. if no already-running allowed project member pins that network, start only
+   the pinned NATS dependency with
+   `docker compose up -d --no-deps --no-build --pull missing --wait
+   --wait-timeout 180 nats`. The self-host port-posture gate has already proved
+   that NATS publishes no host port. Reinspect and require the same network ID,
+   the same gateway, and running NATS membership. Existing running application
+   or NATS membership skips this step, so upgrades do not recreate a service;
+7. convert the inspected network gateway to an exact `/32` or `/128` route;
+8. atomically replace only `TRUSTED_PROXY_CIDRS` and
    `TRUSTED_PROXIES` in the root `.env`, preserving all other bytes,
    ownership, and mode; and
-8. export the same values for the current Compose invocation so container
+9. export the same values for the current Compose invocation so container
    creation cannot read stale process state; then let the existing guarded
    rebuild remain the only application image builder and service starter.
 
@@ -193,6 +201,14 @@ before the canonical handoff. A post-start mismatch returns failure but leaves
 the services running in fail-safe under-trust; it never widens the allowlist or
 rolls back to the broad legacy value.
 
+The directly callable self-host `concord-ctl.sh restart` is not a migration
+path: restart does not recreate containers and therefore cannot apply changed
+environment values. Before restarting, it must require that the canonical
+exact routes, both running containers' trust-variable values, and both live
+endpoint network-ID, gateway, and priority proofs already agree. Otherwise it
+refuses without mutation and directs the operator to `concord-selfhost up`.
+The same endpoint proof runs after a permitted restart.
+
 The resolver may migrate the known legacy defaults
 `172.16.0.0/12,10.0.0.0/8`,
 `172.16.0.0/12,10.0.0.0/8,192.168.0.0/16`, and
@@ -200,13 +216,27 @@ The resolver may migrate the known legacy defaults
 refused with an instruction to replace it with measured exact routes. It is
 never narrowed by guessing.
 
-If the Compose floor, render, stopped network seed, network inspection, atomic
-rewrite, or final rendered-Compose verification fails, no application service
-starts and an already running application is not recreated. `down` removes the
+`install-selfhost.sh` remains the schema authority and fresh publisher for the
+Self-Hosted root `.env`; it declares both trust keys together. The deploy-lock
+helper is a sanctioned derived-value migrator inside that same Self-Hosted
+writer chain, not an independent or reusable environment writer. It may add a
+missing `TRUSTED_PROXIES` only for a recognized legacy installer file and may
+replace only `TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES` after bridge proof.
+Duplicates, a missing control-plane key, an unknown broad value, malformed
+dotenv, symlinks, concurrent inode replacement, or any request to change a
+third key are refused. Every other byte plus file ownership and mode is
+preserved. The installer, Compose consumers, service examples, and operator
+docs must name both keys so the migration does not create a hidden schema.
+
+If the Compose floor, render, stopped network materialization, running-holder
+proof, network inspection, atomic rewrite, or final rendered-Compose
+verification fails, no application service starts and an already running
+application is not recreated. A newly started NATS holder may remain internal
+and healthy for diagnosis; it has no self-host host port. `down` removes the
 network as today; the next `up` measures the newly allocated gateway before
 starting. Endpoint inspection and the through-nginx attribution probe run
-before success is reported. Their failure leaves a newly started service in
-fail-safe under-trust for operator diagnosis, returns nonzero, and is not
+before success is reported. Their failure leaves a newly started application
+in fail-safe under-trust for operator diagnosis, returns nonzero, and is not
 permission to widen the trusted range.
 
 ### 4.5 Writer/consumer parity
@@ -215,8 +245,10 @@ These are one contract and change together:
 
 | Surface | Required state |
 |---|---|
-| Installer and root `.env` writer | Writes both trust variables; no broad default prompt |
-| `concord-selfhost up/update` | Resolves and persists exact routes before start |
+| Installer/root `.env` schema authority | Fresh-publishes both trust variables; no broad default prompt |
+| Locked self-host trust migrator | Updates only the two installer-owned derived keys after bridge proof; no general dotenv mutation API |
+| `concord-selfhost up/update` | Invokes the locked migrator and persists exact routes before application start |
+| Direct self-host `concord-ctl restart` | Refuses unless canonical values and existing live endpoints already agree; never migrates |
 | Base/production/self-host Compose | Selects `concordvoice-services` as both application services' default gateway; no production broad literal; consumes both exact variables |
 | Control-plane config | Parses as today; production validation accepts host routes only |
 | Gin router | Continues using the validated list through `SetTrustedProxies` |
@@ -331,8 +363,10 @@ be followed by the same through-nginx spoof probe. Forward repair is preferred.
 | Published ports use a different network from the inspected gateway | Medium | Pin both endpoints with `gw_priority: 1`; require Compose >=2.33.1; verify rendered priority before build and running endpoints before success |
 | Network is recreated with a new gateway | Medium | Resolve before every `up`; persist and export current values |
 | Compose accepts syntax but does not transmit gateway priority | Low with floors | Existing Engine >=29.8.2 plus Compose >=2.33.1; inspect running endpoints before reporting success; mismatch remains under-trusted |
-| Bootstrap endpoint proof requires unavailable app images | Certain on fresh install | Seed only stopped pinned NATS to create/pin the network; canonical rebuild remains the sole app builder/starter |
+| Bootstrap endpoint proof requires unavailable app images | Certain on fresh install | Materialize with stopped NATS, then start only internal NATS to pin the proved network; canonical rebuild remains the sole app builder/starter |
+| Stopped seed is mistaken for network ownership/pinning | Certain on current Moby | Accept empty membership after materialization; require a running allowed member and stable network ID+gateway before publishing `.env` |
 | Discovery recreates a serving app before guarded handoff | Medium without sequencing | Run preparation under the deploy lock; never call `create`/`up --no-start` for application services |
+| Direct restart perpetuates legacy broad container env | Medium during upgrade | Pre-restart equality proof; refuse without mutation and direct the operator to the `up` migration path |
 | Header overwrite missed in one location | Medium | Template census test rejects every append/pass-through form |
 | Broad entry survives beside an exact one | Medium | Production validation rejects the whole list on any non-host prefix |
 | Cloudflare users are bucketed by edge IP | Expected until #80 | Remove unauthenticated identity restoration; document the availability/granularity tradeoff |
@@ -359,11 +393,12 @@ application logs.
 - Media resolver/admission tests: non-nginx RFC1918 peer cannot rotate keys by
   changing either header.
 - Self-host lifecycle fixtures: Compose 2.33.0 refusal/2.33.1 admission,
-  rendered gateway priority, fresh stopped-NATS network seed without app
-  images, no recreation of a running app before guarded handoff, post-start
-  endpoint proof, legacy migration, network recreation, ambiguous/foreign
-  network refusal, atomic rewrite failure, ownership/mode preservation, and
-  update/rollback.
+  rendered gateway priority, fresh stopped-NATS materialization with empty
+  membership, running NATS holder and stable network ID, no recreation of a
+  running app before guarded handoff, post-start endpoint proof, restart
+  refusal for legacy/mismatched live config, legacy migration, network
+  recreation, ambiguous/foreign network refusal, atomic rewrite failure,
+  ownership/mode preservation, and update/rollback.
 - Real nginx fixture: forged incoming headers are overwritten for HTTP and
   WebSocket locations; `nginx -t` passes.
 - Original VULN-008 and VULN-017 overlays fail.
@@ -380,8 +415,9 @@ No test targets the shared `concord` database.
 | No caller-supplied forwarding entry changes any listed IP-keyed control | Root-cause proxy/Gin/media tests plus consumer integration table |
 | Production trusts exact peers only | Go and TypeScript negative/positive config matrices |
 | nginx never appends client XFF | Template census and real-nginx echo fixture |
-| Fresh self-host installs derive exact routes without requiring app images | Version-floor, rendered-model, stopped-NATS network seed, post-start container-inspect, and lifecycle fixtures |
+| Fresh self-host installs derive exact routes without requiring app images | Version-floor, rendered model, stopped-NATS materialization, running-holder continuity, post-start container inspection, and lifecycle fixtures |
 | Known broad legacy installs migrate before start | Update fixture with atomic `.env` proof |
+| Root `.env` writer ownership remains unambiguous | Installer fresh-publishes both schema keys; locked migrator changes only those keys; writer-census and byte-preservation fixtures |
 | Unknown broad custom values are not guessed narrower | Refusal fixture and operator message |
 | Media neighbor spoof is blocked | Admission test from non-nginx RFC1918 peer |
 | VULN-008 and VULN-017 exploit tests fail | Security overlay results recorded on the exact PR head |

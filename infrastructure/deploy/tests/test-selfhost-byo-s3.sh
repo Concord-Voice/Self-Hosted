@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real, config-only Compose models and deployment packaging for fresh BYO storage.
 # Run --require-compose in the completion gate; --compose-bin selects a supported
-# standalone CLI (for example the 2.24.5 floor). No daemon/container/provider calls.
+# standalone CLI (for example the 2.33.1 floor). No daemon/container/provider calls.
 # Literal Docker Config.Env equality is separate Task-1 boundary evidence. Compose
 # JSON is reusable serialization: never undouble dollars here to claim byte parity.
 set -uo pipefail
@@ -310,11 +310,11 @@ def run():
     elif shutil.which("docker-compose"):
         cli = [shutil.which("docker-compose")]
     else:
-        prerequisite("Docker Compose >= 2.24.5 is required (no daemon needed)")
+        prerequisite("Docker Compose >= 2.33.1 is required (no daemon needed)")
     version = capture("compose-version", cli + ["version", "--short"], BASE_ENV)
     match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?\s*", version.stdout)
-    if version.returncode != 0 or match is None or tuple(map(int, match.groups())) < (2, 24, 5):
-        prerequisite("supported Compose >= 2.24.5 is required")
+    if version.returncode != 0 or match is None or tuple(map(int, match.groups())) < (2, 33, 1):
+        prerequisite("supported Compose >= 2.33.1 is required")
     print("INFO: config-only Compose " + ".".join(match.groups()))
     # Run the independent cache-cold build-env oracle with this same admitted CLI.
     # The oracle discovers `docker compose`, so a private wrapper also carries an

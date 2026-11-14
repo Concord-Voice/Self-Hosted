@@ -29,7 +29,7 @@ source "$SCRIPT_DIR/selfhost-storage.sh" || {
 readonly INSTALLER_ANSWER_KEYS=(
   CFG_DOMAIN CFG_TLS_MODE CFG_TURN_REALM CFG_PUBLIC_IP
   CFG_SMTP_HOST CFG_SMTP_PORT CFG_SMTP_USER CFG_SMTP_PASS CFG_SMTP_FROM
-  CFG_TRUSTED_CIDRS CFG_ACTIVITY_HISTORY_OPERATOR_NAME CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL
+  CFG_ACTIVITY_HISTORY_OPERATOR_NAME CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL
   CFG_FEEDBACK_ENABLED CFG_FEEDBACK_REPO CFG_FEEDBACK_PAT
   CFG_STORAGE_MODE CFG_STORAGE_BACKEND CFG_STORAGE_ENDPOINT CFG_STORAGE_REGION
   CFG_STORAGE_ACCESS_KEY CFG_STORAGE_SECRET_KEY CFG_STORAGE_USE_SSL CFG_STORAGE_BUCKET
@@ -190,12 +190,12 @@ preflight_os() {
 # responses can disclose registry credentials (CVE-2026-92543). Before 28.0.0,
 # LAN neighbours can reach ports
 # published on 127.0.0.1, and from 28.2.0 to 28.3.2 a firewalld reload drops the
-# rule that blocks them (CVE-2025-54388). Compose: 2.24.5 is the oldest release
-# measured honouring `!override` in docker-compose.selfhost.yml (2.20 and 2.21
-# ignore it and merge the lists back to 0.0.0.0). MIN_ENGINE must equal
+# rule that blocks them (CVE-2025-54388). Compose >= 2.33.1 is required for
+# gw_priority; older releases also mishandle `!override` in the self-host layer.
+# MIN_ENGINE must equal
 # SELFHOST_MIN_ENGINE in concord-ctl.sh (pinned by test-selfhost-port-posture.sh).
 readonly MIN_ENGINE=29.8.2
-readonly MIN_COMPOSE=2.24.5
+readonly MIN_COMPOSE=2.33.1
 
 # version_at_least HAVE NEED — dotted-version comparison via sort -V.
 version_at_least() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]]; }
@@ -622,7 +622,9 @@ except (ValueError, UnicodeError):
   esac
   validate_domain "${CFG_DOMAIN:-}" || return 1
   validate_tls_mode "${CFG_TLS_MODE:-letsencrypt}" || return 1
-  validate_cidrs "${CFG_TRUSTED_CIDRS:-}" || return 1
+  # Initial trust is a loopback placeholder. The locked controller replaces it
+  # with the measured published-port gateway before starting app containers.
+  CFG_TRUSTED_CIDRS=127.0.0.1/32
   validate_smtp_port "${CFG_SMTP_PORT:-}" || return 1
   validate_activity_history_disclosure "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}" \
     "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}" || return 1
@@ -782,7 +784,7 @@ collect_config() {
   CFG_SMTP_USER="$(ask 'SMTP username')" || return $?
   CFG_SMTP_PASS="$(ask_secret 'SMTP password')" || return $?
   CFG_SMTP_FROM="$(ask 'SMTP from address' "noreply@$CFG_DOMAIN")" || return $?
-  CFG_TRUSTED_CIDRS="$(ask 'Trusted proxy CIDRs' '172.16.0.0/12,10.0.0.0/8')" || return $?
+  CFG_TRUSTED_CIDRS=127.0.0.1/32
   CFG_ACTIVITY_HISTORY_OPERATOR_NAME="$(ask 'Activity History operator name (optional)')" || return $?
   CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL="$(ask 'Activity History privacy policy URL (optional, HTTPS)')" || return $?
   CFG_FEEDBACK_ENABLED="$(ask 'Enable in-app feedback (posts to a GitHub repo)? yes/no' no)" || return $?
@@ -865,7 +867,7 @@ write_env_file() (
   domain="$(compose_dotenv_quote "$CFG_DOMAIN")" || return 1
   public_ip="$(compose_dotenv_quote "${CFG_PUBLIC_IP:-}")" || return 1
   realm="$(compose_dotenv_quote "${CFG_TURN_REALM:-$CFG_DOMAIN}")" || return 1
-  cidrs="$(compose_dotenv_quote "${CFG_TRUSTED_CIDRS:-172.16.0.0/12,10.0.0.0/8}")" || return 1
+  cidrs="$(compose_dotenv_quote '127.0.0.1/32')" || return 1
   smtp_host="$(compose_dotenv_quote "${CFG_SMTP_HOST:-}")" || return 1
   smtp_port="$(compose_dotenv_quote "${CFG_SMTP_PORT:-587}")" || return 1
   smtp_user="$(compose_dotenv_quote "${CFG_SMTP_USER:-}")" || return 1
@@ -896,7 +898,7 @@ write_env_file() (
     "POSTGRES_PASSWORD=$postgres_password" "REDIS_PASSWORD=$redis_password"
     "JWT_SECRET=$jwt_secret" "MFA_ENCRYPTION_KEY=$mfa_key" "TURN_SECRET=$turn_secret"
     "TURN_REALM=$realm" MINIO_ROOT_USER=concord "MINIO_ROOT_PASSWORD=$minio_password"
-    MINIO_BUCKET=concord-media "TRUSTED_PROXY_CIDRS=$cidrs"
+    MINIO_BUCKET=concord-media "TRUSTED_PROXY_CIDRS=$cidrs" "TRUSTED_PROXIES=$cidrs"
     "SMTP_HOST=$smtp_host" "SMTP_PORT=$smtp_port" "SMTP_USERNAME=$smtp_user"
     "SMTP_PASSWORD=$smtp_pass" "SMTP_FROM=$smtp_from"
     "FEEDBACK_REPO=$quoted_repo" "FEEDBACK_PAT=$quoted_pat"
