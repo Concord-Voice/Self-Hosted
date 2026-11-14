@@ -94,9 +94,11 @@ Android.
 
 ### Security
 
-- **Accounts:** Removing a TOTP or WebAuthn factor now requires a fresh, route-bound second-factor proof whenever the account has inline MFA; a password alone cannot remove the factor.
-- **Accounts:** Unlinking an SSO identity and enabling SSO security trust now require a fresh, route-bound proof inside the protected transaction. Disabling that trust remains an ungated strengthening.
-- **Sessions:** A bearer session can log out only its own login family. Supplying another same-account family's session ID now returns 403 `invalid_logout_target` without revoking either family.
+- **Accounts:** Removing a TOTP or WebAuthn factor now requires a fresh, route-bound second-factor proof whenever the account has inline MFA; a password alone cannot remove the factor ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
+- **Accounts:** Unlinking an SSO identity and enabling SSO security trust now require a fresh, route-bound proof inside the protected transaction. Disabling that trust remains an ungated strengthening ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
+- **Accounts:** Erasing an account now requires fresh proof and explicit confirmation of any owned servers with other members. An unverified email address also requires a one-use confirmation link ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
+- **Servers:** Confirming an ownership transfer now requires a fresh proof ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
+- **Sessions:** A bearer session can log out only its own login family. Supplying another same-account family's session ID now returns 403 `invalid_logout_target` without revoking either family ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
 - **Accounts:** MFA step-up attempts now share a per-account limit across session, security, ownership and DM purge actions; recovery and registration code guesses retain their limits across new-code and email changes. Exhausted budgets return 429 with a retry delay, and unavailable budget checks fail closed ([#285](https://github.com/Concord-Voice/Self-Hosted/pull/285)).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
