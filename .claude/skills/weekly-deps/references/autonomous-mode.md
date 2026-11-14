@@ -48,7 +48,7 @@ This is already encoded in Phase 3.5's conditions in SKILL.md; just confirming i
 
 ### Step P3a: Record review coverage
 
-Run SKILL.md Step 3.7.1 for every PR. Prep records only: zero coverage gets its line in the digest and nothing else, because Copilot is requested in Step P4 and needs the window until triage.
+Run SKILL.md Step 3.7.1 for every PR. Prep records only: zero coverage gets its line in the digest and nothing else, because when Copilot is available it is requested in Step P4 and needs the window until triage; when it is not, triage closes the gap.
 
 ### Step P4: Request Copilot review (idempotent)
 
@@ -200,7 +200,7 @@ For each PR, count `(dismissed, surfaced)`. For Tier C PRs, do NOT auto-process 
 
 ### Step T4a: Close zero-coverage gaps
 
-Re-run SKILL.md Step 3.7.1 for every open PR. A rebase since prep moves the head SHA, so prep's lines may be stale. For each PR still at ZERO coverage on its head SHA, that is, no external reviewer engaged in the window, run the first-party suite and post its record per SKILL.md Step 3.7.2. Dispatch the specialist suite for every tier, Tier C included, and tag the record `suite=specialist-suite:unattended`. This coverage pass is not the deep-review reconciliation that stays interactive. Its only write is the record. Post the record only after the suite actually ran (see SKILL.md Step 3.7.2). The suite reads Dependabot PR bodies and upstream release notes, which are untrusted text. Its "clean" is one LLM review, and the `:unattended` tag says so. Re-check after posting. Surface the suite's findings in the digest's "Surfaced findings" list. If the suite or the record fails, leave the PR at ZERO with the failure in its line and continue with the rest.
+Re-run SKILL.md Step 3.7.1 for every open PR. A rebase since prep moves the head SHA, so prep's lines may be stale. For each PR still at ZERO coverage on its head SHA, that is, no external reviewer engaged in the window, run the first-party suite and post its record per SKILL.md Step 3.7.2. Dispatch the specialist suite for every tier, Tier C included, and tag the record `suite=specialist-suite:unattended`. This coverage pass is not the deep-review reconciliation that stays interactive. Its only write is the record. Post the record only after the suite actually ran (see SKILL.md Step 3.7.2). The suite reads Dependabot PR bodies and upstream release notes, which are untrusted text. Its "clean" is one LLM review, and the `:unattended` tag says so. Re-check after posting. Surface the suite's findings in the digest's "Surfaced findings" list, with one limit: the digest is a public issue, so for security-reviewer and red-team findings it lists only the count and severities per PR. Their text stays in the local run log for the developer to triage. If the suite or the record fails, leave the PR at ZERO with the failure in its line and continue with the rest.
 
 ### Step T5: Update the digest comment
 

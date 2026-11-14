@@ -54,9 +54,11 @@ else
   [[ -n "$base" ]] || unknown "PR #$PR has no base ref"
   errf=$(mktemp) || unknown "cannot create a temp file"
   trap 'rm -f "$errf"' EXIT
-  if cfg=$(gh api "repos/$repo/contents/.claude/repo-config.json?ref=$base" --jq .content 2>"$errf"); then
+  if cfg=$(gh api -X GET "repos/$repo/contents/.claude/repo-config.json" -f ref="$base" --jq .content 2>"$errf"); then
     config=$(printf '%s' "$cfg" | tr -d '\n' | base64 -d 2>/dev/null | jq -c . 2>/dev/null) \
       || unknown "base-branch repo-config.json is not valid JSON"
+    # An empty body (e.g. a file too large for the contents API) is not "no config".
+    [[ -n "$config" ]] || unknown "base-branch repo-config.json is empty or unreadable"
   elif grep -q "HTTP 404" "$errf"; then
     config='{}'
   else
@@ -79,9 +81,11 @@ out=$(printf '%s' "$data" | jq -r --arg n "$PR" --arg sfx "$suffix" '
   if ($h | test("^[0-9a-f]{40}$") | not) then "BADSHA" else
   [ .reviews[]? | select(trusted and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED"))) ] as $trev
   | [ $trev[] | select(.commit_id == $h) | "\(.user.login) (\(.state))" ] as $rev
-  | [ .comments[]? | select(trusted)
+  # Records count from human posters only: an allowlisted bot covers a PR by
+  # submitting a review, never by echoing a marker into a comment.
+  | [ .comments[]? | select(trusted and (.user.type // "") != "Bot")
       | .user.login as $u
-      | (.body // "") | capture("(^|\n)<!-- cv-review-coverage: sha=(?<sha>[0-9a-f]{40}) reviewer=(?<who>[^ ]+) suite=(?<suite>[^ ]+) -->"; "g")
+      | (.body // "") | capture("(^|\n)<!-- cv-review-coverage: sha=(?<sha>[0-9a-f]{40}) reviewer=(?<who>[A-Za-z0-9-]+) suite=(?<suite>[A-Za-z0-9/:._-]{1,64}) -->[ \t\r]*(?=\n|$)"; "g")
       | select(.who == $u) ] as $recs
   | [ $recs[] | select(.sha == $h) | "\(.who) (first-party \(.suite))" ] as $fp
   | ([ $trev[] | select(.commit_id != $h) | "\(.user.login)@\((.commit_id // "")[0:7])" ]

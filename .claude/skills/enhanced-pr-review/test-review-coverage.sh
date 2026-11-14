@@ -48,6 +48,9 @@ run "first-party record on older SHA is stale"     1 '[]' "[$(rec mark MEMBER "$
 run "record naming someone else does not count"    1 '[]' "[$(rec mallory MEMBER "$H" mark)]"
 run "record by an outsider does not count"         1 '[]' "[$(rec mark NONE "$H" mark)]"
 run "unlisted insider bot's record does not count" 1 '[]' "[$(rec 'auto-approver[bot]' MEMBER "$H" 'auto-approver[bot]' '' Bot)]"
+run "allowlisted bot's record does not count"      1 '[]' "[$(rec "$CP" NONE "$H" "$CP" '' Bot)]"
+run "record with text after the marker no"         1 '[]' '[{"user":{"login":"mark","type":"User"},"author_association":"MEMBER","body":"<!-- cv-review-coverage: sha='"$H"' reviewer=mark suite=x --> @everyone"}]'
+run "record suite spanning lines does not count"   1 '[]' '[{"user":{"login":"mark","type":"User"},"author_association":"MEMBER","body":"<!-- cv-review-coverage: sha='"$H"' reviewer=mark suite=x\n@everyone -->"}]'
 run "PR author's own record does not count"      1 '[]' "[$(rec mark OWNER "$H" mark)]" "{\"head\":{\"sha\":\"$H\"},\"base\":{\"ref\":\"main\"},\"user\":{\"login\":\"mark\"}}"
 run "marker quoted mid-line does not count"        1 '[]' "[$(rec mark MEMBER "$H" mark '> ')]"
 run "head marker after an old one in one comment"  0 '[]' "[$(rec mark MEMBER "$H" mark "<!-- cv-review-coverage: sha=$O reviewer=mark suite=/review-pr -->\\n")]"
@@ -68,7 +71,7 @@ cat > "$TMP/bin/gh" <<STUB
 #!/usr/bin/env bash
 case "\$*" in
   "repo view"*) echo o/r ;;
-  *"contents/.claude/repo-config.json?ref=main"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  *"contents/.claude/repo-config.json -f ref=main"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   *"pulls/7/reviews"*) echo '[[{"user":{"login":"x","type":"User"},"author_association":"NONE","commit_id":"$O","state":"COMMENTED"}],[$(rev "$CP" "$H" COMMENTED NONE Bot)]]' ;;
   *"issues/7/comments"*) echo '[[]]' ;;
   "api repos/o/r/pulls/7") echo '$PRJ' ;;
@@ -77,8 +80,9 @@ esac
 STUB
 chmod +x "$TMP/bin/gh"
 out=$(PATH="$TMP/bin:$PATH" "$SCRIPT" 7 2>&1); got=$?
-case "$got:$out" in "0:#7 @aaaaaaa covered: $CP (COMMENTED)") echo "  ok   live path via stub gh (paginated, 404 config)"; pass=$((pass + 1)) ;;
-  *) echo "  FAIL live path via stub gh: $got $out"; fail=$((fail + 1)) ;; esac
+# An if, not a one-line case: Semgrep's bash parser rejects the one-line case form.
+if [[ "$got:$out" == "0:#7 @aaaaaaa covered: $CP (COMMENTED)" ]]; then echo "  ok   live path via stub gh (paginated, 404 config)"; pass=$((pass + 1))
+else echo "  FAIL live path via stub gh: $got $out"; fail=$((fail + 1)); fi
 sed -i.bak 's/Not Found (HTTP 404)/Server Error (HTTP 500)/' "$TMP/bin/gh"
 out=$(PATH="$TMP/bin:$PATH" "$SCRIPT" 7 2>&1); got=$?
 if [[ "$got" -eq 2 ]]; then echo "  ok   unreadable base config is UNKNOWN (exit 2)"; pass=$((pass + 1)); else echo "  FAIL unreadable base config: $got $out"; fail=$((fail + 1)); fi

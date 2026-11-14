@@ -4,6 +4,7 @@
 > - `/review-pr` (user-facing convenience skill — `disable-model-invocation: true`)
 > - `/enhanced-pr-review` Phase 1 Step 5 (dispatches these directly)
 > - `/weekly-deps` Tier-C fallback (same direct dispatch)
+> - `/weekly-deps` Phase 3.7.2 coverage pass on a zero-coverage bot PR, any tier, unattended in `--mode=triage` (same direct dispatch)
 >
 > **How "direct dispatch" works:** the `@`-prefixed entries are subagents — dispatch them
 > via the **Agent tool**, which bypasses the `Skill` tool entirely. The one `/`-prefixed

@@ -160,7 +160,7 @@ The triage run finds the existing comment by `<!-- routine-week: 2026-WNN -->` m
 
 1. The `routine-triage-run` front-matter timestamp
 2. The status table (Triage → ✅ Complete)
-3. Replaces the "🛡 Review coverage" lines with the triage run's re-checked lines. A PR the triage run reviewed itself now reads `covered: <login> (first-party specialist-suite)`.
+3. Replaces the "🛡 Review coverage" lines with the triage run's re-checked lines. A PR the triage run reviewed itself now reads `covered: <login> (first-party specialist-suite:unattended)`.
 4. Adds a new section **"### 🤖 Copilot reconciliation"** after the "Copilot review requests" section:
 
 ```markdown
