@@ -90,9 +90,14 @@ jq "$L |= (del(.resolved) | .version = \"https://npm.example.invalid/left-pad.tg
 expect 'install location without resolved fails' 1 'left-pad: install location has no resolved URL' --npm-lock "$WORK/nores-lock.json"
 jq '.packages["node_modules/@scope/x"] = {"version": "1.0.0"}' "$WORK/workspace-lock.json" > "$WORK/scoped-lock.json"
 expect 'scoped install location without resolved fails' 1 '@scope/x: install location has no resolved' --npm-lock "$WORK/scoped-lock.json"
-jq '.packages["node_modules/is-number/node_modules/inner"] = {"version": "1.0.0", "inBundle": true} | .packages["packages/ws"] = {"version": "0.0.0"} | .packages["node_modules/left-pad"].resolved = "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"' \
+jq '.packages["node_modules/is-number/node_modules/inner"] = {"version": "1.0.0", "inBundle": true} | .packages["node_modules/is-number"].bundleDependencies = ["inner"] | .packages["packages/ws"] = {"version": "0.0.0"} | .packages["node_modules/left-pad"].resolved = "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"' \
   "$FIX/off-registry-lock.json" > "$WORK/bundled-lock.json"
 expect 'bundled copy and workspace source without resolved pass' 0 '^ok:' --npm-lock "$WORK/bundled-lock.json"
+jq '.packages["node_modules/is-number/node_modules/inner"] = {"version": "https://npm.example.invalid/x.tgz", "inBundle": true}' "$WORK/bundled-lock.json" \
+  | jq 'del(.packages["node_modules/is-number"].bundleDependencies)' > "$WORK/fakebundle-lock.json"
+expect 'inBundle without a bundling parent fails' 1 'inner: install location has no resolved' --npm-lock "$WORK/fakebundle-lock.json"
+jq '.packages["node_modules/evil"] = {"version": "https://npm.example.invalid/x.tgz", "inBundle": true}' "$WORK/bundled-lock.json" > "$WORK/topbundle-lock.json"
+expect 'top-level inBundle fails' 1 'evil: install location has no resolved' --npm-lock "$WORK/topbundle-lock.json"
 jq "$L.resolved = 7" "$FIX/off-registry-lock.json" > "$WORK/num-lock.json"
 expect 'non-string resolved fails' 1 'resolved is not a string' --npm-lock "$WORK/num-lock.json"
 mkdir -p "$WORK/nested/sub"
@@ -107,6 +112,12 @@ expect '.npmrc scoped registry off the list fails' 1 '@acme:registry' --npmrc "$
 # shellcheck disable=SC2016  # a literal ${...} the .npmrc must not be trusted with
 printf 'registry=${EVIL_REGISTRY}\n' > "$WORK/var.npmrc"
 expect '.npmrc registry from a variable fails' 1 'registry = \$\{EVIL_REGISTRY\}' --npmrc "$WORK/var.npmrc"
+for line in 'https-proxy=http://proxy.example.invalid' 'strict-ssl=false' 'replace-registry-host=always' \
+            '//npm.example.invalid/:_authToken=x' 'userconfig=/tmp/x' '"registry"=https://npm.example.invalid/' \
+            '[section]' 'registry[]=https://npm.example.invalid/'; do
+  printf '%s\n' "$line" > "$WORK/k.npmrc"
+  expect ".npmrc line fails: $line" 1 'k\.npmrc:1: ' --npmrc "$WORK/k.npmrc"
+done
 printf 'registry=https://registry.npmjs.org/\nsave-exact=true\n' > "$WORK/ok.npmrc"
 expect '.npmrc with the approved registry passes' 0 '^ok:' --npmrc "$WORK/ok.npmrc"
 

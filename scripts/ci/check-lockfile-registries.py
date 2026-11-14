@@ -71,6 +71,23 @@ def inside(base, rel):
     return target == base or target.startswith(base + os.sep)
 
 
+def bundled(packages, key, name):
+    """True when `key` really is a copy inside its parent's tarball.
+
+    `inBundle` is just a field in a file the PR controls. Believe it only when
+    the entry sits under a parent install location that has a `resolved` URL
+    (checked on its own) and lists the package in its bundleDependencies.
+    """
+    entry = packages.get(key, {})
+    if entry.get("inBundle") is not True or "/node_modules/" not in key:
+        return False
+    parent = packages.get(key.rsplit("/node_modules/", 1)[0])
+    if not isinstance(parent, dict) or not isinstance(parent.get("resolved"), str):
+        return False
+    listed = parent.get("bundleDependencies") or parent.get("bundledDependencies") or []
+    return listed is True or (isinstance(listed, list) and name in listed)
+
+
 def npm_violations(path, hosts):
     lock = load_json(path)
     version = lock.get("lockfileVersion")
@@ -96,7 +113,7 @@ def npm_violations(path, hosts):
             # back to `version`, which may itself be a URL or git spec. Bundled
             # copies come inside their parent's tarball, and other keys
             # (workspace sources, directories inside a package) are not fetched.
-            if INSTALL_KEY.search(key) and entry.get("inBundle") is not True:
+            if INSTALL_KEY.search(key) and not bundled(lock["packages"], key, name):
                 out.append(f"{path}: {name}: install location has no resolved URL "
                            f"(version {entry.get('version')!r})")
             continue
@@ -198,10 +215,17 @@ def go_violations(path, root, local_allowed, work=False):
 
 
 REGISTRY_URL = re.compile(r"^https://(?P<host>[A-Za-z0-9.-]+)/?$")
+# Keys a tracked .npmrc may set. Everything else fails: proxies, TLS settings,
+# `//host/:` auth, replace-registry-host, userconfig/globalconfig and any
+# key npm adds later all change where or how packages are fetched, and a
+# deny-list cannot keep up. Add a key here, in a reviewed diff, if it is needed.
+NPMRC_KEYS = {"save-exact", "save-prefix", "engine-strict", "fund", "audit",
+              "package-lock", "ignore-scripts", "min-release-age", "legacy-peer-deps"}
+NPMRC_KEY = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*:)?[a-z][a-z0-9-]*$")
 
 
 def npmrc_violations(path, hosts):
-    """A tracked .npmrc may point `registry` or `@scope:registry` only at an approved host.
+    """A tracked .npmrc may set only allowlisted keys, and registries only to approved hosts.
 
     npm rewrites registry.npmjs.org in every `resolved` URL to the configured
     registry (replace-registry-host defaults to npmjs), so an .npmrc next to an
@@ -215,15 +239,21 @@ def npmrc_violations(path, hosts):
     out = []
     for number, raw in enumerate(lines, 1):
         line = raw.strip()
-        if not line or line[0] in "#;" or "=" not in line:
+        if not line or line[0] in "#;":
             continue
-        key, value = (part.strip() for part in line.split("=", 1))
-        if key != "registry" and not key.endswith(":registry"):
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        # Bare keys only: no section headers, quoting, escapes or `[]` suffixes,
+        # which ini parses differently from this reader.
+        if not sep or not NPMRC_KEY.match(key):
+            out.append(f"{path}:{number}: {line} is not a plain key=value line this check can read")
             continue
-        value = value.strip("'\"")
-        match = REGISTRY_URL.match(value)
-        if not (match and match.group("host") in hosts):
-            out.append(f"{path}:{number}: {key} = {value} is not an approved npm registry")
+        if key == "registry" or key.endswith(":registry"):
+            match = REGISTRY_URL.match(value)
+            if not (match and match.group("host") in hosts):
+                out.append(f"{path}:{number}: {key} = {value} is not an approved npm registry")
+        elif key not in NPMRC_KEYS:
+            out.append(f"{path}:{number}: {key} is not an allowed .npmrc setting")
     return out
 
 
