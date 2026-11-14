@@ -2,8 +2,10 @@ package users_test
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -36,6 +38,29 @@ func TestDeleteAccount_HappyPath(t *testing.T) {
 		`SELECT COUNT(*) FROM account_deletions WHERE user_id IS NULL AND deleted_at >= NOW() - INTERVAL '1 minute'`,
 	).Scan(&auditRows))
 	assert.GreaterOrEqual(t, auditRows, 1, "audit row must be inserted with NULL user_id")
+}
+
+func TestPrepareAccountErasure_ExhaustedMFABudgetDoesNotReservePassword(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "erase-budget-before-password")
+	service := users.NewAccountService(ts.DB, logger.New("test"))
+	service.SetRedis(ts.Redis)
+	ctx := context.Background()
+
+	require.NoError(t, ts.Redis.Set(ctx, stepup.DangerousActionBudget(ts.Redis).Key(user.ID), stepup.BudgetLimit, stepup.BudgetWindow).Err())
+	for i := 0; i < stepup.BudgetLimit; i++ {
+		attempt, stepErr := service.PrepareAccountErasure(ctx, user.ID, user.Password, "rejected-code")
+		require.Nil(t, attempt)
+		require.NotNil(t, stepErr)
+		require.Equal(t, http.StatusTooManyRequests, stepErr.Status)
+	}
+
+	require.False(t, ts.Redis.Exists(ctx, "login_attempts:"+user.Email).Val() > 0,
+		"an MFA-budget denial must not reserve an unchecked password guess")
+	login := ts.DoRequest(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"email": user.Email, "password": user.Password,
+	}, nil)
+	require.Equal(t, http.StatusOK, login.Code, login.Body.String())
 }
 
 // TestDeleteAccount_RemovesPendingServerVoiceTerminalOutbox verifies that

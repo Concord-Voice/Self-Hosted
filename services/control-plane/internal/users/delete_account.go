@@ -52,7 +52,7 @@ func (e *ErrErasureOwnedServerSetDrifted) Error() string {
 }
 
 // AccountErasureRequest is the closed service input for account erasure. The
-// handler reserves PasswordAttempt and charges MFA before opening the service
+// handler charges MFA and reserves PasswordAttempt before opening the service
 // transaction; this request carries that admitted work to its transaction owner.
 type AccountErasureRequest struct {
 	Actor                   loginfamily.AccessIdentity
@@ -276,18 +276,14 @@ func (s *AccountService) SetRedis(client *redis.Client) { s.redis = client }
 func (s *AccountService) SetMFAVerifier(verifier stepup.MFATxCodeVerifier) { s.mfaVerifier = verifier }
 
 // PrepareAccountErasure performs all Redis work required before the erasure
-// transaction: password-lockout reservation and shared MFA attempt charge.
+// transaction: shared MFA attempt charge and password-lockout reservation.
 func (s *AccountService) PrepareAccountErasure(
 	ctx context.Context, userID, password, mfaCode string,
 ) (*stepup.PasswordAttempt, *stepup.Error) {
-	attempt, err := stepup.ReserveUserPasswordAttempt(ctx, s.db, s.redis, userID, password)
-	if err != nil {
-		return nil, err
-	}
 	if err := stepup.Charge(ctx, stepup.DangerousActionBudget(s.redis), userID, mfaCode); err != nil {
 		return nil, err
 	}
-	return attempt, nil
+	return stepup.ReserveUserPasswordAttempt(ctx, s.db, s.redis, userID, password)
 }
 
 // EmailVerified is an advisory branch selector. The authoritative unverified
