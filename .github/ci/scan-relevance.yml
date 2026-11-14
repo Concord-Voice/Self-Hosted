@@ -562,6 +562,19 @@ workflow_lint:
   - 'scripts/ci/require-remote-buildkit.py'
   - 'scripts/test-check-*.sh'
   - '.github/base-images.json'
+  # Lockfile registry guard (#271, runs in workflow-lint): every npm lockfile,
+  # package.json, .npmrc, go.mod and go.work it reads, its approved-source list, the check,
+  # its test and fixtures.
+  - '**/package.json'
+  - '**/package-lock.json'
+  - '**/npm-shrinkwrap.json'
+  - '**/go.mod'
+  - '**/go.work'
+  - '**/.npmrc'
+  - '.github/ci/approved-registries.json'
+  - 'scripts/ci/check-lockfile-registries.py'
+  - 'scripts/tests/test-check-lockfile-registries.sh'
+  - 'scripts/tests/fixtures/registries/**'
   # npm lockfile flush test (#272, runs in workflow-lint).
   - 'scripts/tests/test-npm-lockfile-flush.sh'
 worker_apple:

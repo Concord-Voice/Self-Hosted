@@ -834,6 +834,16 @@ jobs:
         run: |
           python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
 
+      # Fails when a package-lock.json resolves a package from a host that is
+      # not in .github/ci/approved-registries.json, or a go.mod replace points
+      # at an unlisted filesystem path (#271). Every lockfile and go.mod path
+      # selects this job. The fixture suite runs first and must see both
+      # committed fixtures fail. Exit 2 (could not run) is a failure too.
+      - name: Lockfiles resolve from approved registries
+        run: |
+          bash scripts/tests/test-check-lockfile-registries.sh
+          python3 scripts/ci/check-lockfile-registries.py
+
       # The weekly npm lockfile flush (#272) runs only on its cron, so a broken
       # step would look like "nothing to update". This runs its real refresh and
       # render steps against a stub npm and locks its credential split.
