@@ -554,7 +554,7 @@ _authority_renew_keys() {
   # in use. If it is not (files restored by hand), renew would drop the live key
   # and the authority would refuse to start after the point of no return.
   local live_tls listed_tls
-  _authority_point live_tls -in "$dir/secrets/tls-key" 2>/dev/null \
+  _authority_point live_tls -inform DER -in "$dir/secrets/tls-key" 2>/dev/null \
     || { _authority_fail "cannot read the TLS key point from $dir/secrets/tls-key"; return 1; }
   listed_tls="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["authority_tls_keys"][-1])' "$dir/ceremony/delegation-$serial.json")" \
     || { _authority_fail "cannot read the TLS keys of delegation $serial"; return 1; }

@@ -78,9 +78,9 @@ if [[ " $* " == *" go build "* ]]; then
 else
   if [[ "${LINK%%:*}" == "$name" ]]; then ln -s "${LINK#*:}" "$vol/$name"
   elif [[ "$name" == tls-key ]]; then
-    # A real P-384 key: renew reads the live TLS key's point from the file.
-    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$vol/$name" 2>/dev/null
-    printf 'point=%s\npin=%s\n' "$(openssl pkey -in "$vol/$name" -pubout -outform DER | tail -c 97 | od -An -v -tx1 | tr -d ' \n')" "$(hex384 "$name.pin")"
+    # A real P-384 key in PKCS#8 DER, as the authority writes it: renew reads the live TLS key's point from the file.
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -outform DER -out "$vol/$name" 2>/dev/null
+    printf 'point=%s\npin=%s\n' "$(openssl pkey -inform DER -in "$vol/$name" -pubout -outform DER | tail -c 97 | od -An -v -tx1 | tr -d ' \n')" "$(hex384 "$name.pin")"
     exit 0
   else printf 'key %s%s' "$name" "${SALT:-}" >"$vol/$name"; fi
   printf 'point=04%s%s\npin=%s\n' "$(hex384 "$name${SALT:-}")" "$(hex384 "$name.y")" "$(hex384 "$name.pin")"
@@ -400,7 +400,7 @@ NOT_ROOT=1 VERB=renew run_init '' && fail "renew ran as non-root" \
 # FILE.prev is left from a failed rollback, when a TLS key was staged without
 # the flag, and an empty argument.
 : >"$CALLS"; saved_tls="$(cat "$AUTH/secrets/tls-key")"
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$ROOT/other-tls-key" 2>/dev/null
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -outform DER -out "$ROOT/other-tls-key" 2>/dev/null
 cp "$AUTH/secrets/tls-key" "$ROOT/live-tls-key"; cat "$ROOT/other-tls-key" >"$AUTH/secrets/tls-key"
 VERB=renew run_init '' && fail "renew ran with a TLS key the delegation does not list" \
   || { grep -qF 'is not the last TLS key' "$ROOT/out" && [[ ! -e "$AUTH/stage" && ! -e "$AUTH/ceremony/delegation-7.json" ]] \
