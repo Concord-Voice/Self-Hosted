@@ -41,7 +41,9 @@ const (
 	// read it so an upgrade does not restart the agent mid-restore.
 	writeMarkerFile = "write-in-progress"
 	// setupMaxConns bounds the TLS connections a LAN client can hold open.
-	setupMaxConns = 16
+	setupMaxConns          = 16
+	setupMaxConnsPerSource = 4
+	setupWriteTimeout      = 30 * time.Second
 )
 
 func main() {
@@ -206,14 +208,8 @@ func startSetup(ctx context.Context, cli, addr, assets, tokenFile string, window
 		_ = tcp.Close()
 		return nil, nil, err
 	}
-	ln := tls.NewListener(netutil.LimitListener(tcp, setupMaxConns), cfg)
-	srv := &http.Server{
-		Handler:           setup,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		MaxHeaderBytes:    8 << 10,
-		IdleTimeout:       60 * time.Second,
-	}
+	ln := tls.NewListener(netutil.LimitListener(limitPerSource(tcp, setupMaxConnsPerSource), setupMaxConns), cfg)
+	srv := newSetupServer(setup)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -240,6 +236,17 @@ func startSetup(ctx context.Context, cli, addr, assets, tokenFile string, window
 	log.Printf("concord-agent: setup mode on port %d; the wizard address with its one-time token is in %s (root only)", port, tokenFile)
 	log.Printf("concord-agent: setup certificate SHA-256 fingerprint %s; setup closes in %s", fingerprint, window)
 	return ln.Addr(), done, nil
+}
+
+func newSetupServer(setup http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           setup,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      setupWriteTimeout,
+		MaxHeaderBytes:    8 << 10,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 // writeTokenFile creates path afresh as 0600, refusing anything already there.

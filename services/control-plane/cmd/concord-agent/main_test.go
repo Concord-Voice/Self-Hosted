@@ -249,6 +249,13 @@ func TestStartSetupSkipsAnInstalledHost(t *testing.T) {
 	}
 }
 
+func TestNewSetupServerSetsWriteTimeout(t *testing.T) {
+	server := newSetupServer(http.NotFoundHandler())
+	if server.WriteTimeout != setupWriteTimeout {
+		t.Fatalf("write timeout %v, want %v", server.WriteTimeout, setupWriteTimeout)
+	}
+}
+
 func TestStartSetupServesTLSUntilTheWindowEnds(t *testing.T) {
 	cli, assets, tokenFile := setupRoot(t, false)
 	addr, done, err := startSetup(context.Background(), cli, "127.0.0.1:0", assets, tokenFile, 300*time.Millisecond)
