@@ -324,15 +324,12 @@ func TestTOTPDisableBudgetPreflightPrecedesLockedTransaction(t *testing.T) {
 	end := strings.Index(rest, "\nfunc ")
 	require.Greater(t, end, 0)
 	body := rest[:end]
-	preflight := strings.Index(body, "preflightTOTPExists")
 	charge := strings.Index(body, "h.chargeMFASettingsCode")
 	begin := strings.Index(body, "h.db.BeginTx")
-	lockedRecheck := strings.Index(body, "if !preflightTOTPExists")
-	require.GreaterOrEqual(t, preflight, 0)
-	require.Greater(t, charge, preflight, "charge must follow the unlocked enrollment probe")
+	stepUp := strings.Index(body, "h.requireFactorRemovalStepUpTx")
+	require.GreaterOrEqual(t, charge, 0)
 	require.Greater(t, begin, charge, "Redis admission must finish before the SQL transaction starts")
-	require.Greater(t, lockedRecheck, begin, "a factor appearing after preflight must be refused under the lock")
-	require.Contains(t, body[lockedRecheck:], "http.StatusConflict")
+	require.Greater(t, stepUp, begin, "the fresh proof must be verified under the transaction lock")
 }
 
 func TestLegacyMFASettingsBudgetIsSharedAndChargesOncePerRequest(t *testing.T) {
@@ -1173,7 +1170,7 @@ func TestFlagSync_RedisExistsFault_WebAuthnDeleteLeavesNoStaleFactor(t *testing.
 
 	h := iuHandler(db, iuExistsFaultRedis(t), kr)
 	c, w := iuGinContext(http.MethodDelete, "/api/v1/mfa/webauthn/credentials/"+credentialID,
-		fmt.Sprintf(`{"password":%q}`, iuPassword), userID, "")
+		fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, iuTOTPCode(t, iuTOTPSecret)), userID, "")
 	c.Params = gin.Params{{Key: "id", Value: credentialID}}
 	h.WebAuthnDeleteCredential(c)
 
