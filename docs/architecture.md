@@ -1747,7 +1747,7 @@ The deploy controller (`infrastructure/deploy/concord-ctl.sh`) has an optional r
 - the presence-audience revocation fence is process-local, so neither colour sees the other's in-flight revocations;
 - Activity History has a single writer.
 
-The rail refuses to start when `ACTIVITY_HISTORY_CLUSTER_ENABLED=true` (`rail-refused-activity-history-cluster`, exit 2). The voice and revocation-fence windows remain. Decide whether they are acceptable for the overlap's length, as recorded on Self-Hosted#253, before turning the rail on.
+The rail refuses to start when `ACTIVITY_HISTORY_CLUSTER_ENABLED=true` (`rail-refused-activity-history-cluster`, exit 2). The voice and revocation-fence windows remain. The overlap analysis ([`2026-11-14-253-control-plane-overlap-analysis.md`](superpowers/specs/2026-11-14-253-control-plane-overlap-analysis.md)) inventories every process-local assumption and gives a decision for each. One finding blocks activation until Self-Hosted#281 merges: every admitted Server Voice join during the overlap is force-disconnected. Three decisions are left to the repo admin. Record them on Self-Hosted#253 before turning the rail on.
 
 **Before turning it on, verify on the target host.** The hermetic tests stub Docker, nginx and the nested reload, so these paths have not run end to end anywhere yet:
 
