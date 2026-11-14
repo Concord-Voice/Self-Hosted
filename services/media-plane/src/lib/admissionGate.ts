@@ -166,12 +166,7 @@ export function resolveClientIp(
   const peer = req.socket?.remoteAddress;
 
   if (peer && trustedProxies.has(peer)) {
-    // Only accept a header value that actually PARSES as an address. Production
-    // trusts the whole RFC1918 space, so any container or LAN host that reaches
-    // this port directly is inside the trusted set and could otherwise set an
-    // arbitrary string as its own counter key — churning the bounded store and
-    // evicting real entries. A non-address value falls through to
-    // X-Forwarded-For, and then to the fail-open return below.
+    // Reject malformed headers so they cannot become arbitrary counter keys.
     const realIp = firstHeader(req.headers['x-real-ip'])?.trim();
     if (realIp && ipFamily(realIp)) return realIp;
 
@@ -181,8 +176,7 @@ export function resolveClientIp(
         .split(',')
         .map((h) => h.trim())
         .filter(Boolean);
-      // $proxy_add_x_forwarded_for appends the peer, so the LAST hop is the
-      // address nginx observed — the one we can actually attribute.
+      // nginx overwrites XFF with the observed client address.
       const last = hops.at(-1);
       // Same parse guard as X-Real-IP above — validating only one of the two
       // headers would leave the identical arbitrary-key path open on the other.
