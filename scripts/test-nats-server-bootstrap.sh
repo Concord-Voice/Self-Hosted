@@ -17,8 +17,8 @@ cleanup() {
   rm -rf "$TEST_TEMP"
 }
 trap cleanup EXIT
-PIN_DIGEST="2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6" # pragma: allowlist secret -- public official NATS image manifest digest
-PIN_IMAGE="nats:2.15.1-alpine@sha256:${PIN_DIGEST}"
+PIN_DIGEST="823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5" # pragma: allowlist secret -- public official NATS image manifest digest
+PIN_IMAGE="nats:2.15.2-alpine@sha256:${PIN_DIGEST}"
 REAL_ENV="$(command -v env)"
 CASE_DIR=""
 CASE_BIN=""
@@ -29,6 +29,14 @@ fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
 }
+
+# Real JetStream tests must use the same immutable engine as Compose.
+mapfile -t compose_nats_images < <(sed -nE \
+  's/^[[:space:]]*image: (nats:[^[:space:]]+)[[:space:]]*$/\1/p' \
+  "${TEST_ROOT}/docker-compose.yml")
+[[ "${#compose_nats_images[@]}" -eq 1 && "${compose_nats_images[0]}" == "$PIN_IMAGE" ]] ||
+  fail "test broker pin must match the Compose NATS image"
+printf 'PASS: test broker pin matches the Compose NATS image\n'
 
 # Quoted heredoc markers use letters only for the pinned Semgrep parser.
 setup_case() {
@@ -63,7 +71,7 @@ MOCKUNAME
 printf '%s\n' "$0" >>"$NATS_BOOTSTRAP_TEST_VERSION_LOG"
 printf '%s\n' "${NATS_BOOTSTRAP_TEST_CALLER:-single}" >>"$NATS_BOOTSTRAP_TEST_CALLER_LOG"
 if [[ "${NATS_BOOTSTRAP_TEST_VERSION_DELAY:-}" == true ]]; then sleep 6; fi
-printf '%s\n' "${NATS_BOOTSTRAP_TEST_VERSION:-nats-server: v2.15.1}"
+printf '%s\n' "${NATS_BOOTSTRAP_TEST_VERSION:-nats-server: v2.15.2}"
 MOCKSERVER
   chmod +x "${CASE_DIR}/fixture-server"
   : >"${CASE_DIR}/docker.log"
@@ -220,7 +228,7 @@ expect_owned_lifecycle() {
 }
 
 cache_path() {
-  printf '%s/concordvoice-test-tools-%s/nats-server-2.15.1-%s-linux-amd64/nats-server\n' \
+  printf '%s/concordvoice-test-tools-%s/nats-server-2.15.2-%s-linux-amd64/nats-server\n' \
     "$CASE_TMP" "$(id -u)" "$PIN_DIGEST"
 }
 
@@ -228,7 +236,7 @@ setup_case explicit
 install_docker
 cp "${CASE_DIR}/fixture-server" "${CASE_BIN}/nats-server"
 expect_success NATS_SERVER_BINARY="${CASE_DIR}/fixture-server" \
-  NATS_BOOTSTRAP_TEST_VERSION='  nats-server: v2.15.1  '
+  NATS_BOOTSTRAP_TEST_VERSION='  nats-server: v2.15.2  '
 [[ "$RESOLVED" == "${CASE_DIR}/fixture-server" ]] || fail "explicit override lost precedence"
 [[ "$(<"${CASE_DIR}/versions.log")" == "${CASE_DIR}/fixture-server" ]] ||
   fail "explicit override did not receive the version probe"
@@ -256,8 +264,8 @@ for invalid in empty absent nonexecutable version; do
     version) candidate="${CASE_DIR}/fixture-server" ;;
   esac
   if [[ "$invalid" == version ]]; then
-    expect_failure 'version|2\.15\.1' NATS_SERVER_BINARY="$candidate" \
-      NATS_BOOTSTRAP_TEST_VERSION='nats-server: v2.15.10'
+    expect_failure 'version|2\.15\.2' NATS_SERVER_BINARY="$candidate" \
+      NATS_BOOTSTRAP_TEST_VERSION='nats-server: v2.15.20'
   else
     expect_failure 'NATS_SERVER_BINARY' NATS_SERVER_BINARY="$candidate"
   fi
@@ -268,7 +276,7 @@ printf 'PASS: empty/invalid explicit override fails without fallback\n'
 setup_case path-version
 install_docker
 cp "${CASE_DIR}/fixture-server" "${CASE_BIN}/nats-server"
-expect_failure 'version|2\.15\.1' NATS_BOOTSTRAP_TEST_VERSION='nats-server: v2.15.0'
+expect_failure 'version|2\.15\.2' NATS_BOOTSTRAP_TEST_VERSION='nats-server: v2.15.0'
 expect_no_docker
 printf 'PASS: wrong-version PATH binary fails without Docker fallback\n'
 
@@ -317,7 +325,7 @@ printf 'PASS: copy failure removes the owned stopped container and publishes no 
 
 setup_case copied-version
 install_docker
-expect_failure 'version|2\.15\.1' NATS_BOOTSTRAP_TEST_VERSION='nats-server: v2.15.0'
+expect_failure 'version|2\.15\.2' NATS_BOOTSTRAP_TEST_VERSION='nats-server: v2.15.0'
 expect_owned_lifecycle
 [[ ! -e "$(cache_path)" ]] || fail "wrong-version copied binary was published"
 printf 'PASS: copied wrong-version binary fails validation without publication\n'
@@ -326,7 +334,7 @@ setup_case cached-version
 install_docker
 expect_success
 : >"${CASE_DIR}/docker.log"
-expect_failure 'version|2\.15\.1' NATS_BOOTSTRAP_TEST_VERSION='nats-server: v2.15.0'
+expect_failure 'version|2\.15\.2' NATS_BOOTSTRAP_TEST_VERSION='nats-server: v2.15.0'
 expect_no_docker
 printf 'PASS: cached wrong-version binary fails without returning a path\n'
 

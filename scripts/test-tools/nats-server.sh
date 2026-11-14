@@ -3,8 +3,8 @@
 set -euo pipefail
 umask 077
 
-readonly nats_version="2.15.1"
-readonly nats_digest="2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6" # pragma: allowlist secret -- public official NATS image manifest digest
+readonly nats_version="2.15.2"
+readonly nats_digest="823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5" # pragma: allowlist secret -- public official NATS image manifest digest
 readonly nats_image="nats:${nats_version}-alpine@sha256:${nats_digest}"
 readonly acquisition_deadline=$((SECONDS + 115))
 work_dir=""

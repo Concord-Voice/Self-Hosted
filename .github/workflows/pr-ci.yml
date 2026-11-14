@@ -834,6 +834,23 @@ jobs:
         run: |
           python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
 
+      # The weekly npm lockfile flush (#272) runs only on its cron, so a broken
+      # step would look like "nothing to update". This runs its real refresh and
+      # render steps against a stub npm and locks its credential split.
+      - name: npm lockfile flush workflow behaves
+        run: bash scripts/tests/test-npm-lockfile-flush.sh
+
+      # Runs when a workflow_lint path in .github/ci/scan-relevance.yml changes;
+      # a new package.json, go.mod or requirements root alone does not start it.
+      # Fails if a tracked update root is in no block of .github/dependabot.yml,
+      # or a block watches a missing directory. Exit 2 means the audit could not
+      # complete (for example PyYAML is missing); that is a failure, not a pass.
+      # The audit's regression suite runs first, so a broken audit cannot pass.
+      - name: Dependabot watches every update root
+        run: |
+          bash scripts/security/test-audit-dependabot-coverage.sh
+          bash scripts/security/audit-dependabot-coverage.sh
+
       - name: TruffleHog runtime is digest-pinned
         run: |
           python3 - <<'PY'
@@ -928,6 +945,13 @@ jobs:
       - name: Image publisher Docker Engine pins
         run: python3 scripts/tests/test-publish-minio-engine-pins.py
 
+      # Every image source in a tracked Dockerfile (FROM, COPY or ADD --from=,
+      # RUN --mount from=) must match the identity declared in
+      # .github/base-images.json. Advisory here: this job does not block a
+      # merge. Exit 2 means the check could not complete.
+      - name: Base images match their declared identity
+        run: python3 .github/scripts/check-base-images.py
+
       - name: Self-host release tag check and bundle builder
         run: |
           bash scripts/tests/test-check-release-tag.sh
@@ -956,6 +980,7 @@ jobs:
           bash .github/scripts/tests/lint-test-suite-wiring.test.sh
           bash .github/scripts/tests/ci-scan-relevance.test.sh
           bash .github/scripts/tests/trivy-assert-os.test.sh
+          bash .github/scripts/tests/check-base-images.test.sh
           bash scripts/test-nats-server-bootstrap.sh
 
   # ─── PostgreSQL migration lint (squawk, #4175) ───────────────────────

@@ -6,8 +6,19 @@ import (
 	"strings"
 )
 
-// This is the sole script in the reviewed media blue/green operator source.
+// These are the only scripts in the reviewed concord-ctl.sh operator source.
 const cleanupRoomScript = `local removed = 0; if redis.call("GET", KEYS[1]) == ARGV[1] then removed = removed + redis.call("DEL", KEYS[1]) end; local live = redis.call("GET", KEYS[2]); if live and string.sub(live, 1, string.len(ARGV[1]) + 1) == ARGV[1] .. "-" then removed = removed + redis.call("DEL", KEYS[2]) end; return removed`
+
+// resumePauseScript is media_legacy_resume_value: delete the join pause only
+// while it still holds the value the operator read.
+const resumePauseScript = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return -1`
+
+// joinPauseKey is joinpause.Key; importing that package would pull gin into
+// this binary.
+const joinPauseKey = "media:legacy_join_pause"
+
+// operatorPauseValue is joinpause's value shape: `<t0>:<deadline>[:<test-user-uuid>]`.
+var operatorPauseValue = regexp.MustCompile(`^[0-9]{1,12}:[0-9]{1,12}(:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$`)
 
 var operatorRoomID = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
 var operatorGeneration = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,128}$`)
@@ -20,7 +31,9 @@ func validColour(value string) bool { return value == "blue" || value == "green"
 func drainKey(value string) bool {
 	return value == "media:colour_draining:blue" || value == "media:colour_draining:green"
 }
-func readableOperatorKey(value string) bool { return value == "media:active_colour" || drainKey(value) }
+func readableOperatorKey(value string) bool {
+	return value == "media:active_colour" || value == joinPauseKey || drainKey(value)
+}
 
 func validRoomCleanup(args []string) bool {
 	if len(args) != 6 || args[1] != cleanupRoomScript || args[2] != "2" || !validColour(args[5]) {
@@ -52,7 +65,7 @@ func validOperatorArgs(args []string) bool {
 	case "--scan":
 		return validOperatorScan(args)
 	case "EVAL":
-		return validRoomCleanup(args)
+		return validRoomCleanup(args) || validPauseResume(args)
 	default:
 		return false
 	}
@@ -62,7 +75,22 @@ func validOperatorRead(args []string) bool {
 	return len(args) == 2 && readableOperatorKey(args[1])
 }
 
+// validPauseSet admits the two writes media_legacy_pause makes: arm a new pause
+// (NX) and add a test user to the existing one (XX).
+func validPauseSet(args []string) bool {
+	return len(args) == 4 && args[1] == joinPauseKey && operatorPauseValue.MatchString(args[2]) &&
+		(args[3] == "NX" || args[3] == "XX")
+}
+
+func validPauseResume(args []string) bool {
+	return len(args) == 5 && args[1] == resumePauseScript && args[2] == "1" && args[3] == joinPauseKey &&
+		operatorPauseValue.MatchString(args[4])
+}
+
 func validOperatorSet(args []string) bool {
+	if validPauseSet(args) {
+		return true
+	}
 	if len(args) != 3 {
 		return false
 	}

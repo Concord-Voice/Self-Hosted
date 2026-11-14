@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "dockerfiles": {
+    "app.df": {
+      "stages": [
+        {
+          "alias": "builder",
+          "registry": "docker.io",
+          "repository": "library/golang",
+          "tag": "^(1$"
+        }
+      ]
+    }
+  }
+}

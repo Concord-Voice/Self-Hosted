@@ -124,6 +124,7 @@
         "admin_lockout:ip:*",
         "admin_lockout:ip_lock:*",
         "admin_lockout:ip_level:*",
+        "admin_server_stepup:*",
         "age_claim_nonce:*",
         "ent:*",
         "entviol:*",
@@ -139,7 +140,11 @@
         "dm_voice_pending_call:*",
         "dm_voice_call_closed:*",
         "dm_voice_call_cleanup:*",
-        "dm_voice_join_admission:*"
+        "dm_voice_join_admission:*",
+        "media:legacy_join_pause"
+      ],
+      "readOnlyKeyPatterns": [
+        "media:legacy_join_pause"
       ]
     },
     "media-plane": {
@@ -201,7 +206,8 @@
       "media:colour_draining:blue",
       "media:colour_draining:green",
       "voice:room_owner:*",
-      "voice:room_live:*"
+      "voice:room_live:*",
+      "media:legacy_join_pause"
     ]
   },
   "excludedAbsentApplicationCommands": [

@@ -2,10 +2,13 @@ package managedredis
 
 import (
 	"encoding/json"
+	"path"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/joinpause"
 )
 
 func TestAbsentCommandInventoryDoesNotContradictGrantedACL(t *testing.T) {
@@ -113,4 +116,23 @@ func TestAccountBudgetTimeGrantIsControlPlaneOnly(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(aclManifestJSON, &inventory))
 	require.NotContains(t, inventory.ExcludedAbsentApplicationCommands, "TIME")
+}
+
+// The control plane only reads the voice-join pause (internal/joinpause), so the
+// emitted rule must grant it "%R~" and no write grant may cover it. Without the
+// read grant, REDIS_CREDENTIAL_MODE=managed answered NOPERM. path.Match stands in
+// for Redis glob here only because the key holds no "/".
+func TestControlPlaneACLReadsJoinPauseOnly(t *testing.T) {
+	// Root grants only: a "(...)" selector grants just its own commands.
+	root, _, _ := strings.Cut(serviceACLRule("control-plane"), "(")
+	tokens := strings.Fields(root)
+	require.Contains(t, tokens, "%R~"+joinpause.Key)
+	// No write grant may cover the pause, a wildcard such as ~media:* included.
+	for _, token := range tokens {
+		if pattern, isKey := strings.CutPrefix(token, "~"); isKey {
+			ok, err := path.Match(pattern, joinpause.Key)
+			require.NoError(t, err, "bad key pattern %q", pattern)
+			require.False(t, ok, "write grant %q covers the join pause; the control plane must only read it", token)
+		}
+	}
 }

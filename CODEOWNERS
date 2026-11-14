@@ -4,6 +4,7 @@
 /.github/workflows/**                                @Concord-Voice/security
 .github/codeql/**                                   @Concord-Voice/security
 /.github/ci/**                                       @Concord-Voice/security
+/.github/base-images.json                            @Concord-Voice/security
 /.pre-commit-config.yaml                             @Concord-Voice/security
 docker-compose.production.yml                       @Concord-Voice/security
 docker-compose.selfhost.yml                         @Concord-Voice/security

@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "dockerfiles": {
+    "infrastructure/deploy/tests/Dockerfile.selfhost-hook": {
+      "stages": [
+        {"registry": "docker.io", "repository": "library/ubuntu", "tag": "^24\\.04$"}
+      ]
+    },
+    "infrastructure/docker/buildtools/Dockerfile": {
+      "syntax": "docker/dockerfile:1.7",
+      "stages": [
+        {"registry": "docker.io", "repository": "library/node", "tag": "^26-alpine$"}
+      ]
+    },
+    "infrastructure/docker/minio/Dockerfile": {
+      "stages": [
+        {"alias": "builder", "registry": "docker.io", "repository": "library/golang", "tag": "^1\\.26\\.[0-9]+-bookworm$"},
+        {"alias": "runtime", "registry": "registry.access.redhat.com", "repository": "ubi9/ubi-micro", "tag": "^9\\.6$"}
+      ]
+    },
+    "infrastructure/docker/postgres/Dockerfile": {
+      "stages": [
+        {"registry": "docker.io", "repository": "library/postgres", "tag": "^16\\.[0-9]+-alpine$"}
+      ]
+    },
+    "services/control-plane/Dockerfile": {
+      "build_contexts": ["admin_ui"],
+      "stages": [
+        {"alias": "admin-ui-builder", "registry": "docker.io", "repository": "library/node", "tag": "^26-alpine$"},
+        {"alias": "builder", "registry": "docker.io", "repository": "library/golang", "tag": "^1\\.27\\.[0-9]+-alpine$"},
+        {"registry": "docker.io", "repository": "library/alpine", "tag": "^3\\.24$"}
+      ]
+    },
+    "services/control-plane/Dockerfile.account-authority": {
+      "stages": [
+        {"alias": "builder", "registry": "docker.io", "repository": "library/golang", "tag": "^1\\.27\\.[0-9]+-alpine$"},
+        {"scratch": true}
+      ]
+    },
+    "services/control-plane/Dockerfile.ops-agent": {
+      "stages": [
+        {"alias": "builder", "registry": "docker.io", "repository": "library/golang", "tag": "^1\\.27\\.[0-9]+-alpine$"},
+        {"scratch": true}
+      ]
+    },
+    "services/control-plane/Dockerfile.redis-auth-controller": {
+      "stages": [
+        {"alias": "builder", "registry": "docker.io", "repository": "library/golang", "tag": "^1\\.27\\.[0-9]+-alpine$"},
+        {"registry": "docker.io", "repository": "library/alpine", "tag": "^3\\.24$"}
+      ]
+    },
+    "services/media-plane/Dockerfile": {
+      "stages": [
+        {"alias": "builder", "registry": "ghcr.io", "repository": "concord-voice/node-buildtools", "tag": "^26-alpine-[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        {"registry": "docker.io", "repository": "library/node", "tag": "^26-alpine$"}
+      ]
+    }
+  }
+}

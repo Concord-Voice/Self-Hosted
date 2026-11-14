@@ -31,9 +31,10 @@ def selected_version(go_mod: str) -> str:
 
 
 def check_dockerfile(path: Path, version: str) -> None:
+    text = path.read_text()
     images = re.findall(
         r"(?im)^\s*FROM\s+(?:--platform=\S+\s+)?(golang(?:[:@]\S*)?)(?=\s|$)",
-        path.read_text(),
+        text,
     )
     if not images:
         raise ValueError(f"{path.name}: missing golang builder")
@@ -41,6 +42,11 @@ def check_dockerfile(path: Path, version: str) -> None:
         tag = image.split("@", 1)[0].removeprefix("golang:")
         if not re.fullmatch(rf"{re.escape(version)}(?:-[a-zA-Z0-9.-]+)?", tag):
             raise ValueError(f"{path.name}: {image} disagrees with go.mod's Go {version}")
+    # A RUN step may also assert the builder's release, e.g. `go version go1\.27\.4 `.
+    # Checking FROM lines alone missed that assertion on two version bumps.
+    for pinned in re.findall(r"go version go(\d+\\?\.\d+\\?\.\d+)", text):
+        if pinned.replace("\\", "") != version:
+            raise ValueError(f"{path.name}: go version check expects {pinned}, which disagrees with go.mod's Go {version}")
 
 
 def check_license_workflow(path: Path) -> None:

@@ -77,7 +77,10 @@ SCAN=$(printf '%s' "$COMMAND" | perl -0777 -pe 's/"((?:[^"\\]|\\.)*)"|\x27([^\x2
     exit 2
 }
 # Quote-aware, so an escaped quote inside the script (bash -c "echo \"a\" && rm -rf x") does not end it.
-INNER=$(printf '%s' "$COMMAND" | perl -0777 -ne 'while (/(?:\b(?:sh|bash|zsh)\s+-[a-zA-Z]*c|\beval)\s+(?:"((?:[^"\\]|\\.)*)"|\x27([^\x27]*)\x27)/g) { my $t = defined $1 ? $1 : $2; $t =~ s/\\(.)/$1/g if defined $1; print "$t\n" }') || {
+# Any shell -c or eval is scanned wherever it sits, so a wrapper (timeout, nice, find -exec)
+# cannot hide one. ponytail: prose naming `bash -c '...'` inside a quoted argument is
+# scanned too and may block; failing closed beats guessing which spans run.
+INNER=$(printf '%s' "$COMMAND" | perl -0777 -ne 'while (/(?:\b(?:sh|bash|zsh)(?:\s+-[a-zA-Z]+)*?\s+-[a-zA-Z]*c|\beval)\s+(?:"((?:[^"\\]|\\.)*)"|\x27([^\x27]*)\x27)/g) { my $t = defined $1 ? $1 : $2; $t =~ s/\\(.)/$1/g if defined $1; print "$t\n" }') || {
     echo "BLOCKED: perl failed — destructive-commands hook cannot evaluate command" >&2
     exit 2
 }
@@ -95,7 +98,11 @@ DESTRUCTIVE_RE+="|${CMD_POS}${GIT}\s+reset\b[^;&|]*\s--hard"
 DESTRUCTIVE_RE+="|${CMD_POS}${GIT}\s+clean\b[^;&|]*\s(-[a-zA-Z]*f|--force)"
 DESTRUCTIVE_RE+="|${CMD_POS}${GIT}\s+checkout\b[^;&|]*\s\.{1,2}/?(\s|$)"
 RESTORE_RE="${CMD_POS}${GIT}\s+restore\b[^;&|]*\s\.{1,2}/?(\s|$)"
-DESTRUCTIVE_RE+="|(^|[;&|([:space:]])rm(\s+[^;&|]*)?\s(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)"
+# rm counts after any separator or whitespace, so a wrapper (timeout, nice, sudo -u,
+# xargs -I{}, if/while, find -exec/-ok) cannot hide it. Only `git rm` is exempt: it
+# touches tracked files git can restore, and is rewritten out of RM_SCAN first.
+RM_SCAN=$(printf '%s' "$SCAN" | perl -pe 's/\b(git(?:\s+(?:-[Cc]\s+\S+|--[a-z][a-z-]*(?:=\S*)?))*)\s+rm\b/$1 _gitrm/g')
+RM_RE='(^|[;&|(`[:space:]])([^[:space:];&|]*/)?rm(\s+[^;&|]*)?\s(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)'
 restore_hits_worktree() { # --staged alone only touches the index; judged per command segment
     local seg
     while IFS= read -r seg; do
@@ -105,7 +112,7 @@ restore_hits_worktree() { # --staged alone only touches the index; judged per co
     done < <(printf '%s\n' "$SCAN" | tr ';&|' '\n')
     return 1
 }
-if echo "$SCAN" | grep -qE "$DESTRUCTIVE_RE" || restore_hits_worktree; then
+if echo "$SCAN" | grep -qE "$DESTRUCTIVE_RE" || echo "$RM_SCAN" | grep -qE "$RM_RE" || restore_hits_worktree; then
     echo "BLOCKED: Potentially destructive command detected: $COMMAND" >&2
     exit 2
 fi
