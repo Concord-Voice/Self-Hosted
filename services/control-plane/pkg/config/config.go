@@ -757,6 +757,10 @@ func (c *Config) validateActivityHistory() error {
 // *Config, so calling it twice is idempotent. Do not delete either call as
 // "the redundant one": at both sites the guard is deliberately ordered ahead of
 // validateActivityHistory for the shadowing reason above.
+// It reads configuration only. The default-off control-plane blue-green rail
+// (docs/architecture.md, "Control-plane blue-green deploys") briefly runs two
+// processes that both read CONTROL_PLANE_REPLICA_COUNT=1; that overlap is an
+// activation gate for the rail, and this check does not and cannot see it.
 func (c *Config) validateControlPlaneReplicaCount() error {
 	if c.ControlPlaneReplicaCountExplicit && c.ControlPlaneReplicaCount != 1 {
 		return fmt.Errorf(
