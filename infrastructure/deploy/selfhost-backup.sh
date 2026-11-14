@@ -12,6 +12,8 @@
 
 readonly BACKUP_PG_SERVICE=postgres
 readonly BACKUP_HELPER_IMAGE=concordvoice-postgres:16-alpine
+readonly BACKUP_MAX_ARCHIVES=24
+readonly BACKUP_RESERVE_BYTES=$((1024 * 1024 * 1024))
 
 _backup_fail() { printf 'selfhost-backup: %s\n' "$1" >&2; return 1; }
 
@@ -66,6 +68,57 @@ _backup_prepare_dir() {
     || { _backup_fail 'backup directory must be owned by this user with no group or other access (0700)'; return 1; }
 }
 
+_backup_archive_count() (
+  local entry name count=0
+  shopt -s nullglob
+  for entry in "$1"/*; do
+    name="${entry##*/}"
+    [[ "$name" =~ ^concord-backup-[0-9]{8}T[0-9]{6}Z\.tar\.gz$ && -f "$entry" && ! -L "$entry" ]] \
+      && count=$((count + 1))
+  done
+  printf '%s\n' "$count"
+)
+
+_backup_pg_bytes() {
+  compose exec -T "$BACKUP_PG_SERVICE" psql -U concord -d concord -Atc "SELECT pg_database_size('concord')"
+}
+
+_backup_minio_bytes() {
+  docker run --rm --network none -u 0 -v "$(_backup_minio_volume):/data:ro" \
+    --entrypoint du "$BACKUP_HELPER_IMAGE" -sb /data
+}
+
+_backup_available_bytes() {
+  df -PB1 -- "$1" | awk 'END { print $4 }'
+}
+
+# _backup_admit checks retention and staging headroom before any data copy.
+_backup_admit() {
+  local out="$1" pg minio=0 available count
+  count="$(_backup_archive_count "$out")" || { _backup_fail 'cannot count existing backups'; return 1; }
+  [[ "$count" =~ ^[0-9]+$ && "$count" -lt "$BACKUP_MAX_ARCHIVES" ]] \
+    || { _backup_fail 'backup archive limit reached'; return 1; }
+  pg="$(_backup_pg_bytes)" || { _backup_fail 'cannot determine database size'; return 1; }
+  if [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == bundled ]]; then
+    minio="$(_backup_minio_bytes)" || { _backup_fail 'cannot determine bundled storage size'; return 1; }
+    minio="${minio%%[[:space:]]*}"
+  fi
+  available="$(_backup_available_bytes "$out")" || { _backup_fail 'cannot determine free space'; return 1; }
+  python3 - "$pg" "$minio" "$available" "$BACKUP_RESERVE_BYTES" <<'PY' || {
+import re, sys
+values = sys.argv[1:]
+if not all(re.fullmatch(r"[0-9]+", value) for value in values):
+    sys.exit(1)
+source = int(values[0]) + int(values[1])
+required = source * 2 + int(values[3])
+if int(values[2]) < required:
+    sys.exit(1)
+PY
+    _backup_fail 'insufficient free space for backup staging'
+    return 1
+  }
+}
+
 _backup_run() {
   local out="$1" stage release
   BACKUP_LAST_NAME=''
@@ -73,6 +126,7 @@ _backup_run() {
   release="$(_backup_release)" && [[ -n "$release" ]] || { _backup_fail 'release identity unavailable'; return 1; }
   [[ -f "$PROJECT_ROOT/.env" ]] || { _backup_fail 'no .env: nothing installed to back up'; return 1; }
   _backup_prepare_dir "$out" || return 1
+  _backup_admit "$out" || return 1
   stage="$(umask 077; mktemp -d "$out/.staging.XXXXXX")" || { _backup_fail 'cannot create staging'; return 1; }
   local rc=0
   _backup_body "$out" "$stage" "$release" || rc=$?

@@ -43,7 +43,7 @@ var agentRefusals = map[string]bool{
 	"invalid_body": true, "untrusted_backups": true, "unknown_archive": true,
 	"security_log_boundary_missing": true, "job_unavailable": true,
 	"write_in_progress": true, "unknown_action": true, "unknown_job": true,
-	"appliance_managed": true,
+	"appliance_managed": true, "backup_rate_limited": true,
 }
 
 type serverActionRequest struct {

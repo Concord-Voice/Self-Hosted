@@ -156,6 +156,7 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 		reason string
 	}{
 		{http.StatusConflict, `{"error":"write_in_progress"}`, http.StatusConflict, "write_in_progress"},
+		{http.StatusTooManyRequests, `{"error":"backup_rate_limited"}`, http.StatusTooManyRequests, "backup_rate_limited"},
 		{http.StatusConflict, `{"error":"security_log_boundary_missing"}`, http.StatusConflict, "security_log_boundary_missing"},
 		{http.StatusConflict, `{"appliance":"truenas","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
 		{http.StatusConflict, `{"appliance":"<script>","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},

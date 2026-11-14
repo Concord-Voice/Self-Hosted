@@ -310,6 +310,65 @@ func TestMarkerExistsOnlyWhileAWriteRuns(t *testing.T) {
 	}
 }
 
+func TestBackupAdmissionPersistsAcrossFailureAndRestart(t *testing.T) {
+	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	s, _ := writeServer(t, &fakeRunner{err: errors.New("backup failed")})
+	s.writes.now = func() time.Time { return now }
+	first := started(t, postAuthorized(t, s, "/v1/actions/backup", ""))
+	if job := waitJob(t, s, first.ID); job.State != "failed" {
+		t.Fatalf("failed backup state = %q", job.State)
+	}
+	if rec := postAuthorized(t, s, "/v1/actions/backup", ""); rec.Code != http.StatusTooManyRequests ||
+		!strings.Contains(rec.Body.String(), "backup_rate_limited") {
+		t.Fatalf("second backup: %d %s", rec.Code, rec.Body)
+	}
+
+	s2, _ := writeServer(t, &fakeRunner{})
+	s2.writes.admission = s.writes.admission
+	s2.writes.now = func() time.Time { return now }
+	if rec := postAuthorized(t, s2, "/v1/actions/backup", ""); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("restart backup: %d %s", rec.Code, rec.Body)
+	}
+	s2.writes.now = func() time.Time { return now.Add(backupWindow) }
+	if job := started(t, postAuthorized(t, s2, "/v1/actions/backup", "")); waitJob(t, s2, job.ID).State != "succeeded" {
+		t.Fatalf("backup at window boundary did not succeed")
+	}
+}
+
+func TestBackupAdmissionConcurrent(t *testing.T) {
+	f := &fakeRunner{wait: make(chan struct{})}
+	s, _ := writeServer(t, f)
+	s.writes.now = func() time.Time { return time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC) }
+	list, err := s.authorizations.authorizers.List()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("authorizer fixture: %v, %d entries", err, len(list))
+	}
+	start := make(chan struct{})
+	type result struct {
+		job *Job
+		err error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			job, err := s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+			results <- result{job: job, err: err}
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	if (first.job == nil) == (second.job == nil) || first.err != nil || second.err != nil {
+		t.Fatalf("concurrent admissions: job=%v err=%v, job=%v err=%v", first.job, first.err, second.job, second.err)
+	}
+	close(f.wait)
+	if first.job != nil {
+		waitJob(t, s, first.job.ID)
+	} else {
+		waitJob(t, s, second.job.ID)
+	}
+}
+
 func TestOneWriteAtATime(t *testing.T) {
 	f := &fakeRunner{wait: make(chan struct{})}
 	s, _ := writeServer(t, f)

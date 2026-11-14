@@ -13,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -32,6 +34,7 @@ const (
 	shortJobBudget = 15 * time.Minute
 	// up rebuilds images; backup, restore and update move whole databases.
 	longJobBudget = 2 * time.Hour
+	backupWindow  = time.Hour
 	// securityLogRoot is the boundary `up` refuses to start without, checked
 	// before restart stops anything (as concord-selfhost's SECURITY_LOG_ROOT).
 	securityLogRoot = "/var/log/concord-security"
@@ -39,6 +42,7 @@ const (
 
 var (
 	jobIDPattern     = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	errBackupLimited = errors.New("backup admission rate limited")
 	updateTagPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`) // as selfhost-update.sh
 	archivePattern   = regexp.MustCompile(`^concord-backup-[0-9]{8}T[0-9]{6}Z\.tar\.gz$`)
 )
@@ -67,14 +71,16 @@ type Job struct {
 }
 
 type jobs struct {
-	mu       sync.Mutex
-	run      Runner
-	backups  string // the install's backups directory
-	marker   string // exists while a write runs
-	boundary string // the security-event log root
-	audit    *Audit
-	list     []*Job // oldest first
-	running  bool
+	mu        sync.Mutex
+	run       Runner
+	backups   string // the install's backups directory
+	marker    string // exists while a write runs
+	admission string // persistent backup admission timestamp beside marker
+	boundary  string // the security-event log root
+	audit     *Audit
+	list      []*Job // oldest first
+	running   bool
+	now       func() time.Time
 }
 
 // EnableWrites lets s run write actions through r, whose output should
@@ -85,7 +91,13 @@ type jobs struct {
 // earlier run is removed.
 func (s *Server) EnableWrites(r Runner, backups, marker string) {
 	_ = os.Remove(marker) // that run's job died with it
-	s.writes = &jobs{run: r, backups: backups, marker: marker, boundary: securityLogRoot, audit: s.audit}
+	s.writes = &jobs{
+		run: r, backups: backups, marker: marker,
+		admission: filepath.Join(filepath.Dir(marker), "backup-last-admitted"),
+		boundary:  securityLogRoot,
+		audit:     s.audit,
+		now:       time.Now,
+	}
 }
 
 // refusal is a refused write: its HTTP status and reason.
@@ -185,6 +197,11 @@ func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Durati
 	if j.running {
 		return nil, nil
 	}
+	if action == "backup" {
+		if err := j.admitBackup(j.now().UTC()); err != nil {
+			return nil, err
+		}
+	}
 	if j.audit == nil || j.audit.Write(AuditEvent{Action: action, Outcome: "admitted", Reason: "admission_approved", AdminID: adminID, JobID: id}) != nil {
 		return nil, errors.New("host-agent admission audit unavailable")
 	}
@@ -204,6 +221,74 @@ func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Durati
 		log.Print("concord-agent: host-agent audit start event unavailable")
 	}
 	return job, nil
+}
+
+// admitBackup persists the admission before a backup job can start. The state
+// survives process restarts and a failed backup still consumes its window.
+func (j *jobs) admitBackup(now time.Time) error {
+	dir := filepath.Dir(j.admission)
+	if err := trustedEntry(dir); err != nil {
+		return fmt.Errorf("backup admission directory: %w", err)
+	}
+	if st, err := os.Lstat(j.admission); err == nil {
+		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || trustedEntry(j.admission) != nil {
+			return errors.New("backup admission state is untrusted")
+		}
+		f, err := os.OpenFile(j.admission, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			return fmt.Errorf("open backup admission state: %w", err)
+		}
+		b, readErr := io.ReadAll(f)
+		closeErr := f.Close()
+		if readErr != nil || closeErr != nil {
+			return errors.New("read backup admission state")
+		}
+		last, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		if err != nil || last < 0 {
+			return errors.New("backup admission state is invalid")
+		}
+		if now.Before(time.Unix(0, last).Add(backupWindow)) {
+			return errBackupLimited
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect backup admission state: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".backup-admission-")
+	if err != nil {
+		return fmt.Errorf("create backup admission state: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if err := os.Remove(tmpName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Print("concord-agent: backup admission temporary cleanup failed")
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			return fmt.Errorf("close backup admission state after chmod failure: %w", closeErr)
+		}
+		return fmt.Errorf("protect backup admission state: %w", err)
+	}
+	if _, err := fmt.Fprintf(tmp, "%d\n", now.UnixNano()); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			return fmt.Errorf("close backup admission state after write failure: %w", closeErr)
+		}
+		return fmt.Errorf("write backup admission state: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			return fmt.Errorf("close backup admission state after sync failure: %w", closeErr)
+		}
+		return fmt.Errorf("sync backup admission state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close backup admission state: %w", err)
+	}
+	if err := os.Rename(tmpName, j.admission); err != nil {
+		return fmt.Errorf("publish backup admission state: %w", err)
+	}
+	return nil
 }
 
 // execute runs cmds in order, stopping at the first failure. The run is not
@@ -342,6 +427,10 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 	}
 	job, err := s.writes.start(name, adminID, cmds, budget)
 	if err != nil {
+		if errors.Is(err, errBackupLimited) {
+			refuse(w, http.StatusTooManyRequests, "backup_rate_limited")
+			return
+		}
 		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "job_unavailable", AdminID: adminID})
 		refuse(w, http.StatusServiceUnavailable, "job_unavailable")
 		log.Printf("concord-agent: action=%s outcome=error", name)
