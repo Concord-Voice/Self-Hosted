@@ -13,10 +13,9 @@ import (
 
 // verificationRecord is stored in Redis keyed by "email_verify:{pending_id}".
 type verificationRecord struct {
-	CodeHash    string `json:"code_hash"`
-	Email       string `json:"email"`
-	Attempts    int    `json:"attempts"`
-	ResendCount int    `json:"resend_count"`
+	CodeHash string `json:"code_hash"`
+	Email    string `json:"email"`
+	Attempts int    `json:"attempts"`
 }
 
 // generateCode produces a cryptographically random 6-digit numeric code.

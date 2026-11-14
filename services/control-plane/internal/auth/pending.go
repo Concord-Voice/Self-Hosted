@@ -317,7 +317,7 @@ func (r *PendingRepo) GetByID(ctx context.Context, id string) (*PendingRegistrat
 // cooldown and max-resend limits. It returns the recipient read under the same
 // row lock as the reservation. publish runs before that lock is released, so a
 // delayed resend cannot overwrite a newer change-email verification code.
-func (r *PendingRepo) IncrementResend(ctx context.Context, id string, publish func(*sql.Tx, string, int) error) (int, time.Time, string, error) {
+func (r *PendingRepo) IncrementResend(ctx context.Context, id string, publish func(*sql.Tx, string) error) (int, time.Time, string, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, time.Time{}, "", err
@@ -364,7 +364,7 @@ func (r *PendingRepo) IncrementResend(ctx context.Context, id string, publish fu
 		return 0, time.Time{}, "", err
 	}
 	if publish != nil {
-		if err = publish(tx, email, count+1); err != nil {
+		if err = publish(tx, email); err != nil {
 			return 0, time.Time{}, "", err
 		}
 	}
@@ -414,7 +414,7 @@ func (r *PendingRepo) UpdateEmail(ctx context.Context, id, newEmail string) erro
 	return err
 }
 
-func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string, publish func(*sql.Tx, string, int) error) (int, time.Time, error) {
+func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string, publish func(*sql.Tx, string) error) (int, time.Time, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, time.Time{}, err
@@ -462,7 +462,7 @@ func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string, publ
 		return 0, time.Time{}, err
 	}
 	if publish != nil {
-		if err = publish(tx, lowerEmail, count+1); err != nil {
+		if err = publish(tx, lowerEmail); err != nil {
 			return 0, time.Time{}, fmt.Errorf("publish new verification code: %w", err)
 		}
 	}
@@ -502,7 +502,7 @@ func pendingResendCount(ctx context.Context, tx *sql.Tx, id string) (int, error)
 // Promote atomically converts a pending registration into a full user account,
 // inserting rows into users, user_keys, and public_keys, then deleting the
 // pending row. Returns the new user ID.
-func (r *PendingRepo) Promote(ctx context.Context, id, expectedEmail string, expectedResendCount int) (userID string, err error) {
+func (r *PendingRepo) Promote(ctx context.Context, id, expectedEmail string, verifyCodeCurrent func() error) (userID string, err error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -538,8 +538,10 @@ func (r *PendingRepo) Promote(ctx context.Context, id, expectedEmail string, exp
 	if !strings.EqualFold(strings.TrimSpace(p.Email), strings.TrimSpace(expectedEmail)) {
 		return "", ErrVerificationEmailChanged
 	}
-	if p.ResendCount != expectedResendCount {
-		return "", ErrVerificationCodeReplaced
+	if verifyCodeCurrent != nil {
+		if err = verifyCodeCurrent(); err != nil {
+			return "", err
+		}
 	}
 
 	// Step 2: insert into users

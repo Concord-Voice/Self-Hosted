@@ -253,7 +253,7 @@ func TestResendPublicationSerializesChangeEmail(t *testing.T) {
 	}()
 	resendDone := make(chan error, 1)
 	go func() {
-		_, _, _, resendErr := repo.IncrementResend(ctx, id, func(tx *sql.Tx, recipient string, _ int) error {
+		_, _, _, resendErr := repo.IncrementResend(ctx, id, func(tx *sql.Tx, recipient string) error {
 			if recipient != oldEmail {
 				return fmt.Errorf("resend recipient = %q, want %q", recipient, oldEmail)
 			}
@@ -315,7 +315,7 @@ func TestPromoteRejectsCodeForDifferentEmail(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = repo.Promote(ctx, id, "recipient-b@test.concord.chat", 0)
+	_, err = repo.Promote(ctx, id, "recipient-b@test.concord.chat", nil)
 	require.ErrorIs(t, err, auth.ErrVerificationEmailChanged)
 
 	var userCount int
@@ -348,7 +348,9 @@ func TestPromoteRejectsCodeReservedBeforeResend(t *testing.T) {
 	_, _, _, err = repo.IncrementResend(ctx, id, nil)
 	require.NoError(t, err)
 
-	_, err = repo.Promote(ctx, id, email, 0)
+	_, err = repo.Promote(ctx, id, email, func() error {
+		return auth.ErrVerificationCodeReplaced
+	})
 	require.ErrorIs(t, err, auth.ErrVerificationCodeReplaced)
 
 	var users, pending int

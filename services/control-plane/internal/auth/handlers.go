@@ -662,7 +662,7 @@ func (h *Handler) extendPendingExpiryForCode(ctx context.Context, q pendingCodeQ
 // test_only:<pending_id> with the same TTL so integration tests can recover
 // it via testhelpers.FetchVerificationCode without reading real email.
 func (h *Handler) sendInitialCode(ctx context.Context, q pendingCodeQueryer, pendingID uuid.UUID, userEmail string) (time.Time, error) {
-	codeExpires, code, raw, err := h.prepareInitialCode(ctx, q, pendingID, userEmail, 0)
+	codeExpires, code, raw, err := h.prepareInitialCode(ctx, q, pendingID, userEmail)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -675,7 +675,7 @@ func (h *Handler) sendInitialCode(ctx context.Context, q pendingCodeQueryer, pen
 	return codeExpires, nil
 }
 
-func (h *Handler) prepareInitialCode(ctx context.Context, q pendingCodeQueryer, pendingID uuid.UUID, userEmail string, resendCount int) (time.Time, string, string, error) {
+func (h *Handler) prepareInitialCode(ctx context.Context, q pendingCodeQueryer, pendingID uuid.UUID, userEmail string) (time.Time, string, string, error) {
 	if h.emailSvc == nil {
 		return time.Time{}, "", "", fmt.Errorf("email service not configured")
 	}
@@ -698,10 +698,9 @@ func (h *Handler) prepareInitialCode(ctx context.Context, q pendingCodeQueryer, 
 	}
 
 	record := verificationRecord{
-		CodeHash:    hashCode(code),
-		Email:       userEmail,
-		Attempts:    0,
-		ResendCount: resendCount,
+		CodeHash: hashCode(code),
+		Email:    userEmail,
+		Attempts: 0,
 	}
 	raw, err := json.Marshal(record)
 	if err != nil {
@@ -785,7 +784,9 @@ func (h *Handler) ConfirmRegistration(c *gin.Context) {
 		return
 	}
 
-	userID, err := h.pending.Promote(ctx, pendingID.String(), proof.email, proof.resendCount)
+	userID, err := h.pending.Promote(ctx, pendingID.String(), proof.email, func() error {
+		return h.verifyRegistrationCodeCurrent(ctx, pendingID, proof.raw)
+	})
 	if err != nil {
 		if errors.Is(err, ErrPendingExpired) {
 			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
@@ -852,13 +853,12 @@ func (h *Handler) validateConfirmRequest(c *gin.Context) (*ConfirmRegistrationRe
 }
 
 // attemptsGuard reserves an attempt atomically before comparing the code.
-// Its record's resend count is rechecked under the pending-row lock before
-// promotion, so a resend/change-email cannot leave a reserved stale code eligible.
+// Its exact record is rechecked under the pending-row lock before promotion, so
+// a resend/change-email cannot leave a reserved stale code eligible.
 type registrationCodeProof struct {
-	email       string
-	raw         string
-	attempts    int
-	resendCount int
+	email    string
+	raw      string
+	attempts int
 }
 
 // Returns the accepted code's recipient proof. A nil proof means a response has
@@ -890,7 +890,7 @@ func (h *Handler) attemptsGuard(ctx context.Context, c *gin.Context, pendingID u
 	}
 
 	if subtle.ConstantTimeCompare([]byte(hashCode(sanitized)), []byte(rec.CodeHash)) == 1 {
-		return &registrationCodeProof{email: strings.ToLower(strings.TrimSpace(rec.Email)), raw: raw, attempts: attempts, resendCount: rec.ResendCount}
+		return &registrationCodeProof{email: strings.ToLower(strings.TrimSpace(rec.Email)), raw: raw, attempts: attempts}
 	}
 
 	remaining := MaxCodeAttempts - attempts
@@ -981,6 +981,20 @@ func (h *Handler) deleteVerificationMaterialIfCurrent(ctx context.Context, pendi
 	return nil
 }
 
+func (h *Handler) verifyRegistrationCodeCurrent(ctx context.Context, pendingID uuid.UUID, expectedRaw string) error {
+	currentRaw, err := h.redis.Get(ctx, redisKey(pendingID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return ErrVerificationCodeReplaced
+	}
+	if err != nil {
+		return fmt.Errorf("read current registration verification code: %w", err)
+	}
+	if subtle.ConstantTimeCompare([]byte(currentRaw), []byte(expectedRaw)) != 1 {
+		return ErrVerificationCodeReplaced
+	}
+	return nil
+}
+
 func (h *Handler) exhaustVerificationCode(ctx context.Context, pendingID uuid.UUID, expiry ...time.Duration) {
 	ttl := h.verificationCodeTTL(ctx, pendingID)
 	if len(expiry) > 0 && expiry[0] > ttl {
@@ -1052,9 +1066,9 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 	var codeExpires time.Time
 	var code, raw string
 	var prepareErr error
-	newCount, reservedAt, recipientEmail, err := h.pending.IncrementResend(ctx, pendingID.String(), func(tx *sql.Tx, recipient string, resendCount int) error {
+	newCount, reservedAt, recipientEmail, err := h.pending.IncrementResend(ctx, pendingID.String(), func(tx *sql.Tx, recipient string) error {
 		h.clearVerificationCodeMaterial(ctx, pendingID)
-		codeExpires, code, raw, prepareErr = h.prepareInitialCode(ctx, tx, pendingID, recipient, resendCount)
+		codeExpires, code, raw, prepareErr = h.prepareInitialCode(ctx, tx, pendingID, recipient)
 		return prepareErr
 	})
 	if err != nil {
@@ -1128,11 +1142,11 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 	var codeExpires time.Time
 	var code, raw string
 	var prepareErr error
-	reservedCount, reservedAt, err := h.pending.updateEmail(ctx, pendingID.String(), req.NewEmail, func(tx *sql.Tx, recipient string, resendCount int) error {
+	reservedCount, reservedAt, err := h.pending.updateEmail(ctx, pendingID.String(), req.NewEmail, func(tx *sql.Tx, recipient string) error {
 		if err := h.deleteVerificationCodeMaterial(ctx, pendingID); err != nil {
 			return err
 		}
-		codeExpires, code, raw, prepareErr = h.prepareInitialCode(ctx, tx, pendingID, recipient, resendCount)
+		codeExpires, code, raw, prepareErr = h.prepareInitialCode(ctx, tx, pendingID, recipient)
 		return prepareErr
 	})
 	if err != nil {
