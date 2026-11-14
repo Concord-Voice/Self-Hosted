@@ -1708,9 +1708,10 @@ func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, 
 	}
 	if !valid {
 		h.recordCheckedFailure(ctx, email)
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return false
+		}
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return false
 	}
@@ -1854,9 +1855,10 @@ func (h *Handler) Login(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 			return
 		}
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
@@ -3991,8 +3993,9 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	record, err := h.consumeRecoveryCode(ctx, recoveryRedisKey(req.Email), req.Code)
 	if errors.Is(err, redis.Nil) {
 		h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		middleware.MarkAuthFailureOutcome(c, outcome)
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
 		return
 	}
@@ -4306,7 +4309,9 @@ func (h *Handler) validateAndConsumeRecoveryToken(c *gin.Context, tokenStr strin
 	}
 	if err != nil {
 		if recordAuthFailure {
-			middleware.MarkAuthFailureOutcome(c, middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig()))
+			if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+				return nil, ""
+			}
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return nil, ""

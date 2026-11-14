@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -153,7 +154,7 @@ func NewLockout(rdb *redis.Client, now func() time.Time) *Lockout {
 // hashIP returns the hex SHA-256 of an IP string. The raw IP is never stored —
 // only this hash forms the Redis key suffix.
 func hashIP(ip string) string {
-	sum := sha256.Sum256([]byte(ip))
+	sum := sha256.Sum256([]byte(middleware.IPBucket(ip)))
 	return hex.EncodeToString(sum[:])
 }
 

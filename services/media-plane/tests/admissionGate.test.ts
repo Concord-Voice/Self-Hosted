@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   compileTrustedProxies,
   createAdmissionGate,
+  bucketClientIp,
   parseTrustedProxyEntry,
   resolveClientIp,
   HANDSHAKE_BURST,
@@ -64,16 +65,9 @@ describe('resolveClientIp', () => {
     expect(resolveClientIp(peerlessReq({}), trust('10.0.0.9'))).toBeNull();
   });
 
-  // A trusted peer that sends invalid forwarding headers cannot nominate an
-  // arbitrary counter key. nginx normally supplies a valid address.
-  // Behaviour change (#2793 Gitar review): a TRUSTED peer with no attributable
-  // client address now fails OPEN rather than falling through to the proxy's own
-  // address. The old form put every such request in one shared bucket, so a
-  // handful of clients could trip the ceiling deployment-wide — the exact
-  // fail-shared outcome createAdmissionGate refuses when no proxy is configured.
-  it('fails OPEN when a trusted peer sends an X-Real-IP that is not an address', () => {
+  it('falls back to a trusted peer for an invalid X-Real-IP', () => {
     const r = req({ 'x-real-ip': 'not-an-ip' });
-    expect(resolveClientIp(r, trust('10.0.0.9'))).toBeNull();
+    expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('10.0.0.9');
   });
 
   it('ignores an unparseable X-Real-IP but still honours a valid X-Forwarded-For', () => {
@@ -81,13 +75,13 @@ describe('resolveClientIp', () => {
     expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('203.0.113.7');
   });
 
-  it('fails OPEN when the X-Forwarded-For last hop is not an address', () => {
+  it('falls back to a trusted peer for an invalid X-Forwarded-For last hop', () => {
     const r = req({ 'x-forwarded-for': '203.0.113.7, not-an-ip' });
-    expect(resolveClientIp(r, trust('10.0.0.9'))).toBeNull();
+    expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('10.0.0.9');
   });
 
-  it('fails OPEN when a trusted peer forwards no client headers at all', () => {
-    expect(resolveClientIp(req({}), trust('10.0.0.9'))).toBeNull();
+  it('falls back to a trusted peer when it forwards no client headers', () => {
+    expect(resolveClientIp(req({}), trust('10.0.0.9'))).toBe('10.0.0.9');
   });
 
   // The untrusted case is unchanged and must stay that way: an untrusted peer
@@ -99,6 +93,27 @@ describe('resolveClientIp', () => {
   it('still accepts an IPv6 X-Real-IP', () => {
     const r = req({ 'x-real-ip': '2001:db8::1' });
     expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('2001:db8::1');
+  });
+});
+
+describe('bucketClientIp', () => {
+  it('uses canonical IPv4 and native IPv6 /64 buckets', () => {
+    expect(bucketClientIp('198.51.100.7')).toBe('198.51.100.7');
+    expect(bucketClientIp('::ffff:198.51.100.7')).toBe('198.51.100.7');
+    expect(bucketClientIp('2001:DB8:1:2:abcd::1')).toBe('2001:db8:1:2::');
+  });
+
+  it('collapses 256 addresses in one /64 and separates adjacent /64s', () => {
+    const buckets = new Set<string>();
+    for (let suffix = 0; suffix < 256; suffix += 1) {
+      buckets.add(bucketClientIp(`2001:db8:1:2::${suffix.toString(16)}`));
+    }
+    expect(buckets).toEqual(new Set(['2001:db8:1:2::']));
+    expect(bucketClientIp('2001:db8:1:3::1')).not.toBe('2001:db8:1:2::');
+  });
+
+  it('throws for malformed direct-helper input', () => {
+    expect(() => bucketClientIp('not-an-ip')).toThrow();
   });
 });
 
@@ -296,18 +311,12 @@ describe('createAdmissionGate', () => {
     expect(cb).toHaveBeenLastCalledWith(null, true);
   });
 
-  // DELIBERATE ASSERTION: fail-open is the specified behaviour here and nowhere
-  // else in #2032. A mis-resolved IP is an operator/topology error; failing
-  // closed on it is a total outage against a threat the rate and structural
-  // layers still bound. A future "hardening" change must argue with this test.
-  it('ALLOWS when the client IP cannot be resolved (documented fail-open)', () => {
+  it('denies a genuinely peerless request before it can enter a counter', () => {
     const clock = makeClock();
     const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
     const cb = vi.fn();
     gate(peerlessReq({}), cb);
-    expect(cb).toHaveBeenCalledWith(null, true);
-    // Falsifiability: an unresolvable address must short-circuit BEFORE the
-    // counter store, so the allow cannot be the ordinary under-ceiling allow.
+    expect(cb).toHaveBeenCalledWith(null, false);
     expect(gate.trackedCount()).toBe(0);
   });
 
@@ -316,6 +325,14 @@ describe('createAdmissionGate', () => {
   // deployment on one reconnect storm. The misconfiguration must degrade to the
   // pre-gate behaviour instead.
   describe('with no trusted proxies configured', () => {
+    it('rejects required configuration with no valid entries', () => {
+      expect(() => createAdmissionGate({ trustedProxies: [], required: true, warn: () => {} })).toThrow(
+        'Admission gate requires at least one valid trusted proxy.'
+      );
+      expect(() => createAdmissionGate({ trustedProxies: ['not-an-ip', '::/0'], required: true, warn: () => {} })).toThrow(
+        'Admission gate requires at least one valid trusted proxy.'
+      );
+    });
     it('allows unconditionally and tracks nothing', () => {
       const clock = makeClock();
       const gate = createAdmissionGate({ now: clock.now, trustedProxies: [], warn: () => {} });
