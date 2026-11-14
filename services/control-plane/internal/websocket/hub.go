@@ -4916,17 +4916,11 @@ func (h *Hub) GetVisibleConnectedUsers(ctx context.Context) map[uuid.UUID]bool {
 	return h.resolveVisibleOnlineWithContext(ctx, users)
 }
 
-// GetConnectedUsers returns the raw connected-user set. It remains for
-// compatibility with test helpers; production privacy exits use the filtered
-// accessor above.
+// GetConnectedUsers returns only connected users whose presence is explicitly
+// visible. It retains the historical exported API without leaving a raw
+// connected-user privacy exit for future callers.
 func (h *Hub) GetConnectedUsers() map[uuid.UUID]bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	users := make(map[uuid.UUID]bool, len(h.userClients))
-	for userID := range h.userClients {
-		users[userID] = true
-	}
-	return users
+	return h.GetVisibleConnectedUsers(context.Background())
 }
 
 // GetUserClientCount returns the number of connected clients for a user (thread-safe).
@@ -4957,12 +4951,10 @@ func (h *Hub) VisibleOnlineSubset(ctx context.Context, userIDs []uuid.UUID) []uu
 	return result
 }
 
-// IsUserOnline reports whether the user has at least one live WS client. It is
-// retained for existing tests; production privacy exits use VisibleOnlineSubset.
+// IsUserOnline reports whether a user is connected with explicitly visible
+// presence. Missing, hidden, and unreadable states fail closed.
 func (h *Hub) IsUserOnline(userID uuid.UUID) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.userClients[userID]) > 0
+	return len(h.VisibleOnlineSubset(context.Background(), []uuid.UUID{userID})) == 1
 }
 
 // PresenceAuthzStateForTest exposes the packed fence word so wiring locks in
