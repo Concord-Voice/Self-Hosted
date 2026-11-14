@@ -71,8 +71,11 @@ refuses every write route, `/v1/jobs` and `/v1/backups` with 409
 `{"error":"appliance_managed","appliance":"truenas"}` and keeps serving
 reads. Any other value stops the agent at startup.
 
-The agent does not check who is asking beyond the socket's permissions. The
-console routes below check the admin before they call it.
+The socket's group permissions only admit the control-plane container. They do
+not authorize a write. The agent requires the expected peer UID and an
+agent-local WebAuthn authorization for every write, including start and
+backup. The control plane cannot turn its database credentials into that
+authorization.
 
 ## Admin Console
 
@@ -97,19 +100,20 @@ of 30 requests per minute per client address; more get 429 `rate_limited`.
 
 ### Console write actions
 
-1. Start and backup need only the signed-in admin. Stop, restart, update and
-   restore also need a fresh WebAuthn check on a key that admin enrolled.
-2. For those four, the console first posts `{"action": "<action>"}` to
-   `/server/stepup` and gets a handle and assertion options. The handle is
-   for that admin and that action only, works once, and expires after 2
-   minutes. User verification is required. The handle is spent when the
-   action is posted, even if the agent then refuses it, so a retry needs a
-   new step-up.
-3. The console then posts the action with
-   `{"stepup": {"handle": "...", "assertion": {...}}}`, plus `"tag"` for update
-   or `"archive"` for restore. The control plane checks the tag and archive
-   name itself and sends the agent only those fields.
-4. Every step-up begin and every action attempt writes a `server_write` audit
+1. Every action starts a fresh, user-verified WebAuthn ceremony in the Host
+   Agent. Its root-owned authorizer store supplies the administrator's
+   credential; the control plane cannot substitute a credential from its
+   database.
+2. The console sends the normalized action and, for update or restore, its
+   tag or archive to begin the ceremony. The agent returns a one-use handle
+   and assertion options. The handle is bound to that administrator, action
+   and exact arguments, expires after two minutes, and is spent before the
+   assertion is checked. A retry always needs a new ceremony.
+3. The console then submits only the handle and assertion. The agent executes
+   the normalized arguments stored at begin time after it verifies the
+   assertion, persists the authenticator counter, and durably records the
+   admission.
+4. Every begin and action attempt writes a `server_write` audit
    row with the action, tag or archive, whether a step-up passed, the job id
    when one started, and the reason for a refusal. Step-up begins carry
    `"phase": "stepup_begin"`. Before calling the agent the control plane
@@ -142,6 +146,33 @@ no buttons.
 Job polls count as reads and write `server_read` rows. All these routes share
 the 30-per-minute limit with the other Server routes, so poll a job no faster
 than every 5 seconds.
+
+The agent also writes its own bounded, fsynced JSONL security record for every
+denied, admitted, started, succeeded, or failed write at
+`/var/log/concord-security/host-agent/events.jsonl`. It records only the
+action, outcome, fixed reason code, and opaque administrator or job IDs. A
+failed agent audit write refuses a new write before a job starts. This stream
+uses `host-agent-audit.v1`; Nightwatch ingestion is not yet verified.
+
+### Agent authorizer administration
+
+The Host Agent stores the credentials it trusts at
+`/etc/concord-voice/agent-authorizers/authorizers.json`. The directory and
+file must be root-owned and closed to group and other access. Host root can
+manage it with `concord-agent authorizer list`, `import`, and `revoke`.
+Import requires the exact SHA-256 printed for an admin's exported authorizer
+file. Revoke removes every trusted credential for the named administrator.
+These are host-root recovery and administration operations; the control plane
+only receives a read-only projection.
+
+### Rollout dependencies
+
+Session-generation reset and indexed handle revocation remain owned by
+Security#41. Do not treat an agent authorizer revoke as a substitute for that
+session boundary. Security#60 separately owns attestation provenance; this
+release rejects a WebAuthn clone warning but does not establish provenance.
+Self-Hosted is the source for these changes. Any Hosted mirror follows a
+source merge and its own validation gates.
 
 `concord-selfhost` connects the console to the agent only when both of these
 hold, and otherwise leaves control-plane exactly as before:
@@ -224,7 +255,9 @@ Setup-mode rules:
   longer logged. A 256-bit token cannot be guessed, so the limit only keeps a
   flood out of the journal; it never locks out the operator.
 - One preflight runs at a time; a second gets 409. At most 16 connections
-  are open at once.
+  are open at once. At most four setup connections from one canonical source
+  IP are admitted; an excess connection closes before TLS. A setup response
+  has a 30-second write deadline.
 - One install runs at a time; a second gets 409. An install may take up to
   10 minutes, and closing the browser does not stop it. Its output is capped
   at 256 KiB, with terminal escapes and control characters removed; output

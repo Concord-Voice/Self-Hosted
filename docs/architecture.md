@@ -816,15 +816,19 @@ fixed `concord-selfhost` run, one at a time, returned as an in-memory job that
 restore to a CLI-named regular file in a root-only `backups/`; a marker file
 held during a job stops the package scripts restarting the agent mid-run. The
 console reaches them through `POST /admin/api/v1/server/actions/<action>` and
-`GET /server/jobs[/<id>]`. Stop, restart, update and restore also need a fresh
-user-verified WebAuthn assertion from `POST /server/stepup`, bound to the admin
-and the action and usable once within 2 minutes. Every attempt writes a
-`server_write` audit row and a privileged-action security event; the row asking
-for the action is written before the agent is called, and the call is refused
-if it cannot be. `GET /server/backups` lists the archives restore accepts. The Server
-page's Actions panel drives all of this. With `CONCORD_AGENT_MANAGED_BY=truenas`
-the agent refuses writes, jobs and backups with 409 `appliance_managed`, and
-the panel points to the appliance's UI instead.
+`GET /server/jobs[/<id>]`. The agent itself requires an expected peer UID and
+a fresh user-verified WebAuthn assertion for all six actions. Its root-owned
+authorizer store verifies a one-use, two-minute handle bound to the exact
+normalized action arguments, persists the authenticator counter, then appends
+a durable `host-agent-audit.v1` admission record before job creation. This
+root-side stream is independent of the control-plane audit and Nightwatch
+ingestion remains unverified. Every attempt also writes a `server_write` audit
+row and a privileged-action security event; the row asking for the action is
+written before the agent is called, and the call is refused if it cannot be.
+`GET /server/backups` lists the archives restore accepts. The Server page's
+Actions panel drives all of this. With `CONCORD_AGENT_MANAGED_BY=truenas` the
+agent refuses writes, jobs and backups with 409 `appliance_managed`, and the
+panel points to the appliance's UI instead.
 
 **Self-hosted setup wizard (#187):** on a host with no `.env`, the Concord Host
 Agent also listens on TCP 9443 with a fresh self-signed ECDSA P-384 certificate
