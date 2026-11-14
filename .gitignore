@@ -71,6 +71,7 @@ package-lock.json
 !services/media-plane/package-lock.json
 !client/mobile/package-lock.json
 !.github/tools/license-checker/package-lock.json
+!scripts/tests/fixtures/**/package-lock.json
 yarn.lock
 pnpm-lock.yaml
 

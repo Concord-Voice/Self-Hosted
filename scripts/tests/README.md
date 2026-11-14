@@ -29,6 +29,8 @@ Other subjects in this directory:
 - `test-publish-minio-image.sh` — MinIO image publishing
 - `test-check-oci-tag.sh` — OCI tag validation
 - `test-go-transitive-flush-render.sh` — Go transitive-flush issue rendering
+- `test-check-vitest-pair.sh` — the vitest / coverage-plugin pair guard
+  (`scripts/ci/check-vitest-pair.sh`); its lockfiles are in `fixtures/vitest-pair/`
 
 The `selfhost-deploy-tests` commit hook runs all twelve self-host suites directly on Linux.
 On macOS it uses `run-selfhost-deploy-tests.sh` and a cached Ubuntu image; Docker Desktop

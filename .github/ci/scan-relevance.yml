@@ -510,6 +510,17 @@ workflow_lint:
   - 'scripts/security/audit-dependabot-coverage.sh'
   - 'scripts/security/test-audit-dependabot-coverage.sh'
   - 'scripts/security/check-pin-exceptions.mjs'
+  # vitest pair guard (#270, runs in workflow-lint): the three npm roots whose
+  # lockfiles it reads, the check, its regression test and fixtures.
+  - 'package.json'
+  - 'package-lock.json'
+  - 'client/admin/package.json'
+  - 'client/admin/package-lock.json'
+  - 'services/media-plane/package.json'
+  - 'services/media-plane/package-lock.json'
+  - 'scripts/ci/check-vitest-pair.sh'
+  - 'scripts/tests/test-check-vitest-pair.sh'
+  - 'scripts/tests/fixtures/vitest-pair/**'
   - '**/*[Dd][Oo][Cc][Kk][Ee][Rr][Ff][Ii][Ll][Ee]*'
   - '**/*[Dd][Oo][Cc][Kk][Ee][Rr][Ff][Ii][Ll][Ee]*/**'
   - '.github/ci/docker-engine-packages.lock'
