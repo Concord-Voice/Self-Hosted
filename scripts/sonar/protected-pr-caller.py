@@ -250,17 +250,20 @@ def dispatch_watch(args):
         raise Invalid("dispatch child ID missing")
     write_private(args.out, canonical({"workflow_run_id": child_id, "run_attempt": 1}))
     url = f"{API}/actions/runs/{child_id}"
+    seen = False
     for attempt in range(MAX_POLLS):
         try:
             run = request_json(url, token)
         except HTTPError as exc:
-            # Only a 404 on a just-dispatched run is waited out; the dispatch
-            # itself and every other status still fail at once.
+            # Only a 404 on a just-dispatched run that has not answered yet is
+            # waited out; the dispatch, a run that vanished after answering,
+            # and every other status still fail at once.
             exc.close()
-            if exc.code != 404 or attempt >= MAX_NOT_VISIBLE:
+            if exc.code != 404 or seen or attempt >= MAX_NOT_VISIBLE:
                 raise
             time.sleep(10)
             continue
+        seen = True
         if (run.get("id") != child_id or run.get("run_attempt") != 1
                 or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "main"):
             raise Invalid("dispatch child identity invalid")
@@ -297,6 +300,7 @@ def main():
     except HTTPError as exc:
         # Report only the numeric status; the exception also carries private
         # request URL, headers, and response body.
+        exc.close()
         code = exc.code
         status = str(code) if type(code) is int and 100 <= code <= 599 else "unknown"
         print(f"protected Sonar caller failed: HTTP status {status}", file=sys.stderr)

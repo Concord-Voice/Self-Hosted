@@ -9,7 +9,7 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
@@ -261,12 +261,37 @@ class CallerTests(unittest.TestCase):
 
     def test_dispatch_run_404_past_visibility_window_fails(self):
         args = self._watch_args()
+        calls, errors = [], []
+
+        def open_mock(request, timeout):
+            calls.append(request)
+            if len(calls) == 1:
+                return Response(200, {"workflow_run_id": 777})
+            errors.append(self._http_error(404))
+            raise errors[-1]
+
+        with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                patch.object(CALLER, "urlopen", open_mock), \
+                patch.object(CALLER.time, "sleep") as sleep:
+            with self.assertRaises(HTTPError):
+                CALLER.dispatch_watch(args)
+        # Pinned on purpose: the window is one minute, six 10-second polls.
+        self.assertEqual(len(calls), 8)
+        self.assertEqual(sleep.call_args_list, [call(10)] * 6)
+        self.assertTrue(all(error.fp.closed for error in errors), "every 404 body must be closed")
+
+    def test_dispatch_run_404_after_run_was_seen_fails(self):
+        # Once the run has answered, a 404 means it is gone, not "not yet visible".
+        args = self._watch_args()
         calls = []
 
         def open_mock(request, timeout):
             calls.append(request)
             if len(calls) == 1:
                 return Response(200, {"workflow_run_id": 777})
+            if len(calls) == 2:
+                return Response(200, {"id": 777, "run_attempt": 1, "event": "workflow_dispatch",
+                                      "head_branch": "main", "status": "in_progress"})
             raise self._http_error(404)
 
         with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
@@ -274,8 +299,8 @@ class CallerTests(unittest.TestCase):
                 patch.object(CALLER.time, "sleep") as sleep:
             with self.assertRaises(HTTPError):
                 CALLER.dispatch_watch(args)
-        self.assertEqual(len(calls), 1 + CALLER.MAX_NOT_VISIBLE + 1)
-        self.assertEqual(sleep.call_count, CALLER.MAX_NOT_VISIBLE)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 1)
 
     def test_dispatch_run_other_http_error_is_not_retried(self):
         for code in (401, 403, 500):
@@ -410,10 +435,13 @@ class CallerTests(unittest.TestCase):
                 args.out.unlink(missing_ok=True)
                 output, stdout = StringIO(), StringIO()
                 private_url = "https://private-api.invalid/dispatch?token=private-url-token"
-                failure = HTTPError(private_url, code, "private-http-message",
+                failure = HTTPError(private_url, 0, "private-http-message",
                                     {"Authorization": "Bearer private-header-token",
                                      "X-Private": "private-response-header"},
                                     UnreadableBody(b"private-response-body"))
+                # Assigned after construction: Python 3.15's HTTPError.__init__
+                # formats the code, which PrivateCode forbids by design.
+                failure.code = code
                 with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
                         patch.object(CALLER, "urlopen", side_effect=failure) as request, \
                         patch.object(CALLER.time, "sleep") as sleep, \
@@ -424,6 +452,7 @@ class CallerTests(unittest.TestCase):
                 request.assert_called_once()
                 sleep.assert_not_called()
                 self.assertFalse(args.out.exists(), "failed dispatch must not record a child run")
+                self.assertTrue(failure.fp.closed, "dispatch error body must be closed")
                 self.assertEqual(stdout.getvalue(), "")
                 self.assertEqual(output.getvalue(),
                                  f"protected Sonar caller failed: HTTP status {expected}\n",
