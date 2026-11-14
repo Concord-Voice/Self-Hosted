@@ -193,16 +193,14 @@ func VerifyBackupCode(code string, hashes []string, used []bool) (index int, mat
 	normalized = strings.ToUpper(normalized)
 	codeHash := sha256.Sum256([]byte(normalized))
 
-	for i, stored := range parsed {
+	for i := 0; i < len(parsed) && i < len(used); i++ {
 		// A code with no used flag is treated as used: the arrays are written
 		// together, so a short one is a damaged row, and the caller indexes
 		// used[i] to mark the match.
-		if i >= len(used) {
-			continue
-		}
 		if used[i] {
 			continue
 		}
+		stored := parsed[i]
 		candidate := codeHash[:]
 		if stored.salt != nil {
 			candidate = argon2.IDKey([]byte(normalized), stored.salt, 1, 8192, 1, 32)
