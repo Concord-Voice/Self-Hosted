@@ -7,6 +7,7 @@ allowed-tools:
   - Bash(gh api *)
   - Bash(gh issue view *)
   - Bash(.claude/skills/enhanced-pr-review/check-review-dispositions.sh *)
+  - Bash(.claude/skills/enhanced-pr-review/review-coverage.sh *)
   - Read
   - Grep
   - Glob
@@ -156,7 +157,24 @@ Why a third fetch — this is where verdict-only reviewers and CI-poster workflo
 
 **Step 5** — Dispatch the project-side specialist-agent suite **directly via the Agent tool**, per the single source of truth [`_shared/pr-review-agent-dispatch.md`](../_shared/pr-review-agent-dispatch.md) (security-reviewer always (or the repo's `.review_agents.mandatory` floor, read from the merge base with the default branch); red-team by the Codex-conditional risk tiers, plus the repo's `.red_team.critical_agent` at T3 when one is set; code-reviewer mandatory when Codex's code review has not covered the head and optional when it has; docs-reviewer and scope-reviewer on their triggers; plus file-pattern specialists; the IPC row is the model-invocable `/ipc-channel-audit` skill), unioned with the specialist subagents the repo declares in `.claude/repo-config.json` `.review_agents` (`.base` always-run agents plus `.patterns[]` matches). Follow the `review-pr` skill's dispatch procedure for the `.review_agents` part — its mandatory-base union and its exclusion of any agent whose definition this PR modifies — rather than re-deriving it, and take the always-run floor from its trust guard's resolved `MANDATORY_BASE` (read from the merge base with the default branch), never from the checkout's repo-config. The floor sets only the always-on rows; the Codex-conditional and risk-tiered rules above still decide everything else. Dispatching the agents directly here inherits the authorization of this `/enhanced-pr-review` invocation (reached via `/dev-lifecycle` Phase 8 or invoked directly). **Do NOT substitute with a single agent or manual review.** (Why direct dispatch, not `Skill(review-pr)`: the `review-pr` skill is `disable-model-invocation: true` — a user-facing convenience the model cannot invoke; agent dispatch bypasses the skill boundary. See `.claude/rules/skill-authoring.md`, installed there by `install.sh claude`.)
 
-> **Drift / config-schema review is delegated.** Reviewing config-drift or config-schema changes is the job of whatever reviewer the repo wires up for those paths in `.review_agents` (`.patterns[]`); this skill does not own that check, and any review fixtures for it live alongside that agent, not here. This skill ships no test fixtures of its own beyond the disposition gate's — its surface is the reconciliation/gate logic above, exercised against live PRs.
+> **Drift / config-schema review is delegated.** Reviewing config-drift or config-schema changes is the job of whatever reviewer the repo wires up for those paths in `.review_agents` (`.patterns[]`); this skill does not own that check, and any review fixtures for it live alongside that agent, not here. The only fixtures this skill ships are for its two check scripts (`test-check-review-dispositions.sh`, `test-review-coverage.sh`); the rest of its surface is exercised against live PRs.
+
+**Step 6 — Bot-author caveat: review coverage on HEAD.** Applies only when the PR author is a bot (`gh pr view $0 --json author --jq '.author.is_bot'` prints `true`: Dependabot, github-actions, Renovate and the like). A bot-authored PR gets no automatic review — Copilot does not review a bot-authored PR unless a maintainer requests it — and an org admin exempt from the default-branch ruleset can merge it with no review at all. So check, and do not count this skill's own pass yet:
+
+```bash
+.claude/skills/enhanced-pr-review/review-coverage.sh $0   # exit 0 covered · 1 zero · 2 UNKNOWN
+```
+
+Coverage is SHA-bound and comes from a trusted reviewer. It is either a submitted review whose `commit_id` is the head SHA, by someone other than the PR author who is a human repo insider (`author_association` `OWNER` / `MEMBER` / `COLLABORATOR`) or an allowlisted review bot, or a **first-party coverage record**. A bot must be on the allowlist even when it carries an insider association. The allowlist is Copilot plus the logins in the base branch's `.claude/repo-config.json` `.review_coverage.reviewer_bots`; other bots, such as a code-scanning bot, do not count. A first-party record is a conversation comment with `<!-- cv-review-coverage: sha=<head SHA> reviewer=<login> suite=<skill> -->` on a line of its own, posted by `<login>` under the same trust rule as a review: not the PR author, and a human insider or an allowlisted bot. A review or record on an older SHA is stale and does not count — a push or an `@dependabot rebase` moves the head and resets coverage. Comments and check runs that name no SHA do not count either. Put the printed line in the Phase 3 table as its own row, and feed the exit code to §6.0 precondition 10.
+
+This skill's Step 5 specialist-suite pass is not coverage until it is recorded, because the record is what puts a reviewer's identity against the SHA. To record it, after the Phase 3 triage and with the developer's go-ahead, post from a body file:
+
+```markdown
+<!-- cv-review-coverage: sha=<head SHA> reviewer=<gh user login> suite=/enhanced-pr-review -->
+**First-party review** at `<sha7>` by <login> via `/enhanced-pr-review` (<agents that ran>): <N findings | clean>.
+```
+
+Post one record per head SHA. If your own record for this SHA already exists (filter on `user.login` equal to the gh user), edit it in place; never edit anyone else's comment. Then re-run the check. If it still does not exit 0, the record did not land, so say that and do not claim coverage. `/weekly-deps` Phase 3.7 writes the same record when it runs the first-party suite itself.
 
 ### Phase 1.5 — Catalog dispatch for Phase-8 candidate skills
 
@@ -879,6 +897,7 @@ The approval artifact may be emitted ONLY if ALL of the following hold. If ANY f
 7. **Every `Fix`-marked finding is actually resolved** — verify by reading `gh pr diff $0` / the fix-commit SHAs, not by asserting it. A finding you intended to fix but didn't push is still open.
 8. **HEAD is the commit being approved** — no unpushed local fixes. The artifact references the current HEAD SHA. If the active ruleset dismisses stale reviews on push (the common configuration), **any later push dismisses the approval** — so Phase 6 is genuinely the last step before merge. If a fix still needs to land, you are not in Phase 6 yet.
 9. **No UNVERIFIED autonomous-agent (autofix) action remains** (Phase 1.7). Every footprint action carries a disposition; every non-`Verified-correct`, non-`No-finding` disposition has a landed Fix commit (verify by diff per precondition 7). This precondition is about the autofix agent's **change**, and precondition 6 is about the **decision record**; they are independent and both must hold. A `cv-disposition` marker on a thread does not discharge this one — an agent's unreviewed commit needs re-review on its merits no matter how well the thread was answered. A manufactured green — the agent resolved a thread it did not fix, a reviewer bot re-approved a cosmetic change, or a failing test was deleted/skipped to green CI — does NOT satisfy this gate. If any footprint action is still `UNVERIFIED`, this precondition FAILS. A **`No-finding`** disposition (a benign non-autofix commit that §1.7.2 tied to no finding and no thread) is informational and does NOT block. When Phase 1.7 reported `Autofix footprint: none detected`, this precondition is trivially satisfied.
+10. **(Bot-authored PRs only) review coverage exists on HEAD.** Phase 1 Step 6's check exits 0 at the current head SHA. Exit 1 (zero coverage, including a review that landed only on an older SHA) and exit 2 (UNKNOWN) both fail this precondition. Zero coverage informs; it does not block mechanically. It produces this NOT-READY and nothing else: no status check, no required check, no ruleset change. Evaluate it **before** §6.1 posts anything, because a formal approval posted by this phase is itself a review at HEAD and would satisfy the check it was meant to answer.
 
 **Faithful reporting (non-negotiable):** the artifact reports the *actual* state of each signal. Never report a pending check as passed, a true-positive finding as a false-positive, or an unaddressed finding as resolved. If a signal cannot be verified, say so in the artifact — do not infer green.
 
@@ -961,6 +980,8 @@ No approval posted. After the blockers clear, re-run the merge-approval gate —
 (Reminder: a new push dismisses any prior approval — land all fixes before the approval step.)
 ```
 
+For a bot-authored PR that fails precondition 10, the blocker line reads: `- Review coverage — #<n> @<sha7> ZERO coverage; stale: <login>@<sha7> — record the first-party review (Phase 1 Step 6) or get an external review at this SHA, then re-run Phase 6`.
+
 You MAY post this as a comment (it is a truthful status, not an approval), or surface it in chat only — developer's preference. Never convert a NOT-READY into an approval by softening the language.
 
 ### 6.5 — Handoff to merge (Phase 9)
@@ -1003,6 +1024,7 @@ gh pr merge $0 --squash --admin
 - Does not perform the merge — Phase 6 emits the approval artifact and prints the merge command; the merge stays with the developer / `/dev-lifecycle` Phase 9. The skill never runs `gh pr merge` (admin or otherwise).
 - Does not self-approve — for a PR the gh user authored, the Phase 6 artifact is a comment, never `gh pr review --approve` (GitHub rejects self-approval with `422`). The comment is the audit record for a §6.3 documented bypass, not a substitute for an approving review.
 - Does not emit an approval while any §6.0 blocker is live — a pending (≠ passed) check, an unresolved thread, a `BLOCK` row, or an unaddressed `Fix` finding routes to the NOT-READY output (§6.4), regardless of time/exhaustion/authority pressure. Faithful reporting of each signal's actual state is non-negotiable.
+- Does not count a review on an older SHA, an unrecorded subagent pass, or a SHA-less comment as review coverage for a bot-authored PR, and does not turn zero coverage into a required status check — it is a NOT-READY (§6.0 precondition 10), nothing more
 - Does not weaken the ruleset or CODEOWNERS to unblock a PR — single-member-team review friction is solved by adding a member to the code-owner team (`.branch_protection.code_owner_team`), never by a per-PR control carve-out (§6.3).
 
 ---

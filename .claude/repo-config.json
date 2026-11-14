@@ -24,5 +24,10 @@
       "(^|/)\\.claude/(hooks/|settings\\.json|repo-config\\.json|\\.agentic-dev-tooling\\.lock$)",
       "scripts/repo-config\\.sh$"
     ]
+  },
+  "review_coverage": {
+    "reviewer_bots": [
+      "gitar-bot[bot]"
+    ]
   }
 }
