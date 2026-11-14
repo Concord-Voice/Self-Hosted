@@ -160,9 +160,11 @@ func checkPendingUniqueness(
 
 // checkUsersUniqueness verifies that neither the email nor username is already
 // registered in the users table. Returns ErrEmailAlreadyRegister or ErrUsernameTaken.
-func checkUsersUniqueness(ctx context.Context, tx *sql.Tx, lowerEmail, lowerUsername string) error {
+func checkUsersUniqueness(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, lowerEmail, lowerUsername string) error {
 	var emailExists bool
-	if err := tx.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(email) = $1)`, lowerEmail,
 	).Scan(&emailExists); err != nil {
 		return err
@@ -172,7 +174,7 @@ func checkUsersUniqueness(ctx context.Context, tx *sql.Tx, lowerEmail, lowerUser
 	}
 
 	var usernameExists bool
-	if err := tx.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(username) = $1)`, lowerUsername,
 	).Scan(&usernameExists); err != nil {
 		return err
