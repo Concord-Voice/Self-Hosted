@@ -71,6 +71,7 @@ func TestSSOCookieRouteInventory(t *testing.T) {
 		"auth/handlers.go:rotateAndRespond":         1, // refresh exemption
 		"auth/handlers.go:handleGracePeriodRefresh": 1, // refresh exemption
 		"auth/handlers.go:Logout":                   1, // logout exemption, clear only
+		"auth/sso_link.go:CompleteSSOLink":            1, // mfa/verify link completion
 		"oauth/handler.go:respondExistingSSO":       2, // provider/session
 		"oauth/handler.go:CompleteRegistration":     1, // provider/complete-registration
 		"oauth/handler.go:CompleteLink":             1, // provider/complete-link
