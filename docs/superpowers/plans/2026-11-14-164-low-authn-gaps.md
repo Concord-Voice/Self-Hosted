@@ -4,7 +4,7 @@
 
 **Goal:** Close Security #164's six owned low-severity authentication gaps while verifying, but not duplicating, Security #39's refresh-machine fix.
 
-**Architecture:** Patch the existing ownership seams and ship three independently reviewed Self-Hosted PRs: WebAuthn, MFA storage/input, and registration/WebSocket admission. Each merged source PR is then imported to Hosted through a separate reviewed mirror PR. No new framework, route, dependency, or configuration variable is added.
+**Architecture:** Patch the existing ownership seams as three workstreams: WebAuthn, MFA storage/input, and registration/WebSocket admission. The MFA storage workstream is deliberately split into B1 compatible-reader and B2 migration/writer PRs. Each merged source PR is then imported to Hosted through a separate reviewed mirror PR. No new framework, route, dependency, or configuration variable is added.
 
 **Tech Stack:** Go 1.27, Gin, PostgreSQL 16, Redis/go-redis, go-webauthn v0.18.2, `golang.org/x/crypto/argon2`, OpenAPI YAML.
 
@@ -18,6 +18,7 @@
 - Keep shared default Go caches. Do not set `GOCACHE`, `GOMODCACHE`, or `GOLANGCI_LINT_CACHE`.
 - Preserve #35's conditional backup-code consumption and #36's Redis `GETDEL` ceremony consumption.
 - Backup v2 is exactly Argon2id v19, `m=8192,t=1,p=1`, 16-byte salt, 32-byte digest. Reject any other stored v2 tuple before hashing.
+- B1 reads exact bare/v1/v2 entries but writes only bare legacy SHA-256. B2 retains those reads and switches generation to v2. No migration or v2 writer may activate while any B0 replica can access the database.
 - Registration limits are: body 64 KiB, decoded RSA public key 1 KiB, decoded wrapped private key 32 KiB, decoded KDF salt 64 bytes.
 - WebAuthn credential maximum remains 10.
 - `recovery-only` methods are a unique subset of `totp,webauthn,email,sms` with raw length ≤4. `email-sms/setup` is a unique non-empty subset of `email,sms` with raw length ≤2.
@@ -30,14 +31,16 @@
 | PR | Files owned | Boundary |
 |---|---|---|
 | A — WebAuthn | `internal/mfa/handlers.go`, focused MFA tests, OpenAPI/changelog if response text changes | Clone warning and write-time cap only |
-| B — MFA storage/input | `internal/mfa/totp.go`, backup-code callers/tests, one migration pair, method handlers/tests, `docs/architecture.md`, OpenAPI, changelog | Versioned backup hashes and bounded method sets |
+| B1 — compatible reader | `internal/mfa/totp.go`, backup-code callers/tests, architecture/changelog | Read bare/v1/v2; writer remains bare; no migration |
+| B2 — storage write/migration | same reader/writer surfaces, one migration pair, method handlers/tests, `docs/architecture.md`, OpenAPI, changelog | Retain bare/v1/v2 reads; write v2; prefix legacy rows; bounded method sets |
 | C — registration/WS | `internal/auth/{handlers.go,pending.go}`, `internal/middleware/attestation.go`, `internal/websocket/handler.go`, `internal/api/router.go`, focused tests, architecture/OpenAPI/changelog | Bounded registration and JWT-only attestation |
 | Mirror | Same imported source/docs per merged PR; repo-local migration filename | No independent redesign |
 
 ## Review Focus
 
 - **CloneWarning is checked after sign-count persistence.** Expected: check immediately after library success and before every DB write or authority mint. Pinned in Task 1.
-- **Backup hash parser accepts attacker-sized Argon parameters from a damaged DB row.** Expected: exact parameter/length checks precede `argon2.IDKey`. Pinned in Task 3.
+- **Backup hash parser accepts attacker-sized Argon parameters from a damaged DB row.** Expected: exact parameter/length checks precede `argon2.IDKey`. Pinned in Tasks 3A and 3B.
+- **The migration or v2 writer reaches an old B0 replica.** Expected: B1 reader is deployed everywhere and zero B0 is proven before B2; Hosted never uses direct rolling B0-to-B2. Pinned in Tasks 3A, 3B, and 8.
 - **Credential cap is still a begin-time check.** Expected: count and insert occur after the same users-row lock. Pinned by the concurrent test in Task 2.
 - **A JWT WebSocket is attested twice or a ticket is newly attested.** Expected: shared validator runs only on JWT fallback; ticket regression stays unchanged. Pinned in Task 6.
 - **Registration's 413 path still reaches password hashing.** Expected: body/field bounds and cheap conflicts precede the `HashPassword` AST call site, plus runtime 413 tests. Pinned in Task 5.
@@ -108,9 +111,9 @@
 
 - [ ] **Step 7: PR A gate.** Run diff check, relevant pre-commit hooks, security review, red-team PoC attempt, code/test/docs/scope review, PR CI, and CodeRabbit windows. Stop at Phase 9 for explicit merge approval.
 
-## PR B — MFA storage and bounded method input
+## PR B1/B2 — MFA storage and bounded method input
 
-### Task 3: Migrate backup-code elements to closed v1/v2 formats
+### Task 3A: Land the compatible backup-code reader without changing writes
 
 **Files:**
 - Modify: `services/control-plane/internal/mfa/totp.go`
@@ -118,9 +121,6 @@
 - Test: `services/control-plane/internal/mfa/totp_test.go`
 - Test: `services/control-plane/internal/mfa/handlers_unit_test.go`
 - Test: `services/control-plane/internal/mfa/totp_step_replay_test.go`
-- Create: `services/control-plane/migrations/000195_backup_code_hash_versions.up.sql` (re-resolve number)
-- Create: `services/control-plane/migrations/000195_backup_code_hash_versions.down.sql` (re-resolve number)
-- Modify: `services/control-plane/migrations/TEST_MIGRATIONS.md`
 - Modify: `docs/architecture.md`
 - Modify: `CHANGELOG.md`
 
@@ -129,25 +129,44 @@
 - Change: `VerifyBackupCode(code string, hashes []string, used []bool) (index int, matched bool, err error)`.
 - Add package-private exact codec helpers; no generic password-hash wrapper.
 
-- [ ] **Step 1: Write codec tests.** Assert generated entries start with the exact v2 prefix, eight salts are distinct and 16 bytes, digests are 32 bytes, correct normalized codes match, wrong codes do not, and used indices are skipped.
+- [ ] **Step 1: Write the B1 compatibility matrix.** Assert exact bare lowercase 64-hex, v1, and v2 fixtures verify; uppercase/short/long bare values and malformed versioned values fail closed. Correct codes match, wrong codes do not, and used indices are skipped.
 
 - [ ] **Step 2: Write parser-abuse tests.** Malformed v1/v2, different algorithm/version, `m/t/p` changes, wrong salt/digest lengths, and very large numeric parameters return an error before calling Argon2. Keep the parser exact rather than accepting arbitrary PHC strings.
 
-- [ ] **Step 3: Write compatibility tests.** A `v1$` SHA-256 fixture verifies once through the real consume path; after backup-code regeneration, the old legacy code fails and a new v2 code succeeds.
+- [ ] **Step 3: Pin the B1 writer.** Assert `GenerateBackupCodes` still writes exact bare lowercase 64-hex SHA-256. This is a rollout invariant, not temporary test looseness.
 
-- [ ] **Step 4: Write migration tests.** Up prefixes every bare 64-hex array element without changing element order or `backup_codes_used`. Down strips v1 on a table lock when no v2 exists and raises when any v2 exists.
+- [ ] **Step 4: Write real consume-path compatibility tests.** Bare, v1, and v2 fixtures each verify once through the conditional consumption path; malformed storage authenticates none.
 
-- [ ] **Step 5: Run red.** Run focused MFA tests and the repository migration test command documented in `TEST_MIGRATIONS.md`. Expected: v2/migration assertions fail.
+- [ ] **Step 5: Run red.** Run focused MFA tests. Expected: v1/v2 reads and verification-error plumbing fail while bare generation stays green.
 
-- [ ] **Step 6: Implement the v2 codec.** Use `argon2.IDKey` from the already installed `x/crypto`; constants are `8192,1,1,16,32`. Normalize exactly as today (`strings.ToUpper(strings.TrimSpace(code))`). Compare decoded digests with `subtle.ConstantTimeCompare`.
+- [ ] **Step 6: Implement the expand reader only.** Parse exact bare/v1/v2 forms. Use `argon2.IDKey` only for exact v2 with constants `8192,1,1,16,32`; normalize exactly as today and compare decoded digests with `subtle.ConstantTimeCompare`. Do not switch generation and do not add a migration.
 
 - [ ] **Step 7: Thread verification errors.** Update every `VerifyBackupCode` caller. A malformed stored element is a dependency/storage failure and cannot authenticate. Preserve the existing conditional `backup_codes_used` update and result checks.
 
-- [ ] **Step 8: Add the migration pair.** Transform only bare legacy hashes. The down migration locks before checking and aborts if any array element has the v2 prefix.
+- [ ] **Step 8: Verify and document B1.** Run focused tests, `go test -race ./internal/mfa -count=1`, and scoped lint. Document that B1 changes reads only and must reach every replica before B2.
 
-- [ ] **Step 9: Verify and document.** Run focused tests, migration tests, `go test -race ./internal/mfa -count=1`, and scoped lint. Document v1/v2 storage and guarded rollback in architecture and migration docs; add `[Prerelease]` bullet.
+- [ ] **Step 9: Gate and commit B1.** Commit `fix(mfa): expand backup code hash reader`; complete the independent security/code/test/docs/scope and CI gates. Do not combine B1 with B2.
 
-- [ ] **Step 10: Commit.** Commit code/tests first (`fix(mfa): salt backup code hashes`), then migration/docs if hooks require a separate reviewable commit (`docs: document versioned backup code storage`). Both remain in PR B.
+### Task 3B: After B1 adoption, migrate rows and enable v2 writes
+
+**Additional files:**
+- Create: `services/control-plane/migrations/000195_backup_code_hash_versions.up.sql` (re-resolve number)
+- Create: `services/control-plane/migrations/000195_backup_code_hash_versions.down.sql` (re-resolve number)
+- Modify: `services/control-plane/migrations/TEST_MIGRATIONS.md`
+
+- [ ] **Step 1: Prove the deployment prerequisite.** For Hosted, record both blue/green pools and background workers on B1-or-newer with zero B0 replicas. For a one-shot Self-Hosted upgrade, record that all B0 processes are stopped and database-fenced. A source merge or green CI run is not this proof.
+
+- [ ] **Step 2: Write B2 codec tests.** Assert generated entries use exact v2, all eight salts are distinct and 16 bytes, digests are 32 bytes, and the B2 reader continues accepting bare/v1/v2.
+
+- [ ] **Step 3: Write mixed-version tests.** Model B1 and B2 readers around the migration: B1 reads migrated v1, B1 reads newly generated v2, B2 reads a late bare row, and application rollback from B2 to B1 reads all persisted forms. Assert the B1 writer never creates v2.
+
+- [ ] **Step 4: Write migration tests.** Up prefixes every bare 64-hex array element without changing order or `backup_codes_used` and is safe to rerun. Down strips v1 under a table lock only when no v2 exists and raises when any v2 exists. Update all repository fixtures that insert backup hashes after migrations to use a reader-supported form.
+
+- [ ] **Step 5: Implement B2.** Retain the B1 reader unchanged, switch only generation to v2, and add the migration pair. Preserve the conditional consume mutation and verification-error behavior.
+
+- [ ] **Step 6: Verify and document.** Run focused/race MFA tests and migration tests. Document the B1/B2 order, Hosted zero-B0 gate, Self-Hosted full-stop alternative, and why application rollback uses B1 without running the destructive down migration.
+
+- [ ] **Step 7: Commit the B2 storage portion.** Commit code/tests (`fix(mfa): salt backup code hashes`) and migration/docs as required. Task 4 lands in the same B2 PR; run the combined B2 gate only after both tasks are complete.
 
 ### Task 4: Normalize method arrays before loops and writes
 
@@ -175,7 +194,7 @@
 
 - [ ] **Step 6: Verify and commit.** Run focused tests, full MFA race tests, scoped lint, OpenAPI contract test, YAML parse, and diff check. Commit: `fix(mfa): bound authentication method sets`.
 
-- [ ] **Step 7: PR B gate.** Run migration-reviewer, security/red-team/code/test/docs/scope review, quality gate, PR CI, and bot windows. Stop at Phase 9 for explicit merge approval.
+- [ ] **Step 7: PR B2 gate.** Run migration-reviewer, security/red-team/code/test/docs/scope review, quality gate, PR CI, and bot windows for Tasks 3B and 4 together. Stop at Phase 9 for explicit merge approval.
 
 ## PR C — Registration and WebSocket JWT attestation
 
@@ -252,7 +271,7 @@
 
 - [ ] **Step 10: PR C gate.** Run security/red-team/e2ee/code/test/docs/scope review, quality gate, PR CI, and bot windows. Rebase on #44 if it lands; preserve its authoritative-sid namespace. Stop at Phase 9 for explicit merge approval.
 
-## Task 7: Source-wide acceptance after all three PRs
+## Task 7: Source-wide acceptance after all four PRs
 
 - [ ] **Step 1: Run the six finding regressions plus #39 proof on the exact source heads.** Report each finding independently; an unrelated 403 does not prove its intended control.
 
@@ -262,7 +281,7 @@
 
 - [ ] **Step 4: Confirm formal gate evidence.** Each PR must show 0 new blocker/critical issues, 0 new high-confidence security hotspots, and ≥80% new-code coverage, plus its repository-required checks.
 
-## Task 8: Reviewed Hosted mirrors
+## Task 8: Reviewed Hosted mirrors and rollout gates
 
 **Files:** Import each merged Self-Hosted PR's shared `services/control-plane/**`, `docs/api/openapi.yaml`, and applicable architecture/changelog text. Rename the migration pair to the next free Hosted number; do not change its semantics.
 
@@ -272,11 +291,15 @@
 
 - [ ] **Step 2: Re-resolve migration number.** At the inspected Hosted head the candidate is `000198`; use the actual next free number at mirror time and update references/tests.
 
-- [ ] **Step 3: Run the same focused regressions against isolated Hosted services.** Never use the shared `concord` database.
+- [ ] **Step 3: Mirror and deploy B1 first.** The B1 mirror contains no migration and no v2 writer. Complete its independent Phase 9 approval, deploy it through both blue/green pools and all workers, and record deployment inventory showing zero B0 before B2 migration admission.
 
-- [ ] **Step 4: Run Hosted's independent hooks, lint, tests, migration checks, OpenAPI contract, PR CI, security/specialist reviews, and bot windows.** Source green status is not mirror proof.
+- [ ] **Step 4: Prove overlap compatibility.** In an isolated Hosted blue-green rehearsal, keep one B1 pool while introducing B2. Before/after the prefix migration, prove both pools verify bare/v1/v2 fixtures and the B1 pool can consume a code generated by B2.
 
-- [ ] **Step 5: Stop each mirror PR at Phase 9.** Obtain separate explicit merge approval. Do not infer deployment or live acceptance from merge.
+- [ ] **Step 5: Admit B2 only after the gate.** Run the Hosted migration, then roll out the v2 writer. Abort if any B0 replica reappears. A B2 application rollback targets B1 and leaves the database up; do not run down after v2 exists.
+
+- [ ] **Step 6: Run Hosted's independent focused tests, hooks, lint, migration checks, OpenAPI contract, PR CI, security/specialist reviews, and bot windows.** Never use the shared `concord` database; source green status is not mirror proof.
+
+- [ ] **Step 7: Stop each mirror PR at Phase 9.** Obtain separate explicit merge approval. Deployment inventory and overlap proof are separate operational gates; do not infer them from merge.
 
 ## Self-review result
 

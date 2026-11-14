@@ -78,18 +78,21 @@ files are the applicable source of truth in this checkout.
 
 ## Approaches considered
 
-### A. Patch each current seam, split into three review units — selected
+### A. Patch each current seam, split into four review units — selected
 
-Keep the existing handler and transaction ownership. Land three source PRs:
+Keep the existing handler and transaction ownership. Land four source PRs in
+three workstreams:
 
 1. WebAuthn clone rejection and finish-time credential cap.
-2. Versioned backup-code hashes and bounded MFA method sets.
-3. Bounded registration and JWT WebSocket attestation.
+2. Backup-code compatible reader expansion (B1).
+3. Versioned backup-code writes/migration plus bounded MFA method sets (B2).
+4. Bounded registration and JWT WebSocket attestation.
 
 Each PR carries its focused tests and docs. This follows the issue dossier,
 keeps migration/storage review separate from WebSocket admission, and lets a
-reviewer reject one control without holding unrelated fixes. The cost is three
-source and three mirror gates.
+reviewer reject one control without holding unrelated fixes. The cost is four
+source and four mirror gates because the B1/B2 storage compatibility boundary
+must be independently deployable.
 
 ### B. One six-finding PR
 
@@ -180,11 +183,15 @@ without multiplying one valid request into half a gigabyte of memory. The
 parser rejects any different algorithm, version, parameter tuple, salt length,
 digest length, or malformed encoding before calling Argon2.
 
-Generation writes only v2. Verification accepts both exact formats, uses
-constant-time digest comparison, skips used indices, and returns an error for a
-malformed stored element. A storage error fails the verifier closed. The
-existing atomic consumption mutation remains the sole owner of marking a code
-used; #164 does not redesign Security #35.
+The steady-state writer emits only v2. The rollout reader accepts three exact
+representations: bare lowercase 64-hex legacy SHA-256, `v1$` plus that same
+digest, and v2. Bare acceptance is intentionally retained after migration so a
+B2 binary can read a row created by an in-flight B1 request and a B1 binary can
+be used for application rollback. Removing bare reads is a later cleanup, not
+part of #164. Verification uses constant-time digest comparison, skips used
+indices, and returns an error for any other stored element. A storage error
+fails the verifier closed. The existing atomic consumption mutation remains
+the sole owner of marking a code used; #164 does not redesign Security #35.
 
 Migration `000195` rewrites every bare 64-hex legacy element to `v1$...` in
 place while preserving array order and `backup_codes_used`. It does not hash or
@@ -192,6 +199,24 @@ log plaintext because none exists. Its down migration strips `v1$` only after
 holding the table lock and proving that no v2 element exists; if any v2 code
 has been generated, downgrade aborts. Silently discarding v2 codes would lock
 users out and is forbidden.
+
+This storage change uses an expand-then-write rollout:
+
+1. **B1 compatible reader:** deploy a reader that accepts bare, v1, and v2 to
+   every replica, while `GenerateBackupCodes` continues writing bare legacy
+   SHA-256. B1 changes no rows and cannot create data an old B0 replica rejects.
+2. **B2 migration and writer:** only after B0 replica count is proven zero, run
+   the prefix migration and enable v2 generation. B1 and B2 both read the
+   resulting v1/v2 rows, so blue-green overlap and application rollback to B1
+   are safe. Rollback to B0 is forbidden. The guarded down migration is not
+   required for application rollback.
+
+Hosted MUST use this two-phase sequence because its blue-green pools overlap.
+An operator-controlled Self-Hosted installation may instead perform a one-shot
+upgrade only if all B0 processes and workers are stopped and fenced from the
+database before migration, and only B2 starts afterward. Direct rolling
+B0-to-B2 deployment is forbidden: after the prefix migration B0 rejects v1,
+and after the first B2 regeneration B0 rejects v2.
 
 ### 4. MFA method inputs become bounded closed sets
 
@@ -282,11 +307,14 @@ WebSocket code.
 1. Security #39 lands and proves VULN-009. #164 records that exact-head result;
    it does not duplicate the fix.
 2. **PR A:** VULN-021 + VULN-026 (WebAuthn).
-3. **PR B:** VULN-022 + VULN-028 (MFA storage/input). It may land after A and
-   must coordinate with Security #35 if that issue edits the same verifier.
-4. **PR C:** VULN-002 + VULN-192 (registration/WS). It coordinates with
+3. **PR B1:** backup-code compatible reader only. It accepts bare/v1/v2 while
+   leaving the legacy bare writer unchanged.
+4. Deploy B1 to every Hosted blue/green replica and prove B0 count is zero.
+5. **PR B2:** v2 writer, prefix migration, and VULN-028 method bounds. It must
+   coordinate with Security #35 if that issue edits the same verifier.
+6. **PR C:** VULN-002 + VULN-192 (registration/WS). It coordinates with
    Security #44 at the shared attestation validator.
-5. After each Self-Hosted source PR merges, create the scheduled reviewed Hosted
+7. After each Self-Hosted source PR merges, create the scheduled reviewed Hosted
    mirror PR from the merged source commit. Re-resolve migration numbering and
    run Hosted's own hooks, CI, reviews, and Phase 9 approval.
 
@@ -318,9 +346,12 @@ Required proof:
   sign-count write, no session/token, denied WebAuthn event.
 - CloneWarning false with zero and increasing counters: existing success.
 - Two barrier-synchronized finishes from nine credentials: final count 10.
-- v1 fixture verifies and consumes once; v2 entries have distinct salts and
-  verify; malformed/oversized parameter strings fail without Argon allocation;
-  regeneration makes old v1 codes unusable.
+- B1 reads bare/v1/v2 while its generator still writes bare; B2 reads all three
+  while its generator writes v2. Mixed B1/B2 verification succeeds before and
+  after migration, including B2-to-B1 application rollback.
+- v1 verifies and consumes once; v2 entries have distinct salts and verify;
+  malformed/oversized parameter strings fail without Argon allocation;
+  regeneration makes old codes unusable.
 - Migration up marks v1 without changing order/used flags; guarded down works
   before v2 and refuses after v2.
 - 1,000 duplicate methods returns 400 and produces no Redis code; small
@@ -339,7 +370,7 @@ Required proof:
 | `@code-reviewer` | always |
 | `@scope-reviewer` | always, advisory |
 | `@red-team` | `risk: security`, `internal/auth/**` |
-| `@migration-reviewer` | `services/control-plane/migrations/*.sql` in PR B |
+| `@migration-reviewer` | `services/control-plane/migrations/*.sql` in PR B2 |
 | `@pr-review-toolkit:silent-failure-hunter` | Go service files |
 | `@pr-review-toolkit:pr-test-analyzer` | `*_test.go` changes |
 | `@docs-reviewer` | Markdown changes |
@@ -350,10 +381,10 @@ WebSocket change is the Go control plane, not `services/media-plane/**`.
 
 ## Count-bearing surfaces
 
-- Migration files: yes (PR B, one up/down pair).
+- Migration files: yes (PR B2, one up/down pair).
 - API routes: behavior and OpenAPI contracts change, but no route is added or
   removed.
-- Test files: yes in all three PRs.
+- Test files: yes in all four PRs.
 - Go packages: existing packages only; package count unchanged.
 - Zustand stores and CSS theme blocks: no.
 
@@ -381,7 +412,7 @@ Docs ship in the PR that changes their contract; no follow-up docs PR.
 | VULN-009 remains owned by #39 | #39 exact-head regression result; no duplicate #164 production edit |
 | Clone warning denied | login and inline tests show no counter write or authority mint |
 | Write-time cap | real PostgreSQL concurrent finish test leaves at most ten |
-| Salted backup storage | distinct v2 salts; v1 compatibility; guarded migration and regeneration proof |
+| Salted backup storage | B1/B2 compatibility matrix, zero-B0 rollout gate, distinct v2 salts, guarded migration and regeneration proof |
 | Bounded method sets | 1,000-entry case stops before Redis; duplicate small set creates one code |
 | Bounded registration | +1 body returns 413 and zero hashes; each decoded field bound; Desktop fixture succeeds |
 | WS attestation parity | enabled JWT no-attestation denial and valid-attestation success; ticket regression green |
@@ -406,6 +437,7 @@ Docs ship in the PR that changes their contract; no follow-up docs PR.
 | Risk | Likelihood | Mitigation |
 |---|---:|---|
 | Backup verification becomes a resource amplifier | Medium | exact low Argon2 tuple, eight-code ceiling, #157 account budget, malformed-parameter precheck |
+| Migration or v2 write reaches a B0 replica | High | B1 read expansion first; zero-B0 gate; Hosted blue-green overlap test; Self-Hosted full-stop alternative only |
 | Downgrade destroys v2 codes | High impact | table lock + refuse down while any v2 entry exists |
 | Finish cap races at nine | High without lock | count and insert after the existing users-row lock in one transaction |
 | Zero-counter authenticators are falsely rejected | Low | branch only on library `CloneWarning`; zero/increasing counter regression tests |
