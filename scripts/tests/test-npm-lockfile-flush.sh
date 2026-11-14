@@ -47,9 +47,11 @@ extract_step() { # $1 = step name, $2 = output file
 
 extract_step 'Refresh the three lockfiles within existing ranges' "$WORK/refresh.sh" \
   && ok "extracted the refresh step" || { bad "could not extract the refresh step"; exit 1; }
+extract_step 'Contention guard — defer if open Dependabot npm PRs touch these lockfiles' "$WORK/guard.sh" \
+  && ok "extracted the guard step" || { bad "could not extract the guard step"; exit 1; }
 extract_step 'Render PR body' "$WORK/render.sh" \
   && ok "extracted the render step" || { bad "could not extract the render step"; exit 1; }
-for s in refresh render; do
+for s in guard refresh render; do
   bash -n "$WORK/$s.sh" 2>"$WORK/syntax.err" && ok "$s step is valid bash" \
     || bad "$s step has a bash syntax error" "$(cat "$WORK/syntax.err")"
 done
@@ -87,6 +89,8 @@ case "$NPM_STUB_MODE" in
   manifest) [ "$PWD" = "$NPM_STUB_ROOT/services/media-plane" ] && \
               printf '{"name":"r","devDependencies":{"dep":"^1.2.0"}}\n' > package.json ;;
   stray)    [ "$PWD" = "$NPM_STUB_ROOT" ] && touch stray.txt ;;
+  downgrade) [ "$PWD" = "$NPM_STUB_ROOT/services/media-plane" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"0.9.0"}}}\n' > package-lock.json ;;
   none)     ;;
 esac
 exit 0
@@ -135,10 +139,52 @@ run_refresh stray
   && ok "any other new file fails the run" \
   || bad "an untracked file must fail the run" "rc=$RC"$'\n'"$OUT"
 
+run_refresh downgrade
+[ "$RC" -ne 0 ] && [ -z "$OUTPUTS" ] && grep -q 'services/media-plane/package-lock.json: node_modules/dep 1.0.0 -> 0.9.0' <<<"$OUT" \
+  && ok "a downgrade fails the run and names the lockfile, package and versions" \
+  || bad "a downgrade must fail the run" "rc=$RC outputs=$OUTPUTS"$'\n'"$OUT"
+
 run_refresh bump 0
 [ "$RC" -ne 0 ] && [ ! -s "$WORK/npm.log" ] && grep -q 'no min-release-age' <<<"$OUT" \
   && ok "an npm without min-release-age fails before any update, even with the env set" \
   || bad "an npm without min-release-age must fail before updating" "rc=$RC"$'\n'"$OUT"
+
+# ── guard step: which open PRs defer the run ────────────────────────────────
+# The stub gh applies the step's own --jq filter to fixture PR JSON, so the
+# filter itself is what is tested.
+cat > "$WORK/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  pr)
+    if [ "$2" = list ]; then
+      while [ $# -gt 0 ]; do [ "$1" = --jq ] && { jq -r "$2" "$GH_STUB_PRS"; exit; }; shift; done
+      exit 1
+    fi
+    [ "$2" = comment ] && echo "comment $3" >> "$GH_STUB_LOG" ;;
+  api) echo 0 ;;
+esac
+STUB
+chmod +x "$WORK/bin/gh"
+run_guard() { # $1 = fixture PR JSON; sets OUT, RC, OUTPUTS
+  printf '%s' "$1" > "$WORK/prs.json"; : > "$WORK/gh.log"; : > "$WORK/gh_output"
+  OUT=$(PATH="$WORK/bin:$PATH" GH_STUB_PRS="$WORK/prs.json" GH_STUB_LOG="$WORK/gh.log" \
+        GITHUB_OUTPUT="$WORK/gh_output" GITHUB_SERVER_URL=https://github.invalid \
+        GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1 bash "$WORK/guard.sh" 2>&1); RC=$?
+  OUTPUTS=$(cat "$WORK/gh_output")
+}
+DEP='"author":{"login":"app/dependabot"},"isCrossRepository":false'
+run_guard "[{\"number\":1,\"headRefName\":\"dependabot/npm_and_yarn/vite-1\",$DEP},
+  {\"number\":2,\"headRefName\":\"dependabot/npm_and_yarn/dot-github/tools/license-checker/x-1\",$DEP},
+  {\"number\":3,\"headRefName\":\"dependabot/npm_and_yarn/evil\",\"author\":{\"login\":\"app/dependabot\"},\"isCrossRepository\":true},
+  {\"number\":4,\"headRefName\":\"dependabot/npm_and_yarn/evil\",\"author\":{\"login\":\"mallory\"},\"isCrossRepository\":false},
+  {\"number\":5,\"headRefName\":\"dependabot/go_modules/x\",$DEP}]"
+[ "$RC" -eq 0 ] && [ "$OUTPUTS" = "deferred=true" ] && [ "$(cat "$WORK/gh.log")" = "comment 1" ] \
+  && ok "the guard defers on a same-repo Dependabot npm PR and comments on that PR only" \
+  || bad "the guard must count only PR 1 (not license-checker, fork, other author or Go)" "rc=$RC outputs=$OUTPUTS log=$(cat "$WORK/gh.log")"$'\n'"$OUT"
+run_guard "[{\"number\":3,\"headRefName\":\"dependabot/npm_and_yarn/evil\",\"author\":{\"login\":\"mallory\"},\"isCrossRepository\":true}]"
+[ "$RC" -eq 0 ] && [ "$OUTPUTS" = "deferred=false" ] && [ ! -s "$WORK/gh.log" ] \
+  && ok "a spoofed dependabot/... branch does not defer the run" \
+  || bad "a spoofed branch must not defer the run" "rc=$RC outputs=$OUTPUTS"$'\n'"$OUT"
 
 # ── render step: counts per lockfile ────────────────────────────────────────
 REPO=$(make_repo)
@@ -203,6 +249,17 @@ grep -qF -- '--author app/dependabot' <<<"$GUARD_JOB" \
   && grep -qF '.author.login == "app/dependabot" and .isCrossRepository == false' <<<"$GUARD_JOB" \
   && ok "the contention guard counts only Dependabot's own same-repository PRs" \
   || bad "the contention guard must ignore PRs not opened by Dependabot from this repository"
+
+for job in guard refresh open-pr; do
+  if job_block "$job" | grep -qE '^    permissions:$' && job_block "$job" | grep -qxF '      contents: read'; then
+    ok "the $job job declares contents: read"
+  else
+    bad "the $job job must declare its own permissions with contents: read"
+  fi
+done
+[ "$(job_block refresh | grep -cE '^      [a-z-]+: (read|write)$')" -eq 1 ] && [ "$(job_block open-pr | grep -cE '^      [a-z-]+: (read|write)$')" -eq 1 ] \
+  && ok "refresh and open-pr hold no GITHUB_TOKEN scope beyond contents: read" \
+  || bad "refresh and open-pr must hold only contents: read"
 
 # The PR may carry the three lockfiles and nothing else.
 add_paths=$(awk '/^          add-paths: \|/ { p = 1; next } p && /^            / { sub(/^ +/, ""); print; next } p { exit }' <<<"$OPEN_JOB" | sort | tr '\n' ' ')

@@ -12,10 +12,12 @@ name: Refresh npm lockfiles
 # the lockfile. Majors stay with Dependabot. The refresh job fails if anything
 # other than those three lockfiles changed, including any package.json.
 #
-# Runs Tuesday 06:30 UTC, after Dependabot's npm entries (05:00 in
-# .github/dependabot.yml) and the Go flush (06:00). Ordering is not an
-# invariant: the contention guard below defers the run when a Dependabot npm PR
-# for one of these roots is open, whatever the time.
+# Runs Thursday 06:30 UTC. Dependabot opens its npm batch on Tuesday (05:00 in
+# .github/dependabot.yml) and /weekly-deps reviews it on Wednesday, so by
+# Thursday that batch is usually merged. A Tuesday slot would find it still
+# open and defer nearly every week. Ordering is not an invariant: the
+# contention guard below defers the run while a Dependabot npm PR for one of
+# these roots is open, whatever the day.
 #
 # Same three-job shape as go-transitive-flush.yml, and the split is the same
 # security boundary. A job receives every secret it references, and its
@@ -28,11 +30,11 @@ name: Refresh npm lockfiles
 #            out of the artifact, and create-pull-request reads the rendered
 #            body from the artifact directory.
 # Do not merge the jobs, and do not add npm commands to guard or open-pr.
-# scripts/tests/test-npm-lockfile-flush-shape.sh locks these rules.
+# scripts/tests/test-npm-lockfile-flush.sh locks these rules.
 
 on:
   schedule:
-    - cron: "30 6 * * 2"
+    - cron: "30 6 * * 4"
   workflow_dispatch:
 
 # Least-privilege default. The guard job adds only `pull-requests: write`, for
@@ -97,7 +99,7 @@ jobs:
           cat > /tmp/deferral-comment.md <<DEFERRAL
           ${MARKER}
 
-          \`npm-lockfile-flush\` deferred the run for this week. This branch is open against an npm lockfile the flush would also change, so the two PRs would conflict. It runs again next Tuesday 06:30 UTC.
+          \`npm-lockfile-flush\` deferred the run for this week. This branch is open against an npm lockfile the flush would also change, so the two PRs would conflict. It runs again next Thursday 06:30 UTC.
 
           No action needed. Next week the workflow checks again and proceeds once this branch has merged or closed.
 
@@ -165,6 +167,29 @@ jobs:
             (cd "$root" && npm update --package-lock-only --ignore-scripts --min-release-age=7 --no-audit --no-fund)
             echo "::endgroup::"
           done
+
+          # No downgrades. With no package names, `npm update` re-resolves the whole
+          # tree under min-release-age, so a version locked less than 7 days ago
+          # (a Dependabot security fix has no cooldown) is pulled back to an
+          # older one in range. Fail and list them; the next run, once they are
+          # 7 days old, keeps them.
+          DOWNGRADES=""
+          for lock in package-lock.json client/admin/package-lock.json services/media-plane/package-lock.json; do
+            DOWNGRADES+=$(jq -rn --slurpfile old <(git show "HEAD:$lock") --slurpfile new "$lock" --arg lock "$lock" '
+              def core: capture("^(?<a>[0-9]+)[.](?<b>[0-9]+)[.](?<c>[0-9]+)(-(?<p>[0-9A-Za-z.-]+))?$")
+                | [(.a | tonumber), (.b | tonumber), (.c | tonumber), (if .p then 0 else 1 end), (.p // "")];
+              def semver: type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?$");
+              ($old[0].packages | with_entries(.value = .value.version)) as $o
+              | ($new[0].packages | with_entries(.value = .value.version)) as $n
+              | $o | keys[] | select(($o[.] | semver) and ($n[.] | semver))
+              | select(($n[.] | core) < ($o[.] | core))
+              | "\($lock): \(.) \($o[.]) -> \($n[.])\n"')
+          done
+          if [ -n "$DOWNGRADES" ]; then
+            echo "::error::the refresh would downgrade these locked versions (each is newer than the 7-day window):"
+            printf '%s' "$DOWNGRADES"
+            exit 1
+          fi
 
           # Lockfiles only. Any other change, a package.json above all, means npm
           # did something this workflow does not allow: stop.
