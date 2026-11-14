@@ -42,6 +42,7 @@ describe('config', () => {
     delete process.env['JWT_' + 'SECRET'];
     delete process.env.ANNOUNCED_IP;
     delete process.env.ALLOWED_ORIGINS;
+    delete process.env.TRUSTED_PROXIES;
     delete process.env.NUM_WORKERS;
     delete process.env.INITIAL_NUM_WORKERS;
     delete process.env.MEDIA_INSTANCE_COLOR;
@@ -716,7 +717,54 @@ describe('config', () => {
         ENVIRONMENT: 'production',
         SITE_ID: 'us-west',
         ['JWT_' + 'SECRET']: 'my-secure-value',
+        TRUSTED_PROXIES: '10.0.0.9',
       });
+      expect(process.exit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['', 1],
+      [' ', 1],
+      ['not-an-ip', 1],
+      ['10.0.0.9,', 2],
+      ['10.0.0.9,172.16.0.0/12', 2],
+      ['10.0.0.9/31', 1],
+      ['2001:db8::1/127', 1],
+      ['0.0.0.0/0', 1],
+    ])('rejects production TRUSTED_PROXIES %j at position %i', async (value, position) => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await loadConfig({
+          ENVIRONMENT: 'production',
+          SITE_ID: 'us-west',
+          JWT_SECRET: 'secure-test-jwt',
+          TRUSTED_PROXIES: value,
+        });
+        expect(process.exit).toHaveBeenCalledWith(1);
+        expect(error).toHaveBeenCalledWith(expect.stringContaining(`position ${position}`));
+        expect(error.mock.calls.flat().join(' ')).not.toContain('not-an-ip');
+        expect(error.mock.calls.flat().join(' ')).not.toContain('10.0.0.9');
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it.each(['10.0.0.9', '10.0.0.9/32', '2001:db8::1', '2001:db8::1/128'])(
+      'accepts production host route %s',
+      async (value) => {
+        await loadConfig({
+          ENVIRONMENT: 'production',
+          SITE_ID: 'us-west',
+          JWT_SECRET: 'secure-test-jwt',
+          TRUSTED_PROXIES: value,
+        });
+        expect(process.exit).not.toHaveBeenCalled();
+      }
+    );
+
+    it('retains development CIDR ranges and malformed-entry warnings', async () => {
+      const { config } = await loadConfig({ TRUSTED_PROXIES: '172.16.0.0/12,not-an-ip' });
+      expect(config.trustedProxies).toEqual(['172.16.0.0/12', 'not-an-ip']);
       expect(process.exit).not.toHaveBeenCalled();
     });
 
@@ -733,6 +781,7 @@ describe('config', () => {
       ENVIRONMENT: 'production',
       INSTANCE_TYPE: 'saas',
       JWT_SECRET: 'secure-test-jwt', // pragma: allowlist secret -- synthetic test value
+      TRUSTED_PROXIES: '10.0.0.9',
     };
     const cases = [
       {
@@ -748,6 +797,7 @@ describe('config', () => {
           ENVIRONMENT: 'production',
           INSTANCE_TYPE: ' Self-Hosted ',
           JWT_SECRET: 'secure-test-jwt', // pragma: allowlist secret -- same synthetic test value
+          TRUSTED_PROXIES: '10.0.0.9',
         },
         allowed: true,
       },
