@@ -15,43 +15,59 @@ func LoginCSRF(allowedOrigins []string) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-
-		contentTypes := c.Request.Header.Values("Content-Type")
-		if len(contentTypes) != 1 {
-			c.AbortWithStatusJSON(http.StatusUnsupportedMediaType, gin.H{"error": "unsupported_media_type"})
+		if status, code := loginCSRFRejection(c.Request, allowedOrigins); status != 0 {
+			c.AbortWithStatusJSON(status, gin.H{"error": code})
 			return
-		}
-		mediaType, _, err := mime.ParseMediaType(contentTypes[0])
-		if err != nil || mediaType != "application/json" {
-			c.AbortWithStatusJSON(http.StatusUnsupportedMediaType, gin.H{"error": "unsupported_media_type"})
-			return
-		}
-
-		for _, site := range c.Request.Header.Values("Sec-Fetch-Site") {
-			if strings.EqualFold(strings.TrimSpace(site), "cross-site") {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "cross_site_request"})
-				return
-			}
-		}
-
-		origins := c.Request.Header.Values("Origin")
-		if len(origins) > 0 {
-			allowed := false
-			if len(origins) == 1 && origins[0] != "" && origins[0] != "null" && !strings.Contains(origins[0], ",") {
-				for _, candidate := range allowedOrigins {
-					if candidate != "*" && origins[0] == candidate {
-						allowed = true
-						break
-					}
-				}
-			}
-			if !allowed {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid_origin"})
-				return
-			}
 		}
 		c.Next()
 	}
+}
+
+func loginCSRFRejection(r *http.Request, allowedOrigins []string) (int, string) {
+	if !hasJSONContentType(r) {
+		return http.StatusUnsupportedMediaType, "unsupported_media_type"
+	}
+	if hasCrossSiteFetch(r) {
+		return http.StatusForbidden, "cross_site_request"
+	}
+	if !hasAllowedLoginOrigin(r, allowedOrigins) {
+		return http.StatusForbidden, "invalid_origin"
+	}
+	return 0, ""
+}
+
+func hasJSONContentType(r *http.Request) bool {
+	contentTypes := r.Header.Values("Content-Type")
+	if len(contentTypes) != 1 {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentTypes[0])
+	return err == nil && mediaType == "application/json"
+}
+
+func hasCrossSiteFetch(r *http.Request) bool {
+	for _, site := range r.Header.Values("Sec-Fetch-Site") {
+		if strings.EqualFold(strings.TrimSpace(site), "cross-site") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAllowedLoginOrigin(r *http.Request, allowedOrigins []string) bool {
+	origins := r.Header.Values("Origin")
+	if len(origins) == 0 {
+		return true
+	}
+	if len(origins) != 1 || origins[0] == "" || origins[0] == "null" || strings.Contains(origins[0], ",") {
+		return false
+	}
+	for _, candidate := range allowedOrigins {
+		if candidate != "*" && origins[0] == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func loginCookieRoute(path string) bool {

@@ -86,6 +86,33 @@ func TestLoginCSRFGuard(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, w.Code)
 }
 
+func TestLoginCSRFRejectsMixedFetchMetadataAndDuplicateContentType(t *testing.T) {
+	r := gin.New()
+	r.Use(middleware.LoginCSRF([]string{"https://app.example.test"}))
+	r.POST("/api/v1/auth/login", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	t.Run("cross-site among multiple fetch metadata values", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Add("Sec-Fetch-Site", "same-origin")
+		req.Header.Add("Sec-Fetch-Site", "cross-site")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusForbidden, w.Code)
+		require.Contains(t, w.Body.String(), `"error":"cross_site_request"`)
+	})
+
+	t.Run("duplicate content type", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{}`))
+		req.Header.Add("Content-Type", "application/json")
+		req.Header.Add("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+		require.Contains(t, w.Body.String(), `"error":"unsupported_media_type"`)
+	})
+}
+
 func TestLoginCSRFPreflightStaysWithCORS(t *testing.T) {
 	r := gin.New()
 	r.Use(middleware.CORS([]string{"https://app.example.test"}))
