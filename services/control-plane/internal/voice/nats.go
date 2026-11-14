@@ -3943,21 +3943,8 @@ func moveServerVoiceParticipant(
 	// holds the per-user lifecycle lock this transaction holds; an unlocked
 	// deleter could remove the row between the snapshot and ON CONFLICT.
 	if upsertedCount == 1 && admission != nil {
-		result, err := tx.ExecContext(ctx, `
-			DELETE FROM voice_pending_admissions
-			WHERE channel_id = $1 AND user_id = $2
-			  AND admission_id = $3 AND socket_id = $4
-			  AND expires_at > clock_timestamp()
-		`, channelID, senderID, admission.admissionID, admission.socketID)
-		if err != nil {
-			return serverVoiceMutationResult{}, fmt.Errorf("consume pending voice admission: %w", err)
-		}
-		if rowsAffected, err := result.RowsAffected(); err != nil {
-			return serverVoiceMutationResult{}, fmt.Errorf("read pending voice admission consume result: %w", err)
-		} else if rowsAffected != 1 && !priorAdmitted {
-			return serverVoiceMutationResult{}, fmt.Errorf(
-				"%w: consume affected %d rows", errVoicePendingAdmissionMismatch, rowsAffected,
-			)
+		if err := consumeServerVoiceAdmission(ctx, tx, channelID, senderID, admission, priorAdmitted); err != nil {
+			return serverVoiceMutationResult{}, err
 		}
 	}
 	result := serverVoiceMutationResult{
@@ -3976,6 +3963,35 @@ func moveServerVoiceParticipant(
 		result.removedRoomIDs = append(result.removedRoomIDs, roomID)
 	}
 	return result, nil
+}
+
+// consumeServerVoiceAdmission removes the join's exact reservation. Finding
+// none is a mismatch unless priorAdmitted says this exact join already
+// committed (see moveServerVoiceParticipant).
+func consumeServerVoiceAdmission(
+	ctx context.Context,
+	tx *sql.Tx,
+	channelID, senderID uuid.UUID,
+	admission *voiceJoinedAdmission,
+	priorAdmitted bool,
+) error {
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM voice_pending_admissions
+		WHERE channel_id = $1 AND user_id = $2
+		  AND admission_id = $3 AND socket_id = $4
+		  AND expires_at > clock_timestamp()
+	`, channelID, senderID, admission.admissionID, admission.socketID)
+	if err != nil {
+		return fmt.Errorf("consume pending voice admission: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read pending voice admission consume result: %w", err)
+	}
+	if rowsAffected != 1 && !priorAdmitted {
+		return fmt.Errorf("%w: consume affected %d rows", errVoicePendingAdmissionMismatch, rowsAffected)
+	}
+	return nil
 }
 
 func (s *NATSSubscriber) currentServerVoiceScope(
