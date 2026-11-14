@@ -14,7 +14,7 @@
 
 - Work on `feature/security-157-account-attempt-budgets`; PR references must say `Concord-Voice/Security#157`, never bare `#157` (Self-Hosted #157 is unrelated).
 - Preserve current request and successful response shapes. `RecoveryBegin` stays generic `200`.
-- Redis budget admission happens before factor verification and usually before `BeginTx`. TOTP disable first confirms enrollment under its existing row lock, then charges immediately before verification; a no-TOTP request must not spend the budget. Transactional factor consumption stays on the protected SQL transaction. A correct password does not clear the MFA budget.
+- Redis budget admission happens before factor verification and `BeginTx`. TOTP disable probes enrollment before the transaction, charges when enrolled, and rechecks under its row lock. Newly appearing enrollment is refused before verification for retry; a no-TOTP request must not spend the budget. Transactional factor consumption stays on the protected SQL transaction. A correct password does not clear the MFA budget.
 - Exhaustion is `429` with `Retry-After`; budget dependency failure is `503`. Never log submitted codes or password/hash material.
 - No dependency, migration, environment variable, configurable limit, or new UI.
 - Every integration command below requires independently provisioned disposable `DATABASE_URL` and `REDIS_URL`. The test helpers' default `concord` database is forbidden. Never set private `GOCACHE`, `GOMODCACHE`, or `GOLANGCI_LINT_CACHE`.
@@ -168,7 +168,7 @@ if hasMFA {
     if !valid { c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode}); return true }
 }
 ```
-- [ ] **Step 4: Fix MFA settings omissions.** In `TOTPDisable`, confirm TOTP enrollment under the existing SQL lock, then charge `req.Code` immediately before `VerifyCodeTx`; no-TOTP requests do not charge or clear the budget. Clear only after verified proof and confirmed commit. In `RegenerateBackupCodes`, charge `req.Code` before its hand-rolled `MatchCodeStep`; keep its TOTP-only requirement and replay-safe update, then clear after the successful database update. Do not double-charge `openMFASettingsTx` routes already calling `allowMFASettingsStepUp`.
+- [ ] **Step 4: Fix MFA settings omissions.** In `TOTPDisable`, probe enrollment before `BeginTx`, charge `req.Code` only when enrolled, then recheck under the existing SQL lock; refuse newly appearing enrollment before `VerifyCodeTx` so no guess is free. No-TOTP requests do not charge or clear the budget. Clear only after verified proof and confirmed commit. In `RegenerateBackupCodes`, charge `req.Code` before its hand-rolled `MatchCodeStep`; keep its TOTP-only requirement and replay-safe update, then clear after the successful database update. Do not double-charge `openMFASettingsTx` routes already calling `allowMFASettingsStepUp`.
 - [ ] **Step 5: Fix users, ownership, and DM.** Add pretransaction charge in the public `ChangePassword`/`ReplaceMyKeys` paths before they call `verifyStepUpWithLockedUser`; map `429`/`503` through their existing outer response handling. Charge before `VerifyCode` in ownership transfer/reversal and before `VerifyMFAFactor` in `verifyPurgeStepUp`. Clear only after each protected write reports confirmed success; retain charge on rollback or ambiguous commit. Preserve existing password verification and authorization order.
 
 ```go

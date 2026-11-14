@@ -12472,7 +12472,10 @@ paths:
       summary: Disable TOTP MFA
       description: 'Deletes the TOTP enrollment. Requires password and a valid MFA code.
 
-        Idempotent — returns 200 even when no TOTP enrollment exists.
+        Idempotent — returns 200 even when no TOTP enrollment exists, without
+        consuming the shared MFA attempt budget. Enrollment appearing between
+        preflight and the locked recheck returns 409 before code verification;
+        retry the request.
 
         Once the change commits, every connected client of the account receives
         a `permissions_changed` WebSocket event (`data` is `{}`). It is the same
@@ -12524,7 +12527,8 @@ paths:
             only remaining inline-verifiable factor (TOTP or WebAuthn). Email and
             SMS have no inline verifier, so disabling this factor first would
             leave the account's step-up unable to check anything. Turn off
-            email/SMS first, or leave this factor in place.
+            email/SMS first, or leave this factor in place. Also returned when
+            TOTP enrollment appears during the request; retry before verifying.
           content:
             application/json:
               schema:

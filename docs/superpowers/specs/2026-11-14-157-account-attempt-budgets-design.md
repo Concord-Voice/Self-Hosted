@@ -8,7 +8,7 @@ Close the seven findings in [Security #157](https://github.com/Concord-Voice/Sec
 
 - Self-Hosted owns the control-plane implementation. Hosted imports `services/**` and `docs/api/**` from Self-Hosted through its reviewed upstream mirror PR. The two quality gates and merge approvals remain separate.
 - Keep request bodies and successful response shapes. Recovery begin remains an account-enumeration-resistant generic `200`.
-- Charge a submitted MFA code before factor verification. TOTP disable must first confirm enrollment under its existing SQL lock, so a no-factor request cannot exhaust the shared budget; other routes charge before opening their protected transaction. Keep transactional factor consumption with the protected mutation. Clear a budget only after the relevant proof and protected mutation have committed; a correct password does not clear the MFA budget.
+- Charge a submitted MFA code before factor verification and before a protected SQL transaction. TOTP disable first probes enrollment without a lock; if enrolled it charges before `BeginTx`, then rechecks under the user lock. If enrollment appears after preflight, refuse before verification and ask for retry. A no-factor request cannot exhaust the shared budget. Keep transactional factor consumption with the protected mutation. Clear a budget only after the relevant proof and protected mutation have committed; a correct password does not clear the MFA budget.
 - Preserve the existing `stepup.MFASettingsBudgetPrefix` key spelling, the existing registration pending-ID key, and existing Redis/SQL validation and error handling. Do not add a dependency, migration, environment variable, or new client UI.
 - Use an isolated `DATABASE_URL` and `REDIS_URL` for integration tests. Never run destructive tests against the shared `concord` database.
 
@@ -16,7 +16,7 @@ Close the seven findings in [Security #157](https://github.com/Concord-Voice/Sec
 
 | Approach | Benefit | Cost | Decision |
 |---|---|---|---|
-| Add `stepup.Charge` at each missing step-up call site, with a production caller census | Reuses the existing fail-closed budget; most routes keep Redis outside SQL transactions | Every direct verifier call needs an explicit classification; TOTP disable charges after its locked enrollment check | **Chosen** |
+| Add `stepup.Charge` at each missing step-up call site, with a production caller census | Reuses the existing fail-closed budget and keeps Redis outside SQL transactions | Every direct verifier call needs an explicit classification; TOTP disable needs an unlocked preflight plus locked recheck | **Chosen** |
 | Charge inside `VerifyCode` / `VerifyCodeTx` | One apparent enforcement point | `VerifyCodeTx` would call Redis while holding SQL; login MFA would inherit the dangerous-action policy; existing charged callers could double-charge | Rejected |
 | Add an opaque reservation-handle type | A stricter helper interface | Broad signature/fake changes while direct verifier calls remain callable | Rejected |
 | Lengthen recovery codes and add notifications | Defense in depth | Changes client input and email delivery without closing the reset bug | Deferred |

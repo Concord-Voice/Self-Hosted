@@ -20,8 +20,10 @@ user in fifteen minutes, across these protected actions: session revoke,
 revoke-all, and revocation-mode; TOTP disable and backup-code regeneration;
 password change and E2EE key replacement; ownership transfer and reversal;
 and DM/group bulk purge. Each route charges before factor verification. TOTP
-disable first checks enrollment under its SQL lock and charges only when it will
-verify a factor; other routes charge before their protected transaction. A
+disable probes enrollment before its SQL transaction and charges only when a
+factor is present; the locked recheck refuses a newly enrolled factor before
+verification so there is no free guess. Other routes charge before their
+protected transaction. A
 correct password alone does not clear the MFA counter. An exhausted budget
 returns 429 with `Retry-After` and
 `step_up_budget_exhausted`; a budget-store failure returns 503 with
