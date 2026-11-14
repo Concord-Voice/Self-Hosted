@@ -401,7 +401,7 @@ NOT_ROOT=1 VERB=renew run_init '' && fail "renew ran as non-root" \
 # the flag, and an empty argument.
 : >"$CALLS"; saved_tls="$(cat "$AUTH/secrets/tls-key")"
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -outform DER -out "$ROOT/other-tls-key" 2>/dev/null
-cp "$AUTH/secrets/tls-key" "$ROOT/live-tls-key"; cat "$ROOT/other-tls-key" >"$AUTH/secrets/tls-key"
+cp "$AUTH/secrets/tls-key" "$ROOT/live-tls-key"; chmod u+w "$AUTH/secrets/tls-key"; cat "$ROOT/other-tls-key" >"$AUTH/secrets/tls-key"
 VERB=renew run_init '' && fail "renew ran with a TLS key the delegation does not list" \
   || { grep -qF 'is not the last TLS key' "$ROOT/out" && [[ ! -e "$AUTH/stage" && ! -e "$AUTH/ceremony/delegation-7.json" ]] \
        && pass "renew refuses when the live TLS key is not the last one listed" || fail "tls drift: $(cat "$ROOT/out")"; }
