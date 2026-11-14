@@ -4,6 +4,7 @@
 import argparse
 import base64
 import binascii
+import contextlib
 import hashlib
 from http.client import HTTPException
 import json
@@ -39,12 +40,16 @@ OIDC_HOST = re.compile(r"(?:[a-z0-9-]+\.)+actions\.githubusercontent\.com\Z")
 MAX_INPUT = 24 * 1024
 MAX_PROOF = 64 * 1024
 MAX_RESPONSE = 64 * 1024
-MAX_POLLS = 270  # 45 minutes at 10 seconds; the child scanner may run for 40.
+MAX_POLLS = 270  # Poll slots: 45 minutes at POLL_SECONDS; the child scanner may run for 40.
 POLL_SECONDS = 10
-NOT_VISIBLE_POLLS = 6  # A 404 on the first minute of polls is the new run not being visible yet.
+NOT_VISIBLE_POLLS = 6  # A 404 in the first six polls, before the run is seen, is it not being visible yet.
 RETRY_AFTER_MAX = 120
-MAX_TRANSIENT_RUN = 30  # Consecutive transient poll errors tolerated (about 5 minutes) before failing.
-DEADLINE_SLACK = 600  # Wall-clock cap beyond the poll budget; slow or retried calls must not outrun the job.
+# Consecutive transient poll errors tolerated before failing: at least 5 minutes at
+# POLL_SECONDS; Retry-After or slow calls stretch it, up to the wall-clock deadline.
+MAX_TRANSIENT_RUN = 30
+# Wall-clock cap beyond the poll budget (55 min in all), inside the caller job's
+# `timeout-minutes: 60` in required-pr-build.yml; slow or retried calls must not outrun it.
+DEADLINE_SLACK = 600
 RESULTS = {"success", "failure", "cancelled", "skipped"}
 
 
@@ -187,7 +192,8 @@ def request_json(url, token, *, call, data=None, expected=200, limit=MAX_RESPONS
         # A non-int code is not trusted: class it "other" (never retried) and never format it.
         code = exc.code if type(exc.code) is int else 0
         error = ApiError(f"{call}_http_{http_class(code)}", code, retry_after(exc.headers))
-        exc.close()
+        with contextlib.suppress(OSError):
+            exc.close()  # Cleanup only; never let it mask the status class.
         raise error from None
     except (OSError, HTTPException):
         raise ApiError(f"{call}_network") from None
@@ -289,6 +295,7 @@ def dispatch_watch(args):
     url = f"{API}/actions/runs/{child_id}"
     deadline = time.monotonic() + MAX_POLLS * POLL_SECONDS + DEADLINE_SLACK
     transient_run = 0
+    seen = False  # Once the run has been seen, a 404 means it is gone, not "not yet visible".
     for attempt in range(MAX_POLLS):
         if time.monotonic() > deadline:
             break
@@ -297,9 +304,10 @@ def dispatch_watch(args):
             run = request_json(url, token, call="poll")
         except ApiError as exc:
             # Transient only: network, 429, 5xx, and a 404 while the new run is not yet visible.
-            # Anything else (403, 401, a late 404) fails at once. Each retry spends a poll slot.
+            # Anything else (403, 401, a 404 late or after the run was seen) fails at once.
+            # Each retry spends a poll slot.
             if not (exc.status is None or exc.status == 429 or 500 <= exc.status <= 599
-                    or (exc.status == 404 and attempt < NOT_VISIBLE_POLLS)):
+                    or (exc.status == 404 and not seen and attempt < NOT_VISIBLE_POLLS)):
                 raise
             transient_run += 1
             if transient_run > MAX_TRANSIENT_RUN:
@@ -316,6 +324,7 @@ def dispatch_watch(args):
                     or type(run.get("run_attempt")) is not int or run.get("run_attempt") != 1
                     or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "main"):
                 raise Invalid("dispatch child identity invalid")
+            seen = True
             if run.get("status") == "completed":
                 if run.get("conclusion") != "success":
                     raise Invalid("dispatch child failed")
@@ -352,7 +361,9 @@ def main():
         return 1
     except ApiError as exc:
         # `reason` is one of a fixed set of class strings, so it is safe to print.
-        note = " (a child run may have started)" if exc.reason == "dispatch_network" else ""
+        # A gateway 5xx can arrive after GitHub accepted the dispatch, like a dropped connection.
+        note = (" (a child run may have started)"
+                if exc.reason in ("dispatch_network", "dispatch_http_5xx") else "")
         print(f"protected Sonar caller failed; inspect local input and API status [{exc.reason}]{note}",
               file=sys.stderr)
         return 1

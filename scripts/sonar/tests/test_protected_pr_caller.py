@@ -355,10 +355,13 @@ class CallerTests(unittest.TestCase):
                 args.out.unlink(missing_ok=True)
                 output, stdout = StringIO(), StringIO()
                 private_url = "https://private-api.invalid/dispatch?token=private-url-token"
-                failure = HTTPError(private_url, code, "private-http-message",
+                failure = HTTPError(private_url, 0, "private-http-message",
                                     {"Authorization": "Bearer private-header-token",
                                      "X-Private": "private-response-header"},
                                     UnreadableBody(b"private-response-body"))
+                # Set the code after construction: Python 3.14+ formats repr(self) while building
+                # the HTTPError, which would trip PrivateCode before the caller ever sees it.
+                failure.code = code
                 with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
                         patch.object(CALLER, "urlopen", side_effect=failure) as request, \
                         patch.object(CALLER.time, "sleep") as sleep, \
@@ -370,9 +373,10 @@ class CallerTests(unittest.TestCase):
                 sleep.assert_not_called()
                 self.assertFalse(args.out.exists(), "failed dispatch must not record a child run")
                 self.assertEqual(stdout.getvalue(), "")
+                note = " (a child run may have started)" if expected == "5xx" else ""
                 self.assertEqual(output.getvalue(),
                                  "protected Sonar caller failed; inspect local input and API status "
-                                 f"[dispatch_http_{expected}]\n",
+                                 f"[dispatch_http_{expected}]{note}\n",
                                  "HTTPError must expose only a fixed status class instead of the generic OSError banner")
 
     def _watch(self, responses):
@@ -409,6 +413,30 @@ class CallerTests(unittest.TestCase):
                                 http_error(429, {"Retry-After": "soon"}), DONE])
         self.assertEqual([call.args[0] for call in sleep.call_args_list],
                          [60, CALLER.RETRY_AFTER_MAX, 10])
+
+    def test_poll_404_after_the_run_was_seen_fails_at_once(self):
+        with self.assertRaises(CALLER.ApiError) as ctx:
+            self._watch([DISPATCHED, RUNNING, http_error(404), DONE])
+        self.assertEqual(ctx.exception.reason, "poll_http_404")
+        self.assertEqual(self.opener.call_count, 3)  # DONE was never polled.
+        self.sleep.assert_called_once_with(10)  # Only the sleep after RUNNING.
+
+    def test_poll_malformed_response_fails_without_retry(self):
+        for response in (Response(202, RUN), Response(200, b""), Response(200, b"[]")):
+            with self.subTest(status=response.status, raw=response.raw), \
+                    self.assertRaises(CALLER.Invalid):
+                self._watch([DISPATCHED, response, DONE])
+            self.assertEqual(self.opener.call_count, 2)
+            self.sleep.assert_not_called()
+            self.child.unlink()
+
+    def test_poll_retry_after_is_honoured_on_5xx_too(self):
+        _, sleep = self._watch([DISPATCHED, http_error(503, {"Retry-After": "60"}), DONE])
+        sleep.assert_called_once_with(60)
+
+    def test_poll_retries_the_top_of_the_5xx_range(self):
+        opener, _ = self._watch([DISPATCHED, http_error(599), DONE])
+        self.assertEqual(opener.call_count, 3)
 
     def test_poll_403_fails_at_once_without_retry_or_sleep(self):
         with self.assertRaises(CALLER.ApiError) as ctx:
@@ -470,6 +498,7 @@ class CallerTests(unittest.TestCase):
             with self.assertRaisesRegex(CALLER.Invalid, "timed out"):
                 self._watch([DISPATCHED, http_error(502), DONE])
         self.assertEqual(self.opener.call_count, 2)  # DONE was never polled.
+        self.sleep.assert_not_called()  # No time left, so no (negative) sleep either.
         # Positive control: with the clock standing still the same script succeeds.
         self.child.unlink()
         with patch.object(CALLER.time, "monotonic", lambda: 0):
@@ -505,6 +534,8 @@ class CallerTests(unittest.TestCase):
         for error in (IncompleteRead(b""), ConnectionResetError("private-host")):
             with self.subTest(error=type(error).__name__):
                 self._watch([DISPATCHED, Broken(error), DONE])
+                self.assertEqual(self.opener.call_count, 3)
+                self.sleep.assert_called_once_with(10)
                 self.child.unlink()
 
     def test_dispatch_body_read_failure_is_a_network_error_without_retry(self):
@@ -565,6 +596,18 @@ class CallerTests(unittest.TestCase):
         self.assertEqual(output.getvalue().splitlines(),
                          ["protected Sonar caller: transient poll error [poll_http_5xx]; retrying",
                           "protected Sonar caller: transient poll error [poll_network]; retrying"])
+
+    def test_cli_dispatch_gateway_5xx_says_a_child_may_exist(self):
+        args = self._watch_args()
+        output = StringIO()
+        with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                patch.object(CALLER, "urlopen", side_effect=http_error(504)), \
+                patch("sys.argv", [str(SOURCE), "dispatch-watch", "--proof", str(args.proof),
+                                   "--out", str(args.out)]), redirect_stderr(output):
+            self.assertEqual(CALLER.main(), 1)
+        self.assertEqual(output.getvalue().strip(),
+                         "protected Sonar caller failed; inspect local input and API status "
+                         "[dispatch_http_5xx] (a child run may have started)")
 
     def test_cli_dispatch_network_error_says_a_child_may_exist(self):
         args = self._watch_args()
