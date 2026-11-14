@@ -501,8 +501,10 @@ func TestSecurity166_AlternateChannelUUIDSpellingKeepsDenyAndCanonicalBatchKey(t
 	ts.CreateChannelOverride(t, channelID, "role", allRoleID, 0, int64(rbac.PermSendMessages))
 
 	upper := strings.ToUpper(channelID)
+	braced := "{" + channelID + "}"
+	rawHex := strings.ReplaceAll(channelID, "-", "")
 	permsByChannel, err := resolver.ResolveEffectivePermissionsForChannelsFresh(
-		ctx, serverID, member.ID, []string{channelID, upper},
+		ctx, serverID, member.ID, []string{channelID, upper, braced, rawHex},
 	)
 	require.NoError(t, err)
 	assert.Len(t, permsByChannel, 1, "same UUID spellings must produce one canonical batch key")
@@ -510,9 +512,38 @@ func TestSecurity166_AlternateChannelUUIDSpellingKeepsDenyAndCanonicalBatchKey(t
 	require.True(t, ok, "batch result must use the canonical UUID key")
 	assert.False(t, canonical.Has(rbac.PermSendMessages), "canonical control: channel deny must apply")
 
-	upperPerms, err := resolver.ResolveEffectivePermissionsUncached(ctx, serverID, member.ID, upper)
+	for name, alias := range map[string]string{
+		"uppercase": upper,
+		"braced":    braced,
+		"raw hex":   rawHex,
+	} {
+		t.Run(name, func(t *testing.T) {
+			aliasPerms, err := resolver.ResolveEffectivePermissionsUncached(ctx, serverID, member.ID, alias)
+			require.NoError(t, err)
+			assert.False(t, aliasPerms.Has(rbac.PermSendMessages), "UUID spelling must not bypass a channel deny")
+		})
+	}
+
+	tx, err := ts.DB.BeginTx(ctx, nil)
 	require.NoError(t, err)
-	assert.False(t, upperPerms.Has(rbac.PermSendMessages), "UUID spelling must not bypass a channel deny")
+	t.Cleanup(func() { _ = tx.Rollback() })
+	txPerms, err := resolver.ResolveChannelPermissionsTx(ctx, tx, serverID, member.ID, upper)
+	require.NoError(t, err)
+	assert.False(t, txPerms.Has(rbac.PermSendMessages), "transactional UUID spelling must not bypass a channel deny")
+}
+
+func TestSecurity166_MalformedBatchChannelIDFailsBeforeDatabaseWork(t *testing.T) {
+	resolver := rbac.NewResolver(nil, nil, nil)
+	serverID := uuid.NewString()
+	userID := uuid.NewString()
+
+	require.NotPanics(t, func() {
+		_, err := resolver.ResolveEffectivePermissionsForChannelsFresh(
+			context.Background(), serverID, userID, []string{"not-a-uuid"},
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid channel ID")
+	}, "malformed channel IDs must be rejected before opening a database transaction")
 }
 
 func TestResolveEffectivePermissionsForChannelsFreshDoesNotRefillCache(t *testing.T) {
