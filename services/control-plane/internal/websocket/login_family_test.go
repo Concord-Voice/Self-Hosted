@@ -43,7 +43,7 @@ func loginFamilyRig(t *testing.T) loginFamilySocketRig {
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO login_family_sids(sid,family_id,user_id,access_expires_at) VALUES($1,$2,$3,$4)`, sid, family, user, expiry)
 	require.NoError(t, err)
-	return loginFamilySocketRig{db: db, h: NewHandler(NewHub(db, rdb), db, rdb, loginFamilySocketSecret, nil, nil, nil), user: user, family: family, sid: sid, expiry: expiry}
+	return loginFamilySocketRig{db: db, h: NewHandler(NewHub(db, rdb), db, rdb, loginFamilySocketSecret, nil, nil, nil, false, nil), user: user, family: family, sid: sid, expiry: expiry}
 }
 func (r loginFamilySocketRig) token(t *testing.T, user, sid uuid.UUID, epoch string, expiry time.Time) string {
 	t.Helper()

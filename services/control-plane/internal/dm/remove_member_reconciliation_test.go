@@ -290,7 +290,7 @@ func TestRemoveMemberDeliveryFailureStillQueuesEnforcementAndBroadcasts(t *testi
 	h.nats = bus
 	h.activePlans = deliveryFailureRail{db: db, t: t}
 	jwtSecret := uuid.NewString()
-	wsHandler := websocket.NewHandler(hub, db, wsRedis, jwtSecret, []string{"*"}, nil, nil)
+	wsHandler := websocket.NewHandler(hub, db, wsRedis, jwtSecret, []string{"*"}, nil, nil, false, nil)
 	router := gin.New()
 	router.GET("/ws", wsHandler.HandleWebSocket)
 	server := httptest.NewServer(router)

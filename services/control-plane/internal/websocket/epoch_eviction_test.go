@@ -141,7 +141,7 @@ func startEvictionTestSocket(t *testing.T, label string) (*Hub, *redis.Client, u
 		})
 	}
 	fence := credepoch.New(db, rc, logger.NewWithWriter(io.Discard))
-	h := NewHandler(hub, db, rc, testJWTSecret, []string{"*"}, fence, nil)
+	h := NewHandler(hub, db, rc, testJWTSecret, []string{"*"}, fence, nil, false, nil)
 	router := gin.New()
 	router.GET("/ws", h.HandleWebSocket)
 	router.POST("/ticket", middleware.AuthRequired(testJWTSecret, rc, db, fence), auth.NewWSTicketHandler(rc, testJWTSecret).IssueTicket)

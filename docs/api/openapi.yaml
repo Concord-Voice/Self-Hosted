@@ -1450,6 +1450,11 @@ paths:
 
         Rate limit: 5 requests per 15 minutes (IP-based).
 
+        Request body maximum: 64 KiB. Decoded public key, wrapped private key,
+        and key-derivation salt are limited to 1 KiB, 32 KiB, and 64 bytes
+        respectively. Existing email and username conflicts are rejected before
+        password hashing; the conflict is checked again when creating the pending row.
+
         '
       security: []
       requestBody:
@@ -1483,6 +1488,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '409':
           description: Email or username already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Registration request body exceeds 64 KiB
           content:
             application/json:
               schema:
@@ -19703,6 +19714,13 @@ paths:
 
         - `Authorization: Bearer <jwt>` — JWT in header (before upgrade).
 
+        When `REQUIRE_CLIENT_ATTESTATION` is enabled, JWT fallback upgrades
+        also require `X-Attestation-Token` and `X-Session-ID` headers. The
+        attestation proof is checked after JWT authentication against the
+        verified user, with the same 403 rejection and 503 registry
+        failure behavior as authenticated HTTP. A single-use ticket remains
+        the preferred path and is not checked again at upgrade.
+
 
         ## Connection Lifecycle
 
@@ -19881,6 +19899,18 @@ paths:
       parameters:
       - $ref: '#/components/parameters/ClientVersionQuery'
       - $ref: '#/components/parameters/ClientPlatformQuery'
+      - name: X-Attestation-Token
+        in: header
+        required: false
+        schema:
+          type: string
+        description: Required for JWT fallback when REQUIRE_CLIENT_ATTESTATION is enabled; not required for a ticket upgrade.
+      - name: X-Session-ID
+        in: header
+        required: false
+        schema:
+          type: string
+        description: Attestation record namespace supplied with a JWT fallback proof when REQUIRE_CLIENT_ATTESTATION is enabled; not required for a ticket upgrade.
       - name: activity_rich_presence
         in: query
         required: false
@@ -19899,7 +19929,17 @@ paths:
         '400':
           $ref: '#/components/responses/UnsupportedClientPlatform'
         '403':
-          $ref: '#/components/responses/ClientVersionTooOld'
+          description: Client version rejected, or required JWT fallback attestation missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttestationError'
+        '503':
+          description: Required JWT fallback attestation registry unavailable — fails closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           description: Account or process WebSocket connection capacity reached
           content:
@@ -19922,7 +19962,7 @@ components:
       type: apiKey
       in: query
       name: token
-      description: JWT access token for the WebSocket compatibility fallback; subject to the same live account and credential-epoch checks as bearer authentication.
+      description: JWT access token for the WebSocket compatibility fallback; subject to the same live account and credential-epoch checks as bearer authentication. When REQUIRE_CLIENT_ATTESTATION is enabled, the upgrade also requires X-Attestation-Token and X-Session-ID headers.
     AuthConnectionProofAuth:
       type: apiKey
       in: header
@@ -22372,13 +22412,13 @@ components:
           description: Must be true (user confirms they are 16+)
         public_key:
           type: string
-          description: Base64-encoded SPKI RSA-4096 public key
+          description: Base64-encoded SPKI RSA-4096 public key; at most 1 KiB decoded
         wrapped_private_key:
           type: string
-          description: Base64-encoded AES-GCM encrypted private key
+          description: Base64-encoded AES-GCM encrypted private key; at most 32 KiB decoded
         key_derivation_salt:
           type: string
-          description: Base64-encoded 16-byte PBKDF2 salt
+          description: Base64-encoded key-derivation salt; at most 64 bytes decoded
     LoginRequest:
       type: object
       required:

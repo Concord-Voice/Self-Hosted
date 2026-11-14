@@ -46,7 +46,7 @@ import (
 func TestAuthenticateViaTicket_DenylistIsSpellingInvariant(t *testing.T) {
 	redisClient := setupHubTestRedis(t)
 	db, _ := dbtest.SetupTestDB(t)
-	h := NewHandler(nil, db, redisClient, testJWTSecret, nil, nil, nil)
+	h := NewHandler(nil, db, redisClient, testJWTSecret, nil, nil, nil, false, nil)
 
 	userID := uuid.New()
 	ctx := context.Background()

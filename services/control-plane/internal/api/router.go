@@ -1297,7 +1297,7 @@ func NewRouter(
 	}
 	requireDangerousActionGatesWired(log, channelsHandler, membersHandler, rbacHandler, mediaHandler)
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins,
-		credFence, middleware.SecurityHeaderSet(cfg.Environment, cfg.HSTSHeaderValue))
+		credFence, middleware.SecurityHeaderSet(cfg.Environment, cfg.HSTSHeaderValue), cfg.RequireClientAttestation, log)
 	wsHandler.SetClientMinimums(middleware.ClientMinimumsFromConfig(cfg))
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
 	// The one endpoint an own-rule route's password reaches (#3509). It
@@ -1792,6 +1792,9 @@ func NewRouter(
 		// exempt RequireAttestation — see the middleware's doc comment.
 		authRequired.Use(middleware.MediaPlaneServiceHop(cfg.JWTSecret, log))
 		authRequired.Use(middleware.RequireClientVersion(middleware.ClientMinimumsFromConfig(cfg)))
+		if cfg.RequireClientAttestation {
+			authRequired.Use(middleware.RequireSessionHeaderMatchesToken())
+		}
 		authRequired.Use(middleware.RequireAttestation(cfg.RequireClientAttestation, redis, log))
 
 		// ── Pending-OK routes (unverified email allowed) ──────────────

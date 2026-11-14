@@ -29,7 +29,7 @@ func fenceWiredWSHandler(t *testing.T) (*Handler, *redis.Client) {
 	rc := setupHubTestRedis(t)
 	db, _ := dbtest.SetupTestDB(t)
 	fence := credepoch.New(nil, rc, logger.NewWithWriter(io.Discard))
-	return NewHandler(nil, db, rc, testJWTSecret, nil, fence, nil), rc
+	return NewHandler(nil, db, rc, testJWTSecret, nil, fence, nil, false, nil), rc
 }
 
 func signedJWTWithClaims(t *testing.T, claims jwt.MapClaims) string {
@@ -117,7 +117,7 @@ func TestAuthenticateWS_JWTRedisOutageRejected(t *testing.T) {
 		MaxRetries:  -1,
 	})
 	t.Cleanup(func() { assert.NoError(t, rc.Close()) })
-	h := NewHandler(nil, db, rc, testJWTSecret, nil, nil, nil)
+	h := NewHandler(nil, db, rc, testJWTSecret, nil, nil, nil, false, nil)
 	token := signedJWTWithClaims(t, jwt.MapClaims{
 		"user_id":        userID.String(),
 		"email_verified": true,
