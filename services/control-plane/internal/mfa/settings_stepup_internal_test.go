@@ -1153,7 +1153,7 @@ func TestFlagSync_RedisExistsFault_WebAuthnDeleteLeavesNoStaleFactor(t *testing.
 
 	h := iuHandler(db, iuExistsFaultRedis(t), kr)
 	c, w := iuGinContext(http.MethodDelete, "/api/v1/mfa/webauthn/credentials/"+credentialID,
-		fmt.Sprintf(`{"password":%q}`, iuPassword), userID, "")
+		fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, iuTOTPCode(t, iuTOTPSecret)), userID, "")
 	c.Params = gin.Params{{Key: "id", Value: credentialID}}
 	h.WebAuthnDeleteCredential(c)
 
