@@ -405,14 +405,17 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	// Parse optional password from request body
 	var req struct {
 		Password string `json:"password"` // #nosec G117 -- not a secret field, receives user input for auth verification
-		MFACode  string `json:"mfa_code"` // Framework: accepted but unused until MFA is implemented
+		MFACode  string `json:"mfa_code"`
 	}
 	if c.ContentType() == "application/json" {
 		_ = c.ShouldBindJSON(&req)
 	}
 
+	mfaVerified := false
+	blocked := false
 	if needsPassword {
-		if h.authenticateForRevoke(ctx, c, uid, req.Password, req.MFACode, revokeSessionAction) {
+		blocked, mfaVerified = h.authenticateForRevokeWithMFA(ctx, c, uid, req.Password, req.MFACode, revokeSessionAction)
+		if blocked {
 			return
 		}
 		if mode == "simple" {
@@ -421,6 +424,9 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	}
 
 	h.executeRevocation(ctx, c, uid, sessionID)
+	if needsPassword && mfaVerified && c.Writer.Status() == http.StatusOK {
+		h.clearRevokeMFABudget(ctx, uid)
+	}
 }
 
 // verifySessionOwnership checks immutable SID ownership, including terminal families.
@@ -472,66 +478,81 @@ func (h *Handler) determineAuthRequired(ctx context.Context, uid string) (needsP
 // authenticateForRevoke verifies the user's identity via MFA or password for session revocation.
 // Returns true if the request was blocked (response written), false if authentication passed.
 func (h *Handler) authenticateForRevoke(ctx context.Context, c *gin.Context, uid, password, mfaCode string, action revokeAction) bool {
+	blocked, _ := h.authenticateForRevokeWithMFA(ctx, c, uid, password, mfaCode, action)
+	return blocked
+}
+
+func (h *Handler) authenticateForRevokeWithMFA(ctx context.Context, c *gin.Context, uid, password, mfaCode string, action revokeAction) (blocked, mfaVerified bool) {
 	route := action.route
 	hasMFA := h.mfaVerifier != nil && h.mfaVerifier.IsEnabled(ctx, uid)
 
-	if hasMFA && mfaCode != "" {
-		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
-		if mfaErr != nil {
-			h.log.Error("MFA verification error during session revoke", "error", mfaErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-			return true
-		}
-		if !valid {
-			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
-			return true
-		}
-		return false
-	}
-
-	if password != "" {
-		match, verifyErr := h.verifyUserPassword(ctx, uid, password)
-		if errors.Is(verifyErr, auth.ErrAccountLocked) {
-			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonAccountLocked, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
-			stepup.LockedError().Write(c)
-			return true
-		}
-		if verifyErr != nil {
-			h.log.Error("Password verification failed during session revoke", "error", verifyErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
-			return true
-		}
-		if !match {
-			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgIncorrectPassword})
-			return true
-		}
-		return false
-	}
-
-	// Neither provided — tell client what's needed
-	if hasMFA {
-		methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
-		if err != nil {
-			// A failed read is not an empty method list: answering with one
-			// would tell the client no factor is available.
-			h.log.Error("Failed to read MFA methods during session revoke", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-			return true
-		}
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":   "auth_required",
-			"message": "Authentication required to " + action.desc,
-			"methods": methods,
-		})
-	} else {
+	if password == "" {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "password_required",
 			"message": "Password verification required to " + action.desc,
 		})
+		return true, false
 	}
-	return true
+
+	match, verifyErr := h.verifyUserPassword(ctx, uid, password)
+	if errors.Is(verifyErr, auth.ErrAccountLocked) {
+		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonAccountLocked, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
+		stepup.LockedError().Write(c)
+		return true, false
+	}
+	if verifyErr != nil {
+		h.log.Error("Password verification failed during session revoke", "error", verifyErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
+		return true, false
+	}
+	if !match {
+		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgIncorrectPassword})
+		return true, false
+	}
+
+	if hasMFA {
+		if mfaCode == "" {
+			methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+			if err != nil {
+				h.log.Error("Failed to read MFA methods during session revoke", "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+				return true, false
+			}
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "auth_required",
+				"message": "Authentication required to " + action.desc,
+				"methods": methods,
+			})
+			return true, false
+		}
+		if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), uid, mfaCode); e != nil {
+			if e.Cause != nil {
+				h.log.Error("Session-revoke MFA budget unavailable", "error", e.Cause)
+			}
+			e.Write(c)
+			return true, false
+		}
+		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
+		if mfaErr != nil {
+			h.log.Error("MFA verification error during session revoke", "error", mfaErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+			return true, false
+		}
+		if !valid {
+			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
+			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
+			return true, false
+		}
+		mfaVerified = true
+	}
+	return false, mfaVerified
+}
+
+func (h *Handler) clearRevokeMFABudget(ctx context.Context, uid string) {
+	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, uid); err != nil {
+		h.log.Warn("Could not reset session-revoke MFA budget after a successful change", "error", err)
+	}
 }
 
 // executeRevocation performs the actual session revocation, tracking, and disconnect.
@@ -588,7 +609,8 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 	uid := userID.(string)
 	ctx := c.Request.Context()
 
-	if h.authenticateForRevoke(ctx, c, uid, req.Password, req.MFACode, revokeAllSessionsAction) {
+	blocked, mfaVerified := h.authenticateForRevokeWithMFA(ctx, c, uid, req.Password, req.MFACode, revokeAllSessionsAction)
+	if blocked {
 		return
 	}
 
@@ -619,6 +641,9 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 
 	rowsAffected := result.RevokedRefreshRows
 	h.closeCommittedFamilies(c.Request.Context(), result)
+	if mfaVerified {
+		h.clearRevokeMFABudget(ctx, uid)
+	}
 
 	h.resetRevokeTracking(ctx, uid)
 	h.log.Info("Sessions revoked", "user_id", uid, "count", rowsAffected, "include_current", req.IncludeCurrent)
@@ -705,7 +730,7 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	var req struct {
 		Mode     string `json:"mode"`     // "simple" or "secure"
 		Password string `json:"password"` // #nosec G117 -- not a secret field, receives user input for auth verification
-		MFACode  string `json:"mfa_code"` // Framework: accepted but unused until MFA is implemented
+		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
@@ -720,7 +745,8 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	uid := userID.(string)
 	ctx := c.Request.Context()
 
-	if h.authenticateForRevoke(ctx, c, uid, req.Password, req.MFACode, revocationModeSetAction) {
+	blocked, mfaVerified := h.authenticateForRevokeWithMFA(ctx, c, uid, req.Password, req.MFACode, revocationModeSetAction)
+	if blocked {
 		return
 	}
 
@@ -736,6 +762,9 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 
 	if req.Mode == "secure" {
 		h.redis.Del(ctx, simpleAuthWindowKey(uid))
+	}
+	if mfaVerified {
+		h.clearRevokeMFABudget(ctx, uid)
 	}
 
 	h.log.Info("Revocation mode changed", "user_id", uid, "mode", req.Mode)

@@ -180,6 +180,69 @@ func TestRecoveryBeginStoresCodeInRedis(t *testing.T) {
 	assert.Equal(t, float64(0), record["attempts"])
 }
 
+func TestRecoveryBeginKeepsLiveRecord(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverylive")
+	seedRecoveryCode(t, ts, user.Email, testRecoveryCode, user.ID)
+	key := recoveryCodeKeyPrefix + user.Email
+	before, err := ts.Redis.Get(context.Background(), key).Result()
+	require.NoError(t, err)
+
+	w := ts.DoRequest("POST", pathRecoveryBegin, map[string]string{"email": user.Email}, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	after, err := ts.Redis.Get(context.Background(), key).Result()
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a live recovery record must retain its code and attempt count")
+}
+
+func TestRecoveryAccountBudgetRejectsEleventhGuess(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverybudget")
+	seedRecoveryCode(t, ts, user.Email, testRecoveryCode, user.ID)
+
+	for i := 0; i < 10; i++ {
+		response := ts.DoRequest("POST", pathRecoveryVerifyCode, map[string]string{
+			"email": user.Email,
+			"code":  "000000", //nolint:gosec // test value, not a credential
+		}, nil)
+		require.Equal(t, http.StatusUnauthorized, response.Code)
+		require.NoError(t, ts.Redis.Del(context.Background(),
+			"ratelimit:ip:192.0.2.1:POST:"+pathRecoveryVerifyCode,
+			"auth_failures:ip:192.0.2.1",
+			"auth_ban:ip:192.0.2.1",
+		).Err())
+	}
+
+	w := ts.DoRequest("POST", pathRecoveryVerifyCode, map[string]string{
+		"email": user.Email,
+		"code":  "000000", //nolint:gosec // test value, not a credential
+	}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.NotEmpty(t, w.Header().Get("Retry-After"))
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equalf(t, true, body["step_up_budget_exhausted"], "response body: %#v", body)
+}
+
+func TestRecoveryAccountBudgetClearsAfterCorrectCode(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverybudgetclear")
+	seedRecoveryCode(t, ts, user.Email, testRecoveryCode, user.ID)
+
+	require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", pathRecoveryVerifyCode, map[string]string{
+		"email": user.Email,
+		"code":  "000000", //nolint:gosec // test value, not a credential
+	}, nil).Code)
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", pathRecoveryVerifyCode, map[string]string{
+		"email": user.Email,
+		"code":  testRecoveryCode,
+	}, nil).Code)
+
+	exists, err := ts.Redis.Exists(context.Background(), "recovery_fail:"+user.Email).Result()
+	require.NoError(t, err)
+	assert.Zero(t, exists)
+}
+
 func TestRecoveryBeginSMTPFailureKeepsGenericResponseAndClearsCode(t *testing.T) {
 	ts := setupRecoverySMTPFailureTS(t, 6*time.Second)
 	user := ts.CreateTestUser(t, "recoverysmtpfail")

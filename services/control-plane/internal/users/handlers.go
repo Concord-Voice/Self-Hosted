@@ -532,6 +532,9 @@ func (h *Handler) replaceMyKeysCoordinated(
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
+	if !h.chargeDangerousMFA(c, senderID.String(), req.MFACode) {
+		return
+	}
 	// Credential-epoch fence (#2201): publish the blocked marker before the
 	// rotating transaction. Fail closed if the fence is unwired — a destructive
 	// key replacement must never run without epoch rotation.
@@ -557,9 +560,10 @@ func (h *Handler) replaceMyKeysCoordinated(
 		return
 	}
 	// Factor consumption is a users-serialized prerequisite to family capture.
-	if err := h.verifyStepUpWithLockedUser(
+	mfaVerified, err := h.verifyStepUpWithLockedUser(
 		c.Request.Context(), tx, senderID, stepup.PurposeE2EEKeyReset, req.CurrentPassword, req.MFACode,
-	); err != nil {
+	)
+	if err != nil {
 		fenceOp.Rollback(c.Request.Context())
 		h.respondKeyReplacementReauthenticationFailure(c, err)
 		return
@@ -606,6 +610,9 @@ func (h *Handler) replaceMyKeysCoordinated(
 
 	if !h.completeKeyReplacementClear(c, tx, forcedClear, fenceOp, owners) {
 		return
+	}
+	if mfaVerified {
+		h.clearDangerousMFA(c, senderID.String())
 	}
 
 	response := gin.H{"message": "Keys replaced successfully. Encrypted message history was reset."}
@@ -1498,7 +1505,7 @@ func (h *Handler) verifyMFAWithLockedUser(
 	uid string,
 	purpose stepup.Purpose,
 	mfaCode string,
-) (int, gin.H) {
+) (bool, int, gin.H) {
 	var enabled bool
 	var methods []string
 	if err := tx.QueryRowContext(ctx,
@@ -1506,13 +1513,13 @@ func (h *Handler) verifyMFAWithLockedUser(
 		uid,
 	).Scan(&enabled, pq.Array(&methods)); err != nil {
 		h.log.Error("MFA state query failed during reauthentication", "error", err)
-		return http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed}
+		return false, http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed}
 	}
 	if !enabled {
-		return 0, nil
+		return false, 0, nil
 	}
 	if mfaCode == "" {
-		return http.StatusForbidden, gin.H{
+		return false, http.StatusForbidden, gin.H{
 			"error":   "mfa_required",
 			"message": mfaRequiredMessage(purpose),
 			"methods": methods,
@@ -1520,17 +1527,17 @@ func (h *Handler) verifyMFAWithLockedUser(
 	}
 	if h.mfaVerifier == nil {
 		h.log.Error("MFA verifier is not configured for MFA-enabled user")
-		return http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed}
+		return false, http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed}
 	}
 	valid, mfaErr := h.mfaVerifier.VerifyCodeTx(ctx, tx, uid, purpose, mfaCode)
 	if mfaErr != nil {
 		h.log.Error("MFA verification error during reauthentication", "error", mfaErr)
-		return http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed}
+		return false, http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed}
 	}
 	if !valid {
-		return http.StatusForbidden, gin.H{"error": "Invalid MFA code"}
+		return false, http.StatusForbidden, gin.H{"error": "Invalid MFA code"}
 	}
-	return 0, nil
+	return true, 0, nil
 }
 
 type stepUpReauthenticationError struct {
@@ -1557,38 +1564,39 @@ func (h *Handler) verifyStepUpWithLockedUser(
 	userID uuid.UUID,
 	purpose stepup.Purpose,
 	currentPassword, mfaCode string,
-) error {
+) (bool, error) {
 	var passwordHash string
 	err := tx.QueryRowContext(ctx,
 		`SELECT password_hash FROM users WHERE id = $1 FOR NO KEY UPDATE`,
 		userID,
 	).Scan(&passwordHash)
 	if errors.Is(err, sql.ErrNoRows) {
-		return &stepUpReauthenticationError{
+		return false, &stepUpReauthenticationError{
 			status: http.StatusNotFound,
 			body:   gin.H{"error": errMsgUserNotFound},
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("lock user for reauthentication: %w", err)
+		return false, fmt.Errorf("lock user for reauthentication: %w", err)
 	}
 
 	// Plain verify, not the lockout: verifyCurrentPassword already counted this guess before the lock.
 	match, err := auth.VerifyPassword(currentPassword, passwordHash)
 	if err != nil {
-		return fmt.Errorf("verify locked password: %w", err)
+		return false, fmt.Errorf("verify locked password: %w", err)
 	}
 	if !match {
-		return &stepUpReauthenticationError{
+		return false, &stepUpReauthenticationError{
 			status: http.StatusUnauthorized,
 			body:   gin.H{"error": errMsgCurrentPasswordIncorrect},
 		}
 	}
 
-	if status, body := h.verifyMFAWithLockedUser(ctx, tx, userID.String(), purpose, mfaCode); status != 0 {
-		return &stepUpReauthenticationError{status: status, body: body}
+	mfaVerified, status, body := h.verifyMFAWithLockedUser(ctx, tx, userID.String(), purpose, mfaCode)
+	if status != 0 {
+		return false, &stepUpReauthenticationError{status: status, body: body}
 	}
-	return nil
+	return mfaVerified, nil
 }
 
 // validateNewPassword checks strength and ensures it differs from the current password.
@@ -1763,7 +1771,8 @@ type passwordChangeOutcome struct {
 	presenceOverrideVersion int
 	domainVersions          map[string]int // nil when domains == nil (legacy request)
 	// owners is set even on an ambiguous commit so the caller can still fence.
-	owners []loginfamily.DeliveryOwner
+	owners      []loginfamily.DeliveryOwner
+	mfaVerified bool
 }
 
 // closeCredentialFamilies synchronously fences the families a credential
@@ -1840,11 +1849,13 @@ func (h *Handler) executePasswordChange(ctx context.Context, change passwordChan
 		return outcome, err
 	}
 	// Keep transactional factor consumption ahead of family capture.
-	if err := h.verifyStepUpWithLockedUser(
+	mfaVerified, err := h.verifyStepUpWithLockedUser(
 		ctx, tx, change.userID, stepup.PurposePasswordChange, change.currentPassword, change.mfaCode,
-	); err != nil {
+	)
+	if err != nil {
 		return outcome, err
 	}
+	outcome.mfaVerified = mfaVerified
 
 	// Capture families before any domain mutation; the epoch parent owns them.
 	owners, err := rotateCredentialFamiliesTx(ctx, tx, change.userID, userAuthority, fenceOp)
@@ -1976,6 +1987,9 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
+	if !h.chargeDangerousMFA(c, parsedUID.String(), req.MFACode) {
+		return
+	}
 
 	kdAlg := req.KeyDerivationAlg
 	if kdAlg == "" {
@@ -2013,6 +2027,9 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		h.respondChangePasswordError(c, err)
 		return
 	}
+	if outcome.mfaVerified {
+		h.clearDangerousMFA(c, parsedUID.String())
+	}
 
 	// No domain broadcasts: old-key clients reauthenticate through terminal
 	// family authority. The existing epoch evictor targets only the old epoch.
@@ -2032,6 +2049,24 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 
 	h.log.Info("Password changed with key re-wrap", "user_id", userID)
 	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) chargeDangerousMFA(c *gin.Context, userID, mfaCode string) bool {
+	e := stepup.Charge(c.Request.Context(), stepup.DangerousActionBudget(h.redis), userID, mfaCode)
+	if e == nil {
+		return true
+	}
+	if e.Cause != nil {
+		h.log.Error("MFA budget unavailable", "error", e.Cause)
+	}
+	e.Write(c)
+	return false
+}
+
+func (h *Handler) clearDangerousMFA(c *gin.Context, userID string) {
+	if err := stepup.DangerousActionBudget(h.redis).Clear(c.Request.Context(), userID); err != nil {
+		h.log.Warn("Could not reset MFA budget after a successful change", "error", err)
+	}
 }
 
 // beginCredentialFence publishes the blocked marker before a destructive

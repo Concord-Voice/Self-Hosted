@@ -208,7 +208,8 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 		return
 	}
 
-	if err := h.verifyMFA(c, userID, stepup.PurposeOwnershipTransfer, req.MFACode); err != nil {
+	mfaVerified, err := h.verifyMFA(c, userID, stepup.PurposeOwnershipTransfer, req.MFACode)
+	if err != nil {
 		return
 	}
 
@@ -239,6 +240,9 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 
 	if err := h.insertTransferRecord(ctx, c, rec, middleware.TokenCredentialEpoch(c)); err != nil {
 		return
+	}
+	if mfaVerified {
+		h.clearOwnershipMFABudget(c, userID)
 	}
 
 	h.sendTransferEmail(ctx, userID, serverID, req.TargetUserID, reversalToken)
@@ -539,7 +543,8 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 		return
 	}
 
-	if err := h.verifyMFA(c, userID, stepup.PurposeOwnershipReverse, req.MFACode); err != nil {
+	mfaVerified, err := h.verifyMFA(c, userID, stepup.PurposeOwnershipReverse, req.MFACode)
+	if err != nil {
 		return
 	}
 
@@ -559,6 +564,9 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReverseTransfer})
 		}
 		return
+	}
+	if mfaVerified {
+		h.clearOwnershipMFABudget(c, userID)
 	}
 
 	if serverUUID, err := uuid.Parse(rec.serverID); err == nil {
@@ -1615,16 +1623,16 @@ func (h *Handler) verifyPassword(c *gin.Context, userID, password string) error 
 // the calling route's own stepup.Purpose, which a WebAuthn inline token must
 // have been minted for.
 // On failure, sends an error response to the gin context and returns an error.
-func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpose, mfaCode string) error {
+func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpose, mfaCode string) (bool, error) {
 	ctx := c.Request.Context()
 	methods, err := stepup.InlineMFAMethods(ctx, h.db, userID)
 	if err != nil {
 		h.log.Error("Failed to read MFA factors", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyMFACode})
-		return err
+		return false, err
 	}
 	if len(methods) == 0 {
-		return nil
+		return false, nil
 	}
 
 	if mfaCode == "" {
@@ -1633,21 +1641,35 @@ func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpos
 			"mfa_required": true,
 			"methods":      methods,
 		})
-		return fmt.Errorf("MFA required")
+		return false, fmt.Errorf("MFA required")
+	}
+
+	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+		if e.Cause != nil {
+			h.log.Error("Ownership MFA budget unavailable", "error", e.Cause)
+		}
+		e.Write(c)
+		return false, e
 	}
 
 	valid, err := h.mfaVerifier.VerifyCode(ctx, userID, purpose, mfaCode)
 	if err != nil {
 		h.log.Error(errMsgFailedVerifyMFACode, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyMFACode})
-		return err
+		return false, err
 	}
 	if !valid {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
-		return fmt.Errorf("invalid MFA code")
+		return false, fmt.Errorf("invalid MFA code")
 	}
 
-	return nil
+	return true, nil
+}
+
+func (h *Handler) clearOwnershipMFABudget(c *gin.Context, userID string) {
+	if err := stepup.DangerousActionBudget(h.redis).Clear(c.Request.Context(), userID); err != nil {
+		h.log.Warn("Could not reset ownership MFA budget after a successful change", "error", err)
+	}
 }
 
 // sendTransferEmail sends an ownership transfer notification to the current owner.

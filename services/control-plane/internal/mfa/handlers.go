@@ -1416,11 +1416,10 @@ type totpDisableRequest struct {
 
 // TOTPDisable disables TOTP MFA. Requires password + a valid MFA code.
 //
-// Everything runs in ONE transaction that takes the users row FOR NO KEY
-// UPDATE first (it writes the flags): the password and code are checked under
-// that lock, the code on the transaction so a rollback cannot burn a backup
-// code, the delete and the flags commit together (B1), and D1 is checked
-// before the commit.
+// The enrollment probe and any attempt-budget admission run before the
+// transaction. The transaction then takes the users row FOR NO KEY UPDATE:
+// password/factor verification, delete, and flags sync commit together (B1),
+// so a rollback cannot burn a backup code; D1 remains checked before commit.
 func (h *Handler) TOTPDisable(c *gin.Context) {
 	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
@@ -1428,6 +1427,19 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	var req totpDisableRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password and MFA code are required"})
+		return
+	}
+	// Probe enrollment before beginning the locked transaction. A Redis charge
+	// while LockSubjectTx holds the users row would let a slow Redis consume a
+	// scarce SQL connection and block factor writers. The locked recheck below
+	// is still authoritative.
+	var preflightTOTPExists bool
+	if err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&preflightTOTPExists); err != nil {
+		h.log.Error("Failed to read TOTP enrollment", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
+		return
+	}
+	if preflightTOTPExists && !h.chargeMFASettingsCode(c, userID, req.Code) {
 		return
 	}
 
@@ -1462,8 +1474,19 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	}
 	// Row gone but mfa_methods may still list 'totp': the sync below cleans
 	// the denormalized flags either way.
-	if totpExists && !h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, req, es) {
-		return
+	mfaVerified := false
+	if totpExists {
+		// A factor appearing after the preflight has not been charged. Refuse it
+		// for a retry instead of offering a free verifier guess; charging here
+		// would reintroduce a Redis round trip while the users row is locked.
+		if !preflightTOTPExists {
+			c.JSON(http.StatusConflict, gin.H{"error": "TOTP enrollment changed; retry"})
+			return
+		}
+		var verified bool
+		if verified, mfaVerified = h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, req, es); !verified {
+			return
+		}
 	}
 	if err := syncMFAFlagsTx(ctx, tx, userID, es); err != nil {
 		h.log.Error("Failed to sync MFA flags after TOTP disable", "error", err)
@@ -1478,6 +1501,9 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
+	if mfaVerified {
+		h.clearTxStepUpAfterCommit(c, userID)
+	}
 
 	if totpExists {
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonFactorDisabled, AuthMethod: securityevent.AuthTOTP})
@@ -1491,31 +1517,31 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 func (h *Handler) verifyAndDeleteTOTPTx(
 	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, attempt *stepup.PasswordAttempt,
 	req totpDisableRequest, es emailSmsState,
-) bool {
+) (proceed, mfaVerified bool) {
 	ctx := c.Request.Context()
 
 	if !h.verifyFactorRemovalPassword(c, subj, attempt, req.Password, "Password verification failed during TOTP disable") {
-		return false
+		return false, false
 	}
 
 	valid, err := h.VerifyCodeTx(ctx, tx, userID, stepup.PurposeTOTPDisable, req.Code)
 	if err != nil {
 		h.log.Error("MFA code verification error during TOTP disable", "user_id", userID, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed because of a server error. Contact support if this continues."})
-		return false
+		return false, false
 	}
 	if !valid {
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid})
 		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidMFACode})
-		return false
+		return false, false
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_mfa_totp WHERE user_id = $1`, userID); err != nil {
 		h.log.Error("Failed to disable TOTP MFA", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
-		return false
+		return false, false
 	}
-	return !h.refuseLastInlineFactorTx(c, tx, userID, es, errMsgFailedDisableMFA)
+	return !h.refuseLastInlineFactorTx(c, tx, userID, es, errMsgFailedDisableMFA), true
 }
 
 // RegenerateBackupCodes generates new backup codes. Requires password + TOTP code.
@@ -1578,6 +1604,9 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidTOTPCode})
 		return
 	}
+	if !h.chargeMFASettingsCode(c, userID, req.Code) {
+		return
+	}
 	step, matched := MatchCodeStep(string(secret), req.Code)
 	if !matched {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidTOTPCode})
@@ -1616,6 +1645,7 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 		return
 	}
 
+	h.clearStepUpAfterSuccess(c, userID)
 	c.JSON(http.StatusOK, gin.H{"backup_codes": codes})
 }
 

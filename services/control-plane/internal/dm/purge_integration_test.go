@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,7 +20,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/redis/go-redis/v9"
 )
 
 func purgeConvPath(convID string) string {
@@ -352,6 +355,98 @@ func TestPurgeConversation_StepUpWrongPassword403(t *testing.T) {
 	require.NoError(t, ts.DB.QueryRow(
 		`SELECT count(*) FROM message_purges WHERE context_id = $1`, convID).Scan(&audits))
 	assert.Equal(t, 0, audits, "failed step-up must write no audit row")
+}
+
+func enablePurgeMFA(t *testing.T, ts *testhelpers.TestServer, userID string) {
+	t.Helper()
+	_, err := ts.DB.Exec(`INSERT INTO user_mfa_webauthn (id, user_id, credential_id, credential_name, credential_type, public_key, sign_count, created_at)
+		VALUES (gen_random_uuid(), $1, $2, 'Key', 'hardware', '\x00', 0, NOW())`, userID, []byte("purge-cred-"+userID))
+	require.NoError(t, err)
+}
+
+func TestPurgeConversationMFABudgetStopsBeforeMutation(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	alice := ts.CreateTestUser(t, "purge_budget_alice")
+	bob := ts.CreateTestUser(t, "purge_budget_bob")
+	convID := ts.CreateDMConversation(t, alice.ID, bob.ID)
+	insertDMMsg(t, ts, convID, alice.ID, "keep-me")
+	enablePurgeMFA(t, ts, alice.ID)
+	require.NoError(t, ts.Redis.Set(context.Background(), stepup.DangerousActionBudget(ts.Redis).Key(alice.ID), stepup.BudgetLimit, 0).Err())
+
+	w := ts.DoRequest(http.MethodDelete, purgeConvPath(convID), map[string]any{
+		"range": "all", "current_password": alice.Password, "mfa_code": "wrong-code",
+	}, testhelpers.AuthHeaders(alice.AccessToken))
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	require.NotEmpty(t, w.Header().Get("Retry-After"))
+	require.Contains(t, w.Body.String(), "step_up_budget_exhausted")
+	require.Equal(t, 1, countDMMessages(t, ts, convID))
+}
+
+func TestPurgeConversationMFABudgetChargesOncePerWrongSubmission(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	alice := ts.CreateTestUser(t, "purge_budget_count_alice")
+	bob := ts.CreateTestUser(t, "purge_budget_count_bob")
+	convID := ts.CreateDMConversation(t, alice.ID, bob.ID)
+	insertDMMsg(t, ts, convID, alice.ID, "keep-me")
+	enablePurgeMFA(t, ts, alice.ID)
+	request := func() *httptest.ResponseRecorder {
+		w := ts.DoRequest(http.MethodDelete, purgeConvPath(convID), map[string]any{
+			"range": "all", "current_password": alice.Password, "mfa_code": "wrong-code",
+		}, testhelpers.AuthHeaders(alice.AccessToken))
+		// The endpoint's outer three-per-window limiter precedes its handler.
+		// Reset only that independent fixture key so the sixth request reaches the
+		// step-up admission being tested.
+		require.NoError(t, ts.Redis.Del(context.Background(), "ratelimit:user:"+alice.ID+":DELETE:/api/v1/dm/conversations/:id/messages").Err())
+		return w
+	}
+	for i := 0; i < stepup.BudgetLimit; i++ {
+		require.Equal(t, http.StatusForbidden, request().Code)
+	}
+	require.Equal(t, http.StatusTooManyRequests, request().Code)
+	count, err := ts.Redis.Get(context.Background(), stepup.DangerousActionBudget(ts.Redis).Key(alice.ID)).Int()
+	require.NoError(t, err)
+	require.Equal(t, stepup.BudgetLimit+1, count)
+	require.Equal(t, 1, countDMMessages(t, ts, convID))
+}
+
+func TestPurgeConversationMFABudgetUnavailableStopsBeforeMutation(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	alice := ts.CreateTestUser(t, "purge_budget_down_alice")
+	bob := ts.CreateTestUser(t, "purge_budget_down_bob")
+	convID := ts.CreateDMConversation(t, alice.ID, bob.ID)
+	insertDMMsg(t, ts, convID, alice.ID, "keep-me")
+	enablePurgeMFA(t, ts, alice.ID)
+	ts.Redis.AddHook(purgeBudgetIncrFaultHook{key: stepup.DangerousActionBudget(ts.Redis).Key(alice.ID)})
+
+	w := ts.DoRequest(http.MethodDelete, purgeConvPath(convID), map[string]any{
+		"range": "all", "current_password": alice.Password, "mfa_code": "wrong-code",
+	}, testhelpers.AuthHeaders(alice.AccessToken))
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "step_up_budget_unavailable")
+	require.Equal(t, 1, countDMMessages(t, ts, convID))
+}
+
+type purgeBudgetIncrFaultHook struct{ key string }
+
+func (purgeBudgetIncrFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h purgeBudgetIncrFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "incr" {
+			if args := cmd.Args(); len(args) >= 2 {
+				if key, ok := args[1].(string); ok && key == h.key {
+					err := errors.New("forced DM-purge MFA budget failure")
+					cmd.SetErr(err)
+					return err
+				}
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (purgeBudgetIncrFaultHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 // TestPurgeConversation_MissingPasswordFailClosed locks M7: with NO

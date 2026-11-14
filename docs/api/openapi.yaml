@@ -810,7 +810,8 @@ paths:
       - Auth
       summary: Begin account recovery
       description: 'Send a 6-digit recovery code to the account email. Always returns 200 to prevent email
-        enumeration.
+        enumeration. A live ten-minute recovery record is retained unchanged: a later begin neither
+        replaces its code nor resets its attempts, and sends no second email.
 
         Rate limit: 3 requests per 15 minutes (IP-based).
 
@@ -1229,7 +1230,9 @@ paths:
       tags:
       - Auth
       summary: Verify a recovery code
-      description: 'Validate the emailed recovery code (single-use, max 5 attempts). When a reserved
+      description: 'Validate the emailed recovery code (single-use, max 5 attempts). Wrong submissions
+        also consume a separate per-normalized-email budget of 10 attempts per 24 hours; it is not
+        reset by beginning recovery again and a correctly consumed code clears it. When a reserved
         authenticator app or security key is enabled, return a five-minute recovery_challenge MFA
         token and offered methods, without recovery authority or key material. Complete that challenge
         through /auth/mfa/verify. Backup codes satisfy a reserved authenticator app. Email ownership
@@ -1348,13 +1351,16 @@ paths:
                   attempts_remaining:
                     type: integer
         '429':
-          $ref: '#/components/responses/RateLimited'
+          $ref: '#/components/responses/RecoveryAttemptsExhausted'
         '503':
-          description: Recovery policy unavailable, unsupported, or no reserved factor can be challenged
+          description: Recovery policy unavailable, unsupported, or no reserved factor can be challenged;
+            the recovery attempt budget also fails closed when Redis is unavailable, before the code is checked.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                anyOf:
+                - $ref: '#/components/schemas/Error'
+                - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
   /auth/refresh:
     post:
       tags:
@@ -1494,8 +1500,9 @@ paths:
       tags:
       - Auth
       summary: Change the email on a pending registration
-      description: 'Update the email address mid-registration, reset the resend counter, and send a fresh
-        code to the new address.
+      description: 'Update the email address mid-registration and send a fresh code to the new address.
+        The pending registration''s wrong-code attempt state, resend count, cooldown, and resend cap
+        survive the rotation; this route consumes the same cooldown and cap as resend.
 
         Rate limit: 10 requests per 15 minutes (IP-based).
 
@@ -1544,7 +1551,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/RegistrationFlowError'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          description: Resends exhausted (`resends_exhausted`), cooldown active (`cooldown_active` with
+            `retry_after_seconds`), or IP rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationFlowError'
         '503':
           description: Verification email could not be sent to the new address
           content:
@@ -1646,7 +1658,8 @@ paths:
       - Auth
       summary: Resend the registration verification code
       description: 'Re-send the email verification code for a pending registration, enforcing cooldown
-        and max-resend limits.
+        and max-resend limits. Code rotation preserves the pending registration''s wrong-code attempt
+        state, resend count, cooldown, and cap.
 
         Rate limit: 20 requests per 15 minutes (IP-based).
 
@@ -5589,7 +5602,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          $ref: '#/components/responses/RateOrStepUpBudgetLimited'
+        '503':
+          $ref: '#/components/responses/StepUpBudgetUnavailable'
     get:
       tags:
       - DM
@@ -11108,6 +11123,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/StepUpAttemptsExhausted'
+        '503':
+          $ref: '#/components/responses/StepUpBudgetUnavailable'
   /mfa/backup-email:
     get:
       tags:
@@ -12453,7 +12472,10 @@ paths:
       summary: Disable TOTP MFA
       description: 'Deletes the TOTP enrollment. Requires password and a valid MFA code.
 
-        Idempotent — returns 200 even when no TOTP enrollment exists.
+        Idempotent — returns 200 even when no TOTP enrollment exists, without
+        consuming the shared MFA attempt budget. Enrollment appearing between
+        preflight and the locked recheck returns 409 before code verification;
+        retry the request.
 
         Once the change commits, every connected client of the account receives
         a `permissions_changed` WebSocket event (`data` is `{}`). It is the same
@@ -12505,7 +12527,8 @@ paths:
             only remaining inline-verifiable factor (TOTP or WebAuthn). Email and
             SMS have no inline verifier, so disabling this factor first would
             leave the account's step-up unable to check anything. Turn off
-            email/SMS first, or leave this factor in place.
+            email/SMS first, or leave this factor in place. Also returned when
+            TOTP enrollment appears during the request; retry before verifying.
           content:
             application/json:
               schema:
@@ -12525,6 +12548,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/StepUpAttemptsExhausted'
+        '503':
+          $ref: '#/components/responses/StepUpBudgetUnavailable'
   /mfa/totp/setup:
     post:
       tags:
@@ -13423,7 +13450,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          $ref: '#/components/responses/RateOrStepUpBudgetLimited'
+        '503':
+          $ref: '#/components/responses/StepUpBudgetUnavailable'
   /privacy/erase-account:
     post:
       tags:
@@ -16747,6 +16776,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateOrStepUpBudgetLimited'
+        '503':
+          $ref: '#/components/responses/StepUpBudgetUnavailable'
     get:
       tags:
       - Servers
@@ -17534,7 +17567,7 @@ paths:
       summary: Set session revocation mode
       description: 'Set the server-authoritative session revocation mode: `secure` asks for
 
-        password or MFA re-verification on every revoke, `simple` opens a short window
+        password AND MFA re-verification on every revoke when MFA is enrolled; `simple` opens a short window
 
         after one verified revoke. Changing the mode needs the same step-up as a revoke:
 
@@ -17567,7 +17600,7 @@ paths:
                   description: Current account password for step-up authentication
                 mfa_code:
                   type: string
-                  description: MFA verification code; may be used instead of the password
+                  description: MFA verification code; required in addition to the password when MFA is enrolled
       responses:
         '200':
           description: Revocation mode updated
@@ -17620,13 +17653,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '500':
           description: Password/MFA verification failed (including a Redis fault that keeps the lockout from counting the guess, or a failed MFA-method read), or the mode could not be saved
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/responses/StepUpBudgetUnavailable'
   /sessions/revoke-all:
     post:
       tags:
@@ -17634,7 +17669,7 @@ paths:
       summary: Revoke all sessions
       description: 'Revoke the authenticated user''s captured logical login families after password
 
-        or MFA re-verification. A request with neither step-up credential returns a
+        and, when MFA is enrolled, MFA re-verification. A request with neither step-up credential returns a
 
         403 discovery response describing the required method. By default, the authenticated
 
@@ -17666,7 +17701,7 @@ paths:
                   description: Current account password for step-up authentication
                 mfa_code:
                   type: string
-                  description: MFA verification code; may be used instead of the password
+                  description: MFA verification code; required in addition to the password when MFA is enrolled
                 include_current:
                   type: boolean
                   default: false
@@ -17732,13 +17767,16 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '503':
-          description: Family authority or persistence is temporarily unavailable; no success or postcommit grant is claimed.
+          description: Family authority or persistence is temporarily unavailable, or the MFA attempt
+            budget could not be evaluated before verification; no success or postcommit grant is claimed.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                anyOf:
+                - $ref: '#/components/schemas/Error'
+                - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
         '500':
           description: Password/MFA verification or session revocation failed
           content:
@@ -17797,12 +17835,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '503':
-          description: Family authority or persistence is temporarily unavailable; no success or postcommit grant is claimed.
+          description: Family authority or persistence is temporarily unavailable, or the MFA attempt
+            budget could not be evaluated before verification; no success or postcommit grant is claimed.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                anyOf:
+                - $ref: '#/components/schemas/Error'
+                - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
         '500':
           description: Internal revocation or step-up verification failure.
           content:
@@ -18048,6 +18091,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateOrStepUpBudgetLimited'
+        '503':
+          $ref: '#/components/responses/StepUpBudgetUnavailable'
         '500':
           description: Key replacement transaction failed or its commit result was ambiguous
           content:
@@ -18194,6 +18241,10 @@ paths:
                 oneOf:
                 - $ref: '#/components/schemas/PresenceOverrideConflict'
                 - $ref: '#/components/schemas/SyncDomainVersionConflict'
+        '429':
+          $ref: '#/components/responses/RateOrStepUpBudgetLimited'
+        '503':
+          $ref: '#/components/responses/StepUpBudgetUnavailable'
         '500':
           description: Password/key transaction failed or its commit result was ambiguous
           content:
@@ -20213,14 +20264,13 @@ components:
         never by the message text. The route limiter's body is `RateLimitError`
         (`error: Rate limit exceeded`) with the usual rate-limit headers. The
         step-up attempt budget's body is `error: Too many verification
-        attempts` with `step_up_budget_exhausted: true` (#3454): the actor
-        sent too many `mfa_code` values (5 per 15 minutes, shared with the MFA
-        settings routes and the delete-rate soft-lock). The budget is charged
-        by any request that carries a code, including one sent to a server
-        that does not enforce MFA on dangerous actions. Nothing was changed.
+        attempts` with `step_up_budget_exhausted: true`: the actor sent too
+        many `mfa_code` values (5 per 15 minutes) on a route sharing the MFA
+        budget. The operation's response documents its participating routes.
+        Nothing was changed.
       headers:
         Retry-After:
-          description: Seconds until the limit resets, when the limiter supplies it
+          description: Whole seconds until the route limiter or MFA budget resets
           schema:
             type: integer
       content:
@@ -20394,12 +20444,39 @@ components:
       description: >-
         Too many step-up verification attempts for this user (5 per 15
         minutes). Every `/mfa/*` route that returns this response shares one
-        budget per account with `PUT /servers/{id}/mfa-enforcement` and with the
-        delete-rate soft-lock's confirmations on the message-delete and purge
-        routes (#3455); `PATCH /users/me/privacy` has its own. Cleared only after a verified,
+        budget per account with session revoke/revocation-mode, password change,
+        key replacement, ownership transfer/reversal, DM purge,
+        `PUT /servers/{id}/mfa-enforcement`, and the delete-rate soft-lock's
+        confirmations on the message-delete and purge routes (#3455);
+        `PATCH /users/me/privacy` has its own. Cleared only after a verified,
         committed success on a route that charges it. The body carries
         `step_up_budget_exhausted: true`, which tells it apart from every
         other 429 without matching the message text.
+      headers:
+        Retry-After:
+          description: Whole seconds until this user's MFA budget resets
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/StepUpBudgetExhaustedError'
+          example:
+            error: Too many verification attempts
+            step_up_budget_exhausted: true
+    RecoveryAttemptsExhausted:
+      description: >-
+        Too many recovery-code attempts for this normalized email (10 per 24
+        hours). The recovery failure budget is independent of IP rate limits
+        and of the ten-minute recovery-code record, so beginning recovery again
+        does not reset it. A successfully consumed recovery code clears it.
+      headers:
+        Retry-After:
+          description: Whole seconds until this email's recovery attempt budget resets
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:
@@ -24378,9 +24455,9 @@ components:
           - totp
     StepUpBudgetExhaustedError:
       description: >-
-        The step-up attempt budget's 429 (`internal/stepup`, 5 attempts per 15
-        minutes). `step_up_budget_exhausted` is what tells it apart from a
-        route limiter's 429; never match the message text.
+        A verification attempt budget's 429. The operation response defines the
+        budget's scope and window. `step_up_budget_exhausted` is what tells it
+        apart from a route limiter's 429; never match the message text.
       allOf:
       - $ref: '#/components/schemas/Error'
       - type: object

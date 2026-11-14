@@ -112,9 +112,17 @@ func (b Budget) Consume(ctx context.Context, userID string) *Error {
 		return budgetUnavailable(fmt.Errorf("consume step-up attempt: %w", err))
 	}
 	if !allowed {
+		ttl, ttlErr := b.rdb.PTTL(ctx, b.Key(userID)).Result()
+		if ttlErr != nil {
+			return budgetUnavailable(fmt.Errorf("read step-up attempt PTTL: %w", ttlErr))
+		}
+		if ttl <= 0 {
+			return budgetUnavailable(fmt.Errorf("read step-up attempt PTTL: non-positive PTTL %s", ttl))
+		}
 		return &Error{
-			Status: http.StatusTooManyRequests,
-			Body:   gin.H{"error": ErrMsgTooManyAttempts, "step_up_budget_exhausted": true},
+			Status:            http.StatusTooManyRequests,
+			Body:              gin.H{"error": ErrMsgTooManyAttempts, "step_up_budget_exhausted": true},
+			retryAfterSeconds: int((ttl + time.Second - 1) / time.Second),
 		}
 	}
 	return nil

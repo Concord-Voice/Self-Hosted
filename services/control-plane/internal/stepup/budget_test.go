@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
@@ -38,6 +41,29 @@ func TestBudget_AdmitsUpToTheLimitThen429(t *testing.T) {
 	require.Nil(t, b.Consume(ctx, "u2"), "the budget is per user")
 }
 
+func TestBudget_ExhaustedWriteIncludesRetryAfter(t *testing.T) {
+	rdb, mr := newBudgetRedis(t)
+	b := NewBudget(rdb, "stepup:test:")
+	ctx := context.Background()
+
+	for range BudgetLimit {
+		require.Nil(t, b.Consume(ctx, "u1"))
+	}
+	mr.FastForward(500 * time.Millisecond)
+	e := b.Consume(ctx, "u1")
+	require.NotNil(t, e)
+	require.Equal(t, http.StatusTooManyRequests, e.Status)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	e.Write(c)
+
+	retryAfter, err := strconv.Atoi(w.Header().Get("Retry-After"))
+	require.NoError(t, err)
+	require.Equal(t, int(BudgetWindow.Seconds()), retryAfter)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
 // An unevaluable budget DENIES, and says so honestly: 503 with its own body,
 // never the 429 that blames the user.
 func TestBudget_UnwiredOrFailingRedisIs503(t *testing.T) {
@@ -48,6 +74,11 @@ func TestBudget_UnwiredOrFailingRedisIs503(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, e.Status)
 	require.Equal(t, gin.H{"error": ErrMsgBudgetUnavailable, "step_up_budget_unavailable": true}, e.Body)
 	require.ErrorIs(t, e, errBudgetUnwired)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	e.Write(c)
+	require.Empty(t, w.Header().Get("Retry-After"))
+	require.NotContains(t, w.Body.String(), "step_up_budget_exhausted")
 
 	rdb, mr := newBudgetRedis(t)
 	mr.Close()
