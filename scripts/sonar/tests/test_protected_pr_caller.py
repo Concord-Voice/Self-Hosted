@@ -2,6 +2,7 @@
 
 import base64
 from contextlib import redirect_stderr, redirect_stdout
+from http.client import IncompleteRead
 from io import BytesIO, StringIO
 import importlib.util
 import json
@@ -10,7 +11,7 @@ import tempfile
 import types
 import unittest
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -35,6 +36,16 @@ class Response:
 
     def read(self, size):
         return self.raw[:size]
+
+
+RUN = {"id": 777, "run_attempt": 1, "event": "workflow_dispatch", "head_branch": "main"}
+DISPATCHED = Response(200, {"workflow_run_id": 777})
+RUNNING = Response(200, {**RUN, "status": "in_progress"})
+DONE = Response(200, {**RUN, "status": "completed", "conclusion": "success"})
+
+
+def http_error(code, headers=None):
+    return HTTPError(CALLER.API, code, "private-body", headers or {}, BytesIO(b""))
 
 
 class CallerTests(unittest.TestCase):
@@ -335,8 +346,8 @@ class CallerTests(unittest.TestCase):
             def read(self, *args):
                 raise AssertionError("must not read HTTP error response body")
 
-        cases = [(code, str(code)) for code in (403, 422, 429, 500)]
-        cases += [(code, "unknown") for code in
+        cases = [(403, "4xx"), (422, "4xx"), (429, "429"), (500, "5xx")]
+        cases += [(code, "other") for code in
                   (None, True, False, "403", 403.0, 0, 99, 600, -1, PrivateCode())]
         for index, (code, expected) in enumerate(cases):
             with self.subTest(case=index):
@@ -360,8 +371,223 @@ class CallerTests(unittest.TestCase):
                 self.assertFalse(args.out.exists(), "failed dispatch must not record a child run")
                 self.assertEqual(stdout.getvalue(), "")
                 self.assertEqual(output.getvalue(),
-                                 f"protected Sonar caller failed: HTTP status {expected}\n",
-                                 "HTTPError must expose only a validated status instead of the generic OSError banner")
+                                 "protected Sonar caller failed; inspect local input and API status "
+                                 f"[dispatch_http_{expected}]\n",
+                                 "HTTPError must expose only a fixed status class instead of the generic OSError banner")
+
+    def _watch(self, responses):
+        """Run dispatch_watch over a urlopen script; returns (urlopen mock, sleep mock)."""
+        args = self._watch_args()
+        with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                patch.object(CALLER, "urlopen", side_effect=responses) as opener, \
+                patch.object(CALLER.time, "sleep") as sleep:
+            self.opener, self.sleep, self.child = opener, sleep, args.out
+            CALLER.dispatch_watch(args)
+        return opener, sleep
+
+    def test_poll_retries_404_before_new_run_is_visible(self):
+        opener, sleep = self._watch([DISPATCHED, http_error(404), DONE])
+        self.assertEqual(opener.call_count, 3)
+        sleep.assert_called_once_with(10)
+
+    def test_poll_404_after_grace_window_fails_at_once(self):
+        with self.assertRaises(CALLER.ApiError) as ctx:
+            self._watch([DISPATCHED] + [http_error(404)] * CALLER.NOT_VISIBLE_POLLS
+                        + [http_error(404), DONE])
+        self.assertEqual(ctx.exception.reason, "poll_http_404")
+        self.assertEqual(self.opener.call_count, CALLER.NOT_VISIBLE_POLLS + 2)  # Dispatch, then the failing poll.
+        self.assertEqual(self.sleep.call_count, CALLER.NOT_VISIBLE_POLLS)
+
+    def test_poll_retries_5xx_in_mid_watch(self):
+        opener, sleep = self._watch([DISPATCHED, RUNNING, http_error(503), URLError("private-host"), DONE])
+        self.assertEqual(opener.call_count, 5)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [10, 10, 10])
+
+    def test_poll_retries_429_and_honours_retry_after(self):
+        _, sleep = self._watch([DISPATCHED, http_error(429, {"Retry-After": "60"}),
+                                http_error(429, {"Retry-After": "99999"}),
+                                http_error(429, {"Retry-After": "soon"}), DONE])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list],
+                         [60, CALLER.RETRY_AFTER_MAX, 10])
+
+    def test_poll_403_fails_at_once_without_retry_or_sleep(self):
+        with self.assertRaises(CALLER.ApiError) as ctx:
+            self._watch([DISPATCHED, http_error(403, {"Retry-After": "60"}), DONE])
+        self.assertEqual(ctx.exception.reason, "poll_http_4xx")
+        self.assertEqual(self.opener.call_count, 2)
+        self.sleep.assert_not_called()
+
+    def test_dispatch_post_error_is_not_retried(self):
+        args = self._watch_args()
+        for error, reason in ((http_error(502), "dispatch_http_5xx"), (http_error(429), "dispatch_http_429"),
+                              (TimeoutError("private-host"), "dispatch_network")):
+            with self.subTest(reason=reason), patch.dict(CALLER.os.environ, {"GH_TOKEN": "t"}, clear=True), \
+                    patch.object(CALLER, "urlopen", side_effect=[error, DISPATCHED, DONE]) as opener, \
+                    patch.object(CALLER.time, "sleep") as sleep, self.assertRaises(CALLER.ApiError) as ctx:
+                CALLER.dispatch_watch(args)
+            self.assertEqual(ctx.exception.reason, reason)
+            self.assertEqual(opener.call_count, 1)
+            sleep.assert_not_called()
+            self.assertFalse(args.out.exists())
+
+    def test_poll_retry_keeps_identity_and_result_checks(self):
+        for run, message in (({**RUN, "run_attempt": 2, "status": "completed", "conclusion": "success"}, "identity"),
+                             ({**RUN, "status": "completed", "conclusion": "failure"}, "failed")):
+            with self.subTest(message=message), self.assertRaisesRegex(CALLER.Invalid, message):
+                self._watch([DISPATCHED, http_error(500), Response(200, run)])
+            self.child.unlink(missing_ok=True)
+
+    def test_poll_retries_still_end_at_the_forty_five_minute_budget(self):
+        # Alternate errors and running polls so the consecutive-error cap is never reached.
+        with self.assertRaisesRegex(CALLER.Invalid, "timed out"):
+            self._watch([DISPATCHED] + [http_error(502), RUNNING] * (CALLER.MAX_POLLS // 2))
+        self.assertEqual(self.opener.call_count, CALLER.MAX_POLLS + 1)
+        self.assertEqual(self.sleep.call_count, CALLER.MAX_POLLS - 1)
+
+    def test_poll_running_to_the_last_slot_times_out_without_a_final_sleep(self):
+        with self.assertRaisesRegex(CALLER.Invalid, "timed out"):
+            self._watch([DISPATCHED] + [RUNNING] * CALLER.MAX_POLLS)
+        self.assertEqual(self.sleep.call_count, CALLER.MAX_POLLS - 1)
+
+    def test_poll_consecutive_transient_errors_fail_with_their_reason_class(self):
+        for error, reason in ((http_error(503), "poll_http_5xx"), (URLError("private-host"), "poll_network")):
+            with self.subTest(reason=reason), self.assertRaises(CALLER.ApiError) as ctx:
+                self._watch([DISPATCHED] + [error] * (CALLER.MAX_TRANSIENT_RUN + 1) + [DONE])
+            self.assertEqual(ctx.exception.reason, reason)
+            self.assertEqual(self.opener.call_count, CALLER.MAX_TRANSIENT_RUN + 2)  # DONE never consumed.
+            self.child.unlink(missing_ok=True)
+
+    def test_poll_a_good_poll_resets_the_consecutive_error_count(self):
+        script = ([DISPATCHED] + [http_error(502)] * CALLER.MAX_TRANSIENT_RUN + [RUNNING]
+                  + [http_error(502)] * CALLER.MAX_TRANSIENT_RUN + [DONE])
+        self._watch(script)
+        self.assertEqual(self.opener.call_count, len(script))
+
+    def test_poll_wall_clock_deadline_ends_the_watch(self):
+        limit = CALLER.MAX_POLLS * CALLER.POLL_SECONDS + CALLER.DEADLINE_SLACK
+        clock = iter([0, 0])
+        with patch.object(CALLER.time, "monotonic", lambda: next(clock, limit + 1)):
+            with self.assertRaisesRegex(CALLER.Invalid, "timed out"):
+                self._watch([DISPATCHED, http_error(502), DONE])
+        self.assertEqual(self.opener.call_count, 2)  # DONE was never polled.
+        # Positive control: with the clock standing still the same script succeeds.
+        self.child.unlink()
+        with patch.object(CALLER.time, "monotonic", lambda: 0):
+            self._watch([DISPATCHED, http_error(502), DONE])
+
+    def test_poll_retry_sleep_is_clamped_to_the_time_left(self):
+        limit = CALLER.MAX_POLLS * CALLER.POLL_SECONDS + CALLER.DEADLINE_SLACK
+        # deadline calc, top-of-loop check, then 5 s left when the retry sleep is chosen.
+        clock = iter([0, 0, limit - 5])
+        with patch.object(CALLER.time, "monotonic", lambda: next(clock, limit + 1)):
+            with self.assertRaisesRegex(CALLER.Invalid, "timed out"):
+                self._watch([DISPATCHED, http_error(429, {"Retry-After": "120"}), DONE])
+        self.sleep.assert_called_once_with(5)
+        self.assertEqual(self.opener.call_count, 2)  # DONE was never polled.
+
+    def test_poll_identity_is_compared_by_type_as_well_as_value(self):
+        for field, value in (("id", 777.0), ("run_attempt", True), ("run_attempt", 1.0)):
+            with self.subTest(field=field, value=value), \
+                    self.assertRaisesRegex(CALLER.Invalid, "identity invalid"):
+                self._watch([DISPATCHED, Response(200, {**RUN, field: value, "status": "completed",
+                                                         "conclusion": "success"})])
+            self.child.unlink(missing_ok=True)
+
+    def test_poll_body_read_failures_are_network_errors_and_retried(self):
+        class Broken(Response):
+            def __init__(self, error):
+                super().__init__(200, {})
+                self.error = error
+
+            def read(self, size):
+                raise self.error
+
+        for error in (IncompleteRead(b""), ConnectionResetError("private-host")):
+            with self.subTest(error=type(error).__name__):
+                self._watch([DISPATCHED, Broken(error), DONE])
+                self.child.unlink()
+
+    def test_dispatch_body_read_failure_is_a_network_error_without_retry(self):
+        class Broken(Response):
+            def read(self, size):
+                raise IncompleteRead(b"")
+
+        with self.assertRaises(CALLER.ApiError) as ctx:
+            self._watch([Broken(200, {}), DISPATCHED, DONE])
+        self.assertEqual(ctx.exception.reason, "dispatch_network")
+        self.assertEqual(self.opener.call_count, 1)
+
+    def test_redirects_are_not_retried(self):
+        with self.assertRaises(CALLER.ApiError) as ctx:
+            self._watch([DISPATCHED, http_error(302), DONE])
+        self.assertEqual(ctx.exception.reason, "poll_http_other")
+        self.sleep.assert_not_called()
+        self.child.unlink()
+        with self.assertRaises(CALLER.ApiError) as ctx:
+            self._watch([http_error(301), DISPATCHED, DONE])
+        self.assertEqual(ctx.exception.reason, "dispatch_http_other")
+
+    def test_http_class_is_a_closed_set(self):
+        for status, expected in ((404, "404"), (429, "429"), (500, "5xx"), (503, "5xx"), (599, "5xx"),
+                                 (400, "4xx"), (403, "4xx"), (499, "4xx"), (302, "other"), (200, "other")):
+            self.assertEqual(CALLER.http_class(status), expected, status)
+
+    def test_retry_after_accepts_only_small_ascii_integers(self):
+        for value, expected in (("60", 60), ("0", 0), ("3", 3), ("999999", 999999), ("", None), ("-5", None),
+                                ("1.5", None), ("soon", None), ("1000000", None), ("\u0663", None)):
+            self.assertEqual(CALLER.retry_after({"Retry-After": value}), expected, value)
+        self.assertIsNone(CALLER.retry_after({}))
+        self.assertIsNone(CALLER.retry_after(None))
+
+    def test_retry_after_below_the_cadence_keeps_the_ten_second_poll(self):
+        _, sleep = self._watch([DISPATCHED, http_error(429, {"Retry-After": "3"}), DONE])
+        sleep.assert_called_once_with(10)
+
+    def test_oidc_failures_carry_the_oidc_reason_class(self):
+        env = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://pipelines.actions.githubusercontent.com/token?x=1",
+               "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "private-request-bearer"}
+        for error, reason in ((http_error(500), "oidc_http_5xx"), (URLError("private-host"), "oidc_network")):
+            with self.subTest(reason=reason), patch.dict(CALLER.os.environ, env, clear=True), \
+                    patch.object(CALLER, "urlopen", side_effect=error), \
+                    self.assertRaises(CALLER.ApiError) as ctx:
+                CALLER.oidc_token(b"{}")
+            self.assertEqual(ctx.exception.reason, reason)
+
+    def test_transient_retries_are_logged_by_reason_class_only(self):
+        args = self._watch_args()
+        output = StringIO()
+        with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                patch.object(CALLER, "urlopen", side_effect=[DISPATCHED, http_error(503), URLError("private-host"), DONE]), \
+                patch.object(CALLER.time, "sleep"), \
+                patch("sys.argv", [str(SOURCE), "dispatch-watch", "--proof", str(args.proof),
+                                   "--out", str(args.out)]), redirect_stderr(output):
+            self.assertEqual(CALLER.main(), 0)
+        self.assertEqual(output.getvalue().splitlines(),
+                         ["protected Sonar caller: transient poll error [poll_http_5xx]; retrying",
+                          "protected Sonar caller: transient poll error [poll_network]; retrying"])
+
+    def test_cli_dispatch_network_error_says_a_child_may_exist(self):
+        args = self._watch_args()
+        output = StringIO()
+        with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                patch.object(CALLER, "urlopen", side_effect=TimeoutError("private-host")), \
+                patch("sys.argv", [str(SOURCE), "dispatch-watch", "--proof", str(args.proof),
+                                   "--out", str(args.out)]), redirect_stderr(output):
+            self.assertEqual(CALLER.main(), 1)
+        self.assertEqual(output.getvalue().strip(),
+                         "protected Sonar caller failed; inspect local input and API status "
+                         "[dispatch_network] (a child run may have started)")
+
+    def test_cli_prints_only_the_fixed_reason_class(self):
+        args = self._watch_args()
+        output = StringIO()
+        with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                patch.object(CALLER, "urlopen", side_effect=[DISPATCHED, http_error(403)]), \
+                patch("sys.argv", [str(SOURCE), "dispatch-watch", "--proof", str(args.proof),
+                                   "--out", str(args.out)]), redirect_stderr(output):
+            self.assertEqual(CALLER.main(), 1)
+        self.assertEqual(output.getvalue().strip(),
+                         "protected Sonar caller failed; inspect local input and API status [poll_http_4xx]")
 
     def _watch_args(self):
         payload = CALLER.validate_payload({**self.ids, "selection": self.selection,
