@@ -65,6 +65,7 @@ Android.
 - **Authentication:** Added dormant SQL receipt accounting for future separate step-up attempt budgets. Current request handling and attempt budgets are unchanged.
 - **Authentication:** Added a private process proof-work tracker for future step-up cutovers. Current request handling remains unchanged.
 - **Self-hosting:** Operators can set separate minimum app versions for iOS and Android with `CLIENT_MIN_VERSION_IOS` and `CLIENT_MIN_VERSION_ANDROID`. `CLIENT_MIN_VERSION` still sets the desktop minimum. API: mobile clients send `X-Concord-Client-Platform` (`ios` or `android`), or `client_platform` on the WebSocket; any other value gets a 400.
+- **Self-hosting:** Each self-host release now carries a CycloneDX JSON SBOM, `concord-selfhost-v<version>.cdx.json`, as an attested release asset. It lists every npm package and Go module the bundle's lockfiles and `go.mod` files pin, dev dependencies included.
 - **Self-hosting:** Pushing a `v<VERSION>` tag now builds the self-host bundle (`concord-selfhost-<version>.tar.gz`, its manifest and `SHA256SUMS`) from the tagged tree in this repository and attests each file's build provenance. The release pipeline verifies the attestations and opens an unsigned draft. A release is not a supported install until it passes fresh-host acceptance.
 
 ### Changed
@@ -77,6 +78,7 @@ Android.
 
 ### Fixed
 
+- **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
 - **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
 - **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.
 
