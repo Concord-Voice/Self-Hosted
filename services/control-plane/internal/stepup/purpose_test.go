@@ -12,7 +12,7 @@ import (
 // routes shared would let a token minted for one be spent on the other.
 func TestPurposes_ClosedSet(t *testing.T) {
 	all := Purposes()
-	require.Len(t, all, 42, "one purpose per consumer route; update the table and this count together")
+	require.Len(t, all, 47, "one purpose per consumer route; update the table and this count together")
 
 	seen := map[Purpose]bool{}
 	for _, p := range all {
@@ -24,6 +24,7 @@ func TestPurposes_ClosedSet(t *testing.T) {
 		PurposeBackupEmailSet, PurposeEmailSmsDisable, PurposeServerMFAEnforcementOff,
 		PurposeDMPurge, PurposeSessionRevoke, PurposeOwnershipTransfer, PurposePasswordChange, PurposeE2EEKeyReset,
 		PurposeMessageDelete, PurposeDMMessageDelete, PurposeChannelPurge, PurposeServerPurge,
+		PurposeAccountErase, PurposeWebAuthnDelete, PurposeSSOUnlink, PurposeSSOTrustEnable, PurposeOwnershipTransferConfirm,
 	} {
 		require.True(t, seen[p], "%q must be in the closed set", p)
 	}
@@ -88,9 +89,11 @@ func TestGraceEligiblePurposes_ClosedSet(t *testing.T) {
 		PurposeChannelOverrideUpsert, PurposeCategoryOverrideUpsert,
 		// The own-rule-only and settings routes are outside D-2 entirely.
 		PurposeDMClear, PurposeDMPurge, PurposeTOTPDisable, PurposePasswordChange,
+		PurposeAccountErase, PurposeWebAuthnDelete, PurposeSSOUnlink, PurposeSSOTrustEnable, PurposeOwnershipTransferConfirm,
 		"", "not.a.purpose",
 	} {
 		require.False(t, p.GraceEligible(), "%q must always ask for a fresh confirmation", p)
+		require.False(t, p.OwnRule(), "%q must never accept a password token", p)
 	}
 
 	got := GraceEligiblePurposes()
