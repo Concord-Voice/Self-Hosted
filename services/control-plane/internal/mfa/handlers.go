@@ -2152,8 +2152,9 @@ func (h *Handler) refuseWrongCode(ctx context.Context, c *gin.Context, method, u
 	if attempt >= failedAttemptLimit {
 		lockErr = h.lockOutVerify(ctx, lockoutKey)
 	}
-	outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-	middleware.MarkAuthFailureOutcome(c, outcome)
+	if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+		return
+	}
 	if lockErr != nil {
 		h.verifyDependencyFailed(c, userID, lockErr)
 		return

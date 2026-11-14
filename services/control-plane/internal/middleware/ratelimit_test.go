@@ -199,6 +199,26 @@ func TestRateLimitByIPFailClosedWithHandlersRejectsTTLAndExpireErrors(t *testing
 	}
 }
 
+func TestRateLimitByIPFailClosedRejectsBackendErrors(t *testing.T) {
+	for _, command := range []string{"incr", "ttl", "expire"} {
+		t.Run(command, func(t *testing.T) {
+			ts := setupTS(t)
+			ts.Redis.AddHook(rateLimitCommandErrorHook{command: command})
+			router := gin.New()
+			handlerCalled := false
+			router.GET(pathRateTest, middleware.RateLimitByIPFailClosed(ts.Redis, 10, time.Minute), func(c *gin.Context) {
+				handlerCalled = true
+				c.Status(http.StatusNoContent)
+			})
+
+			response := doRateLimitRequest(router)
+			require.Equal(t, http.StatusServiceUnavailable, response.Code)
+			require.Equal(t, "1", response.Header().Get("Retry-After"))
+			require.False(t, handlerCalled)
+		})
+	}
+}
+
 func TestRateLimitByIPFailOpenMarksEveryBackendErrorBeforeAllowingRequest(t *testing.T) {
 	for _, command := range []string{"incr", "ttl", "expire"} {
 		t.Run(command, func(t *testing.T) {

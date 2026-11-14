@@ -1893,6 +1893,16 @@ The `tools` compose profile gates the dev and test services (`pgadmin`, `redis-c
 
 ### Authentication & Authorization
 
+Pre-auth source budgets normalize plain and mapped IPv4 to a `/32` identity and
+native IPv6 to its `/64` prefix. This is downstream of the trusted-proxy
+derivation: aggregation does not make a forwarded header trustworthy. Nginx
+uses the same binary source key for request and connection limits; the control
+plane and media plane use it for Redis and handshake counters. Missing or
+malformed control-plane addresses share an `unattributed` bucket. Public auth
+admission and failure recording fail closed with the fixed 503 plus
+`Retry-After: 1` when Redis cannot count; production media configuration fails
+startup if its trusted-proxy source is unusable.
+
 - Email + password with **Argon2id** hashing (t=3, m=64MB, p=4). Username validation applies profanity and leetspeak filtering. Login authenticates by **email**.
 - **JWT access tokens** (15-minute TTL) + **refresh tokens** (30-day rolling) in HttpOnly cookies (`internal/auth/`).
 - **Refresh-token revocation ordering:** standalone bulk sweeps call `auth.RevokeAllRefreshTokens`, which locks the user row `FOR NO KEY UPDATE` in the revocation transaction. Destructive flows that already hold that lock retain their own atomic sweeps. Session mints take the same lock, so a sweep and mint have a total order. For “revoke all other sessions,” the helper locks an active bearer refresh row, falls back to the active refresh-cookie row, and fails without revoking if neither is active. When it preserves a bearer row, the sweep revokes a different refresh-cookie row.

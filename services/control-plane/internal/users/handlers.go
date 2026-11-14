@@ -411,8 +411,9 @@ func (h *Handler) RevealMyKeys(c *gin.Context) {
 			Severity: securityevent.SeverityMedium, Reason: securityevent.ReasonInvalidCredentials,
 			AuthMethod: securityevent.AuthPassword,
 		})
-		outcome := middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		middleware.MarkAuthFailureOutcome(c, outcome) // a ban it created supersedes the denial
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgCurrentPasswordIncorrect, "code": errCodeInvalidCurrentPassword})
 	default:
 		// err is deliberately not logged: a hash decode failure can embed the
