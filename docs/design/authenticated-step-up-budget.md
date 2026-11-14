@@ -19,9 +19,11 @@ The existing Redis `stepup.Budget` counts up to five submitted MFA proofs per
 user in fifteen minutes, across these protected actions: session revoke,
 revoke-all, and revocation-mode; TOTP disable and backup-code regeneration;
 password change and E2EE key replacement; ownership transfer and reversal;
-and DM/group bulk purge. Each route charges before factor verification and
-before a protected SQL transaction. A correct password alone does not clear the
-MFA counter. An exhausted budget returns 429 with `Retry-After` and
+and DM/group bulk purge. Each route charges before factor verification. TOTP
+disable first checks enrollment under its SQL lock and charges only when it will
+verify a factor; other routes charge before their protected transaction. A
+correct password alone does not clear the MFA counter. An exhausted budget
+returns 429 with `Retry-After` and
 `step_up_budget_exhausted`; a budget-store failure returns 503 with
 `step_up_budget_unavailable`. Routes already using this budget charge once.
 
