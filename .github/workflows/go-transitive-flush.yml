@@ -150,6 +150,30 @@ jobs:
           set -euo pipefail
           echo "Running go get -u ./... && go mod tidy"
           go get -u ./...
+
+          # modernc.org/libc must stay at the exact version modernc.org/sqlite
+          # requires (internal/managedturn TestSQLiteRunsOnTheLibcItRequires).
+          # `go get -u` takes libc's newest release, which can be ahead of
+          # sqlite's pin; a flush once moved libc to v1.81.0 under sqlite v1.62.0,
+          # which requires v1.80.1. Re-pin libc to whatever sqlite now requires.
+          SQLITE=$(go list -m -f '{{.Version}}' modernc.org/sqlite)
+          LIBC=$(go mod graph | awk -v p="modernc.org/sqlite@$SQLITE" \
+            '$1 == p && $2 ~ /^modernc\.org\/libc@/ { sub(/^.*@/, "", $2); print $2 }')
+          if [ -z "$LIBC" ]; then
+            echo "::error::modernc.org/sqlite $SQLITE declares no modernc.org/libc requirement"
+            exit 1
+          fi
+          echo "Pinning modernc.org/libc to $LIBC (required by modernc.org/sqlite $SQLITE)"
+          PIN_LOG=$(go get "modernc.org/libc@$LIBC" 2>&1) || { printf '%s\n' "$PIN_LOG"; exit 1; }
+          printf '%s\n' "$PIN_LOG"
+          # Moving libc down also moves down any module that needs a newer libc.
+          # That would undo part of the flush without a sign, so stop instead.
+          OTHER=$(printf '%s\n' "$PIN_LOG" | grep -E '^go: (downgraded|removed) ' | grep -v '^go: downgraded modernc\.org/libc ' || true)
+          if [ -n "$OTHER" ]; then
+            echo "::error::pinning modernc.org/libc to $LIBC also changed other modules"
+            printf '%s\n' "$OTHER"
+            exit 1
+          fi
           go mod tidy
 
           # Stat the result for the PR body
@@ -225,6 +249,7 @@ jobs:
           - Direct deps bumped to latest minor+patch
           - Indirect deps that newer direct/indirect versions now require (MVS resolution)
           - Orphan cleanup by \`go mod tidy\` (the count above is measured from the diff, not assumed)
+          - \`modernc.org/libc\` re-pinned to the exact version \`modernc.org/sqlite\` requires (\`go get -u\` alone can move it ahead)
 
           ## Review checklist
 
