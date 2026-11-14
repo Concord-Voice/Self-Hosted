@@ -23,6 +23,7 @@ import (
 	"golang.org/x/net/netutil"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/hostagent"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
 )
 
 const (
@@ -44,6 +45,9 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "authorizer" {
+		os.Exit(runAuthorizerCLI(os.Args[2:]))
+	}
 	os.Exit(run())
 }
 
@@ -52,6 +56,14 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func expectedControlPlaneUID() (int, error) {
+	value, err := strconv.ParseUint(envOr("CONCORD_AGENT_CONTROL_PLANE_UID", "10006"), 10, 32)
+	if err != nil || value == 0 || value > uint64(^uint(0)>>1) {
+		return 0, errors.New("invalid CONCORD_AGENT_CONTROL_PLANE_UID")
+	}
+	return int(value), nil
 }
 
 func run() int {
@@ -71,6 +83,11 @@ func run() int {
 		log.Print("concord-agent: startup failed: group id")
 		return 1
 	}
+	uid, err := expectedControlPlaneUID()
+	if err != nil {
+		log.Print("concord-agent: startup failed: invalid control-plane peer UID")
+		return 1
+	}
 	sock := envOr("CONCORD_AGENT_SOCKET", defaultSocket)
 	ln, err := listen(sock, gid)
 	if err != nil {
@@ -79,19 +96,51 @@ func run() int {
 	}
 
 	agent := hostagent.NewServer(hostagent.ExecRunner{CLI: cli})
-	// Writes report progress on stderr, so their runs keep it. backups is the
-	// CLI's default, three levels above it like .env.
-	agent.EnableWrites(hostagent.ExecRunner{CLI: cli, Combined: true},
-		filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(resolved))), "backups"),
-		filepath.Join(filepath.Dir(sock), writeMarkerFile))
+	if err := agent.SetExpectedPeerUID(uid); err != nil {
+		log.Print("concord-agent: startup failed: invalid control-plane peer UID")
+		return 1
+	}
+	audit, auditErr := hostagent.OpenAudit(hostagent.HostAgentAuditPath)
+	if auditErr != nil {
+		log.Print("concord-agent: host-agent audit unavailable; writes disabled")
+	} else if err := agent.SetAudit(audit); err != nil {
+		log.Print("concord-agent: startup failed: host-agent audit")
+		return 1
+	}
 	// An appliance (TrueNAS) runs the containers itself; its own UI owns
 	// every write, so the console only reads.
 	if appliance := os.Getenv("CONCORD_AGENT_MANAGED_BY"); appliance != "" && !agent.SetManagedBy(appliance) {
 		log.Print("concord-agent: startup failed: unknown CONCORD_AGENT_MANAGED_BY")
 		return 1
 	}
+	if os.Getenv("CONCORD_AGENT_MANAGED_BY") == "" && audit != nil {
+		// The agent remains read-only until a root-confirmed authorizer file is
+		// installed. A missing or unsafe file never enables legacy write routes.
+		authorizers, loadErr := hostagent.LoadAuthorizers(authorizerPath)
+		if loadErr != nil {
+			log.Print("concord-agent: authorizer trust unavailable; writes disabled")
+		} else {
+			rpID, origins, configErr := authorizers.RPConfig()
+			if configErr != nil {
+				log.Print("concord-agent: authorizer trust unavailable; writes disabled")
+			} else if verifier, verifierErr := mfa.NewWebAuthnService(rpID, "Concord Voice Admin", origins); verifierErr != nil {
+				log.Print("concord-agent: authorizer verifier unavailable; writes disabled")
+			} else {
+				// Writes report progress on stderr. The CLI's backups directory
+				// is three levels above the trusted executable, like .env.
+				agent.EnableWrites(hostagent.ExecRunner{CLI: cli, Combined: true},
+					filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(resolved))), "backups"),
+					filepath.Join(filepath.Dir(sock), writeMarkerFile))
+				if err := agent.SetAuthorizationStore(hostagent.NewAuthorizationStore(authorizers, verifier, time.Now)); err != nil {
+					log.Print("concord-agent: startup failed: authorization store")
+					return 1
+				}
+			}
+		}
+	}
 	srv := &http.Server{
 		Handler:           agent,
+		ConnContext:       hostagent.PeerConnContext,
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    8 << 10,
 		IdleTimeout:       60 * time.Second,

@@ -18,17 +18,16 @@ import (
 	"time"
 )
 
-// Write actions (#188). The control-plane proxy checks the admin session and,
-// for disruptive actions, a fresh WebAuthn assertion, and writes an audit row
-// before it calls the agent; the agent keeps the allowlist, validates every
-// argument itself, and runs one write at a time. A write returns a job id at
-// once and the caller polls the job.
+// Write actions (#188). The agent requires its own action-bound WebAuthn
+// assertion for every root write, validates the stored arguments again at
+// admission, and runs one write at a time. A write returns a job id at once
+// and the caller polls the job.
 
 const (
 	jsonFlag       = "--json"
 	maxJobs        = 16
 	maxJobOutput   = 64 << 10 // tail kept per job
-	maxActionBody  = 1 << 10
+	maxActionBody  = 34 << 10 // 32 KiB assertion plus bounded JSON envelope
 	jobIDBytes     = 16
 	shortJobBudget = 15 * time.Minute
 	// up rebuilds images; backup, restore and update move whole databases.
@@ -44,7 +43,8 @@ var (
 	archivePattern   = regexp.MustCompile(`^concord-backup-[0-9]{8}T[0-9]{6}Z\.tar\.gz$`)
 )
 
-// actionRequest is the only body a write accepts.
+// actionRequest is accepted only at authorization begin. The final write
+// receives a one-use handle and assertion, never caller-supplied arguments.
 type actionRequest struct {
 	Tag     string `json:"tag,omitempty"`
 	Archive string `json:"archive,omitempty"`
@@ -62,7 +62,8 @@ type Job struct {
 	Archive string `json:"archive,omitempty"`
 	Output  string `json:"output,omitempty"`
 
-	out tailBuffer
+	out     tailBuffer
+	adminID string
 }
 
 type jobs struct {
@@ -71,6 +72,7 @@ type jobs struct {
 	backups  string // the install's backups directory
 	marker   string // exists while a write runs
 	boundary string // the security-event log root
+	audit    *Audit
 	list     []*Job // oldest first
 	running  bool
 }
@@ -83,7 +85,7 @@ type jobs struct {
 // earlier run is removed.
 func (s *Server) EnableWrites(r Runner, backups, marker string) {
 	_ = os.Remove(marker) // that run's job died with it
-	s.writes = &jobs{run: r, backups: backups, marker: marker, boundary: securityLogRoot}
+	s.writes = &jobs{run: r, backups: backups, marker: marker, boundary: securityLogRoot, audit: s.audit}
 }
 
 // refusal is a refused write: its HTTP status and reason.
@@ -173,7 +175,7 @@ func newJobID() (string, error) {
 
 // start records a job and runs it in the background. It returns nil when a
 // write is already running.
-func (j *jobs) start(action string, cmds [][]string, budget time.Duration) (*Job, error) {
+func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Duration) (*Job, error) {
 	id, err := newJobID()
 	if err != nil {
 		return nil, err
@@ -183,10 +185,13 @@ func (j *jobs) start(action string, cmds [][]string, budget time.Duration) (*Job
 	if j.running {
 		return nil, nil
 	}
+	if j.audit == nil || j.audit.Write(AuditEvent{Action: action, Outcome: "admitted", Reason: "admission_approved", AdminID: adminID, JobID: id}) != nil {
+		return nil, errors.New("host-agent admission audit unavailable")
+	}
 	if err := os.WriteFile(j.marker, []byte(id+"\n"), 0o600); err != nil {
 		return nil, err
 	}
-	job := &Job{ID: id, Action: action, State: "running", Started: time.Now().UTC()}
+	job := &Job{ID: id, Action: action, State: "running", Started: time.Now().UTC(), adminID: adminID}
 	job.out.max = maxJobOutput
 	j.running = true
 	j.list = append(j.list, job)
@@ -195,6 +200,9 @@ func (j *jobs) start(action string, cmds [][]string, budget time.Duration) (*Job
 		j.list = append([]*Job(nil), j.list[len(j.list)-maxJobs:]...)
 	}
 	go j.execute(job, cmds, budget)
+	if err := j.audit.Write(AuditEvent{Action: action, Outcome: "started", Reason: "job_started", AdminID: adminID, JobID: id}); err != nil {
+		log.Print("concord-agent: host-agent audit start event unavailable")
+	}
 	return job, nil
 }
 
@@ -229,6 +237,15 @@ func (j *jobs) execute(job *Job, cmds [][]string, budget time.Duration) {
 	}
 	_ = os.Remove(j.marker)
 	j.running = false
+	if j.audit != nil {
+		outcome, reason := "succeeded", "job_succeeded"
+		if err != nil {
+			outcome, reason = "failed", "job_failed"
+		}
+		if auditErr := j.audit.Write(AuditEvent{Action: job.Action, Outcome: outcome, Reason: reason, AdminID: job.adminID, JobID: job.ID}); auditErr != nil {
+			log.Print("concord-agent: host-agent audit completion event unavailable")
+		}
+	}
 	log.Printf("concord-agent: job action=%s state=%s", job.Action, job.State)
 }
 
@@ -276,6 +293,7 @@ func (j *jobs) snapshot(job *Job, withOutput bool) Job {
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action string) {
 	name := actionName(action)
 	if name == "" {
+		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "assertion_denied"})
 		refuse(w, http.StatusNotFound, "unknown_action")
 		log.Printf("concord-agent: refused unknown action")
 		return
@@ -284,28 +302,53 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 		refuse(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-	var req actionRequest
-	if r.ContentLength != 0 {
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxActionBody))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil || dec.Decode(&struct{}{}) != io.EOF {
-			refuse(w, http.StatusBadRequest, "invalid_body")
+	if s.authorizations == nil || s.audit == nil {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied"})
+		refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
+		return
+	}
+	var proof struct {
+		Handle    string          `json:"handle"`
+		Assertion json.RawMessage `json:"assertion"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxActionBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&proof); err != nil || dec.Decode(new(any)) != io.EOF || proof.Handle == "" || len(proof.Assertion) == 0 {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied"})
+		refuse(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+	req, adminID, err := s.authorizations.consume(proof.Handle, name, proof.Assertion)
+	if err != nil {
+		reason := "assertion_denied"
+		if errors.Is(err, ErrAuthorizationReplay) {
+			reason = "replay_denied"
+		}
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: reason, AdminID: adminID})
+		if errors.Is(err, ErrAuthorizerUnavailable) {
+			refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
 			return
 		}
+		refuse(w, http.StatusForbidden, "authorization_denied")
+		log.Printf("concord-agent: action=%s outcome=refused reason=authorization_denied", name)
+		return
 	}
 	cmds, budget, no := s.writes.commands(name, req)
 	if no != nil {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied", AdminID: adminID})
 		refuse(w, no.code, no.reason)
 		log.Printf("concord-agent: action=%s outcome=refused reason=%s", name, no.reason)
 		return
 	}
-	job, err := s.writes.start(name, cmds, budget)
+	job, err := s.writes.start(name, adminID, cmds, budget)
 	if err != nil {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "job_unavailable", AdminID: adminID})
 		refuse(w, http.StatusServiceUnavailable, "job_unavailable")
 		log.Printf("concord-agent: action=%s outcome=error", name)
 		return
 	}
 	if job == nil {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "write_in_progress", AdminID: adminID})
 		refuse(w, http.StatusConflict, "write_in_progress")
 		log.Printf("concord-agent: action=%s outcome=busy", name)
 		return

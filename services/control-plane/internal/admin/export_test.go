@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"net/url"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -46,14 +47,18 @@ func RunAdminCtlForTest(
 	enrollBaseURL string,
 	args []string,
 ) int {
+	u, _ := url.Parse(enrollBaseURL)
 	deps := adminCtlDeps{
 		repo:          NewAdminRepo(db),
 		audit:         NewAuditLog(db),
 		enroll:        NewEnrollmentStore(rdb),
 		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: enrollBaseURL,
+		rpID:          u.Hostname(),
+		rpOrigins:     []string{enrollBaseURL},
 		stdin:         stdin,
 		stdout:        stdout,
+		stderr:        io.Discard,
 	}
 	return runAdminCtl(ctx, deps, args)
 }
@@ -61,14 +66,18 @@ func RunAdminCtlForTest(
 // RunAdminCtlWithWriterForTest exercises the production entry ordering with a
 // controllable security-event writer opener.
 func RunAdminCtlWithWriterForTest(ctx context.Context, db *sql.DB, rdb *redis.Client, stdin io.Reader, stdout io.Writer, baseURL string, args []string, open func() (securityevent.Emitter, io.Closer, error)) int {
+	u, _ := url.Parse(baseURL)
 	deps := adminCtlDeps{
 		repo:          NewAdminRepo(db),
 		audit:         NewAuditLog(db),
 		enroll:        NewEnrollmentStore(rdb),
 		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: baseURL,
+		rpID:          u.Hostname(),
+		rpOrigins:     []string{baseURL},
 		stdin:         stdin,
 		stdout:        stdout,
+		stderr:        io.Discard,
 	}
 	return runAdminCtlWithSecurityEvents(ctx, deps, args, open)
 }

@@ -3,6 +3,8 @@ package admin_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -135,6 +137,61 @@ func TestAdminCtl_UnknownVerb(t *testing.T) {
 	require.Equal(t, 2, code)
 	assert.Contains(t, stdout.String(), "unknown verb")
 	assert.Contains(t, stdout.String(), "unlock", "the verb list shown to the operator must name unlock")
+}
+
+func TestAdminCtl_ExportAgentAuthorizerIncludesAllActiveCredentials(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rdbCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rdbCleanup)
+	ctx := context.Background()
+	repo := admin.NewAdminRepo(db)
+	username := uniqueAdminUsername("agent-export")
+	created, err := repo.CreatePending(ctx, username, "private-password-hash")
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, created.ID)
+	require.NoError(t, repo.SetStatus(ctx, created.ID, admin.StatusActive))
+	for i, raw := range [][]byte{[]byte("first-agent-key"), []byte("second-agent-key")} {
+		_, err := repo.AddCredential(ctx, admin.AdminCredential{
+			AdminID: created.ID, CredentialID: raw, PublicKey: []byte{byte(i + 1)},
+			AAGUID: make([]byte, 16), CredentialName: "key", SignCount: int64(i + 2),
+		})
+		require.NoError(t, err)
+	}
+	var stdout bytes.Buffer
+	code := admin.RunAdminCtlForTest(ctx, db, rdb, strings.NewReader(""), &stdout, testEnrollBaseURL,
+		[]string{"export-agent-authorizer", "--username", username})
+	require.Equal(t, 0, code, "stdout: %s", stdout.String())
+	var doc struct {
+		Schema      int      `json:"schema"`
+		RPID        string   `json:"rp_id"`
+		Origins     []string `json:"origins"`
+		AdminID     string   `json:"admin_id"`
+		Credentials []struct {
+			CredentialID string `json:"credential_id"`
+			SignCount    uint32 `json:"sign_count"`
+		} `json:"credentials"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &doc))
+	require.Equal(t, 1, doc.Schema)
+	require.Equal(t, "admin.example.org", doc.RPID)
+	require.Equal(t, []string{testEnrollBaseURL}, doc.Origins)
+	require.Equal(t, created.ID, doc.AdminID)
+	require.Len(t, doc.Credentials, 2)
+	require.Equal(t, base64.RawURLEncoding.EncodeToString([]byte("first-agent-key")), doc.Credentials[0].CredentialID)
+	require.Equal(t, uint32(3), doc.Credentials[1].SignCount)
+	require.NotContains(t, stdout.String(), "private-password-hash")
+	require.NoError(t, repo.SetStatus(ctx, created.ID, admin.StatusDisabled))
+	stdout.Reset()
+	require.Equal(t, 1, admin.RunAdminCtlForTest(ctx, db, rdb, strings.NewReader(""), &stdout, testEnrollBaseURL,
+		[]string{"export-agent-authorizer", "--username", username}))
+	require.NotContains(t, stdout.String(), "credential_id")
+	require.NoError(t, repo.SetStatus(ctx, created.ID, admin.StatusActive))
+	require.NoError(t, repo.DeleteCredentials(ctx, created.ID))
+	stdout.Reset()
+	require.Equal(t, 1, admin.RunAdminCtlForTest(ctx, db, rdb, strings.NewReader(""), &stdout, testEnrollBaseURL,
+		[]string{"export-agent-authorizer", "--username", username}))
+	require.Empty(t, stdout.String(), "deleted credentials must not be exported")
 }
 
 func TestAdminCtl_ResetEnrollment_RevokesKeysAndMintsToken(t *testing.T) {

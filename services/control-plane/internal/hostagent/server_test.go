@@ -46,7 +46,8 @@ func (f *fakeRunner) Run(ctx context.Context, args []string, w io.Writer) error 
 func get(t *testing.T, s *Server, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
+	req := httptest.NewRequest(method, target, nil)
+	s.ServeHTTP(rec, req.WithContext(withPeer(req.Context(), Peer{UID: 10006})))
 	return rec
 }
 
@@ -263,7 +264,9 @@ func TestStalledReaderReleasesSlot(t *testing.T) {
 	s := NewServer(f)
 	s.followMax = 50 * time.Millisecond
 	s.writeGrace = 50 * time.Millisecond
-	ts := httptest.NewServer(s)
+	ts := httptest.NewUnstartedServer(s)
+	ts.Config.ConnContext = peerConnContextWith(func(net.Conn) (Peer, error) { return Peer{UID: 10006}, nil })
+	ts.Start()
 	defer ts.Close()
 	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
 	if err != nil {

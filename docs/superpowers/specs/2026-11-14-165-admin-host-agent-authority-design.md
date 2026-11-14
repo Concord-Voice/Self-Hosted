@@ -148,7 +148,7 @@ The canonical file is `/etc/concord-voice/agent-authorizers/authorizers.json`, i
 - a list of `admin_id`, credential ID, COSE public key, sign count, and an operator label;
 - a generation and last-updated timestamp for diagnostics.
 
-Public keys are not secrets, but integrity is critical. The agent reads the file with no symlink traversal, validates ownership/mode/schema/uniqueness/bounds, and keeps writes disabled if validation fails. Updates use a same-directory temporary file, `fsync`, atomic rename, and directory `fsync`.
+Public keys are not secrets, but integrity is critical. The file is root-owned mode 0644 under a root-owned mode 0755 directory; the nonroot control plane receives only a read-only mount for reset checks. The agent reads the file with no symlink traversal, validates ownership/mode/schema/uniqueness/bounds, and keeps writes disabled if validation fails. Updates use a same-directory temporary file, `fsync`, atomic rename, and directory `fsync`.
 
 The control-plane container receives a read-only mount of the directory only so reset can prove the target is no longer trusted. It never writes or reloads the file.
 

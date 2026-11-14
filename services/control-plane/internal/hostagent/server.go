@@ -33,7 +33,10 @@ const (
 	followMaxRuntime = 10 * time.Minute
 )
 
-const contentType = "Content-Type"
+const (
+	contentType               = "Content-Type"
+	maxAuthorizationBeginBody = 1 << 10
+)
 
 // Services the agent will read logs for. Compose service names.
 var logServices = map[string]bool{
@@ -54,11 +57,14 @@ type Runner interface {
 
 // Server serves the agent's HTTP API on the unix socket.
 type Server struct {
-	run       Runner
-	inFlight  chan struct{}
-	followers chan struct{}
-	writes    *jobs  // nil unless EnableWrites was called
-	managedBy string // an appliance that owns writes; see SetManagedBy
+	run             Runner
+	expectedPeerUID int
+	authorizations  *AuthorizationStore
+	audit           *Audit
+	inFlight        chan struct{}
+	followers       chan struct{}
+	writes          *jobs  // nil unless EnableWrites was called
+	managedBy       string // an appliance that owns writes; see SetManagedBy
 	// writeGrace is how long past an action's budget a response may take to
 	// write before the connection is cut.
 	writeGrace time.Duration
@@ -68,11 +74,50 @@ type Server struct {
 // NewServer returns a Server that runs actions through r.
 func NewServer(r Runner) *Server {
 	return &Server{
-		run:        r,
-		inFlight:   make(chan struct{}, maxInFlight),
-		followers:  make(chan struct{}, maxFollowers),
-		followMax:  followMaxRuntime,
-		writeGrace: 5 * time.Second,
+		run:             r,
+		expectedPeerUID: 10006,
+		inFlight:        make(chan struct{}, maxInFlight),
+		followers:       make(chan struct{}, maxFollowers),
+		followMax:       followMaxRuntime,
+		writeGrace:      5 * time.Second,
+	}
+}
+
+// SetExpectedPeerUID accepts only an unprivileged numeric control-plane UID.
+func (s *Server) SetExpectedPeerUID(uid int) error {
+	if uid <= 0 || uint64(uid) > uint64(^uint32(0)) {
+		return errors.New("invalid control-plane peer UID")
+	}
+	s.expectedPeerUID = uid
+	return nil
+}
+
+// SetAuthorizationStore binds ceremonies to the same closed job parser used
+// for execution. It is configured before the socket starts serving.
+func (s *Server) SetAuthorizationStore(store *AuthorizationStore) error {
+	if store == nil || s.writes == nil {
+		return errors.New("write parser unavailable")
+	}
+	store.jobs = s.writes
+	s.authorizations = store
+	return nil
+}
+
+// SetAudit installs the root-local durable audit before the listener serves.
+func (s *Server) SetAudit(audit *Audit) error {
+	if audit == nil {
+		return errors.New("host-agent audit unavailable")
+	}
+	s.audit = audit
+	if s.writes != nil {
+		s.writes.audit = audit
+	}
+	return nil
+}
+
+func (s *Server) auditEvent(event AuditEvent) {
+	if s.audit != nil {
+		_ = s.audit.Write(event)
 	}
 }
 
@@ -80,11 +125,25 @@ func NewServer(r Runner) *Server {
 // their jobs; everything else is refused here, whatever the proxy in front
 // allowed.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.managedBy != "" && writePath(r.URL.Path) {
+	peer, ok := peerFromContext(r.Context())
+	if !ok || peer.UID != s.expectedPeerUID {
+		action := ""
+		if value, found := strings.CutPrefix(r.URL.Path, "/v1/actions/"); found {
+			action = actionName(value)
+		}
+		s.auditEvent(AuditEvent{Action: action, Outcome: "denied", Reason: "peer_forbidden"})
+		refuse(w, http.StatusForbidden, "peer_forbidden")
+		return
+	}
+	if s.managedBy != "" && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {
 		s.refuseManaged(w)
 		return
 	}
 	if s.writes != nil {
+		if r.URL.Path == "/v1/authorizations" {
+			s.handleAuthorizationBegin(w, r)
+			return
+		}
 		if r.URL.Path == "/v1/backups" {
 			s.handleBackups(w, r)
 			return
@@ -132,6 +191,49 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(healthTimeout + s.writeGrace))
 	outcome := handle(w, r)
 	log.Printf("concord-agent: action=%s outcome=%s", action, outcome)
+}
+
+func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		refuse(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if s.authorizations == nil {
+		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
+		return
+	}
+	var body struct {
+		AdminID   string        `json:"admin_id"`
+		Action    string        `json:"action"`
+		Arguments actionRequest `json:"arguments"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthorizationBeginBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		refuse(w, http.StatusBadRequest, "invalid_authorization")
+		return
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		refuse(w, http.StatusBadRequest, "invalid_authorization")
+		return
+	}
+	handle, options, err := s.authorizations.Begin(body.AdminID, body.Action, body.Arguments)
+	if err != nil {
+		s.auditEvent(AuditEvent{Action: actionName(body.Action), Outcome: "denied", Reason: "begin_denied", AdminID: canonicalAuditAdminID(body.AdminID)})
+		switch {
+		case errors.Is(err, ErrAuthorizationBusy):
+			refuse(w, http.StatusTooManyRequests, "authorization_busy")
+		case errors.Is(err, ErrAuthorizerUnavailable):
+			refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
+		default:
+			refuse(w, http.StatusForbidden, "authorization_denied")
+		}
+		return
+	}
+	writeJSON(w, map[string]any{"handle": handle, "options": options})
 }
 
 func refuse(w http.ResponseWriter, code int, reason string) {

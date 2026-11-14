@@ -60,6 +60,12 @@ want '-rw-r--r--' 'usr/share/concord-agent/wizard/assets/app.js'
 want '-rw-r--r--' 'usr/share/doc/concord-selfhost/copyright'
 grep -q '\./opt' <<<"$listing" && fail 'package owns /opt' || pass 'package does not own /opt'
 grep -vq ' root/root ' <<<"$listing" && fail 'an entry is not root-owned' || pass 'every entry is root-owned'
+grep -q 'ReadWritePaths=/etc/concord-voice/agent-authorizers' "$REPO/infrastructure/host-agent/concord-agent.service" &&
+  pass 'agent can update root-owned authorizers' || fail 'agent unit lacks authorizer write path'
+grep -q '/etc/concord-voice/agent-authorizers:/etc/concord-voice/agent-authorizers:ro' "$REPO/docker-compose.host-agent.yml" &&
+  pass 'control plane receives read-only authorizer projection' || fail 'authorizer projection is not read-only'
+grep -q 'install -d -o root -g root -m 0755 /etc/concord-voice/agent-authorizers' "$REPO/infrastructure/host-agent/deb/postinst" &&
+  pass 'package creates root-owned authorizer directory' || fail 'authorizer directory is not installed'
 
 info=$(dpkg-deb -f "$deb")
 grep -qx 'Package: concord-selfhost' <<<"$info" && grep -qx 'Version: 1.2.3' <<<"$info" &&
@@ -120,6 +126,7 @@ step install -y -qq /pkg/concord-selfhost_1.2.3_amd64.deb
 test -e "$enabled"; called " start concord-agent.service"
 grep -q "sudo cat /run/concord-agent/setup-token" /tmp/log
 getent group concord-agent >/dev/null
+test "$(stat -c %U:%a /etc/concord-voice/agent-authorizers)" = root:755
 test "$(stat -c %U:%a /opt/concord)" = root:755
 test -x /opt/concord/infrastructure/deploy/concord-selfhost
 test -z "$(find /opt/concord \( ! -user root -o -perm /022 \) -print)"

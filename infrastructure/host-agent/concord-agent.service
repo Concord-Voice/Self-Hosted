@@ -24,6 +24,7 @@ UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
+ReadWritePaths=/etc/concord-voice/agent-authorizers
 ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
