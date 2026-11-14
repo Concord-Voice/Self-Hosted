@@ -36,7 +36,7 @@ func TestUnixPeerSubprocessHelper(t *testing.T) {
 		return
 	}
 	client := &http.Client{Transport: &http.Transport{DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-		return net.Dial("unix", path)
+		return net.Dial("unix", path) //nolint:gosec // test helper connects only to its parent-created Unix socket
 	}}}
 	response, err := client.Get("http://unix/v1/status")
 	require.NoError(t, err)
@@ -52,7 +52,7 @@ func unixSubprocessStatus(t *testing.T, expectedUID int) int {
 	path := filepath.Join(dir, "peer.sock")
 	listener, err := net.Listen("unix", path)
 	require.NoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	// The test process owns this temporary socket; allow the dropped-UID
 	// subprocess to reach it so SO_PEERCRED, not filesystem mode, decides.
 	require.NoError(t, os.Chmod(dir, 0o755))  //nolint:gosec // test-only peer gate fixture
@@ -61,7 +61,7 @@ func unixSubprocessStatus(t *testing.T, expectedUID int) int {
 	require.NoError(t, server.SetExpectedPeerUID(expectedUID))
 	httpServer := &http.Server{Handler: server, ConnContext: PeerConnContext, ReadHeaderTimeout: time.Second}
 	go func() { _ = httpServer.Serve(listener) }()
-	defer httpServer.Close()
+	defer func() { _ = httpServer.Close() }()
 	command := exec.Command(os.Args[0], "-test.run=^TestUnixPeerSubprocessHelper$") //nolint:gosec // fixed current test binary and fixed test selector
 	command.Env = append(os.Environ(), "CV_AGENT_PEER_TEST_SOCKET="+path)
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
@@ -79,12 +79,12 @@ func unixPeerStatus(t *testing.T, expectedUID int) int {
 	path := filepath.Join(t.TempDir(), "peer.sock")
 	listener, err := net.Listen("unix", path)
 	require.NoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	server := NewServer(&fakeRunner{out: statusJSON})
 	require.NoError(t, server.SetExpectedPeerUID(expectedUID))
 	httpServer := &http.Server{Handler: server, ConnContext: PeerConnContext, ReadHeaderTimeout: time.Second}
 	go func() { _ = httpServer.Serve(listener) }()
-	defer httpServer.Close()
+	defer func() { _ = httpServer.Close() }()
 	client := &http.Client{Transport: &http.Transport{DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 		return net.Dial("unix", path)
 	}}}

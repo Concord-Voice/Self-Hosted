@@ -154,7 +154,7 @@ func (s *AuthorizerStore) checkPath() error {
 		return errors.New("authorizer path outside trust root")
 	}
 	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
-		info, err := os.Lstat(dir)
+		info, err := os.Lstat(dir) //nolint:gosec // checkPath confines each component to the absolute trust root and rejects symlinks
 		if err != nil || !info.IsDir() || !ownedBy(info, s.ownerUID) || info.Mode().Perm()&0o022 != 0 {
 			return errors.New("unsafe authorizer directory")
 		}

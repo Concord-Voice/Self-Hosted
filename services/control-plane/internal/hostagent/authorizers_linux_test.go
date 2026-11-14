@@ -40,7 +40,7 @@ func TestAuthorizerNonrootProjectionHelper(t *testing.T) {
 	list, err := store.List()
 	require.NoError(t, err)
 	require.Len(t, list, 1)
-	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	file, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // child test opens its parent-created read-only projection
 	if err == nil {
 		_ = file.Close()
 	}
