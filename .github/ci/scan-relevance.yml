@@ -551,8 +551,9 @@ workflow_lint:
   - 'scripts/test-check-*.sh'
   - '.github/base-images.json'
   # Lockfile registry guard (#271, runs in workflow-lint): every npm lockfile,
-  # .npmrc, go.mod and go.work it reads, its approved-source list, the check, its test and
-  # fixtures.
+  # package.json, .npmrc, go.mod and go.work it reads, its approved-source list, the check,
+  # its test and fixtures.
+  - '**/package.json'
   - '**/package-lock.json'
   - '**/npm-shrinkwrap.json'
   - '**/go.mod'

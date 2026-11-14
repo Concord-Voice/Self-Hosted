@@ -18,8 +18,13 @@ however it is spelled or quoted); it bypasses both, so it passes only when the
 directory it names is inside the repository and listed in
 `go_local_replacements`. GOPROXY and GOPRIVATE settings are out of scope.
 
-Every npm install location must carry an approved `resolved` URL: without
-one npm falls back to `version`, which may be a URL. A tracked .npmrc may set
+On an approved host the `resolved` path must be the entry's own tarball
+(`/<name>/-/<name>-<version>.tgz`), so it cannot install another package. An
+install location without `resolved` must have a plain version, which npm
+fetches from the registry; any other `version` may be a URL. Each package.json
+next to a lockfile (root and workspaces) may use only registry ranges, tags,
+`npm:` aliases and in-tree `file:` paths, because npm ci re-resolves a spec the
+lockfile does not satisfy. A tracked .npmrc may set
 `registry` or `@scope:registry` only to an approved host, because npm rewrites
 registry.npmjs.org in `resolved` to the configured registry. A go.work is read
 like a go.mod, and each `use` must name a directory inside the repository.
@@ -47,6 +52,7 @@ from urllib.parse import urlparse
 
 NPM_NAMES = {"package-lock.json", "npm-shrinkwrap.json"}
 INSTALL_KEY = re.compile(r"(^|/)node_modules/(@[^/]+/)?[^/]+$")
+PLAIN_VERSION = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$")
 SAFE_URL = re.compile(r"^https://(?P<host>[A-Za-z0-9.-]+)/[^\\\s]*$")
 
 
@@ -71,21 +77,53 @@ def inside(base, rel):
     return target == base or target.startswith(base + os.sep)
 
 
-def bundled(packages, key, name):
-    """True when `key` really is a copy inside its parent's tarball.
+def manifest_violations(lock_path, packages):
+    """Spec checks for the package.json files next to a lockfile.
 
-    `inBundle` is just a field in a file the PR controls. Believe it only when
-    the entry sits under a parent install location that has a `resolved` URL
-    (checked on its own) and lists the package in its bundleDependencies.
+    npm ci re-resolves an edge whose package.json spec the lockfile does not
+    satisfy, so a URL or git spec in package.json downloads from anywhere while
+    the lockfile still reads clean. Each dependency spec and override must be a
+    registry range or tag, an `npm:` alias of one, or a `file:` path inside the
+    lockfile's directory.
     """
-    entry = packages.get(key, {})
-    if entry.get("inBundle") is not True or "/node_modules/" not in key:
+    base = os.path.dirname(lock_path) or "."
+    dirs = [""] + [k for k in packages if k and "node_modules/" not in k]
+    out = []
+    for rel in dirs:
+        manifest = os.path.join(base, rel, "package.json")
+        if not os.path.isfile(manifest):
+            continue
+        data = load_json(manifest)
+        here = os.path.join(base, rel)
+        specs = []
+        for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+            specs += [(f"{field}.{k}", v) for k, v in (data.get(field) or {}).items()]
+        stack = [("overrides", data.get("overrides") or {})]
+        while stack:
+            where, node = stack.pop()
+            if isinstance(node, dict):
+                stack += [(f"{where}.{k}", v) for k, v in node.items()]
+            else:
+                specs.append((where, node))
+        for where, spec in specs:
+            if not registry_spec(spec, here, base):
+                out.append(f"{manifest}: {where} = {spec!r} is not a registry range, tag or "
+                           "in-tree file: path")
+    return out
+
+
+def registry_spec(spec, here, base):
+    if not isinstance(spec, str):
         return False
-    parent = packages.get(key.rsplit("/node_modules/", 1)[0])
-    if not isinstance(parent, dict) or not isinstance(parent.get("resolved"), str):
-        return False
-    listed = parent.get("bundleDependencies") or parent.get("bundledDependencies") or []
-    return listed is True or (isinstance(listed, list) and name in listed)
+    if spec.startswith("file:"):
+        return inside(base, os.path.relpath(os.path.join(here, spec[5:]), base))
+    if spec.startswith("npm:"):
+        name, at, spec = spec[4:].rpartition("@")
+        if not at or not name:
+            return False
+    # Ranges, tags and `$name` override references hold no ':' or '/'; URLs,
+    # git specs, `user/repo` shorthands and paths all do.
+    return ":" not in spec and "/" not in spec
 
 
 def npm_violations(path, hosts):
@@ -109,13 +147,14 @@ def npm_violations(path, hosts):
             out.append(f"{path}: {name}: link {resolved} leaves the lockfile directory")
             continue
         if resolved is None:
-            # npm fetches every install location. Without `resolved` it falls
-            # back to `version`, which may itself be a URL or git spec. Bundled
-            # copies come inside their parent's tarball, and other keys
-            # (workspace sources, directories inside a package) are not fetched.
-            if INSTALL_KEY.search(key) and not bundled(lock["packages"], key, name):
+            # Without `resolved` npm fetches `<name>@<version>`. A plain version
+            # comes from the configured registry (the .npmrc check covers that);
+            # this is also how npm writes bundled copies. Any other `version`
+            # may be a URL or git spec. Keys that are not install locations
+            # (workspace sources) are not fetched.
+            if INSTALL_KEY.search(key) and not PLAIN_VERSION.match(str(entry.get("version"))):
                 out.append(f"{path}: {name}: install location has no resolved URL "
-                           f"(version {entry.get('version')!r})")
+                           f"and version {entry.get('version')!r} is not a plain version")
             continue
         # Anchored match, not urlparse alone: Python and npm (WHATWG URL) parse
         # `\`, `@`, ports and escapes in the authority differently, so
@@ -124,6 +163,15 @@ def npm_violations(path, hosts):
         # bare host name, and nothing after it may hold a backslash.
         match = SAFE_URL.match(resolved)
         if match and match.group("host") in hosts:
+            # The host alone is not enough: anyone can publish to the registry,
+            # and a `resolved` that names another package's tarball installs
+            # that package here. The path must be the tarball of this entry.
+            real = entry.get("name") or name
+            want = f"/{real}/-/{real.rsplit('/', 1)[-1]}-{entry.get('version')}.tgz"
+            if urlparse(resolved).path == want:
+                continue
+            out.append(f"{path}: {name}: resolved {resolved} is not the tarball of "
+                       f"{real}@{entry.get('version')} (expected path {want})")
             continue
         url = urlparse(resolved)
         where = (match and match.group("host")) or url.hostname or f"{url.scheme or 'no'} scheme"
@@ -131,7 +179,7 @@ def npm_violations(path, hosts):
             f"{path}: {name}: resolved from {where} ({resolved}); "
             f"approved npm hosts: {', '.join(sorted(hosts)) or 'none'}"
         )
-    return out
+    return out + manifest_violations(path, lock["packages"])
 
 
 def go_directives(text, verb, path):
@@ -183,7 +231,7 @@ def go_violations(path, root, local_allowed, work=False):
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise CannotRun(f"cannot read {path}: {exc}") from exc
     out = []
     if work:
@@ -242,7 +290,7 @@ def npmrc_violations(path, hosts):
     try:
         with open(path, encoding="utf-8") as fh:
             lines = fh.read().splitlines()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise CannotRun(f"cannot read {path}: {exc}") from exc
     out = []
     for number, raw in enumerate(lines, 1):

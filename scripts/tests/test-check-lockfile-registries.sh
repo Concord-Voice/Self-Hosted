@@ -84,12 +84,31 @@ expect 'quoted version cannot run' 2 'is not a version' --go-mod "$WORK/qv.mod"
 printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => ./x v1.0.0 extra\n' > "$WORK/x3.mod"
 expect 'three tokens cannot run' 2 'cannot parse replace target' --go-mod "$WORK/x3.mod"
 
+# An approved host is not enough: the path must be this entry's own tarball.
+jq '.packages["node_modules/left-pad"] = {"version": "1.3.0", "resolved": "https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz"}' "$FIX/off-registry-lock.json" > "$WORK/swap-lock.json"
+expect 'resolved on the approved host but for another package fails' 1 'left-pad: resolved .* is not the tarball of left-pad@1.3.0' --npm-lock "$WORK/swap-lock.json"
+
+# package.json specs: npm ci re-resolves an edge the lockfile does not satisfy.
+mkdir -p "$WORK/mf/stubs/x"
+lockv3='{"lockfileVersion":3,"packages":{"":{"name":"m"}}}'
+printf '%s\n' "$lockv3" > "$WORK/mf/package-lock.json"
+for spec in 'https://npm.example.invalid/x.tgz' 'git+ssh://git@example.invalid/x.git' 'evil/x' 'npm:x@https://npm.example.invalid/x.tgz' 'file:../outside'; do
+  jq -n --arg s "$spec" '{name: "m", dependencies: {x: $s}}' > "$WORK/mf/package.json"
+  expect "package.json spec fails: $spec" 1 'dependencies\.x = .* is not a registry range' --npm-lock "$WORK/mf/package-lock.json"
+done
+jq -n '{name: "m", dependencies: {x: "^1.2.0", y: "latest", z: "npm:@s/z@^2"}, overrides: {q: {".": "1.0.0", r: "file:./stubs/x"}, w: "$x"}}' > "$WORK/mf/package.json"
+expect 'registry ranges, tags, npm: aliases, override refs and in-tree file: overrides pass' 0 '^ok:' --npm-lock "$WORK/mf/package-lock.json"
+jq -n '{name: "m", overrides: {q: {r: "https://npm.example.invalid/r.tgz"}}}' > "$WORK/mf/package.json"
+expect 'a nested override with a URL fails' 1 'overrides\.q\.r = ' --npm-lock "$WORK/mf/package-lock.json"
+
 # npm falls back to `version` when an install location has no `resolved`.
 L='.packages["node_modules/left-pad"]'
 jq "$L |= (del(.resolved) | .version = \"https://npm.example.invalid/left-pad.tgz\")" "$FIX/off-registry-lock.json" > "$WORK/nores-lock.json"
 expect 'install location without resolved fails' 1 'left-pad: install location has no resolved URL' --npm-lock "$WORK/nores-lock.json"
-jq '.packages["node_modules/@scope/x"] = {"version": "1.0.0"}' "$WORK/workspace-lock.json" > "$WORK/scoped-lock.json"
+jq '.packages["node_modules/@scope/x"] = {"version": "github:evil/x"}' "$WORK/workspace-lock.json" > "$WORK/scoped-lock.json"
 expect 'scoped install location without resolved fails' 1 '@scope/x: install location has no resolved' --npm-lock "$WORK/scoped-lock.json"
+jq '.packages["node_modules/@scope/x"] = {"version": "1.0.0"}' "$WORK/workspace-lock.json" > "$WORK/plainver-lock.json"
+expect 'no resolved but a plain version passes (npm fetches it from the registry)' 0 '^ok:' --npm-lock "$WORK/plainver-lock.json"
 jq '.packages["node_modules/is-number/node_modules/inner"] = {"version": "1.0.0", "inBundle": true} | .packages["node_modules/is-number"].bundleDependencies = ["inner"] | .packages["packages/ws"] = {"version": "0.0.0"} | .packages["node_modules/left-pad"].resolved = "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"' \
   "$FIX/off-registry-lock.json" > "$WORK/bundled-lock.json"
 expect 'bundled copy and workspace source without resolved pass' 0 '^ok:' --npm-lock "$WORK/bundled-lock.json"
