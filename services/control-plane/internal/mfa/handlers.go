@@ -1461,7 +1461,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	if req.Code != "" {
+	if totpExists && subj.MFAEnabled {
 		h.clearTxStepUpAfterCommit(c, userID)
 	}
 
