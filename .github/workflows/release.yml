@@ -51,10 +51,74 @@ jobs:
           BASH_ENV: /dev/null
         run: bash scripts/release/check-release-tag.sh
 
-  bundle:
-    name: Build and attest the self-host bundle
+  # CycloneDX SBOM of the bundle. The bundle is every tracked file at the tag,
+  # so syft scans the same exported tree. This job runs third-party code
+  # (syft) and has no id-token: it only uploads the SBOM, and the bundle job
+  # attests it with the other bundle files. The intermediate artifact name has
+  # no tag suffix, so Release-Ops does not treat it as a release artifact.
+  sbom:
+    name: Generate the bundle SBOM
     needs: [check-tag, ioc]
     if: needs.ioc.result == 'success' && needs.check-tag.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.check-tag.outputs.version }}
+      SYFT_VERSION: 1.55.0
+      SYFT_SHA256: bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Export the tagged tree
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/tree"
+          git archive --format=tar "$GITHUB_SHA" | tar -x -C "$RUNNER_TEMP/tree"
+      - name: Install syft (pinned version and checksum)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/syft.tar.gz" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_SHA256}  $RUNNER_TEMP/syft.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$RUNNER_TEMP/bin" syft
+      # Dev dependencies are included: the bundle ships every lockfile whole.
+      # syft runs from an empty directory with an empty HOME, so no config file
+      # in the tagged tree or the runner's home can change what it catalogs.
+      - name: Generate the SBOM
+        env:
+          SYFT_CHECK_FOR_APP_UPDATE: 'false'
+          SYFT_JAVASCRIPT_INCLUDE_DEV_DEPENDENCIES: 'true'
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/sbom" "$RUNNER_TEMP/syft-home"
+          cd "$RUNNER_TEMP/syft-home"
+          export HOME="$RUNNER_TEMP/syft-home" XDG_CONFIG_HOME="$RUNNER_TEMP/syft-home"
+          "$RUNNER_TEMP/bin/syft" scan "dir:$RUNNER_TEMP/tree" -q \
+            --source-name concord-selfhost --source-version "$VERSION" \
+            -o "cyclonedx-json=$RUNNER_TEMP/sbom/concord-selfhost-v${VERSION}.cdx.json"
+      - name: Check the SBOM lists every locked package
+        run: |
+          python3 scripts/release/check-selfhost-sbom.py \
+            --sbom "$RUNNER_TEMP/sbom/concord-selfhost-v${VERSION}.cdx.json" --tree "$RUNNER_TEMP/tree" \
+            --version "$VERSION"
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selfhost-sbom
+          path: ${{ runner.temp }}/sbom/concord-selfhost-v${{ needs.check-tag.outputs.version }}.cdx.json
+          if-no-files-found: error
+          retention-days: 1
+
+  bundle:
+    name: Build and attest the self-host bundle
+    needs: [check-tag, ioc, sbom]
+    if: needs.ioc.result == 'success' && needs.check-tag.result == 'success' && needs.sbom.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -87,6 +151,31 @@ jobs:
             --archive "$RUNNER_TEMP/assets/concord-selfhost-${VERSION}.tar.gz" \
             --manifest "$RUNNER_TEMP/assets/selfhost-manifest.json" \
             --sums "$RUNNER_TEMP/assets/SHA256SUMS"
+      # Release-Ops expects the SBOM at the top of the release artifact as
+      # <artifact>.cdx.json. SHA256SUMS keeps listing only the archive and
+      # manifest. The sbom job ran third-party code, so its artifact lands in
+      # its own directory and only the one expected file is copied into the
+      # attested set: anything else there could replace a bundle file.
+      - name: Download the SBOM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: selfhost-sbom
+          path: ${{ runner.temp }}/sbom-in/
+      - name: Add the SBOM
+        run: |
+          set -euo pipefail
+          name="concord-selfhost-v${VERSION}.cdx.json"
+          found=$(find "$RUNNER_TEMP/sbom-in" -mindepth 1 -printf '%y %P\n')
+          if [ "$found" != "f $name" ]; then
+            echo "::error::the SBOM artifact must hold exactly one regular file, $name; it holds:"
+            printf '%s\n' "$found"
+            exit 1
+          fi
+          # Checked again here, with this job's own tree and copy of the check:
+          # the sbom job ran syft and could have changed both of its own.
+          python3 -I scripts/release/check-selfhost-sbom.py \
+            --sbom "$RUNNER_TEMP/sbom-in/$name" --tree "$RUNNER_TEMP/tree" --version "$VERSION"
+          cp "$RUNNER_TEMP/sbom-in/$name" "$RUNNER_TEMP/assets/$name"
       - name: Upload the bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -103,3 +192,4 @@ jobs:
             ${{ runner.temp }}/assets/concord-selfhost-*.tar.gz
             ${{ runner.temp }}/assets/selfhost-manifest.json
             ${{ runner.temp }}/assets/SHA256SUMS
+            ${{ runner.temp }}/assets/concord-selfhost-v*.cdx.json
