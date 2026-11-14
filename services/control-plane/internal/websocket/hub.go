@@ -1911,9 +1911,12 @@ func (h *Hub) handleUnregister(client *Client) {
 			ctx, cancel = context.WithTimeout(ctx, presenceAudienceTimeout)
 			defer cancel()
 		}
+		wasInvisible := h.isInvisiblePresence(client.UserID)
 		h.transitionUserOffline(ctx, client.UserID, false)
-		if err := h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0).Err(); err != nil {
-			log.Printf("[hub] failed to persist last_seen for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
+		if !wasInvisible {
+			if err := h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0).Err(); err != nil {
+				log.Printf("[hub] failed to persist last_seen for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
+			}
 		}
 
 		// Cancel any DM voice rings this user initiated (#1209 B7 Part 2).
@@ -4901,7 +4904,21 @@ func (h *Hub) BroadcastToChannelAuthorized(channelID uuid.UUID, message Outgoing
 	}
 }
 
-// GetConnectedUsers returns a map of user IDs currently connected (thread-safe).
+// GetVisibleConnectedUsers returns the connected users whose persisted presence
+// is explicitly visible. Missing, hidden, and unreadable states fail closed.
+func (h *Hub) GetVisibleConnectedUsers(ctx context.Context) map[uuid.UUID]bool {
+	h.mu.RLock()
+	users := make(map[uuid.UUID]bool, len(h.userClients))
+	for userID := range h.userClients {
+		users[userID] = true
+	}
+	h.mu.RUnlock()
+	return h.resolveVisibleOnlineWithContext(ctx, users)
+}
+
+// GetConnectedUsers returns the raw connected-user set. It remains for
+// compatibility with test helpers; production privacy exits use the filtered
+// accessor above.
 func (h *Hub) GetConnectedUsers() map[uuid.UUID]bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -4922,8 +4939,26 @@ func (h *Hub) GetUserClientCount(userID uuid.UUID) int {
 	return 0
 }
 
-// IsUserOnline reports whether the user has at least one live WS client on
-// this (single-replica) control-plane. Authoritative per spec §5.4.
+// VisibleOnlineSubset preserves the caller's order while removing users whose
+// presence is not explicitly visible. It is suitable for privacy-sensitive
+// recipient lists such as group-DM rings.
+func (h *Hub) VisibleOnlineSubset(ctx context.Context, userIDs []uuid.UUID) []uuid.UUID {
+	candidates := make(map[uuid.UUID]bool, len(userIDs))
+	for _, userID := range userIDs {
+		candidates[userID] = true
+	}
+	visible := h.resolveVisibleOnlineWithContext(ctx, candidates)
+	result := make([]uuid.UUID, 0, len(userIDs))
+	for _, userID := range userIDs {
+		if visible[userID] {
+			result = append(result, userID)
+		}
+	}
+	return result
+}
+
+// IsUserOnline reports whether the user has at least one live WS client. It is
+// retained for existing tests; production privacy exits use VisibleOnlineSubset.
 func (h *Hub) IsUserOnline(userID uuid.UUID) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -4957,8 +4992,8 @@ func (h *Hub) PresenceAuthzOpenForTest() uint64 {
 }
 
 // MarkUserOnlineForTest registers a synthetic client so unit/integration
-// tests in OTHER packages (e.g. internal/dm) can make a user appear online
-// to IsUserOnline without a real WS upgrade. Test-only; not used in prod.
+// tests in other packages can make a user appear connected without a real WS
+// upgrade. Test-only; not used in prod.
 func (h *Hub) MarkUserOnlineForTest(userID uuid.UUID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -7930,9 +7965,15 @@ func (h *Hub) queryServerMemberships(userIDs []uuid.UUID) (map[string][]uuid.UUI
 	return serverMembers, allMemberIDs, nil
 }
 
-// resolveVisibleOnline determines which member IDs are connected and not invisible,
-// using a single Redis MGET round-trip for status checks.
+// resolveVisibleOnline determines which candidate IDs are connected and visibly
+// online. It snapshots Hub-owned state under the mutex, then releases it before
+// the single Redis MGET so a slow presence store cannot stall websocket state.
 func (h *Hub) resolveVisibleOnline(allMemberIDs map[uuid.UUID]bool) map[uuid.UUID]bool {
+	return h.resolveVisibleOnlineWithContext(context.Background(), allMemberIDs)
+}
+
+func (h *Hub) resolveVisibleOnlineWithContext(ctx context.Context, allMemberIDs map[uuid.UUID]bool) map[uuid.UUID]bool {
+	h.mu.RLock()
 	connectedUIDs := make([]uuid.UUID, 0, len(allMemberIDs))
 	redisKeys := make([]string, 0, len(allMemberIDs))
 	for uid := range allMemberIDs {
@@ -7942,13 +7983,14 @@ func (h *Hub) resolveVisibleOnline(allMemberIDs map[uuid.UUID]bool) map[uuid.UUI
 			redisKeys = append(redisKeys, presence.StatusRedisKey(uid))
 		}
 	}
+	h.mu.RUnlock()
 
 	visibleOnline := make(map[uuid.UUID]bool, len(connectedUIDs))
-	if len(redisKeys) == 0 {
+	if len(redisKeys) == 0 || h.redis == nil {
 		return visibleOnline
 	}
 
-	statuses, err := h.redis.MGet(context.Background(), redisKeys...).Result()
+	statuses, err := h.redis.MGet(ctx, redisKeys...).Result()
 	if err != nil {
 		// Status is privacy-sensitive: on Redis failure, do not expose connected
 		// users whose persisted state might be invisible.
@@ -7962,6 +8004,12 @@ func (h *Hub) resolveVisibleOnline(allMemberIDs map[uuid.UUID]bool) map[uuid.UUI
 		}
 	}
 	return visibleOnline
+}
+
+func (h *Hub) isInvisiblePresence(userID uuid.UUID) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.hiddenPresence[userID] == statusInvisible
 }
 
 // isVisibleStatus returns true if a Redis presence value explicitly indicates

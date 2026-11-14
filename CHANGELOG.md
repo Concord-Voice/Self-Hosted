@@ -96,6 +96,7 @@ Android.
 
 ### Security
 
+- **Privacy:** Invisible presence now stays indistinguishable from offline in server counts, member activity, and group-DM calls. Profile and transfer details reach only people allowed to see them, and blocking a stranger no longer notifies them.
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.

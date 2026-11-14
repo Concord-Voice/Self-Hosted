@@ -238,7 +238,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 		return
 	}
 
-	h.populateLastSeen(members)
+	h.populateLastSeen(userID, members)
 	// A failure here must not degrade to role-less members: `roles: []` reads
 	// as "has no roles", and the client builds assign/unassign from it.
 	if err := h.populateRBAcRoles(serverID, members); err != nil {
@@ -382,25 +382,31 @@ func (h *Handler) queryServerMembers(serverID string) ([]MemberWithUser, error) 
 	return members, nil
 }
 
-// populateLastSeen batch-fetches last_seen timestamps from Redis for all members.
-func (h *Handler) populateLastSeen(members []MemberWithUser) {
-	if len(members) == 0 {
+// populateLastSeen batch-fetches last_seen timestamps and presence state. An
+// invisible member's timestamp is visible only to that member.
+func (h *Handler) populateLastSeen(viewerID string, members []MemberWithUser) {
+	if len(members) == 0 || h.redis == nil {
 		return
 	}
-	keys := make([]string, len(members))
-	for i, m := range members {
-		keys[i] = fmt.Sprintf("last_seen:%s", m.UserID)
+	keys := make([]string, 0, len(members)*2)
+	for _, m := range members {
+		keys = append(keys, fmt.Sprintf("last_seen:%s", m.UserID), fmt.Sprintf("presence:%s", m.UserID))
 	}
 	ctx := context.Background()
 	vals, err := h.redis.MGet(ctx, keys...).Result()
 	if err != nil {
 		return
 	}
-	for i, val := range vals {
-		if val == nil {
+	for i, member := range members {
+		lastSeen := vals[i*2]
+		status := vals[i*2+1]
+		if member.UserID != viewerID && status == presence.StatusInvisible {
 			continue
 		}
-		tsStr, ok := val.(string)
+		if lastSeen == nil {
+			continue
+		}
+		tsStr, ok := lastSeen.(string)
 		if !ok {
 			continue
 		}

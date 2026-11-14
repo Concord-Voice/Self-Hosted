@@ -136,8 +136,9 @@ var scanListServersRow = func(rows *sql.Rows, dest ...any) error { return rows.S
 func (h *Handler) ListServers(c *gin.Context) {
 	userID := c.GetString("user_id")
 
-	// Get connected user IDs from the hub for online count computation
-	connectedUsers := h.hub.GetConnectedUsers()
+	// Presence is privacy-sensitive: only explicitly visible users contribute
+	// to the count, and a Redis error yields an empty set.
+	connectedUsers := h.hub.GetVisibleConnectedUsers(c.Request.Context())
 	connectedIDs := make([]string, 0, len(connectedUsers))
 	for uid := range connectedUsers {
 		connectedIDs = append(connectedIDs, uid.String())

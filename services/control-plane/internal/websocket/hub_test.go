@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
 	"github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
@@ -1074,6 +1075,21 @@ func TestHandleUnregisterRemovesClient(t *testing.T) {
 	_, exists := hub.clients[client.ID]
 	assert.False(t, exists, "client should be removed from clients map")
 	assert.True(t, hub.userClients[userID][otherClient.ID], "other client should remain")
+}
+
+func TestSecurity171_HandleUnregisterInvisibleUserDoesNotWriteLastSeen(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.userClients[userID] = map[uuid.UUID]bool{client.ID: true}
+	hub.hiddenPresence[userID] = statusInvisible
+
+	hub.handleUnregister(client)
+
+	_, err := redisClient.Get(context.Background(), "last_seen:"+userID.String()).Result()
+	assert.ErrorIs(t, err, redis.Nil, "an invisible user's final disconnect must not create a last_seen signal")
 }
 
 func TestHandleUnregisterMultiDeviceKeepsOtherClients(t *testing.T) {

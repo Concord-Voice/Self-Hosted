@@ -336,6 +336,8 @@ On the WebSocket path, the hub validates the envelope (`validateEnvelope` — `k
 
 **WebSocket hub** (`internal/websocket/hub.go`): a single `Run()` goroutine owns the subscription maps (`clients`, `userClients`, `channelSubscriptions`, `serverSubscriptions`, `dmSubscriptions`) and drains buffered broadcast channels. `handleIncoming` dispatches inbound frames by `type` (subscribe, message, typing, presence, DM variants, …). Outbound fan-out is `BroadcastToChannel` / `BroadcastToServer` / `BroadcastToUser` / `BroadcastToDM` / `BroadcastToAll`; channel delivery applies channel authorization, including Server Voice visibility, while DM delivery queues visibility-gated frames in order.
 
+**Presence and relationship privacy:** server-list counts, member activity, and group-DM ringing treat `hiddenPresence`, missing or unknown presence, and Redis-read failure as offline. A member list does not disclose another invisible member's `last_seen`; an invisible user's final disconnect also does not create one. Direct profile lookup uses username-search eligibility and symmetric block exclusion, returning the same not-found result for an absent or excluded target. `ownership_transfer_initiated` reaches only the current owner and transfer target. A block target receives `friend_removed` only for a prior accepted friendship; the blocker's own key-revocation delivery remains unconditional.
+
 #### Database Schema
 
 PostgreSQL 16 (schema under `services/control-plane/migrations/`). Under E2EE-everywhere (#201) the `is_encrypted` columns were dropped (migration 000062) from `channels`, `messages`, `dm_conversations`, `dm_messages`, and `media_files` — they are intentionally absent below.

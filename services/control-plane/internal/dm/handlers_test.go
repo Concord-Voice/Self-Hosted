@@ -4795,6 +4795,22 @@ func TestRingDMCall_Group_AllOffline_Returns400(t *testing.T) {
 	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "no ring created when all callees offline")
 }
 
+func TestSecurity171_RingDMCall_GroupAllInvisibleMatchesOffline(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "ring-invisible-caller")
+	invisible := ts.CreateTestUser(t, "ring-invisible-callee")
+	convID := ts.CreateGroupDMConversation(t, caller.ID, invisible.ID)
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(caller.ID))
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(invisible.ID))
+	require.NoError(t, ts.Redis.Set(context.Background(), "presence:"+invisible.ID, "invisible", 0).Err())
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code, "an all-invisible group must ring exactly like an offline group: %s", w.Body.String())
+	assert.False(t, dm.PendingDMCallExistsForTest(uuid.MustParse(convID)), "no ring may be created when every callee is invisible")
+}
+
 // ─── DeclineDMCall tests (#1209, plan Task B4) ───────────────────────────
 
 const pathVoiceDecline = "/voice/decline"

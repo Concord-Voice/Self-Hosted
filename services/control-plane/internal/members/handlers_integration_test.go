@@ -899,6 +899,46 @@ func TestListMembersWithLastSeen(t *testing.T) {
 	assert.GreaterOrEqual(t, len(members), 2)
 }
 
+func TestSecurity171_ListMembersHidesInvisibleLastSeenFromOtherViewer(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "privacylastowner")
+	invisible := ts.CreateTestUser(t, "privacylastinvisible")
+	serverID := ts.CreateTestServer(t, owner.ID, "Privacy Last Seen Server")
+	ts.AddMemberToServer(t, serverID, invisible.ID, "member")
+
+	ctx := context.Background()
+	require.NoError(t, ts.Redis.Set(ctx, fmt.Sprintf("last_seen:%s", invisible.ID), "1711000000", 0).Err())
+	require.NoError(t, ts.Redis.Set(ctx, fmt.Sprintf("presence:%s", invisible.ID), "invisible", 0).Err())
+
+	otherView := ts.DoRequest("GET", membersPath(serverID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, otherView.Code, otherView.Body.String())
+	var otherBody map[string]interface{}
+	testhelpers.ParseJSON(t, otherView, &otherBody)
+	foundInvisible := false
+	for _, value := range otherBody["members"].([]interface{}) {
+		member := value.(map[string]interface{})
+		if member["user_id"] == invisible.ID {
+			foundInvisible = true
+			assert.NotContains(t, member, "last_seen", "invisible last_seen must be hidden from another member")
+			break
+		}
+	}
+	require.True(t, foundInvisible, "invisible member must remain visible in the member list")
+
+	selfView := ts.DoRequest("GET", membersPath(serverID), nil, testhelpers.AuthHeaders(invisible.AccessToken))
+	require.Equal(t, http.StatusOK, selfView.Code, selfView.Body.String())
+	var selfBody map[string]interface{}
+	testhelpers.ParseJSON(t, selfView, &selfBody)
+	for _, value := range selfBody["members"].([]interface{}) {
+		member := value.(map[string]interface{})
+		if member["user_id"] == invisible.ID {
+			assert.Equal(t, float64(1711000000), member["last_seen"], "the user may retain their own last_seen")
+			return
+		}
+	}
+	t.Fatalf("invisible member %s missing from self member list", invisible.ID)
+}
+
 // ── RemoveMember cleans up read states ───────────────────────────────────────
 
 func TestRemoveMemberCleansUpReadStates(t *testing.T) {

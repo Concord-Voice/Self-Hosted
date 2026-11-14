@@ -1,11 +1,14 @@
 package servers_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func setupTS(t *testing.T) *testhelpers.TestServer {
@@ -43,6 +46,32 @@ func TestListServersWithServers(t *testing.T) {
 	server := servers[0].(map[string]interface{})
 	assert.Equal(t, "My Server", server["name"])
 	assert.Equal(t, "owner", server["role"])
+}
+
+func TestSecurity171_ListServersExcludesInvisibleOnlineMember(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "privacycountowner")
+	invisible := ts.CreateTestUser(t, "privacycountinvisible")
+	serverID := ts.CreateTestServer(t, owner.ID, "Privacy Count Server")
+	ts.AddMemberToServer(t, serverID, invisible.ID, "member")
+
+	invisibleID := uuid.MustParse(invisible.ID)
+	ts.Hub.MarkUserOnlineForTest(invisibleID)
+	require.NoError(t, ts.Redis.Set(context.Background(), "presence:"+invisible.ID, "invisible", 0).Err())
+
+	w := ts.DoRequest("GET", "/api/v1/servers", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	for _, value := range body["servers"].([]interface{}) {
+		server := value.(map[string]interface{})
+		if server["id"] == serverID {
+			assert.Equal(t, float64(0), server["online_count"], "invisible must be indistinguishable from offline")
+			return
+		}
+	}
+	t.Fatalf("server %s missing from ListServers response", serverID)
 }
 
 // --- Create Server ---
