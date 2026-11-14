@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1450,6 +1451,38 @@ func TestAssignRole_Success_Owner(t *testing.T) {
 	var resp map[string]interface{}
 	testhelpers.ParseJSON(t, w, &resp)
 	assert.Equal(t, "Role assigned", resp["message"])
+}
+
+// regression for Security #166: accepted UUID aliases must not be retained in
+// identity-bearing audit metadata after a role mutation.
+func TestAssignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "CanonicalAudit", 0)
+
+	// Positive control: the normal spelling reaches the mutation path.
+	w := ts.DoRequest("POST", assignRolePath(serverID, member.ID), map[string]interface{}{
+		"role_id": roleID,
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Remove it so the alias request performs a distinct durable mutation.
+	w = ts.DoRequest("DELETE", unassignRolePath(serverID, member.ID, roleID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = ts.DoRequest("POST", assignRolePath(strings.ToUpper(serverID), strings.ToUpper(member.ID)), map[string]interface{}{
+		"role_id": strings.ToUpper(roleID),
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "alternate UUID spellings must preserve role-assignment authorization")
+
+	var auditedRoleID string
+	require.NoError(t, ts.DB.QueryRow(`
+		SELECT metadata->>'role_id'
+		FROM audit_log
+		WHERE action = 'role_assigned' AND target_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1`, member.ID).Scan(&auditedRoleID))
+	assert.Equal(t, roleID, auditedRoleID,
+		"accepted UUID aliases must be emitted to audit metadata in canonical form")
 }
 
 func TestAssignRole_BaseMember_Forbidden(t *testing.T) {
