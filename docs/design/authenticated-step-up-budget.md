@@ -10,8 +10,29 @@ numbered production migration, lifecycle admission or consumer integration ships
 with it. The tracker has no production opener, router/runtime binding or process
 observation. Retirement integration and lifecycle controls below remain planned
 requirements. Source availability is not validation, active enforcement or
-deployment evidence. Existing Redis budgets and authentication defenses remain
-unchanged.
+deployment evidence. The active Redis defenses below are separate from this
+dormant SQL proposal; neither activates its receipt or lifecycle machinery.
+
+## Active code-guess budgets (Security #157)
+
+The existing Redis `stepup.Budget` counts up to five submitted MFA proofs per
+user in fifteen minutes, across these protected actions: session revoke,
+revoke-all, and revocation-mode; TOTP disable and backup-code regeneration;
+password change and E2EE key replacement; ownership transfer and reversal;
+and DM/group bulk purge. Each route charges before factor verification and
+before a protected SQL transaction. A correct password alone does not clear the
+MFA counter. An exhausted budget returns 429 with `Retry-After` and
+`step_up_budget_exhausted`; a budget-store failure returns 503 with
+`step_up_budget_unavailable`. Routes already using this budget charge once.
+
+Email recovery has a separate ten-attempt, twenty-four-hour failure budget keyed
+by normalized account email. A new recovery request retains a live code record
+and its attempt count; only a successfully consumed email code clears that
+email's failure budget. Registration uses the pending-registration ID as its
+attempt subject through resend and change-email, with attempt state lasting
+until the pending row expires. Resend and change-email share the existing
+two-minute cooldown and four-resend cap. These code budgets do not use the
+proposed login-family SQL receipt design below.
 
 ## Actor provenance
 

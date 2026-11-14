@@ -12,6 +12,15 @@ Concord treats every credential as interchangeable, and the weakest can rebuild 
 
 **Current implementation note (2026-10-15):** the ad-hoc `recovery-only-challenge` patch closes this immediate recovery-policy bypass (Codex Security finding `csf_13551019f403b6ab218b09ef`) on this branch, pending deployment. A recovery email is atomically consumed and, where current raw policy reserves an actually enrolled TOTP or WebAuthn factor, a distinct five-minute recovery challenge must prove one before final recovery authority is issued. The final `recovery_v2` token carries signed server-verified factor provenance and every reset, device, and social-recovery consumer rechecks current policy. The patch does not implement this ADR's broader proposed hardening: universal MFA accounts, the 15-minute recovery-token TTL, credential-epoch recovery binding, recovery-key authority, or the seniority/hold model remain proposed work.
 
+**Security #157 recovery attempt policy:** email-code verification has a separate
+ten-attempt, twenty-four-hour Redis budget keyed by normalized email. Starting
+recovery again preserves a live code record and never resets either its local
+attempts or the account budget. A successfully consumed email code clears the
+account budget; password proof or a new email send does not. Exhaustion returns
+429 with `Retry-After`; an unavailable budget store fails closed with 503. This
+is an active guess limit, independent of the broader recovery authority changes
+proposed by this ADR.
+
 #2553 assumes CP user authentication is sound (ADR-0045 decision-table row D21, `0045:672`) and freezes its protocol-v1 contract at #3587 PR-A, so any factor this design needs must be named first.
 
 Two hard constraints pull against each other. An attacker who changed the password or email must not lock the owner out or stop the owner's recovery. And an intimate-partner abuser who knows the old password or shares the mailbox must be cut off quickly, with no delay that shields the abuser. When owner and attacker hold the same credentials, no rule over credentials alone can separate them: the two cases are mirror images.

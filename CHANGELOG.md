@@ -95,6 +95,7 @@ Android.
 ### Security
 
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
+- **Accounts:** MFA step-up attempts now share a per-account limit across session, security, ownership and DM purge actions; recovery and registration code guesses retain their limits across new-code and email changes. Exhausted budgets return 429 with a retry delay, and unavailable budget checks fail closed.
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
 - **Accounts:** **BREAKING** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. Wrong passwords there, and when changing your password, resetting your encryption keys or changing your sign-in security settings, now count toward the same lockout as sign-in: five lock the account. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401, a locked account gets 423 `account_locked`, and an account with no password gets 400 `no_password`.
