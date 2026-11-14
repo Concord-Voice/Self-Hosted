@@ -21,11 +21,11 @@ func TestRegisterDecodedKeyBoundaries(t *testing.T) {
 		{"salt", 64},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
-			max := bytes.Repeat([]byte{0x42}, tc.limit)
-			got, err := decodeBoundedBase64(base64.StdEncoding.EncodeToString(max), tc.label, tc.limit)
+			atLimit := bytes.Repeat([]byte{0x42}, tc.limit)
+			got, err := decodeBoundedBase64(base64.StdEncoding.EncodeToString(atLimit), tc.label, tc.limit)
 			require.NoError(t, err)
-			require.Equal(t, max, got)
-			_, err = decodeBoundedBase64(base64.StdEncoding.EncodeToString(append(max, 0x42)), tc.label, tc.limit)
+			require.Equal(t, atLimit, got)
+			_, err = decodeBoundedBase64(base64.StdEncoding.EncodeToString(append(atLimit, 0x42)), tc.label, tc.limit)
 			require.Error(t, err)
 			_, err = decodeBoundedBase64("not-base64", tc.label, tc.limit)
 			require.Error(t, err)
