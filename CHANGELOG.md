@@ -69,7 +69,7 @@ Android.
 
 ### Security
 
-- **Authorization:** UUID spelling no longer changes permission checks, hierarchy protection, channel-key access, or emitted IDs. Invalid IDs are refused before a write.
+- **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed
 
