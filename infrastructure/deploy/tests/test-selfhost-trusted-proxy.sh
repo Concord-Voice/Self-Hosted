@@ -90,6 +90,7 @@ pid {temp}/nginx.pid;
 error_log {temp}/error.log;
 events {{ worker_connections 128; }}
 http {{
+    access_log {temp}/access.log;
     map $host $validated_host {{ default $host; }}
     map $http_upgrade $validated_upgrade {{ default $http_upgrade; }}
     map $validated_upgrade $connection_upgrade {{ default upgrade; }}

@@ -164,7 +164,9 @@ grep -qFx 'TRUSTED_PROXY_CIDRS="127.0.0.1/32"' "$FIX/original-env"
 printf '%s\n' 'PASS: symlink environment refused without replacing target'
 ! compgen -G "$FIX/.env.proxy.*" >/dev/null
 
-writer_files="$(rg -l '^write_env_file\(\)|^selfhost_proxy_write_env\(\)' "$ROOT/infrastructure/deploy" --glob '*.sh' | sed "s|$ROOT/||" | sort)"
+writer_files="$(find "$ROOT/infrastructure/deploy" -type f -name '*.sh' -print0 \
+  | xargs -0 grep -lE '^write_env_file\(\)|^selfhost_proxy_write_env\(\)' \
+  | sed "s|$ROOT/||" | sort)"
 [[ "$writer_files" == $'infrastructure/deploy/install-selfhost.sh\ninfrastructure/deploy/selfhost-proxy.sh' ]]
 printf '%s\n' 'PASS: root-env writer census remains installer plus locked two-key migrator'
 
