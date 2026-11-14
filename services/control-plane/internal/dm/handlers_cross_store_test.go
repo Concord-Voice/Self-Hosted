@@ -306,7 +306,7 @@ func TestRingDMCall_RefreshesRecipientsUnderAnnouncementFence(t *testing.T) {
 	removed := ts.CreateTestUser(t, "cross_store_refresh_removed")
 	remaining := ts.CreateTestUser(t, "cross_store_refresh_remaining")
 	convID := ts.CreateGroupDMConversation(t, caller.ID, removed.ID, remaining.ID)
-	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(remaining.ID))
+	markDMUserVisible(t, ts, remaining.ID)
 	removedConn := dialDMObserver(t, ts, removed.ID, convID)
 	h := crossStoreVoiceHandler(ts)
 

@@ -4760,8 +4760,8 @@ func TestRingDMCall_Group_ExcludesOfflineCallees(t *testing.T) {
 	online := ts.CreateTestUser(t, "rg-online")
 	offline := ts.CreateTestUser(t, "rg-offline")
 	convID := ts.CreateGroupDMConversation(t, caller.ID, online.ID, offline.ID)
-	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(caller.ID))
-	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(online.ID)) // offline is NOT marked
+	markDMUserVisible(t, ts, caller.ID)
+	markDMUserVisible(t, ts, online.ID) // offline is NOT marked
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -4830,6 +4830,14 @@ func ringForTest(t *testing.T, ts *testhelpers.TestServer, caller testhelpers.Te
 	return body.RingID
 }
 
+// markDMUserVisible makes a synthetic hub connection observable to DM ringing.
+// Production only rings members with an explicit visible Redis presence record.
+func markDMUserVisible(t *testing.T, ts *testhelpers.TestServer, userID string) {
+	t.Helper()
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(userID))
+	require.NoError(t, ts.Redis.Set(context.Background(), "presence:"+userID, "online", 0).Err())
+}
+
 func TestDeclineDMCall_DM1on1_EndsCallAndClearsRing(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	t.Cleanup(dm.ResetPendingDMCallsForTest)
@@ -4857,7 +4865,7 @@ func TestDeclineDMCall_Group_RingPersistsUntilLastDecline(t *testing.T) {
 	cc := ts.CreateTestUser(t, "gd-c")
 	convID := ts.CreateGroupDMConversation(t, caller.ID, b.ID, cc.ID)
 	for _, u := range []string{caller.ID, b.ID, cc.ID} {
-		ts.Hub.MarkUserOnlineForTest(uuid.MustParse(u))
+		markDMUserVisible(t, ts, u)
 	}
 
 	ringForTest(t, ts, caller, convID)
@@ -4883,7 +4891,7 @@ func TestJoinDMCall_Group_AcceptClearsRingForRemaining(t *testing.T) {
 	cc := ts.CreateTestUser(t, "gj-c")
 	convID := ts.CreateGroupDMConversation(t, caller.ID, b.ID, cc.ID)
 	for _, u := range []string{caller.ID, b.ID, cc.ID} {
-		ts.Hub.MarkUserOnlineForTest(uuid.MustParse(u))
+		markDMUserVisible(t, ts, u)
 	}
 
 	ringForTest(t, ts, caller, convID)
