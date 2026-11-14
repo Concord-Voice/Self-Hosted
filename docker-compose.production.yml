@@ -142,7 +142,9 @@ services:
     env_file: !reset []
     # Host nginx and concord-ctl.sh reach the API on 127.0.0.1:8080. The base file
     # publishes 8080 on every interface; managed hosts must not (needs Compose >= 2.24.5
-    # for !override, same floor as docker-compose.selfhost.yml).
+    # for !override, same floor as docker-compose.selfhost.yml). Keeping other hosts out
+    # of the loopback publish also needs Docker Engine >= 28.3.3 (raw-table DROP); the
+    # controller gates the Engine version only in self-host mode.
     ports: !override
       - "127.0.0.1:8080:8080"
     read_only: true

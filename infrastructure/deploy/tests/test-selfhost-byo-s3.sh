@@ -90,7 +90,7 @@ except ImportError:
 # changes require baseline review. Snapshot all inputs to detect test-side mutations.
 SOURCE_HASHES = {
     "docker-compose.yml": "".join(('e986aa7d', 'fecc2036', 'c70fbe96', 'bc87bdd0', 'abca9050', '81861760', '4fce4887', 'ffc84780')),
-    "docker-compose.production.yml": "".join(('b1b81bcf', '0a7dadcd', '1aad369a', 'ea397d87', 'd4f2e404', '5017e1cc', 'e6ac9c49', '54aa23bf')),
+    "docker-compose.production.yml": "".join(('202534de', '21456e81', '8bd169e6', 'eb9574a2', 'd73fc561', '38240ebd', '835729e6', '41bded6d')),
 }
 SOURCE_FILES = tuple(SOURCE_HASHES) + ("docker-compose.selfhost.yml",)
 if not check("all shared Compose source inputs are available",
