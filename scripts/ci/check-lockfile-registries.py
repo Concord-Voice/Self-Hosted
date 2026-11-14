@@ -18,13 +18,20 @@ however it is spelled or quoted); it bypasses both, so it passes only when the
 directory it names is inside the repository and listed in
 `go_local_replacements`. GOPROXY and GOPRIVATE settings are out of scope.
 
+Every npm install location must carry an approved `resolved` URL: without
+one npm falls back to `version`, which may be a URL. A tracked .npmrc may set
+`registry` or `@scope:registry` only to an approved host, because npm rewrites
+registry.npmjs.org in `resolved` to the configured registry. A go.work is read
+like a go.mod, and each `use` must name a directory inside the repository.
+
 The approved hosts and paths live in .github/ci/approved-registries.json, so a
 change to them is a visible diff.
 
 Usage:
   check-lockfile-registries.py [--config PATH] [--npm-lock FILE]... [--go-mod FILE]...
+                               [--go-work FILE]... [--npmrc FILE]...
 With no file option it checks every tracked package-lock.json,
-npm-shrinkwrap.json and go.mod (`git ls-files`).
+npm-shrinkwrap.json, go.mod, go.work and .npmrc (`git ls-files`).
 
 Exit 0 = clean. Exit 1 = a violation. Exit 2 = the check could not run (bad
 config, unreadable file, unsupported lockfile version); that is a failure too.
@@ -39,6 +46,7 @@ import sys
 from urllib.parse import urlparse
 
 NPM_NAMES = {"package-lock.json", "npm-shrinkwrap.json"}
+INSTALL_KEY = re.compile(r"(^|/)node_modules/(@[^/]+/)?[^/]+$")
 SAFE_URL = re.compile(r"^https://(?P<host>[A-Za-z0-9.-]+)/[^\\\s]*$")
 
 
@@ -69,15 +77,28 @@ def npm_violations(path, hosts):
     if version not in (2, 3) or not isinstance(lock.get("packages"), dict):
         raise CannotRun(f"{path}: lockfileVersion {version!r} is not supported (need 2 or 3)")
     out = []
+    base = os.path.dirname(path) or "."
     for key, entry in lock["packages"].items():
-        resolved = entry.get("resolved") if isinstance(entry, dict) else None
-        if not isinstance(resolved, str):
-            continue
+        if not isinstance(entry, dict):
+            raise CannotRun(f"{path}: packages[{key!r}] is not an object")
         name = key.rsplit("node_modules/", 1)[-1] or "(root)"
-        if entry.get("link") is True and "://" not in resolved and ":" not in resolved:
-            if inside(".", resolved):
+        resolved = entry.get("resolved")
+        if resolved is not None and not isinstance(resolved, str):
+            out.append(f"{path}: {name}: resolved is not a string ({resolved!r})")
+            continue
+        if entry.get("link") is True:
+            if isinstance(resolved, str) and ":" not in resolved and inside(base, resolved):
                 continue
             out.append(f"{path}: {name}: link {resolved} leaves the lockfile directory")
+            continue
+        if resolved is None:
+            # npm fetches every install location. Without `resolved` it falls
+            # back to `version`, which may itself be a URL or git spec. Bundled
+            # copies come inside their parent's tarball, and other keys
+            # (workspace sources, directories inside a package) are not fetched.
+            if INSTALL_KEY.search(key) and entry.get("inBundle") is not True:
+                out.append(f"{path}: {name}: install location has no resolved URL "
+                           f"(version {entry.get('version')!r})")
             continue
         # Anchored match, not urlparse alone: Python and npm (WHATWG URL) parse
         # `\`, `@`, ports and escapes in the authority differently, so
@@ -96,12 +117,11 @@ def npm_violations(path, hosts):
     return out
 
 
-REPLACE = re.compile(r"replace\b")
-
-
-def go_replaces(text):
-    """Yield (line_number, directive) for each replace directive in a go.mod."""
+def go_directives(text, verb, path):
+    """Yield (line_number, arguments) for each `verb` directive in a go.mod or go.work."""
+    start = re.compile(rf"{verb}\b")
     block = False
+    opened = 0
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.split("//", 1)[0].strip()
         if not line:
@@ -111,12 +131,14 @@ def go_replaces(text):
                 block = False
             else:
                 yield number, line
-        elif REPLACE.match(line):
-            rest = line[len("replace"):].strip()
+        elif start.match(line):
+            rest = line[len(verb):].strip()
             if rest == "(":
-                block = True
+                block, opened = True, number
             elif rest:
                 yield number, rest
+    if block:
+        raise CannotRun(f"{path}:{opened}: unterminated {verb} block")
 
 
 # Go's tokens: an interpreted "..." string (escapes refused, not guessed), a raw
@@ -140,14 +162,22 @@ def parse_target(rhs, path, number):
     return dest, version
 
 
-def go_violations(path, root, local_allowed):
+def go_violations(path, root, local_allowed, work=False):
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
     except OSError as exc:
         raise CannotRun(f"cannot read {path}: {exc}") from exc
     out = []
-    for number, directive in go_replaces(text):
+    if work:
+        # go.work `use` adds a module directory to the build. Inside the
+        # repository its code is in the diff; outside it is not.
+        for number, arg in go_directives(text, "use", path):
+            dest, version = parse_target(arg, path, number)
+            here = os.path.dirname(os.path.abspath(path))
+            if version is not None or os.path.isabs(dest) or not inside(root, os.path.relpath(os.path.join(here, dest), root)):
+                out.append(f"{path}:{number}: use {arg} is not a directory inside the repository")
+    for number, directive in go_directives(text, "replace", path):
         if "=>" not in directive:
             raise CannotRun(f"{path}:{number}: cannot parse replace directive: {directive}")
         dest, version = parse_target(directive.split("=>", 1)[1], path, number)
@@ -167,6 +197,36 @@ def go_violations(path, root, local_allowed):
     return out
 
 
+REGISTRY_URL = re.compile(r"^https://(?P<host>[A-Za-z0-9.-]+)/?$")
+
+
+def npmrc_violations(path, hosts):
+    """A tracked .npmrc may point `registry` or `@scope:registry` only at an approved host.
+
+    npm rewrites registry.npmjs.org in every `resolved` URL to the configured
+    registry (replace-registry-host defaults to npmjs), so an .npmrc next to an
+    untouched lockfile can redirect every download.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        raise CannotRun(f"cannot read {path}: {exc}") from exc
+    out = []
+    for number, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line[0] in "#;" or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key != "registry" and not key.endswith(":registry"):
+            continue
+        value = value.strip("'\"")
+        match = REGISTRY_URL.match(value)
+        if not (match and match.group("host") in hosts):
+            out.append(f"{path}:{number}: {key} = {value} is not an approved npm registry")
+    return out
+
+
 def tracked(root):
     try:
         files = subprocess.run(
@@ -175,12 +235,13 @@ def tracked(root):
     except (OSError, subprocess.CalledProcessError) as exc:
         raise CannotRun(f"git ls-files failed: {exc}") from exc
     npm = [f for f in files if os.path.basename(f) in NPM_NAMES]
-    gomod = [f for f in files if os.path.basename(f) == "go.mod"]
+    gomod = [f for f in files if os.path.basename(f) in ("go.mod", "go.work")]
+    npmrc = [f for f in files if os.path.basename(f) == ".npmrc"]
     if not npm and not gomod:
         raise CannotRun("git ls-files found no lockfile and no go.mod; refusing to pass an empty scan")
     # Paths relative to the working directory, so messages name them as a reader would.
-    return ([os.path.relpath(os.path.join(root, f)) for f in npm],
-            [os.path.relpath(os.path.join(root, f)) for f in gomod])
+    rel = lambda names: [os.path.relpath(os.path.join(root, f)) for f in names]
+    return rel(npm), rel(gomod), rel(npmrc)
 
 
 def main():
@@ -188,6 +249,8 @@ def main():
     ap.add_argument("--config")
     ap.add_argument("--npm-lock", action="append", default=[])
     ap.add_argument("--go-mod", action="append", default=[])
+    ap.add_argument("--go-work", action="append", default=[])
+    ap.add_argument("--npmrc", action="append", default=[])
     args = ap.parse_args()
     try:
         root = subprocess.run(
@@ -198,15 +261,21 @@ def main():
         local_allowed = {os.path.normpath(p) for p in config.get("go_local_replacements", [])}
         if not hosts:
             raise CannotRun("config lists no npm_registry_hosts")
-        if args.npm_lock or args.go_mod:
-            npm, gomod = args.npm_lock, args.go_mod
+        explicit = args.npm_lock or args.go_mod or args.go_work or args.npmrc
+        if explicit:
+            npm, npmrc = args.npm_lock, args.npmrc
+            gomod = args.go_mod + args.go_work
+            work = set(args.go_work)
         else:
-            npm, gomod = tracked(root)
+            npm, gomod, npmrc = tracked(root)
+            work = {f for f in gomod if os.path.basename(f) == "go.work"}
         problems = []
         for path in npm:
             problems += npm_violations(path, hosts)
         for path in gomod:
-            problems += go_violations(path, root, local_allowed)
+            problems += go_violations(path, root, local_allowed, work=path in work)
+        for path in npmrc:
+            problems += npmrc_violations(path, hosts)
     except (CannotRun, subprocess.CalledProcessError, OSError) as exc:
         print(f"::error::lockfile registry check could not run: {exc}")
         return 2
@@ -216,7 +285,8 @@ def main():
         print(f"{len(problems)} off-registry source(s). Fix the lockfile or go.mod, or, if the "
               "source is deliberate, add it to .github/ci/approved-registries.json in this PR.")
         return 1
-    print(f"ok: {len(npm)} npm lockfile(s) and {len(gomod)} go.mod file(s) use approved sources")
+    print(f"ok: {len(npm)} npm lockfile(s), {len(gomod)} go.mod/go.work file(s) and "
+          f"{len(npmrc)} .npmrc file(s) use approved sources")
     return 0
 
 

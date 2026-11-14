@@ -44,7 +44,7 @@ expect 'local replace fails and names file and directive' 1 \
 expect 'module-path replace is allowed' 1 '^1 off-registry source' --go-mod "$FIX/bad-replace.mod"
 
 # The repository's own files.
-expect 'tracked lockfiles and go.mod pass' 0 '^ok: [1-9][0-9]* npm lockfile\(s\) and [1-9][0-9]* go\.mod'
+expect 'tracked lockfiles, go.mod and .npmrc pass' 0 '^ok: [1-9][0-9]* npm lockfile\(s\), [1-9][0-9]* go\.mod/go\.work file\(s\) and [0-9]+ \.npmrc'
 
 # Other off-registry shapes.
 jq '.packages["node_modules/left-pad"].resolved = "git+ssh://git@github.com/example/left-pad.git#abc123"' \
@@ -83,6 +83,42 @@ printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => "./x
 expect 'quoted version cannot run' 2 'is not a version' --go-mod "$WORK/qv.mod"
 printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => ./x v1.0.0 extra\n' > "$WORK/x3.mod"
 expect 'three tokens cannot run' 2 'cannot parse replace target' --go-mod "$WORK/x3.mod"
+
+# npm falls back to `version` when an install location has no `resolved`.
+L='.packages["node_modules/left-pad"]'
+jq "$L |= (del(.resolved) | .version = \"https://npm.example.invalid/left-pad.tgz\")" "$FIX/off-registry-lock.json" > "$WORK/nores-lock.json"
+expect 'install location without resolved fails' 1 'left-pad: install location has no resolved URL' --npm-lock "$WORK/nores-lock.json"
+jq '.packages["node_modules/@scope/x"] = {"version": "1.0.0"}' "$WORK/workspace-lock.json" > "$WORK/scoped-lock.json"
+expect 'scoped install location without resolved fails' 1 '@scope/x: install location has no resolved' --npm-lock "$WORK/scoped-lock.json"
+jq '.packages["node_modules/is-number/node_modules/inner"] = {"version": "1.0.0", "inBundle": true} | .packages["packages/ws"] = {"version": "0.0.0"} | .packages["node_modules/left-pad"].resolved = "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"' \
+  "$FIX/off-registry-lock.json" > "$WORK/bundled-lock.json"
+expect 'bundled copy and workspace source without resolved pass' 0 '^ok:' --npm-lock "$WORK/bundled-lock.json"
+jq "$L.resolved = 7" "$FIX/off-registry-lock.json" > "$WORK/num-lock.json"
+expect 'non-string resolved fails' 1 'resolved is not a string' --npm-lock "$WORK/num-lock.json"
+mkdir -p "$WORK/nested/sub"
+jq '.packages["node_modules/left-pad"] = {"resolved": "../outside", "link": true}' "$FIX/off-registry-lock.json" > "$WORK/nested/sub/package-lock.json"
+expect 'link is resolved against the lockfile directory' 1 'link \.\./outside leaves' --npm-lock "$WORK/nested/sub/package-lock.json"
+
+# A tracked .npmrc can redirect every download.
+printf 'registry=https://npm.example.invalid/\n' > "$WORK/evil.npmrc"
+expect '.npmrc registry off the list fails' 1 'evil\.npmrc:1: registry = https://npm\.example\.invalid/ is not an approved' --npmrc "$WORK/evil.npmrc"
+printf '; comment\n@acme:registry = "https://npm.example.invalid"\n' > "$WORK/scope.npmrc"
+expect '.npmrc scoped registry off the list fails' 1 '@acme:registry' --npmrc "$WORK/scope.npmrc"
+# shellcheck disable=SC2016  # a literal ${...} the .npmrc must not be trusted with
+printf 'registry=${EVIL_REGISTRY}\n' > "$WORK/var.npmrc"
+expect '.npmrc registry from a variable fails' 1 'registry = \$\{EVIL_REGISTRY\}' --npmrc "$WORK/var.npmrc"
+printf 'registry=https://registry.npmjs.org/\nsave-exact=true\n' > "$WORK/ok.npmrc"
+expect '.npmrc with the approved registry passes' 0 '^ok:' --npmrc "$WORK/ok.npmrc"
+
+# go.work overrides go.mod.
+printf 'go 1.26\n\nuse ./scripts\n\nreplace example.invalid/dep => ../evil\n' > "$LISTED"
+expect 'go.work local replace fails' 1 'replace example\.invalid/dep => \.\./evil points at local path' --go-work "$LISTED"
+printf 'go 1.26\n\nuse (\n\t./scripts\n\t../../outside\n)\n' > "$LISTED"
+expect 'go.work use outside the repository fails' 1 'use \.\./\.\./outside is not a directory inside' --go-work "$LISTED"
+printf 'go 1.26\n\nuse ./scripts\n' > "$LISTED"
+expect 'go.work use inside the repository passes' 0 '^ok:' --go-work "$LISTED"
+printf 'module example.invalid/x\n\ngo 1.26\n\nreplace (\n\texample.invalid/a => ./x\n' > "$WORK/open.mod"
+expect 'unterminated replace block cannot run' 2 'unterminated replace block' --go-mod "$WORK/open.mod"
 
 # A listed local replacement passes. The fixture's target resolves to a path
 # outside the repository, so list a replacement that resolves inside it.
