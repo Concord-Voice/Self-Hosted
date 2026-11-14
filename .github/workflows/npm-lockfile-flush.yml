@@ -78,10 +78,7 @@ jobs:
             --search "head:dependabot/npm_and_yarn/" \
             --state open \
             --json number,headRefName,author,isCrossRepository \
-            --jq '[.[] | select(.author.login == "app/dependabot" and .isCrossRepository == false)
-                       | select(.headRefName | startswith("dependabot/npm_and_yarn/"))
-                       | select(.headRefName | startswith("dependabot/npm_and_yarn/dot-github/") | not)
-                       | .number | tostring] | join(" ")')
+            --jq '[.[] | select(.author.login == "app/dependabot" and .isCrossRepository == false) | select(.headRefName | startswith("dependabot/npm_and_yarn/")) | select(.headRefName | startswith("dependabot/npm_and_yarn/dot-github/") | not) | .number | tostring] | join(" ")')
 
           if [ -z "$OPEN_PRS" ]; then
             echo "No open Dependabot npm PRs for these roots. Proceeding."
@@ -100,7 +97,7 @@ jobs:
           cat > /tmp/deferral-comment.md <<DEFERRAL
           ${MARKER}
 
-          \`npm-lockfile-flush\` deferred this week's run. This branch is open against an npm lockfile the flush would also change, so the two PRs would conflict. It runs again next Tuesday 06:30 UTC.
+          \`npm-lockfile-flush\` deferred the run for this week. This branch is open against an npm lockfile the flush would also change, so the two PRs would conflict. It runs again next Tuesday 06:30 UTC.
 
           No action needed. Next week the workflow checks again and proceeds once this branch has merged or closed.
 
