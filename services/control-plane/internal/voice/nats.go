@@ -3868,11 +3868,12 @@ func moveServerVoiceParticipant(
 	var (
 		upsertedCount int
 		priorTarget   bool
+		priorExact    bool
 		removedRaw    []string
 	)
 	err := tx.QueryRowContext(ctx, `
 		WITH prior_target AS MATERIALIZED (
-			SELECT 1
+			SELECT lifecycle_event_at
 			FROM voice_participants
 			WHERE channel_id = $1 AND user_id = $2
 		), blocked AS MATERIALIZED (
@@ -3900,6 +3901,7 @@ func moveServerVoiceParticipant(
 		SELECT
 			(SELECT COUNT(*) FROM upserted),
 			EXISTS (SELECT 1 FROM prior_target),
+			EXISTS (SELECT 1 FROM prior_target WHERE lifecycle_event_at = $3),
 			COALESCE(ARRAY(
 				SELECT channel_id::text
 				FROM removed
@@ -3907,7 +3909,7 @@ func moveServerVoiceParticipant(
 				LIMIT $4
 			), ARRAY[]::text[])
 	`, channelID, senderID, eventAt, maxVoiceReplayRemovedRooms+1).Scan(
-		&upsertedCount, &priorTarget, pq.Array(&removedRaw),
+		&upsertedCount, &priorTarget, &priorExact, pq.Array(&removedRaw),
 	)
 	if err != nil {
 		return serverVoiceMutationResult{}, fmt.Errorf("move server voice participant: %w", err)
@@ -3917,7 +3919,15 @@ func moveServerVoiceParticipant(
 			"server voice participant upsert affected %d rows", upsertedCount,
 		)
 	}
-	if upsertedCount == 1 && admission != nil {
+	// priorExact means this exact join already committed: the row carries its
+	// stamp, and that commit consumed the reservation in the same transaction.
+	// Requiring the reservation again would turn a second delivery into an
+	// ejection of the peer that just joined. Core NATS delivers every voice.*
+	// event to every control plane, so this is the normal case whenever two run
+	// at once (blue-green cutover, #253). Do NOT key this on the Redis claim's
+	// duplicate status: a first attempt can claim and then roll back, and its
+	// redelivery is a duplicate claim that must still consume the reservation.
+	if upsertedCount == 1 && admission != nil && !priorExact {
 		result, err := tx.ExecContext(ctx, `
 			DELETE FROM voice_pending_admissions
 			WHERE channel_id = $1 AND user_id = $2
