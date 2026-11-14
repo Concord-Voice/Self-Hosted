@@ -53,10 +53,14 @@ for root in "${roots[@]}"; do
 
   # The lower version is the half that is behind.
   lower=$(printf '%s\n%s\n' "$vitest" "$plugin" | sort -V | head -n1)
+  # One assignment per line: Semgrep's bash parser rejects `a=x b=y` here and
+  # reports the whole file as a scanner error.
   if [ "$lower" = "$vitest" ]; then
-    behind=vitest ahead="$plugin"
+    behind=vitest
+    ahead="$plugin"
   else
-    behind="$PLUGIN" ahead="$vitest"
+    behind="$PLUGIN"
+    ahead="$vitest"
   fi
   echo "::error file=$lock::vitest pair out of step in $root: vitest $vitest, $PLUGIN $plugin. $behind is behind."
   echo "  Fix: on this branch, run 'npm install --save-dev --ignore-scripts $behind@$ahead' in $root and commit package.json and package-lock.json."
