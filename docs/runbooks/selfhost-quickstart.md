@@ -34,11 +34,12 @@ For a verified release carrying this source contract, the installer owns the
 root `.env` schema and fresh file publication. It writes exact loopback
 placeholders for `TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES`; the deploy-lock
 `up` path then measures the Docker services bridge and atomically replaces only
-those two values with its gateway's exact `/32` or `/128` host route before the
+those two values with its gateway's canonical IPv4 `/32` or IPv6 `/128` host route before the
 application rebuild. Existing installs with the known legacy broad defaults
 are migrated there. A custom broad value, ambiguous network, or unverified
 gateway stops the start. Direct `restart` requires an already exact, matching
 running stack and otherwise directs the operator to `concord-selfhost up`.
+IPv4-mapped IPv6 trust entries (`::ffff:`) are rejected by both services.
 
 Both application services select `concordvoice-services` as their default
 gateway through Compose `gw_priority: 1`; this requires Compose 2.33.1 or
