@@ -983,6 +983,8 @@ jobs:
       # leaves such a PR unable to install; the message names the half that is
       # behind and the fix. The job reads files only and never pushes to the PR
       # branch. The fixture suite runs first and must see the split pair fail.
+      # Advisory: workflow-lint is not a required check, so this step explains
+      # the install failure but does not block a merge by itself.
       - name: vitest pair is in step
         # Last in the job, and runs even when an earlier step failed: one red
         # step does not hide this one, and this one hides no other step.
