@@ -3,30 +3,40 @@ package privacy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
 
 // Handler exposes the privacy erasure endpoints.
 type Handler struct {
-	account users.AccountDeleter
-	redis   *redis.Client
-	log     *logger.Logger
+	account            users.AccountDeleter
+	redis              *redis.Client
+	log                *logger.Logger
+	erasureEmailSender ErasureEmailSender
+}
+
+// ErasureEmailSender sends the one-use account-erasure confirmation link.
+// Implementations must never log the URL or its embedded secret.
+type ErasureEmailSender interface {
+	SendAccountErasureConfirmation(to, confirmationURL string) error
 }
 
 // NewHandler builds a Handler wired to the given account-deletion service.
@@ -46,13 +56,79 @@ func NewHandler(account users.AccountDeleter, redisClient *redis.Client, log *lo
 	return &Handler{account: account, redis: redisClient, log: log}
 }
 
-// eraseAccountRequest is intentionally empty. Unknown fields in the
-// request body (e.g. legacy "clientId" sent by old desktop builds) are
-// silently ignored — Gin's ShouldBindJSON does not reject unknown fields
-// by default. This unblocks #757 (desktop strip): the desktop client may
-// continue sending {"clientId":"..."} during the rollout window without
-// server-side errors.
-type eraseAccountRequest struct{}
+// SetErasureEmailSender wires delivery for unverified-email erasure intents.
+func (h *Handler) SetErasureEmailSender(sender ErasureEmailSender) { h.erasureEmailSender = sender }
+
+const maxEraseAccountRequestBytes int64 = 8192
+
+type eraseAccountRequest struct {
+	Password                string   `json:"password"` //nolint:gosec // request field, not a stored secret
+	MFACode                 string   `json:"mfa_code"`
+	ConfirmedOwnedServerIDs []string `json:"confirmed_owned_server_ids"`
+	// ClientID remains accepted only for the compatibility window. It has no
+	// authority and is deliberately not copied into AccountErasureRequest.
+	ClientID          string                         `json:"clientId"`
+	EmailConfirmation *eraseEmailConfirmationRequest `json:"email_confirmation"`
+}
+
+type eraseEmailConfirmationRequest struct {
+	RequestID string `json:"request_id"`
+	Token     string `json:"token"`
+}
+
+type parsedEraseAccountRequest struct {
+	Password                string
+	MFACode                 string
+	ConfirmedOwnedServerIDs []uuid.UUID
+	EmailConfirmation       *eraseEmailConfirmationRequest
+}
+
+func bindEraseAccountRequest(c *gin.Context) (parsedEraseAccountRequest, bool) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxEraseAccountRequestBytes)
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	var body eraseAccountRequest
+	if err := decoder.Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
+		}
+		if errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
+		}
+		return parsedEraseAccountRequest{}, false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
+		return parsedEraseAccountRequest{}, false
+	}
+	if body.ConfirmedOwnedServerIDs == nil {
+		// A bearer-only request must reach the proof gate and receive the
+		// indistinguishable step_up_required refusal. Once any proof material is
+		// supplied, the acknowledgement array is independently mandatory.
+		if body.Password != "" || body.MFACode != "" || body.EmailConfirmation != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
+			return parsedEraseAccountRequest{}, false
+		}
+		return parsedEraseAccountRequest{}, true
+	}
+	confirmed := make([]uuid.UUID, len(body.ConfirmedOwnedServerIDs))
+	var previous string
+	for i, value := range body.ConfirmedOwnedServerIDs {
+		id, err := uuid.Parse(value)
+		if err != nil || id == uuid.Nil || id.String() != value || (i > 0 && value <= previous) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
+			return parsedEraseAccountRequest{}, false
+		}
+		confirmed[i] = id
+		previous = value
+	}
+	return parsedEraseAccountRequest{
+		Password:                body.Password,
+		MFACode:                 body.MFACode,
+		ConfirmedOwnedServerIDs: confirmed,
+		EmailConfirmation:       body.EmailConfirmation,
+	}, true
+}
 
 // EraseAccount handles POST /api/v1/privacy/erase-account.
 // Performs the atomic DB erasure via the AccountDeleter, which cascades
@@ -70,19 +146,64 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 		return
 	}
 
-	var req eraseAccountRequest
-	// An empty body (io.EOF from the JSON decoder) is acceptable — the
-	// request struct has no required fields. Other JSON-shape errors are
-	// rejected as 400.
-	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+	request, ok := bindEraseAccountRequest(c)
+	if !ok {
+		return
+	}
+	identity, ok := loginfamily.AccessIdentityFromContext(c.Request.Context())
+	if !ok || identity.UserID.String() != userID {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	attempt, stepErr := h.account.PrepareAccountErasure(c.Request.Context(), userID, request.Password, request.MFACode)
+	if stepErr != nil {
+		stepErr.Write(c)
+		return
+	}
+	erasure := users.AccountErasureRequest{
+		Actor:                   identity,
+		Password:                request.Password,
+		MFACode:                 request.MFACode,
+		PasswordAttempt:         attempt,
+		ConfirmedOwnedServerIDs: request.ConfirmedOwnedServerIDs,
+	}
+	verifiedEmail, err := h.account.EmailVerified(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation status unavailable"})
+		return
+	}
+	if !verifiedEmail {
+		if request.EmailConfirmation == nil {
+			h.issueEmailErasureConfirmation(c, erasure)
+			return
+		}
+		claim, ok := h.claimEmailErasureConfirmation(c, erasure, request.EmailConfirmation)
+		if !ok {
+			return
+		}
+		defer h.settleEmailErasureConfirmation(claim, &err)
+	} else if request.EmailConfirmation != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return
 	}
 
 	// deliveryFailed marks a DURABLE erasure whose presence delivery did not
 	// settle. The account is gone; only the fan-out failed.
 	var deliveryFailed bool
-	if err := h.account.DeleteAccount(c.Request.Context(), userID); err != nil {
+	if err = h.account.DeleteAccount(c.Request.Context(), erasure); err != nil {
+		var verificationErr *stepup.Error
+		if errors.As(err, &verificationErr) {
+			verificationErr.Write(c)
+			return
+		}
+		var ownedSetErr *users.ErrErasureOwnedServerSetDrifted
+		if errors.As(err, &ownedSetErr) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error_code":                "owned_server_confirmation_stale",
+				"required_owned_server_ids": ownedSetErr.RequiredOwnedServerIDs,
+			})
+			return
+		}
 		if errors.Is(err, users.ErrUserNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
 			return
@@ -111,14 +232,6 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "account deletion failed"})
 			return
 		}
-		// Returning here would be two separate failures. First it would answer
-		// 500 for an account that IS erased, and a client retry then gets 404 —
-		// the duplicate-action lie the post-commit classification exists to
-		// prevent. Second, and worse, it would skip revokeAccessTokens below, so
-		// the jti blacklist and the user_disabled:<id> key are never written and
-		// an already-issued access token keeps working against an erased
-		// account. [internal]rules/backend.md requires both to be set BEFORE
-		// returning success (code review, PR #2840).
 		deliveryFailed = true
 		if h.log != nil {
 			h.log.Error("erase-account: presence delivery did not settle",
@@ -150,6 +263,110 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) issueEmailErasureConfirmation(c *gin.Context, request users.AccountErasureRequest) {
+	prepared, err := h.account.PrepareEmailErasureConfirmation(c.Request.Context(), request)
+	if h.writeErasurePreparationError(c, err) {
+		return
+	}
+	intent, err := NewEmailConfirmationStore(h.redis).Issue(c.Request.Context(), EmailConfirmationBinding{
+		Recipient: prepared.Recipient, UserID: request.Actor.UserID.String(), FamilyID: prepared.FamilyID,
+		CredentialEpoch: prepared.CredentialEpoch, OwnedServerIDs: prepared.OwnedServerIDs,
+	})
+	if err != nil {
+		h.writeEmailConfirmationError(c, err)
+		return
+	}
+	if h.erasureEmailSender == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
+		return
+	}
+	confirmationURL := "concord://account-erasure/confirm/" + intent.RequestID + "/" + intent.Token
+	if err := h.erasureEmailSender.SendAccountErasureConfirmation(prepared.Recipient, confirmationURL); err != nil {
+		if h.log != nil {
+			h.log.Error("erase-account: email confirmation delivery failed", "error", err)
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"status": "email_confirmation_required", "request_id": intent.RequestID,
+		"expires_in": int(intent.ExpiresIn.Seconds()),
+	})
+}
+
+func (h *Handler) claimEmailErasureConfirmation(
+	c *gin.Context, request users.AccountErasureRequest, confirmation *eraseEmailConfirmationRequest,
+) (*EmailConfirmationClaim, bool) {
+	if confirmation.RequestID == "" || confirmation.Token == "" {
+		c.JSON(http.StatusConflict, gin.H{"error_code": "email_confirmation_stale"})
+		return nil, false
+	}
+	prepared, err := h.account.EmailErasureConfirmationBinding(c.Request.Context(), request)
+	if h.writeErasurePreparationError(c, err) {
+		return nil, false
+	}
+	claim, err := NewEmailConfirmationStore(h.redis).Claim(c.Request.Context(), confirmation.RequestID, confirmation.Token,
+		EmailConfirmationBinding{Recipient: prepared.Recipient, UserID: request.Actor.UserID.String(), FamilyID: prepared.FamilyID,
+			CredentialEpoch: prepared.CredentialEpoch, OwnedServerIDs: prepared.OwnedServerIDs})
+	if err != nil {
+		h.writeEmailConfirmationError(c, err)
+		return nil, false
+	}
+	return claim, true
+}
+
+func (h *Handler) settleEmailErasureConfirmation(claim *EmailConfirmationClaim, operationErr *error) {
+	if claim == nil {
+		return
+	}
+	if *operationErr == nil || errors.Is(*operationErr, presencecapture.ErrPostCommitDelivery) {
+		if err := claim.Commit(context.Background()); err != nil && h.log != nil {
+			h.log.Error("erase-account: email confirmation commit failed", "error", err)
+		}
+		return
+	}
+	if errors.Is(*operationErr, presencecapture.ErrCommitUnresolved) {
+		return
+	}
+	if err := claim.Release(context.Background()); err != nil && h.log != nil {
+		h.log.Error("erase-account: email confirmation release failed", "error", err)
+	}
+}
+
+func (h *Handler) writeErasurePreparationError(c *gin.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	var verificationErr *stepup.Error
+	if errors.As(err, &verificationErr) {
+		verificationErr.Write(c)
+		return true
+	}
+	var ownedSetErr *users.ErrErasureOwnedServerSetDrifted
+	if errors.As(err, &ownedSetErr) {
+		c.JSON(http.StatusConflict, gin.H{"error_code": "owned_server_confirmation_stale", "required_owned_server_ids": ownedSetErr.RequiredOwnedServerIDs})
+		return true
+	}
+	if errors.Is(err, users.ErrErasureEmailAlreadyVerified) {
+		c.JSON(http.StatusConflict, gin.H{"error_code": "email_confirmation_stale"})
+		return true
+	}
+	if errors.Is(err, credepoch.ErrEpochMismatch) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return true
+	}
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
+	return true
+}
+
+func (h *Handler) writeEmailConfirmationError(c *gin.Context, err error) {
+	if errors.Is(err, ErrEmailConfirmationStale) || errors.Is(err, ErrEmailConfirmationInvalid) {
+		c.JSON(http.StatusConflict, gin.H{"error_code": "email_confirmation_stale"})
+		return
+	}
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
 }
 
 func (h *Handler) revokeAccessTokens(c *gin.Context, userID string) error {
