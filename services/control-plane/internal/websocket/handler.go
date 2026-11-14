@@ -47,17 +47,15 @@ type Handler struct {
 }
 
 // NewHandler creates a new WebSocket handler
-func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret string, allowedOrigins []string, fence *credepoch.Fence, securityHeaders http.Header, requireAttestation bool, attestationLog *logger.Logger) *Handler {
+func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret string, allowedOrigins []string, fence *credepoch.Fence, securityHeaders http.Header) *Handler {
 	h := &Handler{
-		hub:                hub,
-		db:                 db,
-		redis:              redisClient,
-		jwtSecret:          jwtSecret,
-		allowedOrigins:     allowedOrigins,
-		requireAttestation: requireAttestation,
-		attestationLog:     attestationLog,
-		fence:              fence,
-		securityHeaders:    securityHeaders,
+		hub:             hub,
+		db:              db,
+		redis:           redisClient,
+		jwtSecret:       jwtSecret,
+		allowedOrigins:  allowedOrigins,
+		fence:           fence,
+		securityHeaders: securityHeaders,
 	}
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -89,6 +87,12 @@ func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret strin
 		},
 	}
 	return h
+}
+
+// SetAttestation configures the JWT fallback's admission proof requirement.
+func (h *Handler) SetAttestation(required bool, log *logger.Logger) {
+	h.requireAttestation = required
+	h.attestationLog = log
 }
 
 // SetClientMinimums configures the optional per-platform client-version admission floors.

@@ -47,7 +47,7 @@ func renewalValidatorHandler(t *testing.T) (*Handler, string) {
 	fence := credepoch.New(nil, rc, logger.NewWithWriter(io.Discard))
 	userID := dbtest.CreateUser(t, db).String()
 	require.NoError(t, rc.Set(context.Background(), credepoch.Key(userID), "active:11111111111111111111111111111111", time.Minute).Err())
-	return NewHandler(nil, db, rc, testJWTSecret, nil, fence, nil, false, nil), userID
+	return NewHandler(nil, db, rc, testJWTSecret, nil, fence, nil), userID
 }
 
 func TestValidateAccessToken(t *testing.T) {

@@ -167,7 +167,7 @@ func TestWebSocketClosesAtAccessTokenDeadline(t *testing.T) {
 			db := setupHubTestDB(t)
 			rc := setupHubTestRedis(t)
 			hub := NewHub(db, rc)
-			h := NewHandler(hub, db, rc, testJWTSecret, nil, nil, nil, false, nil)
+			h := NewHandler(hub, db, rc, testJWTSecret, nil, nil, nil)
 			router := gin.New()
 			router.GET("/ws", h.HandleWebSocket)
 			srv := httptest.NewServer(router)
@@ -260,7 +260,7 @@ func TestExpiredTokenUnregistersWhilePostRegistrationFenceStalls(t *testing.T) {
 	releaseFence := sync.OnceFunc(func() { close(hook.release) })
 	hub := NewHub(db, rc)
 	go hub.Run()
-	handler := NewHandler(hub, db, rc, testJWTSecret, []string{"*"}, fence, nil, false, nil)
+	handler := NewHandler(hub, db, rc, testJWTSecret, []string{"*"}, fence, nil)
 	handlerDone := make(chan struct{})
 	var handlerPanic any
 	router := gin.New()
@@ -343,7 +343,7 @@ func TestExpiredTokenUnregistersWhilePostRegistrationFenceStalls(t *testing.T) {
 }
 
 func TestWebSocketJWTRequiresSignedDeadline(t *testing.T) {
-	h := NewHandler(nil, nil, nil, testJWTSecret, nil, nil, nil, false, nil)
+	h := NewHandler(nil, nil, nil, testJWTSecret, nil, nil, nil)
 	claims := jwt.MapClaims{"iss": middleware.AccessTokenIssuer, "user_id": uuid.NewString()}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(testJWTSecret))
 	require.NoError(t, err)

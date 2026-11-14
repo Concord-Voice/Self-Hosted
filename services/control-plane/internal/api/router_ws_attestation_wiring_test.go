@@ -12,7 +12,7 @@ func TestWebSocketJWTAttestationWiring(t *testing.T) {
 	data, err := os.ReadFile("router.go") //nolint:gosec // fixed source file in test
 	require.NoError(t, err)
 	source := string(data)
-	require.Contains(t, source, "cfg.RequireClientAttestation, log)")
+	require.Contains(t, source, "wsHandler.SetAttestation(cfg.RequireClientAttestation, log)")
 	require.Contains(t, source, "authRequired.Use(middleware.RequireSessionHeaderMatchesToken())")
 	require.Less(t,
 		strings.Index(source, "authRequired.Use(middleware.RequireSessionHeaderMatchesToken())"),

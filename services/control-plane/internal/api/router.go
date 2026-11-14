@@ -1297,7 +1297,8 @@ func NewRouter(
 	}
 	requireDangerousActionGatesWired(log, channelsHandler, membersHandler, rbacHandler, mediaHandler)
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins,
-		credFence, middleware.SecurityHeaderSet(cfg.Environment, cfg.HSTSHeaderValue), cfg.RequireClientAttestation, log)
+		credFence, middleware.SecurityHeaderSet(cfg.Environment, cfg.HSTSHeaderValue))
+	wsHandler.SetAttestation(cfg.RequireClientAttestation, log)
 	wsHandler.SetClientMinimums(middleware.ClientMinimumsFromConfig(cfg))
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
 	// The one endpoint an own-rule route's password reaches (#3509). It
