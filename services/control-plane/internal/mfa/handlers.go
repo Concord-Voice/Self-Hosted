@@ -2457,11 +2457,14 @@ func (h *Handler) verifyWebAuthnChallenge(ctx context.Context, c *gin.Context, a
 	}
 	// Cloned-authenticator detection compares the next assertion against this
 	// value, so the login does not verify unless it landed.
-	if _, err := h.db.ExecContext(ctx, `
-		UPDATE user_mfa_webauthn SET sign_count = $1, last_used_at = NOW() WHERE credential_id = $2 AND user_id = $3
-	`, credential.Authenticator.SignCount, credential.ID, claims.UserID); err != nil {
+	advanced, err := h.advanceWebAuthnSignCount(ctx, claims.UserID, user, credential)
+	if err != nil {
 		h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("update WebAuthn sign count: %w", err))
 		return false, true
+	}
+	if !advanced {
+		h.log.Warn("WebAuthn credential counter did not advance", "user_id", claims.UserID)
+		return false, false
 	}
 	return true, false
 }
@@ -2873,12 +2876,15 @@ func (h *Handler) WebAuthnVerifyInlineFinish(c *gin.Context) {
 
 	// Update sign count. Cloned-authenticator detection compares the next
 	// assertion against this value, so a token is not issued unless it landed.
-	if _, err := h.db.ExecContext(ctx,
-		`UPDATE user_mfa_webauthn SET sign_count = $1, last_used_at = NOW() WHERE credential_id = $2 AND user_id = $3`,
-		credential.Authenticator.SignCount, credential.ID, userID,
-	); err != nil {
+	advanced, err := h.advanceWebAuthnSignCount(ctx, userID, user, credential)
+	if err != nil {
 		h.log.Error("Failed to update WebAuthn sign count", "error", err, "user_id", userID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerify})
+		return
+	}
+	if !advanced {
+		h.log.Warn("WebAuthn credential counter did not advance", "user_id", userID)
+		c.JSON(http.StatusForbidden, gin.H{"error": "Verification failed. Try again."})
 		return
 	}
 
@@ -2954,6 +2960,40 @@ func (h *Handler) buildWebAuthnUser(ctx context.Context, userID string) (*WebAut
 		DisplayName: displayName,
 		Credentials: creds,
 	}, nil
+}
+
+// advanceWebAuthnSignCount records a verified assertion's counter only when
+// the credential remains at the value used for verification. A zero counter
+// is supported only while the stored value is also zero; it can never reset a
+// counter that has started advancing.
+func (h *Handler) advanceWebAuthnSignCount(ctx context.Context, userID string, user *WebAuthnUser, credential *webauthn.Credential) (bool, error) {
+	expected, ok := webAuthnCredentialSignCount(user, credential.ID)
+	if !ok {
+		return false, errors.New("credential missing from WebAuthn verification snapshot")
+	}
+
+	result, err := h.db.ExecContext(ctx, `
+		UPDATE user_mfa_webauthn SET sign_count = $1, last_used_at = NOW()
+		WHERE credential_id = $2 AND user_id = $3 AND sign_count = $4
+		  AND (sign_count < $1 OR (sign_count = 0 AND $1 = 0))
+	`, credential.Authenticator.SignCount, credential.ID, userID, expected)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
+}
+
+func webAuthnCredentialSignCount(user *WebAuthnUser, credentialID []byte) (uint32, bool) {
+	for _, credential := range user.Credentials {
+		if bytes.Equal(credential.ID, credentialID) {
+			return credential.Authenticator.SignCount, true
+		}
+	}
+	return 0, false
 }
 
 // ── Recovery-Only Methods ─────────────────────────────────────────────────────
