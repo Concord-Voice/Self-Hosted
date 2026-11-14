@@ -82,6 +82,7 @@ const (
 	errMsgFailedDeleteCredential     = "Failed to delete credential"
 	errMsgFailedSendCode             = "Failed to send code"
 	errMsgFailedVerify               = "Failed to verify"
+	errMsgInlineVerificationFailed   = "Verification failed. Try again."
 	errMsgFailedLoadShares           = "Failed to load recovery shares"
 	errMsgEmailNotConfigured         = "Email delivery is not configured"
 	errMsgFailedRemoveDevice         = "Failed to remove trusted device"
@@ -657,6 +658,7 @@ func containsStr(ss []string, target string) bool {
 // errSubjectGone reports that the authenticated account's users row no longer
 // exists (a deleted account holding a still-valid JWT).
 var errSubjectGone = errors.New("user no longer exists")
+var errWebAuthnCredentialLimit = errors.New("WebAuthn credential limit reached")
 
 // mfaFlagsExactSQL writes the flags when the email/SMS state is known. It is
 // also the first-activation rule: mfa_enabled_at is set only on a NULL → on
@@ -1768,6 +1770,13 @@ func (h *Handler) WebAuthnRegisterFinish(c *gin.Context) {
 	// but not listed is never challenged at login.
 	es := h.readEmailSmsForSync(ctx, userID)
 	if err := h.withMFAFactorWriteTx(ctx, userID, es, func(tx *sql.Tx) error {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_mfa_webauthn WHERE user_id = $1`, userID).Scan(&count); err != nil {
+			return fmt.Errorf("count WebAuthn credentials: %w", err)
+		}
+		if count >= 10 {
+			return errWebAuthnCredentialLimit
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO user_mfa_webauthn (user_id, credential_id, public_key, aaguid, sign_count, credential_name, credential_type, transports)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1777,6 +1786,10 @@ func (h *Handler) WebAuthnRegisterFinish(c *gin.Context) {
 		}
 		return nil
 	}); err != nil {
+		if errors.Is(err, errWebAuthnCredentialLimit) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Maximum of 10 WebAuthn credentials reached. Remove an existing key first."})
+			return
+		}
 		h.failMFAFactorWrite(c, "Failed to store WebAuthn credential", "Failed to store credential", err)
 		return
 	}
@@ -2439,13 +2452,20 @@ func (h *Handler) verifyWebAuthnChallenge(ctx context.Context, c *gin.Context, a
 		h.log.Warn("WebAuthn login verification failed", "error", err, "user_id", claims.UserID)
 		return false, false
 	}
+	if credential.Authenticator.CloneWarning {
+		h.log.Warn("WebAuthn clone warning", "user_id", claims.UserID)
+		return false, false
+	}
 	// Cloned-authenticator detection compares the next assertion against this
 	// value, so the login does not verify unless it landed.
-	if _, err := h.db.ExecContext(ctx, `
-		UPDATE user_mfa_webauthn SET sign_count = $1, last_used_at = NOW() WHERE credential_id = $2 AND user_id = $3
-	`, credential.Authenticator.SignCount, credential.ID, claims.UserID); err != nil {
+	advanced, err := h.advanceWebAuthnSignCount(ctx, claims.UserID, user, credential)
+	if err != nil {
 		h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("update WebAuthn sign count: %w", err))
 		return false, true
+	}
+	if !advanced {
+		h.log.Warn("WebAuthn credential counter did not advance", "user_id", claims.UserID)
+		return false, false
 	}
 	return true, false
 }
@@ -2846,18 +2866,26 @@ func (h *Handler) WebAuthnVerifyInlineFinish(c *gin.Context) {
 	credential, err := h.webauthn.FinishLogin(user, session.SessionData, c.Request)
 	if err != nil {
 		h.log.Warn("WebAuthn inline verify assertion failed", "error", err, "user_id", userID)
-		c.JSON(http.StatusForbidden, gin.H{"error": "Verification failed. Try again."})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInlineVerificationFailed})
+		return
+	}
+	if credential.Authenticator.CloneWarning {
+		h.log.Warn("WebAuthn clone warning", "user_id", userID)
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInlineVerificationFailed})
 		return
 	}
 
 	// Update sign count. Cloned-authenticator detection compares the next
 	// assertion against this value, so a token is not issued unless it landed.
-	if _, err := h.db.ExecContext(ctx,
-		`UPDATE user_mfa_webauthn SET sign_count = $1, last_used_at = NOW() WHERE credential_id = $2 AND user_id = $3`,
-		credential.Authenticator.SignCount, credential.ID, userID,
-	); err != nil {
+	advanced, err := h.advanceWebAuthnSignCount(ctx, userID, user, credential)
+	if err != nil {
 		h.log.Error("Failed to update WebAuthn sign count", "error", err, "user_id", userID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerify})
+		return
+	}
+	if !advanced {
+		h.log.Warn("WebAuthn credential counter did not advance", "user_id", userID)
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInlineVerificationFailed})
 		return
 	}
 
@@ -2933,6 +2961,40 @@ func (h *Handler) buildWebAuthnUser(ctx context.Context, userID string) (*WebAut
 		DisplayName: displayName,
 		Credentials: creds,
 	}, nil
+}
+
+// advanceWebAuthnSignCount records a verified assertion's counter only when
+// the credential remains at the value used for verification. A zero counter
+// is supported only while the stored value is also zero; it can never reset a
+// counter that has started advancing.
+func (h *Handler) advanceWebAuthnSignCount(ctx context.Context, userID string, user *WebAuthnUser, credential *webauthn.Credential) (bool, error) {
+	expected, ok := webAuthnCredentialSignCount(user, credential.ID)
+	if !ok {
+		return false, errors.New("credential missing from WebAuthn verification snapshot")
+	}
+
+	result, err := h.db.ExecContext(ctx, `
+		UPDATE user_mfa_webauthn SET sign_count = $1, last_used_at = NOW()
+		WHERE credential_id = $2 AND user_id = $3 AND sign_count = $4
+		  AND (sign_count < $1 OR (sign_count = 0 AND $1 = 0))
+	`, credential.Authenticator.SignCount, credential.ID, userID, expected)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
+}
+
+func webAuthnCredentialSignCount(user *WebAuthnUser, credentialID []byte) (uint32, bool) {
+	for _, credential := range user.Credentials {
+		if bytes.Equal(credential.ID, credentialID) {
+			return credential.Authenticator.SignCount, true
+		}
+	}
+	return 0, false
 }
 
 // ── Recovery-Only Methods ─────────────────────────────────────────────────────
