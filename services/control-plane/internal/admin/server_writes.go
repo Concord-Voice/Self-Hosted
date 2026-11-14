@@ -3,43 +3,30 @@ package admin
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"regexp"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-webauthn/webauthn/protocol"
-	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/redis/go-redis/v9"
 )
 
 // Server write actions (#188): the console asks the host agent to run one
-// fixed concord-selfhost action and gets a job id back to poll. Actions that
-// take the server down or replace its data need a fresh WebAuthn assertion
-// bound to that action; every attempt writes one server_write audit row.
+// fixed concord-selfhost action and gets a job id back to poll. The root agent
+// owns the fresh WebAuthn ceremony and binds its one-use proof to every action.
 
 const (
-	serverStepUpPrefix = "admin_server_stepup:"
-	// serverStepUpTTL is short: the operator taps the key right after asking.
-	serverStepUpTTL = 2 * time.Minute
 	// maxServerActionBody leaves room for a WebAuthn assertion.
 	maxServerActionBody = 64 << 10
 	maxAgentJob         = 128 << 10
 	contentTypeJSON     = "application/json"
 )
 
-// serverActions maps each write action to whether it needs a fresh WebAuthn
-// assertion. Start and backup neither stop the server nor change its data.
-var serverActions = map[string]bool{
-	"start": false, "backup": false,
-	"stop": true, "restart": true, "update": true, "restore": true,
+// serverActions is a closed mirror of the agent's write-action allowlist.
+var serverActions = map[string]struct{}{
+	"start": {}, "backup": {}, "stop": {}, "restart": {}, "update": {}, "restore": {},
 }
 
 // These mirror the agent's own checks; the agent re-checks them.
@@ -47,7 +34,7 @@ var (
 	serverUpdateTag     = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`)
 	serverBackupArchive = regexp.MustCompile(`^concord-backup-[0-9]{8}T[0-9]{6}Z\.tar\.gz$`)
 	serverJobID         = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	serverStepUpHandle  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	serverStepUpHandle  = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 )
 
 // agentRefusals are the agent's own error codes, passed through unchanged.
@@ -59,12 +46,6 @@ var agentRefusals = map[string]bool{
 	"appliance_managed": true,
 }
 
-type serverStepUp struct {
-	AdminID string               `json:"admin_id"`
-	Action  string               `json:"action"`
-	Session webauthn.SessionData `json:"session"`
-}
-
 type serverActionRequest struct {
 	Tag     string `json:"tag,omitempty"`
 	Archive string `json:"archive,omitempty"`
@@ -74,50 +55,96 @@ type serverActionRequest struct {
 	} `json:"stepup,omitempty"`
 }
 
-// ServerStepUpBegin starts a WebAuthn assertion for one step-up action and
-// returns its handle. POST {"action": "..."}.
+type serverStepUpRequest struct {
+	Action  string `json:"action"`
+	Tag     string `json:"tag,omitempty"`
+	Archive string `json:"archive,omitempty"`
+}
+
+// ServerStepUpBegin asks the root agent for an action-bound WebAuthn ceremony.
+// POST {"action":"...","tag":"...","archive":"..."}; the agent stores
+// the validated arguments and only accepts the returned proof for that action.
 func (h *Handler) ServerStepUpBegin(c *gin.Context) {
-	var req struct {
-		Action string `json:"action"`
-	}
+	var req serverStepUpRequest
 	detail := map[string]any{"phase": "stepup_begin"}
 	fail := func(code int, result, reason string) {
 		h.server.recordWrite(c, detail, result, reason)
 		c.JSON(code, gin.H{"error": reason})
 	}
-	if decodeStrict(c, &req, 1<<10) != nil || !serverActions[req.Action] {
+	if decodeStrict(c, &req, 1<<10) != nil {
+		detail["action"] = "unknown"
+		fail(http.StatusBadRequest, AuditDenied, "invalid_request")
+		return
+	}
+	if _, known := serverActions[req.Action]; !known {
 		detail["action"] = "unknown"
 		fail(http.StatusBadRequest, AuditDenied, "invalid_request")
 		return
 	}
 	detail["action"] = req.Action
-	adminID := c.GetString(adminIDContextKey)
-	user, err := h.webAuthnUserForAdmin(c.Request.Context(), adminID)
-	if err != nil {
-		h.log.Error("admin step-up user build failed", "error", err)
-		fail(http.StatusForbidden, AuditDenied, "stepup_unavailable")
+	args, ok := serverActionArgs(req.Action, serverActionRequest{Tag: req.Tag, Archive: req.Archive})
+	if !ok {
+		fail(http.StatusBadRequest, AuditDenied, "invalid_request")
 		return
 	}
-	assertion, session, err := h.webauthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
+	for k, v := range args {
+		detail[k] = v
+	}
+	payload, err := json.Marshal(struct {
+		AdminID   string            `json:"admin_id"`
+		Action    string            `json:"action"`
+		Arguments map[string]string `json:"arguments"`
+	}{c.GetString(adminIDContextKey), req.Action, args})
 	if err != nil {
-		h.log.Error("admin step-up begin failed", "error", err)
 		fail(http.StatusInternalServerError, AuditFailure, "internal_error")
 		return
 	}
-	handle, err := h.storeServerStepUp(c.Request.Context(), serverStepUp{AdminID: adminID, Action: req.Action, Session: *session})
+	agentReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, "http://agent/v1/authorizations", bytes.NewReader(payload))
 	if err != nil {
-		h.log.Error("admin step-up store failed", "error", err)
 		fail(http.StatusInternalServerError, AuditFailure, "internal_error")
+		return
+	}
+	agentReq.Header.Set("Content-Type", contentTypeJSON)
+	resp, err := h.server.agent.Do(agentReq)
+	if err != nil {
+		fail(http.StatusServiceUnavailable, AuditFailure, "stepup_unavailable")
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAgentJob+1))
+	if err != nil || len(body) > maxAgentJob {
+		fail(http.StatusBadGateway, AuditFailure, "agent_error")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		switch resp.StatusCode {
+		case http.StatusForbidden:
+			fail(http.StatusForbidden, AuditDenied, "stepup_failed")
+		case http.StatusServiceUnavailable:
+			fail(http.StatusServiceUnavailable, AuditFailure, "stepup_unavailable")
+		case http.StatusTooManyRequests:
+			fail(http.StatusTooManyRequests, AuditFailure, "stepup_unavailable")
+		default:
+			fail(http.StatusBadGateway, AuditFailure, "agent_error")
+		}
+		return
+	}
+	var authorization struct {
+		Handle  string          `json:"handle"`
+		Options json.RawMessage `json:"options"`
+	}
+	if json.Unmarshal(body, &authorization) != nil || !serverStepUpHandle.MatchString(authorization.Handle) || !json.Valid(authorization.Options) {
+		fail(http.StatusBadGateway, AuditFailure, "agent_error")
 		return
 	}
 	h.server.recordWrite(c, detail, AuditSuccess, "")
-	c.JSON(http.StatusOK, passwordResponse{Handle: handle, PublicKey: assertion})
+	c.JSON(http.StatusOK, gin.H{"handle": authorization.Handle, "publicKey": authorization.Options})
 }
 
 // ServerAction asks the agent to start one write action and returns its job.
 func (h *Handler) ServerAction(c *gin.Context) {
 	action := c.Param("action")
-	needsStepUp, known := serverActions[action]
+	_, known := serverActions[action]
 	if !known {
 		h.server.recordWrite(c, map[string]any{"action": "unknown"}, AuditDenied, "unknown_action")
 		c.JSON(http.StatusNotFound, gin.H{"error": "unknown_action"})
@@ -133,30 +160,16 @@ func (h *Handler) ServerAction(c *gin.Context) {
 		deny(http.StatusBadRequest, "invalid_request")
 		return
 	}
-	args, ok := serverActionArgs(action, req)
-	if !ok {
+	if _, ok := serverActionArgs(action, req); !ok {
 		deny(http.StatusBadRequest, "invalid_request")
 		return
 	}
-	for k, v := range args {
-		detail[k] = v
-	}
-	if !needsStepUp && req.StepUp != nil {
-		deny(http.StatusBadRequest, "invalid_request")
+	if req.StepUp == nil || !serverStepUpHandle.MatchString(req.StepUp.Handle) || len(req.StepUp.Assertion) == 0 {
+		deny(http.StatusForbidden, "stepup_required")
 		return
 	}
-	if needsStepUp {
-		if req.StepUp == nil {
-			deny(http.StatusForbidden, "stepup_required")
-			return
-		}
-		if !h.verifyServerStepUp(c.Request.Context(), c.GetString(adminIDContextKey), action, req.StepUp.Handle, req.StepUp.Assertion) {
-			deny(http.StatusForbidden, "stepup_failed")
-			return
-		}
-		detail["stepup"] = true
-	}
-	payload, err := json.Marshal(args)
+	detail["stepup"] = true
+	payload, err := json.Marshal(req.StepUp)
 	if err != nil {
 		deny(http.StatusInternalServerError, "internal_error")
 		return
@@ -299,63 +312,6 @@ func (s *ServerArea) startJob(c *gin.Context, action string, detail map[string]a
 func (s *ServerArea) writeFail(c *gin.Context, detail map[string]any, code int, reason string) {
 	s.recordWrite(c, detail, AuditFailure, reason)
 	c.JSON(code, gin.H{"error": reason})
-}
-
-// verifyServerStepUp redeems a step-up handle once. It must belong to this
-// admin and this action, and the assertion must verify with UV.
-func (h *Handler) verifyServerStepUp(ctx context.Context, adminID, action, handle string, assertion json.RawMessage) bool {
-	if adminID == "" || !serverStepUpHandle.MatchString(handle) {
-		return false
-	}
-	raw, err := h.redis.GetDel(ctx, serverStepUpPrefix+handle).Result()
-	if err != nil {
-		if !errors.Is(err, redis.Nil) {
-			h.log.Warn("admin step-up load failed", "error", err)
-		}
-		return false
-	}
-	var ch serverStepUp
-	switch {
-	case json.Unmarshal([]byte(raw), &ch) != nil:
-		h.log.Warn("admin step-up record unreadable")
-		return false
-	case ch.AdminID != adminID:
-		h.log.Warn("admin step-up handle used by another admin")
-		return false
-	case ch.Action != action:
-		h.log.Warn("admin step-up handle used for another action", "begun_for", ch.Action, "used_for", action)
-		return false
-	}
-	user, err := h.webAuthnUserForAdmin(ctx, adminID)
-	if err != nil {
-		h.log.Warn("admin step-up user build failed", "error", err)
-		return false
-	}
-	cred, err := h.webauthn.FinishLoginWithBytes(user, ch.Session, assertion)
-	if err != nil {
-		h.log.Warn("admin step-up assertion rejected", "error", err)
-		return false
-	}
-	if err := h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount)); err != nil {
-		h.log.Warn("admin sign-count persist failed", "error", err)
-	}
-	return true
-}
-
-func (h *Handler) storeServerStepUp(ctx context.Context, ch serverStepUp) (string, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generate step-up handle: %w", err)
-	}
-	handle := hex.EncodeToString(raw)
-	payload, err := json.Marshal(ch)
-	if err != nil {
-		return "", fmt.Errorf("marshal step-up: %w", err)
-	}
-	if err := h.redis.Set(ctx, serverStepUpPrefix+handle, payload, serverStepUpTTL).Err(); err != nil {
-		return "", fmt.Errorf("store step-up: %w", err)
-	}
-	return handle, nil
 }
 
 // decodeStrict reads exactly one JSON object with no unknown fields. An empty
