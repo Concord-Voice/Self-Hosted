@@ -19,7 +19,7 @@ func TestCanonical_AcceptsUUIDSpellings(t *testing.T) {
 		"uppercase": strings.ToUpper(canonicalUUID),
 		"braces":    "{" + canonicalUUID + "}",
 		"URN":       "urn:uuid:" + canonicalUUID,
-		"raw hex":   "c0ffee00abcd4ef08abc0123456789ab",
+		"raw hex":   strings.ReplaceAll(canonicalUUID, "-", ""),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
