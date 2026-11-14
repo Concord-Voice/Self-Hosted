@@ -25,6 +25,11 @@
       "scripts/repo-config\\.sh$"
     ]
   },
+  "feedback_triage": {
+    "public": "Concord-Voice/Feedback",
+    "tracker": "Concord-Voice/Self-Hosted",
+    "sentinel_prefix": "concord-feedback-triage"
+  },
   "review_coverage": {
     "reviewer_bots": [
       "gitar-bot[bot]"
