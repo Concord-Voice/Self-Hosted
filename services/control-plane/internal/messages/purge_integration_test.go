@@ -307,6 +307,30 @@ func TestPurgeChannel_ViewDenyBlocksPurge(t *testing.T) {
 	assert.Equal(t, 0, countPurgeAudits(t, ts, channelID), "denied purge must write no audit row")
 }
 
+// regression for Security #166: a route UUID spelling must not change the
+// permission result or permit a destructive purge of a hidden channel.
+func TestPurgeChannel_UppercaseIDStillHonorsViewDeny(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	owner := ts.CreateTestUser(t, "uuid_purge_owner")
+	mod := ts.CreateTestUser(t, "uuid_purge_mod")
+	serverID := ts.CreateTestServer(t, owner.ID, "uuid-purge-server")
+	ts.AddMemberToServer(t, serverID, mod.ID, "member")
+	modRole := ts.CreateTestRole(t, serverID, "Mods", 5, int64(rbac.ModeratorPermissions))
+	ts.AssignRoleToUser(t, serverID, mod.ID, modRole)
+	channelID := ts.CreateTestChannel(t, serverID, "private")
+	ts.CreateTestMessage(t, channelID, owner, "must-survive")
+	ts.CreateChannelOverride(t, channelID, "role", modRole, 0, int64(rbac.PermViewTextChannels))
+
+	w := ts.DoRequest(http.MethodDelete, purgeChannelPath(strings.ToUpper(channelID)),
+		map[string]any{"range": "all"}, testhelpers.AuthHeaders(mod.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"alternate channel UUID spelling must retain the VIEW denial")
+	assert.Equal(t, 1, countChannelMessages(t, ts, channelID),
+		"denied alternate-ID purge must leave the message intact")
+	assert.Equal(t, 0, countPurgeAudits(t, ts, channelID),
+		"denied alternate-ID purge must write no audit row")
+}
+
 // regression for #2344: the view gate must match the channel type. Granting text
 // visibility must not authorize a destructive purge of a voice channel.
 func TestPurgeChannel_VoiceViewDenyBlocksPurge(t *testing.T) {

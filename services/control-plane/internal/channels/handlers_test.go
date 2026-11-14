@@ -703,6 +703,28 @@ func TestGetChannelKeys_HiddenChannelDeniedToMember(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code, "view-denied member must not fetch channel keys")
 }
 
+// regression for Security #166: an uppercase path ID must not bypass the
+// channel-VIEW gate that protects wrapped channel-key material.
+func TestGetChannelKeys_HiddenChannelDeniedWithUppercaseID(t *testing.T) {
+	ts, owner, serverID, channelID := setupEncryptedChannel(t)
+	member := ts.CreateTestUser(t, "keynoviewupper")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+
+	distRec := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathKeys, map[string]interface{}{
+		keyWrappedKeys: map[string]string{member.ID: testhelpers.ValidCiphertext()},
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, distRec.Code)
+
+	var allRoleID string
+	require.NoError(t, ts.DB.QueryRow(`SELECT id FROM roles WHERE server_id = $1 AND is_default = TRUE`, serverID).Scan(&allRoleID))
+	ts.CreateChannelOverride(t, channelID, "role", allRoleID, 0, int64(rbac.PermViewTextChannels))
+	require.NoError(t, rbac.NewPermissionCache(ts.Redis).InvalidateServer(context.Background(), serverID))
+
+	w := ts.DoRequest("GET", pathChannelsPrefix+strings.ToUpper(channelID)+pathKeys, nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"alternate channel UUID spelling must not reveal wrapped keys")
+}
+
 func TestGetChannelKeys_VoiceStalePermissionCacheCannotRestoreRevokedTempGrant(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "stale_key_owner")

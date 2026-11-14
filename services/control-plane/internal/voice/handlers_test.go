@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -449,6 +450,26 @@ func TestAuthorizeVoiceAction_HierarchyViolation(t *testing.T) {
 		keyTargetUserID: admin.ID,
 	}, testhelpers.AuthHeaders(moderator.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// regression for Security #166: a moderator must not target the server owner
+// merely by changing the owner's UUID spelling.
+func TestAuthorizeVoiceAction_UppercaseOwnerStillProtectedByHierarchy(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "vauuidowner")
+	moderator := ts.CreateTestUser(t, "vauuidmod")
+	serverID := ts.CreateTestServer(t, owner.ID, "Voice UUID Owner")
+	ts.AddMemberToServer(t, serverID, moderator.ID, roleMember)
+	channelID := ts.CreateVoiceChannel(t, serverID, "voice-uuid-owner")
+	modRoleID := ts.CreateTestRole(t, serverID, "Mod", 5, int64(rbac.PermMuteMembers))
+	ts.AssignRoleToUser(t, serverID, moderator.ID, modRoleID)
+
+	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
+		keyAction:       "mute",
+		keyTargetUserID: strings.ToUpper(owner.ID),
+	}, testhelpers.AuthHeaders(moderator.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"alternate owner UUID spelling must retain owner hierarchy protection")
 }
 
 func TestAuthorizeVoiceAction_WithCustomPermission(t *testing.T) {

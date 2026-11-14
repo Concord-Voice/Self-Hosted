@@ -3594,6 +3594,30 @@ func TestUpdateMemberRoleCannotDemoteCreator(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
+// regression for Security #166: PostgreSQL accepts uppercase UUID input, so the
+// creator guard must compare identity values rather than UUID text spellings.
+func TestUpdateMemberRoleCannotDemoteCreatorWithUppercaseID(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "roluuidcreator")
+	member := ts.CreateTestUser(t, "roluuidadmin")
+	convID := createTestGroup(t, ts, creator, member)
+
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+member.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(creator.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+strings.ToUpper(creator.ID), map[string]interface{}{
+		"role": "member",
+	}, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"alternate UUID spelling must not permit creator demotion")
+
+	var role string
+	require.NoError(t, ts.DB.QueryRow(`SELECT role FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, creator.ID).Scan(&role))
+	assert.Equal(t, "admin", role, "creator role must remain unchanged after refused alternate-ID request")
+}
+
 func TestUpdateMemberRoleCannotChangeSelf(t *testing.T) {
 	ts := setupTS(t)
 	admin := ts.CreateTestUser(t, "rolself1")

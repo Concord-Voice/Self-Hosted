@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -482,6 +483,38 @@ func TestResolveEffectivePermissionsForChannelsFreshMatchesSingleChannelResoluti
 	}
 }
 
+// regression for Security #166: PostgreSQL compares UUID inputs by value but
+// scans UUID columns in canonical form, so authorization must do the same.
+func TestSecurity166_AlternateChannelUUIDSpellingKeepsDenyAndCanonicalBatchKey(t *testing.T) {
+	resolver, ts := setupResolver(t)
+	ctx := context.Background()
+
+	owner := ts.CreateTestUser(t, "uuidcaseowner")
+	member := ts.CreateTestUser(t, "uuidcasemember")
+	serverID := ts.CreateTestServer(t, owner.ID, "UUID case authorization")
+	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	channelID := ts.CreateTestChannel(t, serverID, "read-only")
+	var allRoleID string
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT id FROM roles WHERE server_id = $1 AND is_default = TRUE`, serverID,
+	).Scan(&allRoleID))
+	ts.CreateChannelOverride(t, channelID, "role", allRoleID, 0, int64(rbac.PermSendMessages))
+
+	upper := strings.ToUpper(channelID)
+	permsByChannel, err := resolver.ResolveEffectivePermissionsForChannelsFresh(
+		ctx, serverID, member.ID, []string{channelID, upper},
+	)
+	require.NoError(t, err)
+	assert.Len(t, permsByChannel, 1, "same UUID spellings must produce one canonical batch key")
+	canonical, ok := permsByChannel[channelID]
+	require.True(t, ok, "batch result must use the canonical UUID key")
+	assert.False(t, canonical.Has(rbac.PermSendMessages), "canonical control: channel deny must apply")
+
+	upperPerms, err := resolver.ResolveEffectivePermissionsUncached(ctx, serverID, member.ID, upper)
+	require.NoError(t, err)
+	assert.False(t, upperPerms.Has(rbac.PermSendMessages), "UUID spelling must not bypass a channel deny")
+}
+
 func TestResolveEffectivePermissionsForChannelsFreshDoesNotRefillCache(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	cache := rbac.NewPermissionCache(ts.Redis)
@@ -785,6 +818,22 @@ func TestCheckHierarchy(t *testing.T) {
 	// PermAdministrator cannot moderate server owner
 	err = resolver.CheckHierarchy(ctx, serverID, adminUser.ID, owner.ID)
 	assert.ErrorIs(t, err, rbac.ErrHierarchyViolation, "PermAdministrator should not outrank server owner")
+}
+
+// regression for Security #166: owner immunity compares UUID values, not text.
+func TestSecurity166_UppercaseOwnerIDRetainsHierarchyImmunity(t *testing.T) {
+	resolver, ts := setupResolver(t)
+	ctx := context.Background()
+
+	owner := ts.CreateTestUser(t, "uuidcasehierarchyowner")
+	admin := ts.CreateTestUser(t, "uuidcasehierarchyadmin")
+	serverID := ts.CreateTestServer(t, owner.ID, "UUID case hierarchy")
+	ts.AddMemberToServer(t, serverID, admin.ID, "admin")
+
+	assert.ErrorIs(t, resolver.CheckHierarchy(ctx, serverID, admin.ID, owner.ID), rbac.ErrHierarchyViolation,
+		"canonical control: an administrator cannot moderate the owner")
+	assert.ErrorIs(t, resolver.CheckHierarchy(ctx, serverID, admin.ID, strings.ToUpper(owner.ID)), rbac.ErrHierarchyViolation,
+		"owner immunity must survive an uppercase UUID spelling")
 }
 
 // TestResolver_InvalidateChannel_DelegatesToCache verifies the public
