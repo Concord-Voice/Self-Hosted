@@ -23,6 +23,7 @@ import (
 	"golang.org/x/net/netutil"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/hostagent"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
 )
 
 const (
@@ -40,10 +41,15 @@ const (
 	// read it so an upgrade does not restart the agent mid-restore.
 	writeMarkerFile = "write-in-progress"
 	// setupMaxConns bounds the TLS connections a LAN client can hold open.
-	setupMaxConns = 16
+	setupMaxConns          = 16
+	setupMaxConnsPerSource = 4
+	setupWriteTimeout      = 30 * time.Second
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "authorizer" {
+		os.Exit(runAuthorizerCLI(os.Args[2:]))
+	}
 	os.Exit(run())
 }
 
@@ -52,6 +58,14 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func expectedControlPlaneUID() (int, error) {
+	value, err := strconv.Atoi(envOr("CONCORD_AGENT_CONTROL_PLANE_UID", "10006"))
+	if err != nil || value <= 0 || uint64(value) > (1<<32)-1 {
+		return 0, errors.New("invalid CONCORD_AGENT_CONTROL_PLANE_UID")
+	}
+	return value, nil
 }
 
 func run() int {
@@ -71,6 +85,11 @@ func run() int {
 		log.Print("concord-agent: startup failed: group id")
 		return 1
 	}
+	uid, err := expectedControlPlaneUID()
+	if err != nil {
+		log.Print("concord-agent: startup failed: invalid control-plane peer UID")
+		return 1
+	}
 	sock := envOr("CONCORD_AGENT_SOCKET", defaultSocket)
 	ln, err := listen(sock, gid)
 	if err != nil {
@@ -79,19 +98,24 @@ func run() int {
 	}
 
 	agent := hostagent.NewServer(hostagent.ExecRunner{CLI: cli})
-	// Writes report progress on stderr, so their runs keep it. backups is the
-	// CLI's default, three levels above it like .env.
-	agent.EnableWrites(hostagent.ExecRunner{CLI: cli, Combined: true},
-		filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(resolved))), "backups"),
-		filepath.Join(filepath.Dir(sock), writeMarkerFile))
-	// An appliance (TrueNAS) runs the containers itself; its own UI owns
-	// every write, so the console only reads.
-	if appliance := os.Getenv("CONCORD_AGENT_MANAGED_BY"); appliance != "" && !agent.SetManagedBy(appliance) {
-		log.Print("concord-agent: startup failed: unknown CONCORD_AGENT_MANAGED_BY")
+	if err := agent.SetExpectedPeerUID(uid); err != nil {
+		log.Print("concord-agent: startup failed: invalid control-plane peer UID")
+		return 1
+	}
+	audit, auditErr := hostagent.OpenAudit(hostagent.HostAgentAuditPath)
+	if auditErr != nil {
+		log.Print("concord-agent: host-agent audit unavailable; writes disabled")
+	} else if err := agent.SetAudit(audit); err != nil {
+		log.Print("concord-agent: startup failed: host-agent audit")
+		return 1
+	}
+	if err := configureWriteAccess(agent, cli, resolved, sock, audit != nil, os.Getenv("CONCORD_AGENT_MANAGED_BY")); err != nil {
+		log.Printf("concord-agent: startup failed: %v", err)
 		return 1
 	}
 	srv := &http.Server{
 		Handler:           agent,
+		ConnContext:       hostagent.PeerConnContext,
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    8 << 10,
 		IdleTimeout:       60 * time.Second,
@@ -117,6 +141,48 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+// configureWriteAccess leaves the agent read-only unless its local audit and
+// root-confirmed WebAuthn trust root are both available.
+func configureWriteAccess(agent *hostagent.Server, cli, resolved, sock string, auditAvailable bool, appliance string) error {
+	// An appliance (TrueNAS) runs the containers itself; its own UI owns every
+	// write, so the console only reads.
+	if appliance != "" {
+		if !agent.SetManagedBy(appliance) {
+			return errors.New("unknown CONCORD_AGENT_MANAGED_BY")
+		}
+		return nil
+	}
+	if !auditAvailable {
+		return nil
+	}
+	// The agent remains read-only until a root-confirmed authorizer file is
+	// installed. A missing or unsafe file never enables legacy write routes.
+	authorizers, loadErr := hostagent.LoadAuthorizers(authorizerPath)
+	if loadErr != nil {
+		log.Print("concord-agent: authorizer trust unavailable; writes disabled")
+	} else {
+		rpID, origins, configErr := authorizers.RPConfig()
+		if configErr != nil {
+			log.Print("concord-agent: authorizer trust unavailable; writes disabled")
+		} else {
+			verifier, verifierErr := mfa.NewWebAuthnService(rpID, "Concord Voice Admin", origins)
+			if verifierErr != nil {
+				log.Print("concord-agent: authorizer verifier unavailable; writes disabled")
+			} else {
+				// Writes report progress on stderr. The CLI's backups directory is three
+				// levels above the trusted executable, like .env.
+				agent.EnableWrites(hostagent.ExecRunner{CLI: cli, Combined: true},
+					filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(resolved))), "backups"),
+					filepath.Join(filepath.Dir(sock), writeMarkerFile))
+				if err := agent.SetAuthorizationStore(hostagent.NewAuthorizationStore(authorizers, verifier, time.Now)); err != nil {
+					return errors.New("authorization store")
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // startSetup serves the first-run wizard over HTTPS when the install root
@@ -157,14 +223,8 @@ func startSetup(ctx context.Context, cli, addr, assets, tokenFile string, window
 		_ = tcp.Close()
 		return nil, nil, err
 	}
-	ln := tls.NewListener(netutil.LimitListener(tcp, setupMaxConns), cfg)
-	srv := &http.Server{
-		Handler:           setup,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		MaxHeaderBytes:    8 << 10,
-		IdleTimeout:       60 * time.Second,
-	}
+	ln := tls.NewListener(netutil.LimitListener(limitPerSource(tcp, setupMaxConnsPerSource), setupMaxConns), cfg)
+	srv := newSetupServer(setup)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -191,6 +251,17 @@ func startSetup(ctx context.Context, cli, addr, assets, tokenFile string, window
 	log.Printf("concord-agent: setup mode on port %d; the wizard address with its one-time token is in %s (root only)", port, tokenFile)
 	log.Printf("concord-agent: setup certificate SHA-256 fingerprint %s; setup closes in %s", fingerprint, window)
 	return ln.Addr(), done, nil
+}
+
+func newSetupServer(setup http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           setup,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      setupWriteTimeout,
+		MaxHeaderBytes:    8 << 10,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 // writeTokenFile creates path afresh as 0600, refusing anything already there.

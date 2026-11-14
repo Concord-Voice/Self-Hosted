@@ -310,6 +310,12 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, genericAuthError)
 		return
 	}
+	if cred.Authenticator.CloneWarning {
+		h.log.Warn("admin webauthn clone warning")
+		h.auditFailure(ctx, challenge.Username, EventLoginFailure)
+		c.JSON(http.StatusUnauthorized, genericAuthError)
+		return
+	}
 
 	// Persist the authenticator's advanced sign counter so clone-detection keeps
 	// working (#1688 / Gitar). Non-fatal: the assertion already validated; a failed

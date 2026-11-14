@@ -13,26 +13,28 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
-// Write actions (#188). The control-plane proxy checks the admin session and,
-// for disruptive actions, a fresh WebAuthn assertion, and writes an audit row
-// before it calls the agent; the agent keeps the allowlist, validates every
-// argument itself, and runs one write at a time. A write returns a job id at
-// once and the caller polls the job.
+// Write actions (#188). The agent requires its own action-bound WebAuthn
+// assertion for every root write, validates the stored arguments again at
+// admission, and runs one write at a time. A write returns a job id at once
+// and the caller polls the job.
 
 const (
 	jsonFlag       = "--json"
 	maxJobs        = 16
 	maxJobOutput   = 64 << 10 // tail kept per job
-	maxActionBody  = 1 << 10
+	maxActionBody  = 34 << 10 // 32 KiB assertion plus bounded JSON envelope
 	jobIDBytes     = 16
 	shortJobBudget = 15 * time.Minute
 	// up rebuilds images; backup, restore and update move whole databases.
 	longJobBudget = 2 * time.Hour
+	backupWindow  = time.Hour
 	// securityLogRoot is the boundary `up` refuses to start without, checked
 	// before restart stops anything (as concord-selfhost's SECURITY_LOG_ROOT).
 	securityLogRoot = "/var/log/concord-security"
@@ -40,11 +42,13 @@ const (
 
 var (
 	jobIDPattern     = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	errBackupLimited = errors.New("backup admission rate limited")
 	updateTagPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`) // as selfhost-update.sh
 	archivePattern   = regexp.MustCompile(`^concord-backup-[0-9]{8}T[0-9]{6}Z\.tar\.gz$`)
 )
 
-// actionRequest is the only body a write accepts.
+// actionRequest is accepted only at authorization begin. The final write
+// receives a one-use handle and assertion, never caller-supplied arguments.
 type actionRequest struct {
 	Tag     string `json:"tag,omitempty"`
 	Archive string `json:"archive,omitempty"`
@@ -62,17 +66,21 @@ type Job struct {
 	Archive string `json:"archive,omitempty"`
 	Output  string `json:"output,omitempty"`
 
-	out tailBuffer
+	out     tailBuffer
+	adminID string
 }
 
 type jobs struct {
-	mu       sync.Mutex
-	run      Runner
-	backups  string // the install's backups directory
-	marker   string // exists while a write runs
-	boundary string // the security-event log root
-	list     []*Job // oldest first
-	running  bool
+	mu        sync.Mutex
+	run       Runner
+	backups   string // the install's backups directory
+	marker    string // exists while a write runs
+	admission string // persistent backup admission timestamp beside marker
+	boundary  string // the security-event log root
+	audit     *Audit
+	list      []*Job // oldest first
+	running   bool
+	now       func() time.Time
 }
 
 // EnableWrites lets s run write actions through r, whose output should
@@ -83,7 +91,13 @@ type jobs struct {
 // earlier run is removed.
 func (s *Server) EnableWrites(r Runner, backups, marker string) {
 	_ = os.Remove(marker) // that run's job died with it
-	s.writes = &jobs{run: r, backups: backups, marker: marker, boundary: securityLogRoot}
+	s.writes = &jobs{
+		run: r, backups: backups, marker: marker,
+		admission: filepath.Join(filepath.Dir(marker), "backup-last-admitted"),
+		boundary:  securityLogRoot,
+		audit:     s.audit,
+		now:       time.Now,
+	}
 }
 
 // refusal is a refused write: its HTTP status and reason.
@@ -173,7 +187,7 @@ func newJobID() (string, error) {
 
 // start records a job and runs it in the background. It returns nil when a
 // write is already running.
-func (j *jobs) start(action string, cmds [][]string, budget time.Duration) (*Job, error) {
+func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Duration) (*Job, error) {
 	id, err := newJobID()
 	if err != nil {
 		return nil, err
@@ -183,10 +197,18 @@ func (j *jobs) start(action string, cmds [][]string, budget time.Duration) (*Job
 	if j.running {
 		return nil, nil
 	}
+	if action == "backup" {
+		if err := j.admitBackup(j.now().UTC()); err != nil {
+			return nil, err
+		}
+	}
+	if j.audit == nil || j.audit.Write(AuditEvent{Action: action, Outcome: "admitted", Reason: "admission_approved", AdminID: adminID, JobID: id}) != nil {
+		return nil, errors.New("host-agent admission audit unavailable")
+	}
 	if err := os.WriteFile(j.marker, []byte(id+"\n"), 0o600); err != nil {
 		return nil, err
 	}
-	job := &Job{ID: id, Action: action, State: "running", Started: time.Now().UTC()}
+	job := &Job{ID: id, Action: action, State: "running", Started: time.Now().UTC(), adminID: adminID}
 	job.out.max = maxJobOutput
 	j.running = true
 	j.list = append(j.list, job)
@@ -195,7 +217,92 @@ func (j *jobs) start(action string, cmds [][]string, budget time.Duration) (*Job
 		j.list = append([]*Job(nil), j.list[len(j.list)-maxJobs:]...)
 	}
 	go j.execute(job, cmds, budget)
+	if err := j.audit.Write(AuditEvent{Action: action, Outcome: "started", Reason: "job_started", AdminID: adminID, JobID: id}); err != nil {
+		log.Print("concord-agent: host-agent audit start event unavailable")
+	}
 	return job, nil
+}
+
+// admitBackup persists the admission before a backup job can start. The state
+// survives process restarts and a failed backup still consumes its window.
+func (j *jobs) admitBackup(now time.Time) error {
+	dir := filepath.Dir(j.admission)
+	if err := trustedEntry(dir); err != nil {
+		return fmt.Errorf("backup admission directory: %w", err)
+	}
+	last, found, err := j.backupAdmissionTimestamp()
+	if err != nil {
+		return err
+	}
+	if found && now.Before(time.Unix(0, last).Add(backupWindow)) {
+		return errBackupLimited
+	}
+	return j.writeBackupAdmission(dir, now)
+}
+
+func (j *jobs) backupAdmissionTimestamp() (int64, bool, error) {
+	st, err := os.Lstat(j.admission)
+	if os.IsNotExist(err) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("inspect backup admission state: %w", err)
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || trustedEntry(j.admission) != nil {
+		return 0, false, errors.New("backup admission state is untrusted")
+	}
+	f, err := os.OpenFile(j.admission, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return 0, false, fmt.Errorf("open backup admission state: %w", err)
+	}
+	b, readErr := io.ReadAll(f)
+	closeErr := f.Close()
+	if readErr != nil || closeErr != nil {
+		return 0, false, errors.New("read backup admission state")
+	}
+	last, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || last < 0 {
+		return 0, false, errors.New("backup admission state is invalid")
+	}
+	return last, true, nil
+}
+
+func (j *jobs) writeBackupAdmission(dir string, now time.Time) error {
+	tmp, err := os.CreateTemp(dir, ".backup-admission-")
+	if err != nil {
+		return fmt.Errorf("create backup admission state: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if err := os.Remove(tmpName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Print("concord-agent: backup admission temporary cleanup failed")
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			return fmt.Errorf("close backup admission state after chmod failure: %w", closeErr)
+		}
+		return fmt.Errorf("protect backup admission state: %w", err)
+	}
+	if _, err := fmt.Fprintf(tmp, "%d\n", now.UnixNano()); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			return fmt.Errorf("close backup admission state after write failure: %w", closeErr)
+		}
+		return fmt.Errorf("write backup admission state: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			return fmt.Errorf("close backup admission state after sync failure: %w", closeErr)
+		}
+		return fmt.Errorf("sync backup admission state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close backup admission state: %w", err)
+	}
+	if err := os.Rename(tmpName, j.admission); err != nil {
+		return fmt.Errorf("publish backup admission state: %w", err)
+	}
+	return nil
 }
 
 // execute runs cmds in order, stopping at the first failure. The run is not
@@ -229,6 +336,15 @@ func (j *jobs) execute(job *Job, cmds [][]string, budget time.Duration) {
 	}
 	_ = os.Remove(j.marker)
 	j.running = false
+	if j.audit != nil {
+		outcome, reason := "succeeded", "job_succeeded"
+		if err != nil {
+			outcome, reason = "failed", "job_failed"
+		}
+		if j.audit.Write(AuditEvent{Action: job.Action, Outcome: outcome, Reason: reason, AdminID: job.adminID, JobID: job.ID}) != nil {
+			log.Print("concord-agent: host-agent audit completion event unavailable")
+		}
+	}
 	log.Printf("concord-agent: job action=%s state=%s", job.Action, job.State)
 }
 
@@ -276,6 +392,7 @@ func (j *jobs) snapshot(job *Job, withOutput bool) Job {
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action string) {
 	name := actionName(action)
 	if name == "" {
+		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "assertion_denied"})
 		refuse(w, http.StatusNotFound, "unknown_action")
 		log.Printf("concord-agent: refused unknown action")
 		return
@@ -284,28 +401,62 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 		refuse(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-	var req actionRequest
-	if r.ContentLength != 0 {
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxActionBody))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil || dec.Decode(&struct{}{}) != io.EOF {
-			refuse(w, http.StatusBadRequest, "invalid_body")
+	if s.authorizations == nil || s.audit == nil {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied"})
+		refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
+		return
+	}
+	var proof struct {
+		Handle    string          `json:"handle"`
+		Assertion json.RawMessage `json:"assertion"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxActionBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&proof); err != nil || dec.Decode(new(any)) != io.EOF || proof.Handle == "" || len(proof.Assertion) == 0 {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied"})
+		refuse(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+	req, adminID, err := s.authorizations.consume(proof.Handle, name, proof.Assertion)
+	if err != nil {
+		reason := "assertion_denied"
+		if errors.Is(err, ErrAuthorizationReplay) {
+			reason = "replay_denied"
+		}
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: reason, AdminID: adminID})
+		if errors.Is(err, ErrAuthorizerUnavailable) {
+			refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
 			return
 		}
+		refuse(w, http.StatusForbidden, "authorization_denied")
+		log.Printf("concord-agent: action=%s outcome=refused reason=authorization_denied", name)
+		return
 	}
 	cmds, budget, no := s.writes.commands(name, req)
 	if no != nil {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied", AdminID: adminID})
 		refuse(w, no.code, no.reason)
 		log.Printf("concord-agent: action=%s outcome=refused reason=%s", name, no.reason)
 		return
 	}
-	job, err := s.writes.start(name, cmds, budget)
+	job, err := s.writes.start(name, adminID, cmds, budget)
 	if err != nil {
+		if errors.Is(err, errBackupLimited) {
+			if s.audit.Write(AuditEvent{Action: name, Outcome: "denied", Reason: "backup_rate_limited", AdminID: adminID}) != nil {
+				refuse(w, http.StatusServiceUnavailable, "job_unavailable")
+				log.Printf("concord-agent: action=%s outcome=error", name)
+				return
+			}
+			refuse(w, http.StatusTooManyRequests, "backup_rate_limited")
+			return
+		}
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "job_unavailable", AdminID: adminID})
 		refuse(w, http.StatusServiceUnavailable, "job_unavailable")
 		log.Printf("concord-agent: action=%s outcome=error", name)
 		return
 	}
 	if job == nil {
+		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "write_in_progress", AdminID: adminID})
 		refuse(w, http.StatusConflict, "write_in_progress")
 		log.Printf("concord-agent: action=%s outcome=busy", name)
 		return

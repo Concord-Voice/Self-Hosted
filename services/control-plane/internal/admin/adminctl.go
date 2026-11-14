@@ -7,16 +7,23 @@ package admin
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/hostagent"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedredis"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
@@ -33,7 +40,7 @@ const verbResetEnrollment = "reset-enrollment"
 const verbUnlock = "unlock"
 
 // adminCtlUsage is the one verb list shown for a missing or unknown verb.
-const adminCtlUsage = "bootstrap|reset-enrollment|unlock"
+const adminCtlUsage = "bootstrap|reset-enrollment|unlock|export-agent-authorizer"
 
 // adminCtlDeps bundles the injected collaborators an adminctl verb operates on.
 // Tests construct this against the isolated PG/Redis stack and an in-memory
@@ -47,8 +54,11 @@ type adminCtlDeps struct {
 	// enrollBaseURL is the console origin the printed enrollment URL points at
 	// (e.g. https://admin.example.org). Derived from the admin RP origins.
 	enrollBaseURL string
+	rpID          string
+	rpOrigins     []string
 	stdin         io.Reader
 	stdout        io.Writer
+	stderr        io.Writer
 }
 
 type discardSecurityEvents struct{}
@@ -128,8 +138,11 @@ func RunAdminCtl(args []string) int {
 		enroll:        NewEnrollmentStore(rdb),
 		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: enrollBaseURL(cfg),
+		rpID:          cfg.AdminWebAuthnRPID,
+		rpOrigins:     cfg.AdminWebAuthnRPOrigins,
 		stdin:         os.Stdin,
 		stdout:        os.Stdout,
+		stderr:        os.Stderr,
 	}
 	return runAdminCtlWithSecurityEvents(context.Background(), deps, args, openSecurityEvents)
 }
@@ -187,10 +200,69 @@ func runAdminCtl(ctx context.Context, deps adminCtlDeps, args []string) int {
 			return 1
 		}
 		return 0
+	case "export-agent-authorizer":
+		if err := runExportAgentAuthorizer(ctx, deps, rest); err != nil {
+			outf(deps.stderr, "admin export-agent-authorizer failed: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
 		outf(deps.stdout, "admin: unknown verb %q (want %s)\n", verb, adminCtlUsage)
 		return 2
 	}
+}
+
+// runExportAgentAuthorizer emits a public-key bundle for explicit host-root import.
+func runExportAgentAuthorizer(ctx context.Context, deps adminCtlDeps, args []string) error {
+	fs := flag.NewFlagSet("export-agent-authorizer", flag.ContinueOnError)
+	fs.SetOutput(deps.stderr)
+	username := fs.String("username", "", "active admin handle (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *username == "" || fs.NArg() != 0 {
+		return errors.New("--username is required and no positional arguments are allowed")
+	}
+	adminUser, err := deps.repo.GetByUsername(ctx, *username)
+	if err != nil {
+		return fmt.Errorf("look up admin: %w", err)
+	}
+	if adminUser.Status != StatusActive {
+		return errors.New("admin is not active")
+	}
+	credentials, err := deps.repo.ListCredentials(ctx, adminUser.ID)
+	if err != nil {
+		return fmt.Errorf("list credentials: %w", err)
+	}
+	if len(credentials) == 0 || len(credentials) > 64 {
+		return errors.New("admin needs between 1 and 64 active credentials")
+	}
+	// The digest should be stable even when rows share a creation timestamp.
+	sort.Slice(credentials, func(i, j int) bool {
+		return bytes.Compare(credentials[i].CredentialID, credentials[j].CredentialID) < 0
+	})
+	doc := hostagent.AuthorizerImport{Schema: 1, RPID: deps.rpID, Origins: deps.rpOrigins, AdminID: adminUser.ID}
+	for _, credential := range credentials {
+		if credential.SignCount < 0 || credential.SignCount > int64(^uint32(0)) {
+			return errors.New("invalid credential counter")
+		}
+		doc.Credentials = append(doc.Credentials, hostagent.AuthorizerCredentialImport{
+			CredentialID: base64.RawURLEncoding.EncodeToString(credential.CredentialID),
+			PublicKey:    base64.RawURLEncoding.EncodeToString(credential.PublicKey),
+			SignCount:    uint32(credential.SignCount), //nolint:gosec // range checked above
+			Label:        credential.CredentialName,
+		})
+	}
+	data, err := json.Marshal(doc)
+	if err != nil || len(data) > 1<<20 {
+		return errors.New("invalid authorizer export")
+	}
+	if _, err := deps.stdout.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write authorizer export: %w", err)
+	}
+	digest := sha256.Sum256(data)
+	outf(deps.stderr, "Authorizer export SHA-256: %s\n", hex.EncodeToString(digest[:]))
+	return nil
 }
 
 // outf writes to an operator-facing stdout, discarding the non-actionable write

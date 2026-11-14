@@ -16,7 +16,10 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
 
-const testJobID = "0123456789abcdef0123456789abcdef"
+const (
+	testJobID               = "0123456789abcdef0123456789abcdef"
+	testAuthorizationHandle = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
 
 type agentCall struct{ path, body string }
 
@@ -60,22 +63,40 @@ func send(r *gin.Engine, target, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func TestServerActionStartsJobsWithoutStepUp(t *testing.T) {
+func TestServerWriteAuthorizationBindsAllActionsToAgentProof(t *testing.T) {
 	job := `{"id":"` + testJobID + `","action":"start","state":"running"}`
 	for _, action := range []string{"start", "backup"} {
-		sock, calls := recordingAgent(t, http.StatusAccepted, job)
+		var calls []agentCall
+		sock := fakeAgent(t, func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls = append(calls, agentCall{r.Method + " " + r.URL.Path, string(body)})
+			if r.URL.Path == "/v1/authorizations" {
+				_, _ = w.Write([]byte(`{"handle":"` + testAuthorizationHandle + `","options":{"challenge":"agent-bound"}}`))
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(job))
+		})
 		audit := &fakeAudit{}
-		rec := send(writeEngine(sock, audit), "/server/actions/"+action, "")
+		r := writeEngine(sock, audit)
+		begin := send(r, "/server/stepup", `{"action":"`+action+`"}`)
+		if begin.Code != http.StatusOK {
+			t.Fatalf("%s begin: %d %s", action, begin.Code, begin.Body)
+		}
+		rec := send(r, "/server/actions/"+action, `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
 		if rec.Code != http.StatusAccepted || rec.Body.String() != job {
 			t.Fatalf("%s: %d %s", action, rec.Code, rec.Body)
 		}
-		if got := calls(); len(got) != 1 || got[0].path != "POST /v1/actions/"+action || got[0].body != "{}" {
-			t.Fatalf("%s: agent got %+v", action, got)
+		if len(calls) != 2 || calls[0].path != "POST /v1/authorizations" || calls[0].body != `{"admin_id":"admin-1","action":"`+action+`","arguments":{}}` || calls[1].path != "POST /v1/actions/"+action || calls[1].body != `{"handle":"`+testAuthorizationHandle+`","assertion":{}}` {
+			t.Fatalf("%s: agent got %+v", action, calls)
 		}
-		if len(audit.events) != 2 || audit.events[0].Detail["phase"] != "requested" {
-			t.Fatalf("%s: want requested row then outcome, got %+v", action, audit.events)
+		if len(audit.events) != 3 || audit.events[0].Detail["phase"] != "stepup_begin" || audit.events[1].Detail["phase"] != "requested" {
+			t.Fatalf("%s: want begin, requested row then outcome, got %+v", action, audit.events)
 		}
-		ev := audit.events[1]
+		ev := audit.events[2]
 		if ev.EventType != EventServerWrite || ev.Result != AuditSuccess || ev.Detail["job_id"] != testJobID || ev.Detail["action"] != action {
 			t.Fatalf("%s: audit %+v", action, ev)
 		}
@@ -95,7 +116,7 @@ func TestServerActionRefusesBadInputWithoutCallingAgent(t *testing.T) {
 		{"/server/actions/start", `{"tag":"v1.0.0"}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/backup", `{"archive":"concord-backup-20260101T000000Z.tar.gz"}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/start", `{"force":true}`, http.StatusBadRequest, "invalid_request"},
-		{"/server/actions/backup", `{"stepup":{"handle":"x","assertion":{}}}`, http.StatusBadRequest, "invalid_request"},
+		{"/server/actions/backup", `{"stepup":{"handle":"x","assertion":{}}}`, http.StatusForbidden, "stepup_required"},
 		{"/server/actions/start", `{}{}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/start", `{"tag":"` + strings.Repeat("x", maxServerActionBody) + `"}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/update", `{"tag":"main"}`, http.StatusBadRequest, "invalid_request"},
@@ -103,7 +124,7 @@ func TestServerActionRefusesBadInputWithoutCallingAgent(t *testing.T) {
 		{"/server/actions/restore", `{"archive":"../etc/shadow"}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/stop", "", http.StatusForbidden, "stepup_required"},
 		{"/server/actions/update", `{"tag":"v1.2.3"}`, http.StatusForbidden, "stepup_required"},
-		{"/server/actions/restart", `{"stepup":{"handle":"nothex","assertion":{}}}`, http.StatusForbidden, "stepup_failed"},
+		{"/server/actions/restart", `{"stepup":{"handle":"nothex","assertion":{}}}`, http.StatusForbidden, "stepup_required"},
 	}
 	for _, tc := range cases {
 		rec := send(r, tc.target, tc.body)
@@ -135,6 +156,7 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 		reason string
 	}{
 		{http.StatusConflict, `{"error":"write_in_progress"}`, http.StatusConflict, "write_in_progress"},
+		{http.StatusTooManyRequests, `{"error":"backup_rate_limited"}`, http.StatusTooManyRequests, "backup_rate_limited"},
 		{http.StatusConflict, `{"error":"security_log_boundary_missing"}`, http.StatusConflict, "security_log_boundary_missing"},
 		{http.StatusConflict, `{"appliance":"truenas","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
 		{http.StatusConflict, `{"appliance":"<script>","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
@@ -145,7 +167,7 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 	for _, tc := range cases {
 		sock, _ := recordingAgent(t, tc.status, tc.body)
 		audit := &fakeAudit{}
-		rec := send(writeEngine(sock, audit), "/server/actions/backup", "")
+		rec := send(writeEngine(sock, audit), "/server/actions/backup", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
 		if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.reason) {
 			t.Errorf("%s: got %d %s", tc.body, rec.Code, rec.Body)
 		}
@@ -164,7 +186,7 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 			t.Errorf("%s: may_have_started %v", tc.body, ev.Detail["may_have_started"])
 		}
 	}
-	rec := send(writeEngine("/nonexistent/agent.sock", &fakeAudit{}), "/server/actions/start", "")
+	rec := send(writeEngine("/nonexistent/agent.sock", &fakeAudit{}), "/server/actions/start", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "agent_unavailable") {
 		t.Fatalf("no agent: %d %s", rec.Code, rec.Body)
 	}
@@ -214,7 +236,7 @@ func TestServerJobsProxy(t *testing.T) {
 func TestServerStepUpBeginRefusesActionsWithoutStepUp(t *testing.T) {
 	audit := &fakeAudit{}
 	r := writeEngine("/nonexistent/agent.sock", audit)
-	bodies := []string{`{"action":"start"}`, `{"action":"delete"}`, `{}`, `nope`}
+	bodies := []string{`{"action":"start","tag":"v1.0.0"}`, `{"action":"delete"}`, `{}`, `nope`}
 	for _, body := range bodies {
 		if rec := send(r, "/server/stepup", body); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: got %d", body, rec.Code)
@@ -230,9 +252,48 @@ func TestServerStepUpBeginRefusesActionsWithoutStepUp(t *testing.T) {
 	}
 }
 
+func TestServerStepUpBeginFailsClosedOnAgentRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   int
+		reason string
+		result string
+	}{
+		{"denied proof", http.StatusForbidden, `{}`, http.StatusForbidden, "stepup_failed", AuditDenied},
+		{"agent unavailable", http.StatusServiceUnavailable, `{}`, http.StatusServiceUnavailable, "stepup_unavailable", AuditFailure},
+		{"agent rate limit", http.StatusTooManyRequests, `{}`, http.StatusTooManyRequests, "stepup_unavailable", AuditFailure},
+		{"unexpected refusal", http.StatusConflict, `{}`, http.StatusBadGateway, "agent_error", AuditFailure},
+		{"invalid authorization", http.StatusOK, `{"handle":"short","options":{}}`, http.StatusBadGateway, "agent_error", AuditFailure},
+		{"missing options", http.StatusOK, `{"handle":"` + testAuthorizationHandle + `"}`, http.StatusBadGateway, "agent_error", AuditFailure},
+		{"oversized response", http.StatusOK, strings.Repeat("x", maxAgentJob+1), http.StatusBadGateway, "agent_error", AuditFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock, calls := recordingAgent(t, tc.status, tc.body)
+			audit := &fakeAudit{}
+			rec := send(writeEngine(sock, audit), "/server/stepup", `{"action":"backup"}`)
+			if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.reason) {
+				t.Fatalf("got %d %s, want %d %s", rec.Code, rec.Body, tc.want, tc.reason)
+			}
+			if got := calls(); len(got) != 1 || got[0].path != "POST /v1/authorizations" {
+				t.Fatalf("agent calls: %+v", got)
+			}
+			if len(audit.events) != 1 || audit.events[0].Result != tc.result || audit.events[0].Detail["reason"] != tc.reason {
+				t.Fatalf("audit: %+v", audit.events)
+			}
+		})
+	}
+
+	rec := send(writeEngine("/nonexistent/agent.sock", &fakeAudit{}), "/server/stepup", `{"action":"backup"}`)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "stepup_unavailable") {
+		t.Fatalf("agent transport failure: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestServerActionFailsClosedWhenAuditIsDown(t *testing.T) {
 	sock, calls := recordingAgent(t, http.StatusAccepted, `{"id":"`+testJobID+`"}`)
-	rec := send(writeEngine(sock, &fakeAudit{err: errors.New("db down")}), "/server/actions/backup", "")
+	rec := send(writeEngine(sock, &fakeAudit{err: errors.New("db down")}), "/server/actions/backup", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "audit_unavailable") {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
 	}
@@ -246,7 +307,7 @@ func TestServerActionOutlivesTheClient(t *testing.T) {
 	audit := &fakeAudit{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	req := httptest.NewRequest(http.MethodPost, "/server/actions/backup", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/server/actions/backup", strings.NewReader(`{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)).WithContext(ctx)
 	writeEngine(sock, audit).ServeHTTP(httptest.NewRecorder(), req)
 	if len(calls()) != 1 {
 		t.Fatal("agent not called")

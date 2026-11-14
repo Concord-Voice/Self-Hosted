@@ -3,11 +3,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiContractError, ApiError } from "./api";
 import {
   APPLIANCES,
-  STEP_UP_ACTIONS,
   ServerRequestError,
   UPDATE_TAG,
   serverWriteApi,
   type Appliance,
+  type ServerActionArguments,
   type ServerBackup,
   type ServerJob,
   type WriteAction,
@@ -214,28 +214,23 @@ export function ServerActions({
     }
   }, [running, current, follow]);
 
-  const run = async (
-    action: WriteAction,
-    args: Record<string, string> = {},
-  ) => {
+  const run = async (action: WriteAction, args: ServerActionArguments = {}) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
       const body: Record<string, unknown> = { ...args };
-      if (STEP_UP_ACTIONS.has(action)) {
-        setStatus("Touch your security key to confirm");
-        const challenge = await serverWriteApi.stepUp(action);
-        const credential = await navigator.credentials.get({
-          publicKey: decodeRequestOptions(challenge.publicKey),
-        });
-        if (!credential)
-          throw new DOMException("no credential", "NotAllowedError");
-        body.stepup = {
-          handle: challenge.handle,
-          assertion: encodeAssertion(credential as PublicKeyCredential),
-        };
-      }
+      setStatus("Touch your security key to confirm");
+      const challenge = await serverWriteApi.stepUp(action, args);
+      const credential = await navigator.credentials.get({
+        publicKey: decodeRequestOptions(challenge.publicKey),
+      });
+      if (!credential)
+        throw new DOMException("no credential", "NotAllowedError");
+      body.stepup = {
+        handle: challenge.handle,
+        assertion: encodeAssertion(credential as PublicKeyCredential),
+      };
       setStatus(`${ACTION_LABELS[action]} started`);
       const job = await serverWriteApi.run(action, body);
       setCurrent(job);
@@ -290,8 +285,8 @@ export function ServerActions({
         <div>
           <h2 id="server-actions-title">Actions</h2>
           <p>
-            One action runs at a time. Stop, restart, update and restore ask for
-            your security key. Every attempt is audited.
+            One action runs at a time. Every action asks for your security key
+            and is audited.
           </p>
         </div>
       </div>

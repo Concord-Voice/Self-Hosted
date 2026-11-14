@@ -127,7 +127,6 @@ func TestLockoutKeyPrefixesAreInTheManagedRedisACL(t *testing.T) {
 
 	for _, key := range []string{
 		acctKey("x"), acctLockKey("x"), acctLevelKey("x"), ipKey("1.2.3.4"), ipLockKey("1.2.3.4"), ipLevelKey("1.2.3.4"),
-		admin.ServerStepUpPrefix + strings.Repeat("cd", 32), // hex handle, as storeServerStepUp writes it
 	} {
 		listed := false
 		for _, p := range patterns {

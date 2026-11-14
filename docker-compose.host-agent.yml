@@ -8,3 +8,4 @@ services:
       - "${CONCORD_AGENT_GID:?CONCORD_AGENT_GID is set by concord-selfhost}"
     volumes:
       - /run/concord-agent:/run/concord-agent:ro
+      - /etc/concord-voice/agent-authorizers:/etc/concord-voice/agent-authorizers:ro
