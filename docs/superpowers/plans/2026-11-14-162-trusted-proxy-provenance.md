@@ -8,9 +8,10 @@ media planes trust only the exact backend-visible nginx peer.
 **Architecture:** nginx overwrites both forwarding headers with its observed
 peer. Production Go and TypeScript configuration accepts only IPv4 `/32` and
 IPv6 `/128` trusted peers. Compose explicitly selects the shared services
-bridge as each application container's default gateway; the self-host
-lifecycle inspects that endpoint before start, atomically persists its exact
-gateway route, and refuses ambiguous topology.
+bridge as each application container's default gateway. Before application
+start, the self-host lifecycle inspects and pins that network and atomically
+persists its exact gateway route; after the canonical guarded rebuild it proves
+the running endpoints match.
 
 **Tech Stack:** nginx, Bash, Docker Compose, Go/Gin 1.12, Node.js 24
 `net.BlockList`, TypeScript/Vitest.
@@ -39,10 +40,14 @@ gateway route, and refuses ambiguous topology.
   entry and silently skip the broad one.
 - IPv4-mapped IPv6 socket peers must match an exact IPv4 rule exactly as the
   existing admission gate does.
-- A recreated Docker network must be remeasured before any service starts.
+- A recreated Docker network must be remeasured before any application service
+  starts.
 - YAML network order is not a gateway-selection mechanism. Both application
-  endpoints must report `concordvoice-services` at `GwPriority: 1` before its
-  gateway can become trusted authority.
+  endpoints must report `concordvoice-services` at `GwPriority: 1` before the
+  deployment reports success.
+- Discovery and guarded rebuild are one deploy-lock transaction. Never create,
+  recreate, stop, or prebuild an application service merely to discover its
+  future gateway.
 - An `.env` rewrite failure must preserve the old file byte-for-byte and
   start no service.
 - Removing generic Cloudflare real-IP restoration must leave direct-origin
@@ -205,8 +210,10 @@ gateway route, and refuses ambiguous topology.
   `SELFHOST_TRUSTED_PROXY_CIDRS` and
   `SELFHOST_TRUSTED_PROXIES`.
 - Produces
-  `selfhost_prepare_trusted_proxy_provenance`, called by `up` after the
-  existing security-log preflight and before `guarded_ctl rebuild`.
+  `selfhost_prepare_trusted_proxy_provenance`, called from the self-host
+  `rebuild` path after the deploy transaction lock is acquired and before the
+  first Compose mutation that can build, recreate, or start an application
+  service.
 - The helper writes only root `.env` keys `TRUSTED_PROXY_CIDRS` and
   `TRUSTED_PROXIES`, then exports both for the current process.
 
@@ -216,8 +223,10 @@ gateway route, and refuses ambiguous topology.
   missing/multiple/foreign-labeled networks, non-bridge driver, service
   membership mismatch, absent/equal/wrong `GwPriority`, endpoint/network
   gateway mismatch, invalid gateway, inspect failure, atomic replacement
-  failure, and an unknown custom broad value. Every error case asserts no
-  service start/rebuild command.
+  failure, and an unknown custom broad value. Add a fresh-install case with no
+  application images and an upgrade case with running application containers.
+  Before canonical handoff, assert there is no app build, create, recreate,
+  stop, or start. Every pre-start error asserts no service start/rebuild.
 - [ ] **Step 2: Write file-safety tests.** The successful rewrite changes only
   the two values, preserves all other bytes and secret lines, owner, mode, and
   final newline. Failure leaves the original byte-identical and removes its
@@ -232,29 +241,37 @@ gateway route, and refuses ambiguous topology.
 - [ ] **Step 4: Change Compose consumers.** Production media and control
   services consume required `TRUSTED_PROXIES` and
   `TRUSTED_PROXY_CIDRS`; remove every broad production literal. Safe exact
-  loopback placeholders are used only for stopped-resource creation.
-- [ ] **Step 5: Implement the resolver.** Reuse Compose ownership/inspection
-  patterns from `selfhost_live_port_check` and the stage-network gate. Render
-  and assert the gateway-priority model, create stopped resources, then require
-  the Compose project/network labels, bridge driver, both service memberships,
-  each created endpoint's `GwPriority: 1`, no equal/higher competing endpoint,
-  and an endpoint gateway exactly equal to the network IPAM gateway. Convert
-  that inspected gateway to an exact route using the existing Python
-  standard-library fixture style; do not add a parser dependency.
+  loopback placeholders are used only for the pre-discovery render.
+- [ ] **Step 5: Implement pre-start network preparation under the deploy
+  lock.** Run from the guarded `rebuild` transaction rather than as a separate
+  `concord-selfhost` wrapper mutation. Reuse ownership/inspection patterns from
+  `selfhost_live_port_check` and the stage-network gate. Render and assert the
+  gateway-priority model. When the owned services network is absent, prove the
+  project has no containers and run only
+  `docker compose up --no-start --no-deps --pull missing nats`; when an existing
+  owned network has no member, use the same stopped NATS seed to pin it. Never
+  create or prebuild control-plane/media-plane here. Require the network's
+  Compose labels, bridge driver, allowed project-only members, and one valid
+  IPAM gateway. Convert that gateway to an exact route using the existing
+  Python standard-library fixture style; do not add a parser dependency.
 - [ ] **Step 6: Implement fresh-install and upgrade migration.** The installer
   no longer asks for or emits a broad default and writes both variables. The
   resolver recognizes only the spec's legacy default strings; a different
   broad value gets a fixed refusal message. `update`'s existing backup
   remains before the tag switch; the new tag's `up` performs migration
   before services start.
-- [ ] **Step 7: Verify rendered and live contracts.** Rendered production
-  Compose contains exact values and the selected gateway network for both
-  services; stopped container inspection reports the same selected gateway.
-  After start, send forged headers through host nginx and require the
-  edge-observed client attribution before accepting the target. A mismatch
-  stops rollout and is never remediated by widening a CIDR. Run installer,
-  lifecycle, port-posture, storage-mode, acceptance, and publication-manifest
-  fixtures selected by the changed writers.
+- [ ] **Step 7: Preserve the canonical build/start and prove live endpoints.**
+  After atomic persistence, export the exact values in the current controller
+  process and continue through the existing guarded rebuild; it remains the
+  only application image builder and starter. Before `Done`, inspect both
+  running application endpoints and require services-network `GwPriority: 1`,
+  no equal/higher competitor, and gateway equality with the pre-start IPAM and
+  persisted route. On mismatch return nonzero but leave services running in
+  fail-safe under-trust; never restore or widen the legacy CIDR. Then send
+  forged headers through host nginx and require edge-observed attribution
+  before accepting the target. Run installer, lifecycle, port-posture,
+  storage-mode, acceptance, and publication-manifest fixtures selected by the
+  changed writers.
 - [ ] **Step 8: Commit.** `fix: pin self-host proxy trust to the published-port bridge`
 
 ---
