@@ -1689,13 +1689,14 @@ func trustedProxyCIDRsAreHostRoutes(cidrs []string) bool {
 // the production guard and fail startup — preventing silent deploys against
 // load balancers outside the Docker bridge range.
 //
-// In non-production, an empty/unset env value falls back to the broad RFC1918
-// Docker private range so dev/CI setups work without explicit configuration.
+// Only development and test use the broad Docker private range without an
+// explicit value. Every other environment leaves the list empty, so Gin trusts
+// no forwarded client identity rather than a broad peer range.
 //
 // A malformed entry returns its position in all environments without logging the address.
 func computeTrustedProxyCIDRs(envValue, environment string) ([]string, error) {
 	if envValue == "" {
-		if environment == "production" {
+		if environment != "development" && environment != "test" {
 			return nil, nil
 		}
 		envValue = defaultTrustedProxyCIDRs()
@@ -1726,14 +1727,24 @@ func parseTrustedProxyCIDRs(raw string) ([]string, error) {
 }
 
 func parseTrustedProxyEntry(entry string) (netip.Prefix, error) {
+	var prefix netip.Prefix
 	if strings.Contains(entry, "/") {
-		return netip.ParsePrefix(entry)
+		parsed, err := netip.ParsePrefix(entry)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		prefix = parsed
+	} else {
+		addr, err := netip.ParseAddr(entry)
+		if err != nil || addr.Zone() != "" {
+			return netip.Prefix{}, errors.New("invalid proxy address")
+		}
+		prefix = netip.PrefixFrom(addr, addr.BitLen())
 	}
-	addr, err := netip.ParseAddr(entry)
-	if err != nil || addr.Zone() != "" {
+	if prefix.Addr().Is4In6() {
 		return netip.Prefix{}, errors.New("invalid proxy address")
 	}
-	return netip.PrefixFrom(addr, addr.BitLen()), nil
+	return prefix, nil
 }
 
 // appAttestAppIDShape is Apple's TEAMID.bundle.id: a 10-character team id,

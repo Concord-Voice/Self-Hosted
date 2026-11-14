@@ -371,8 +371,14 @@ func TestComputeTrustedProxyCIDRs(t *testing.T) {
 		assert.Equal(t, []string{"172.16.0.0/12"}, got)
 	})
 
-	t.Run("empty env in staging falls back to default", func(t *testing.T) {
+	t.Run("empty env in staging trusts no proxy", func(t *testing.T) {
 		got, err := computeTrustedProxyCIDRs("", "staging")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("empty env in test falls back to default", func(t *testing.T) {
+		got, err := computeTrustedProxyCIDRs("", "test")
 		require.NoError(t, err)
 		assert.Equal(t, []string{"172.16.0.0/12"}, got)
 	})
@@ -467,6 +473,8 @@ func TestValidateProductionTrustedProxyHostRoutes(t *testing.T) {
 		{"IPv4 host route", "172.19.0.1/32", true},
 		{"IPv6 bare", "2001:db8::1", true},
 		{"IPv6 host route", "2001:db8::1/128", true},
+		{"IPv4-mapped IPv6 bare", "::ffff:172.19.0.1", false},
+		{"IPv4-mapped IPv6 host route", "::ffff:172.19.0.1/128", false},
 		{"IPv4 all", "0.0.0.0/0", false},
 		{"IPv4 private broad", "10.0.0.0/8", false},
 		{"IPv4 bridge broad", "172.19.0.0/16", false},
@@ -653,6 +661,13 @@ func TestParseTrustedProxyCIDRs(t *testing.T) {
 		cidrs, err := parseTrustedProxyCIDRs("172.19.0.1,2001:db8::1")
 		require.NoError(t, err)
 		assert.Equal(t, []string{"172.19.0.1", "2001:db8::1"}, cidrs)
+	})
+
+	t.Run("rejects IPv4-mapped IPv6 addresses", func(t *testing.T) {
+		for _, value := range []string{"::ffff:172.19.0.1", "::ffff:172.19.0.1/128"} {
+			_, err := parseTrustedProxyCIDRs(value)
+			require.ErrorContains(t, err, "entry 1")
+		}
 	})
 
 	t.Run("rejects one bad entry in a list", func(t *testing.T) {
