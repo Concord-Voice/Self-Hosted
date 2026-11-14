@@ -19929,11 +19929,7 @@ paths:
         '400':
           $ref: '#/components/responses/UnsupportedClientPlatform'
         '403':
-          description: Client version rejected, or required JWT fallback attestation missing or invalid.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AttestationError'
+          $ref: '#/components/responses/ClientVersionTooOld'
         '503':
           description: Required JWT fallback attestation registry unavailable — fails closed.
           content:
@@ -20202,7 +20198,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     ClientVersionTooOld:
-      description: Client version is missing, malformed, or below the configured compatibility floor.
+      description: Client version is missing, malformed, or below the configured compatibility floor, or required client attestation is missing or invalid.
       content:
         application/json:
           schema:
