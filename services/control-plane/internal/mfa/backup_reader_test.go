@@ -18,7 +18,7 @@ func TestVerifyBackupCodeReadsBareV1AndV2(t *testing.T) {
 	bare := hex.EncodeToString(sha[:])
 	salt := []byte("0123456789abcdef")
 	v2 := backuphash.V2Prefix + base64.RawURLEncoding.EncodeToString(salt) + "$" +
-		base64.RawURLEncoding.EncodeToString(argon2.IDKey([]byte(code), salt, 1, 8192, 1, 32))
+		base64.RawURLEncoding.EncodeToString(argon2.IDKey([]byte(code), salt, 2, 19456, 1, 32))
 
 	for _, stored := range []string{bare, "v1$" + bare, v2} {
 		idx, matched, err := VerifyBackupCode("  abcd1234  ", []string{stored}, []bool{false})
@@ -48,7 +48,7 @@ func TestVerifyBackupCodeRejectsMalformedStoredHashesBeforeMatching(t *testing.T
 		"uppercase v1":     "v1$" + strings.ToUpper(bare),
 		"short v1":         "v1$xyz",
 		"large parameters": "v2$argon2id$v=19$m=65536,t=3,p=4$" + salt + "$" + digest,
-		"wrong version":    "v2$argon2id$v=20$m=8192,t=1,p=1$" + salt + "$" + digest,
+		"wrong version":    "v2$argon2id$v=20$m=19456,t=2,p=1$" + salt + "$" + digest,
 		"short salt":       backuphash.V2Prefix + "AA$" + digest,
 		"short digest":     backuphash.V2Prefix + salt + "$AA",
 		"oversize digest":  backuphash.V2Prefix + salt + "$" + digest + "A",

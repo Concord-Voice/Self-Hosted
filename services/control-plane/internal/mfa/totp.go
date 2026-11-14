@@ -203,7 +203,7 @@ func VerifyBackupCode(code string, hashes []string, used []bool) (index int, mat
 		stored := parsed[i]
 		candidate := codeHash[:]
 		if stored.salt != nil {
-			candidate = argon2.IDKey([]byte(normalized), stored.salt, 1, 8192, 1, 32)
+			candidate = argon2.IDKey([]byte(normalized), stored.salt, 2, 19456, 1, 32)
 		}
 		if subtle.ConstantTimeCompare(candidate, stored.digest) == 1 {
 			return i, true, nil

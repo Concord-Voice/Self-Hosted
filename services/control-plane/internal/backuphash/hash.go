@@ -10,7 +10,7 @@ import (
 )
 
 // V2Prefix identifies the bounded Argon2id backup-code format.
-const V2Prefix = "v2$argon2id$v=19$m=8192,t=1,p=1$"
+const V2Prefix = "v2$argon2id$v=19$m=19456,t=2,p=1$"
 
 var errInvalidStoredHash = errors.New("invalid stored backup hash")
 
@@ -18,31 +18,36 @@ var errInvalidStoredHash = errors.New("invalid stored backup hash")
 // and the exact bounded Argon2id v2 form. A non-nil salt identifies v2.
 func Parse(stored string) (salt, digest []byte, err error) {
 	if len(stored) == 64 {
-		digest, err = hex.DecodeString(stored)
-		if err == nil && hex.EncodeToString(digest) == stored {
-			return nil, digest, nil
-		}
+		return parseSHA256(stored)
 	}
 	if strings.HasPrefix(stored, "v1$") && len(stored) == 67 {
-		digest, err = hex.DecodeString(stored[3:])
-		if err == nil && hex.EncodeToString(digest) == stored[3:] {
-			return nil, digest, nil
-		}
+		return parseSHA256(stored[3:])
 	}
 	// Bound the encoded value before decoding or splitting untrusted storage.
-	if len(stored) == len(V2Prefix)+22+1+43 && strings.HasPrefix(stored, V2Prefix) {
-		parts := strings.Split(stored[len(V2Prefix):], "$")
-		if len(parts) == 2 {
-			salt, err = base64.RawURLEncoding.DecodeString(parts[0])
-			if err == nil && len(salt) == 16 && base64.RawURLEncoding.EncodeToString(salt) == parts[0] {
-				digest, err = base64.RawURLEncoding.DecodeString(parts[1])
-				if err == nil && len(digest) == 32 && base64.RawURLEncoding.EncodeToString(digest) == parts[1] {
-					return salt, digest, nil
-				}
-			}
-		}
+	if len(stored) != len(V2Prefix)+22+1+43 || !strings.HasPrefix(stored, V2Prefix) {
+		return nil, nil, errInvalidStoredHash
 	}
-	return nil, nil, errInvalidStoredHash
+	parts := strings.Split(stored[len(V2Prefix):], "$")
+	if len(parts) != 2 {
+		return nil, nil, errInvalidStoredHash
+	}
+	salt, err = base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || len(salt) != 16 || base64.RawURLEncoding.EncodeToString(salt) != parts[0] {
+		return nil, nil, errInvalidStoredHash
+	}
+	digest, err = base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(digest) != 32 || base64.RawURLEncoding.EncodeToString(digest) != parts[1] {
+		return nil, nil, errInvalidStoredHash
+	}
+	return salt, digest, nil
+}
+
+func parseSHA256(encoded string) ([]byte, []byte, error) {
+	digest, err := hex.DecodeString(encoded)
+	if err != nil || hex.EncodeToString(digest) != encoded {
+		return nil, nil, errInvalidStoredHash
+	}
+	return nil, digest, nil
 }
 
 // CountAvailable validates every stored entry before counting unspent codes.
