@@ -2,8 +2,10 @@ package users_test
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -22,7 +24,7 @@ func TestDeleteAccount_HappyPath(t *testing.T) {
 
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
 
-	err := svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
+	err := svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
 	require.NoError(t, err)
 
 	var userRows int
@@ -36,6 +38,29 @@ func TestDeleteAccount_HappyPath(t *testing.T) {
 		`SELECT COUNT(*) FROM account_deletions WHERE user_id IS NULL AND deleted_at >= NOW() - INTERVAL '1 minute'`,
 	).Scan(&auditRows))
 	assert.GreaterOrEqual(t, auditRows, 1, "audit row must be inserted with NULL user_id")
+}
+
+func TestPrepareAccountErasure_ExhaustedMFABudgetDoesNotReservePassword(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "erase-budget-before-password")
+	service := users.NewAccountService(ts.DB, logger.New("test"))
+	service.SetRedis(ts.Redis)
+	ctx := context.Background()
+
+	require.NoError(t, ts.Redis.Set(ctx, stepup.DangerousActionBudget(ts.Redis).Key(user.ID), stepup.BudgetLimit, stepup.BudgetWindow).Err())
+	for i := 0; i < stepup.BudgetLimit; i++ {
+		attempt, stepErr := service.PrepareAccountErasure(ctx, user.ID, user.Password, "rejected-code")
+		require.Nil(t, attempt)
+		require.NotNil(t, stepErr)
+		require.Equal(t, http.StatusTooManyRequests, stepErr.Status)
+	}
+
+	require.False(t, ts.Redis.Exists(ctx, "login_attempts:"+user.Email).Val() > 0,
+		"an MFA-budget denial must not reserve an unchecked password guess")
+	login := ts.DoRequest(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"email": user.Email, "password": user.Password,
+	}, nil)
+	require.Equal(t, http.StatusOK, login.Code, login.Body.String())
 }
 
 // TestDeleteAccount_RemovesPendingServerVoiceTerminalOutbox verifies that
@@ -57,7 +82,7 @@ func TestDeleteAccount_RemovesPendingServerVoiceTerminalOutbox(t *testing.T) {
 	require.Equal(t, 1, pendingBefore, "positive control: pending outbox obligation must be present")
 
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
-	require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID))
+	require.NoError(t, svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID))
 
 	var pendingAfter int
 	require.NoError(t, ts.DB.QueryRow(
@@ -79,7 +104,7 @@ func TestDeleteAccount_MissingUser(t *testing.T) {
 	var auditBefore int
 	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM account_deletions`).Scan(&auditBefore))
 
-	err := svc.DeleteAccount(context.Background(), ghostUUID)
+	err := svc.DeleteAccountForTest(context.Background(), ghostUUID)
 	require.ErrorIs(t, err, users.ErrUserNotFound)
 
 	var auditAfter int
@@ -97,10 +122,10 @@ func TestDeleteAccount_IdempotentRetry(t *testing.T) {
 
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
 
-	require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID))
+	require.NoError(t, svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID))
 
 	// The user row is gone, so no login can be minted; ErrUserNotFound precedes the guard.
-	err := svc.DeleteAccount(context.Background(), user.ID)
+	err := svc.DeleteAccountForTest(context.Background(), user.ID)
 	require.ErrorIs(t, err, users.ErrUserNotFound)
 
 	var auditCount int
@@ -120,7 +145,7 @@ func TestDeleteAccount_AuditRowInsertWithoutSentryColumn(t *testing.T) {
 	user := ts.CreateTestUser(t, "deleteacct3")
 
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
-	err := svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
+	err := svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
 	require.NoError(t, err, "INSERT must succeed without sentry_delete_attempted column")
 }
 
@@ -141,7 +166,7 @@ func TestDeleteAccount_BroadcastsIncompleteChannelDeletion(t *testing.T) {
 	svc.SetChannelDeletedBroadcaster(func(serverID, channelID string) {
 		broadcasts = append(broadcasts, [2]string{serverID, channelID})
 	})
-	require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, creator.ID), creator.ID))
+	require.NoError(t, svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, creator.ID), creator.ID))
 
 	assert.Equal(t, [][2]string{{serverID, channelID}}, broadcasts)
 	var channelRows int
@@ -171,7 +196,7 @@ func TestDeleteAccount_BroadcastsCascadedIncompleteLinkedChannelDeletion(t *test
 	svc.SetChannelDeletedBroadcaster(func(serverID, channelID string) {
 		broadcasts = append(broadcasts, [2]string{serverID, channelID})
 	})
-	require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, creator.ID), creator.ID))
+	require.NoError(t, svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, creator.ID), creator.ID))
 
 	assert.ElementsMatch(t, [][2]string{{serverID, voiceID}, {serverID, linkedTextID}}, broadcasts)
 	var channelRows int
@@ -198,7 +223,7 @@ func TestDeleteAccount_CascadeDeletesUserRelatedData(t *testing.T) {
 	ts.AssignRoleToUser(t, serverID, user.ID, roleID)
 
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
-	require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID))
+	require.NoError(t, svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID))
 
 	// Verify user is gone.
 	var userExists int

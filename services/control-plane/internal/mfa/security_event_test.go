@@ -979,16 +979,15 @@ func (c mfaEventConn) QueryContext(_ context.Context, query string, args []drive
 		if c.state.failInline {
 			return nil, errors.New("raw-error-fixture: forced subject read failure")
 		}
-		return &mfaEventRows{values: []driver.Value{c.state.passwordHash, false, false}}, nil
+		return &mfaEventRows{values: []driver.Value{c.state.passwordHash, c.state.totpEnabled && c.state.totpConfirmed, false}}, nil
 	// stepup.InlineMFAMethods' two-column EXISTS query also contains
 	// "SELECT EXISTS", so it must be matched ahead of the single-column case
-	// below (TOTPDisable's existence probe). None of this file's fixtures need
-	// an inline-verifiable factor, so both columns are false.
+	// below (TOTPDisable's existence probe).
 	case strings.Contains(query, "AND enabled AND confirmed"):
 		if c.state.failInline {
 			return nil, errors.New("raw-error-fixture: forced inline factor read failure")
 		}
-		return &mfaEventRows{values: []driver.Value{false, false}}, nil
+		return &mfaEventRows{values: []driver.Value{c.state.totpEnabled && c.state.totpConfirmed, false}}, nil
 	case strings.Contains(query, "SELECT EXISTS"):
 		return &mfaEventRows{values: []driver.Value{c.state.totpExists}}, nil
 	// verifyUserPassword's lockout-keyed read.

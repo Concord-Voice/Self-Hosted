@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ var templateFS embed.FS
 var verificationTmpl = template.Must(template.ParseFS(templateFS, "templates/verification.html"))
 var recoveryTmpl = template.Must(template.ParseFS(templateFS, "templates/recovery.html"))
 var ownershipTransferTmpl = template.Must(template.ParseFS(templateFS, "templates/ownership_transfer.html"))
+var accountErasureConfirmationTmpl = template.Must(template.ParseFS(templateFS, "templates/account_erasure_confirmation.html"))
 
 const (
 	errInvalidFromAddr = "invalid from address: %w"
@@ -119,6 +121,76 @@ func (s *Service) SendRecoveryCode(to, code string) error {
 		return nil
 	}
 	return s.sendTemplatedEmail(to, "Your Concord account recovery code", recoveryTmpl, map[string]string{"Code": code})
+}
+
+// SendAccountErasureConfirmation sends the one-use deep link that confirms an
+// unverified-email account's freshly authenticated erasure intent. The link is
+// secret-bearing, so unlike development verification codes it is never logged.
+func (s *Service) SendAccountErasureConfirmation(to, confirmationURL string) error {
+	if s.devMode {
+		return ErrDeliveryNotConfigured
+	}
+	safeURL, err := accountErasureConfirmationURL(confirmationURL)
+	if err != nil {
+		return err
+	}
+	return s.sendTemplatedEmail(to, "Confirm your Concord account erasure", accountErasureConfirmationTmpl, struct {
+		ConfirmationURL template.URL
+	}{ConfirmationURL: safeURL})
+}
+
+// accountErasureConfirmationURL validates the only custom-protocol link this
+// service is permitted to render as a trusted template URL. This check is what
+// allows the deep link through html/template's deliberate non-HTTP scheme
+// filter without turning the email service into a generic trusted-link sender.
+func accountErasureConfirmationURL(raw string) (template.URL, error) {
+	if len(raw) > 256 || strings.ContainsAny(raw, "\x00\r\n") {
+		return "", errors.New("invalid account erasure confirmation URL")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "concord" || parsed.Host != "account-erasure" || parsed.User != nil ||
+		parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.EscapedPath() != parsed.Path {
+		return "", errors.New("invalid account erasure confirmation URL")
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "confirm" || !canonicalAccountErasureRequestID(parts[1]) ||
+		!canonicalAccountErasureToken(parts[2]) {
+		return "", errors.New("invalid account erasure confirmation URL")
+	}
+	return template.URL(raw), nil // #nosec G203 -- strict closed-shape validation above permits this exact custom-protocol link
+}
+
+func canonicalAccountErasureRequestID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if value[index] != '-' {
+				return false
+			}
+			continue
+		}
+		if (value[index] < '0' || value[index] > '9') && (value[index] < 'a' || value[index] > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalAccountErasureToken(value string) bool {
+	if len(value) != 43 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		valid := (value[index] >= 'A' && value[index] <= 'Z') ||
+			(value[index] >= 'a' && value[index] <= 'z') ||
+			(value[index] >= '0' && value[index] <= '9') || value[index] == '-' || value[index] == '_'
+		if !valid {
+			return false
+		}
+	}
+	return true
 }
 
 // sendMail handles the SMTP connection and message delivery.

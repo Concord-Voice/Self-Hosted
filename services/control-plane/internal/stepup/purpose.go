@@ -30,6 +30,7 @@ const (
 	PurposeTOTPSetup              Purpose = "mfa_settings.totp_setup"
 	PurposeTOTPDisable            Purpose = "mfa_settings.totp_disable"
 	PurposeWebAuthnRegister       Purpose = "mfa_settings.webauthn_register"
+	PurposeWebAuthnDelete         Purpose = "mfa_settings.webauthn_delete"
 	PurposeRecoveryOnlySet        Purpose = "mfa_settings.recovery_only_set"
 	PurposeRecoveryHardenedSet    Purpose = "mfa_settings.recovery_hardened_set"
 	PurposeEmailSmsSetup          Purpose = "mfa_settings.email_sms_setup"
@@ -47,6 +48,9 @@ const (
 	PurposePasswordChange    Purpose = "account.password_change"
 	PurposeE2EEKeyReset      Purpose = "account.e2ee_key_reset"
 	PurposePurgeFenceDisable Purpose = "privacy.purge_fence_disable"
+	PurposeAccountErase      Purpose = "privacy.account_erase"
+	PurposeSSOUnlink         Purpose = "account.sso_unlink"
+	PurposeSSOTrustEnable    Purpose = "account.sso_trust_enable"
 
 	// internal/sessions.
 	PurposeSessionRevoke     Purpose = "sessions.revoke"
@@ -54,8 +58,9 @@ const (
 	PurposeRevocationModeSet Purpose = "sessions.revocation_mode_set"
 
 	// internal/ownership.
-	PurposeOwnershipTransfer Purpose = "ownership.transfer_initiate"
-	PurposeOwnershipReverse  Purpose = "ownership.transfer_reverse"
+	PurposeOwnershipTransfer        Purpose = "ownership.transfer_initiate"
+	PurposeOwnershipReverse         Purpose = "ownership.transfer_reverse"
+	PurposeOwnershipTransferConfirm Purpose = "ownership.transfer_confirm"
 
 	// internal/dm. PurposeDMMessageDelete confirms a DM message delete past the
 	// delete-rate soft-lock (#3455).
@@ -99,6 +104,7 @@ var allPurposes = [...]Purpose{
 	PurposeTOTPSetup,
 	PurposeTOTPDisable,
 	PurposeWebAuthnRegister,
+	PurposeWebAuthnDelete,
 	PurposeRecoveryOnlySet,
 	PurposeRecoveryHardenedSet,
 	PurposeEmailSmsSetup,
@@ -113,11 +119,15 @@ var allPurposes = [...]Purpose{
 	PurposePasswordChange,
 	PurposeE2EEKeyReset,
 	PurposePurgeFenceDisable,
+	PurposeAccountErase,
+	PurposeSSOUnlink,
+	PurposeSSOTrustEnable,
 	PurposeSessionRevoke,
 	PurposeSessionsRevokeAll,
 	PurposeRevocationModeSet,
 	PurposeOwnershipTransfer,
 	PurposeOwnershipReverse,
+	PurposeOwnershipTransferConfirm,
 	PurposeDMPurge,
 	PurposeDMClear,
 	PurposeDMMessageDelete,

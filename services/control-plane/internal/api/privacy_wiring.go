@@ -8,8 +8,10 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/email"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/privacy"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -39,9 +41,13 @@ func buildPrivacyHandler(
 	log *logger.Logger,
 	activityCleanup *users.Handler,
 	hub *websocket.Hub,
+	mfaVerifier stepup.MFATxCodeVerifier,
+	erasureEmailSender *email.Service,
 	erasure erasureClearWiring,
 ) (*privacy.Handler, *users.AccountService) {
 	account := users.NewAccountService(db, log)
+	account.SetRedis(redisClient)
+	account.SetMFAVerifier(mfaVerifier)
 	account.SetActivitySettingsCleanupHandler(activityCleanup)
 	// #2447: the erasure capture and the cross-replica clear publisher. Returned
 	// alongside the handler so the router's boot guard can interrogate the
@@ -69,5 +75,7 @@ func buildPrivacyHandler(
 			})
 		})
 	}
-	return privacy.NewHandler(account, redisClient, log), account
+	handler := privacy.NewHandler(account, redisClient, log)
+	handler.SetErasureEmailSender(erasureEmailSender)
+	return handler, account
 }

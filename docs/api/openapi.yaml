@@ -13149,6 +13149,7 @@ paths:
                   - mfa_settings.totp_setup
                   - mfa_settings.totp_disable
                   - mfa_settings.webauthn_register
+                  - mfa_settings.webauthn_delete
                   - mfa_settings.recovery_only_set
                   - mfa_settings.recovery_hardened_set
                   - mfa_settings.email_sms_setup
@@ -13163,11 +13164,15 @@ paths:
                   - account.password_change
                   - account.e2ee_key_reset
                   - privacy.purge_fence_disable
+                  - privacy.account_erase
+                  - account.sso_unlink
+                  - account.sso_trust_enable
                   - sessions.revoke
                   - sessions.revoke_all
                   - sessions.revocation_mode_set
                   - ownership.transfer_initiate
                   - ownership.transfer_reverse
+                  - ownership.transfer_confirm
                   - dm.purge
                   - dm.clear
                   - dm.message_delete

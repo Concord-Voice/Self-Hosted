@@ -247,6 +247,17 @@ func TestSendOwnershipTransferNotificationDevMode(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestSendAccountErasureConfirmationDevModeFailsClosed(t *testing.T) {
+	svc := newDevService()
+
+	err := svc.SendAccountErasureConfirmation(
+		testUserEmail,
+		"concord://account-erasure/confirm/00000000-0000-4000-8000-000000000001/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	)
+
+	require.ErrorIs(t, err, ErrDeliveryNotConfigured)
+}
+
 // Without SMTP, only development and test may log what they would have sent.
 // Anywhere else every send fails and the secret never reaches the log: a
 // recovery code resets the account, and staging runs without SMTP (security
@@ -305,6 +316,7 @@ func TestTemplatesLoad(t *testing.T) {
 	assert.NotNil(t, verificationTmpl)
 	assert.NotNil(t, recoveryTmpl)
 	assert.NotNil(t, ownershipTransferTmpl)
+	assert.NotNil(t, accountErasureConfirmationTmpl)
 }
 
 // ── Production Path Tests (mock SMTP) ───────────────────────────────────────
@@ -356,6 +368,29 @@ func TestSendOwnershipTransferProd(t *testing.T) {
 	assert.Contains(t, msg, "newowner42")
 	assert.Contains(t, msg, "reversal-token-xyz")
 	assert.Contains(t, msg, "Subject: Ownership transfer initiated for Test Server")
+}
+
+func TestSendAccountErasureConfirmationProd(t *testing.T) {
+	addr, capture := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
+	svc := newProdService(addr)
+	confirmationURL := "concord://account-erasure/confirm/00000000-0000-4000-8000-000000000001/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	err := svc.SendAccountErasureConfirmation(testUserEmail, confirmationURL)
+	require.NoError(t, err)
+
+	msg := capture.last()
+	assert.Contains(t, msg, confirmationURL)
+	assert.Contains(t, msg, "Confirm account erasure")
+	assert.Contains(t, msg, "Subject: Confirm your Concord account erasure")
+}
+
+func TestSendAccountErasureConfirmationRejectsUnexpectedLink(t *testing.T) {
+	addr, _ := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
+	svc := newProdService(addr)
+
+	err := svc.SendAccountErasureConfirmation(testUserEmail, "https://example.test/not-an-erasure-link")
+
+	require.Error(t, err)
 }
 
 // ── Sanitization Tests ──────────────────────────────────────────────────────

@@ -3186,6 +3186,62 @@ type patchSecurityRequest struct {
 	PasswordLoginDisabled *bool  `json:"password_login_disabled"`
 	TrustSSOSecurity      *bool  `json:"trust_sso_security"`
 	CurrentPassphrase     string `json:"current_passphrase"`
+	MFACode               string `json:"mfa_code"`
+	StepUpToken           string `json:"step_up_token"`
+}
+
+type ssoStepUpRequest struct {
+	Password    string `json:"password"`
+	MFACode     string `json:"mfa_code"`
+	StepUpToken string `json:"step_up_token"`
+}
+
+var ssoStepUpCopy = stepup.Copy{
+	NoFactors:          "No authentication factor is available",
+	CredentialRequired: "Current passphrase is required",
+}
+
+func (h *Handler) reserveSSOStepUp(c *gin.Context, userID, password string) (*stepup.PasswordAttempt, bool) {
+	attempt, e := stepup.ReserveUserPasswordAttempt(c.Request.Context(), h.db, h.redis, userID, password)
+	if e == nil {
+		return attempt, true
+	}
+	if e.Status == http.StatusLocked {
+		stepup.MarkAccountLocked(c)
+	}
+	e.Write(c)
+	return nil, false
+}
+
+func (h *Handler) verifySSOStepUpTx(
+	ctx context.Context, tx *sql.Tx, userID string, attempt *stepup.PasswordAttempt,
+	password, mfaCode string, purpose stepup.Purpose, epoch string,
+) *stepup.Error {
+	subj, e := stepup.LockSubjectTx(ctx, tx, userID, stepup.LockForNoKeyUpdate, epoch)
+	if e != nil {
+		return e
+	}
+	return h.verifySSOStepUpLockedTx(ctx, tx, userID, subj, attempt, password, mfaCode, purpose)
+}
+
+func (h *Handler) verifySSOStepUpLockedTx(
+	ctx context.Context, tx *sql.Tx, userID string, subj stepup.Subject, attempt *stepup.PasswordAttempt,
+	password, mfaCode string, purpose stepup.Purpose,
+) *stepup.Error {
+	if e := stepup.VerifyPasswordFactor(attempt, subj, password, ssoStepUpCopy); e != nil {
+		return e
+	}
+	if !subj.MFAEnabled {
+		return nil
+	}
+	if h.mfaVerifier == nil {
+		return &stepup.Error{
+			Status: http.StatusInternalServerError,
+			Body:   gin.H{"error": stepup.ErrMsgVerificationFailed},
+			Cause:  errors.New("SSO step-up MFA verifier is not configured"),
+		}
+	}
+	return stepup.VerifyMFAFactorTx(ctx, tx, h.mfaVerifier, userID, purpose, mfaCode, subj.MFAMethods)
 }
 
 // verifyCurrentPassphrase loads the user's password hash and confirms the
@@ -3234,9 +3290,10 @@ func (h *Handler) verifyCurrentPassphrase(c *gin.Context, userID, plaintext stri
 	return false
 }
 
-// PatchSecurity flips the two SSO-related security flags. Any change requires
-// passphrase confirmation to defend against session-token-replay-driven
-// settings hijack.
+// PatchSecurity flips the two SSO-related security flags. Weakening SSO trust
+// (false -> true) takes a transaction-bound fresh proof; turning it off is an
+// ungated strengthening. The password-login setting retains its passphrase
+// confirmation.
 // PATCH /api/v1/users/me/security
 func (h *Handler) PatchSecurity(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -3245,12 +3302,29 @@ func (h *Handler) PatchSecurity(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
 		return
 	}
-	if req.CurrentPassphrase == "" {
+	if req.StepUpToken != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
+	trustMayEnable := req.TrustSSOSecurity != nil && *req.TrustSSOSecurity
+	onlyTrustDisable := req.TrustSSOSecurity != nil && !*req.TrustSSOSecurity && req.PasswordLoginDisabled == nil
+	if !trustMayEnable && !onlyTrustDisable && req.CurrentPassphrase == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "passphrase_required"})
 		return
 	}
-	if !h.verifyCurrentPassphrase(c, userID, req.CurrentPassphrase) {
+	if !trustMayEnable && !onlyTrustDisable && !h.verifyCurrentPassphrase(c, userID, req.CurrentPassphrase) {
 		return
+	}
+	var attempt *stepup.PasswordAttempt
+	if trustMayEnable {
+		if !h.chargeDangerousMFA(c, userID, req.MFACode) {
+			return
+		}
+		var ok bool
+		attempt, ok = h.reserveSSOStepUp(c, userID, req.CurrentPassphrase)
+		if !ok {
+			return
+		}
 	}
 
 	// Refuse self-hosted disablement before any transaction or identity read.
@@ -3266,8 +3340,21 @@ func (h *Handler) PatchSecurity(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "no_fields"})
 		return
 	}
-	if !h.applySecurityPatch(c, userID, req, query, args) {
+	if !h.applySecurityPatch(c, userID, req, query, args, attempt) {
+		if attempt != nil {
+			if err := attempt.Settle(c.Request.Context()); err != nil {
+				h.log.Warn("Could not settle SSO trust password attempt", "error", err)
+			}
+		}
 		return
+	}
+	if attempt != nil {
+		if err := attempt.Settle(c.Request.Context()); err != nil {
+			h.log.Warn("Could not settle SSO trust password attempt", "error", err)
+		}
+		if req.MFACode != "" {
+			h.clearDangerousMFA(c, userID)
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -3305,7 +3392,7 @@ func securityPatchUpdate(userID string, req patchSecurityRequest) (string, []any
 
 // applySecurityPatch serializes fallback checks and writes with unlink. READ
 // COMMITTED gives the count its own snapshot after the standalone users lock.
-func (h *Handler) applySecurityPatch(c *gin.Context, userID string, req patchSecurityRequest, query string, args []any) bool {
+func (h *Handler) applySecurityPatch(c *gin.Context, userID string, req patchSecurityRequest, query string, args []any, attempt *stepup.PasswordAttempt) bool {
 	ctx := c.Request.Context()
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
@@ -3319,18 +3406,34 @@ func (h *Handler) applySecurityPatch(c *gin.Context, userID string, req patchSec
 		}
 	}()
 
-	var lockedUserID string
-	err = tx.QueryRowContext(ctx,
-		`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID,
-	).Scan(&lockedUserID)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_credentials"})
-		return false
+	var currentTrust bool
+	var lockedSubject stepup.Subject
+	if req.TrustSSOSecurity != nil && *req.TrustSSOSecurity {
+		var stepUpErr *stepup.Error
+		lockedSubject, stepUpErr = stepup.LockSubjectTx(ctx, tx, userID, stepup.LockForNoKeyUpdate, middleware.TokenCredentialEpoch(c))
+		if stepUpErr != nil {
+			stepUpErr.Write(c)
+			return false
+		}
+		err = tx.QueryRowContext(ctx, `SELECT trust_sso_security FROM users WHERE id = $1`, userID).Scan(&currentTrust)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT trust_sso_security FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID).Scan(&currentTrust)
 	}
 	if err != nil {
-		h.log.Error("Failed to lock user for security settings", "error_class", "lookup")
-		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "lookup_failed"})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_credentials"})
+		} else {
+			h.log.Error("Failed to lock user for security settings", "error_class", "lookup")
+			c.JSON(http.StatusInternalServerError, gin.H{"error_code": "lookup_failed"})
+		}
 		return false
+	}
+	if req.TrustSSOSecurity != nil && *req.TrustSSOSecurity && !currentTrust {
+		e := h.verifySSOStepUpLockedTx(ctx, tx, userID, lockedSubject, attempt, req.CurrentPassphrase, req.MFACode, stepup.PurposeSSOTrustEnable)
+		if e != nil {
+			e.Write(c)
+			return false
+		}
 	}
 
 	if req.PasswordLoginDisabled != nil && *req.PasswordLoginDisabled { // pragma: allowlist secret
@@ -3376,6 +3479,27 @@ func (h *Handler) applySecurityPatch(c *gin.Context, userID string, req patchSec
 func (h *Handler) DeleteSSOIdentity(c *gin.Context) {
 	userID := c.GetString("user_id")
 	provider := c.Param("provider")
+	var req ssoStepUpRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
+	if req.StepUpToken != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
+	if !h.chargeDangerousMFA(c, userID, req.MFACode) {
+		return
+	}
+	attempt, ok := h.reserveSSOStepUp(c, userID, req.Password)
+	if !ok {
+		return
+	}
+	defer func() {
+		if err := attempt.Settle(c.Request.Context()); err != nil {
+			h.log.Warn("Could not settle SSO unlink password attempt", "error", err)
+		}
+	}()
 
 	ctx := c.Request.Context()
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -3390,16 +3514,14 @@ func (h *Handler) DeleteSSOIdentity(c *gin.Context) {
 		}
 	}()
 
-	// Acquire the account lock before the child count takes its snapshot.
-	var pld bool
-	err = tx.QueryRowContext(ctx,
-		`SELECT password_login_disabled FROM users WHERE id = $1 FOR UPDATE`, userID,
-	).Scan(&pld)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error_code": "user_not_found"})
+	// The factor proof and the authority check share this transaction's actor
+	// lock, so credentials superseded while it waited cannot unlink an identity.
+	if e := h.verifySSOStepUpTx(ctx, tx, userID, attempt, req.Password, req.MFACode, stepup.PurposeSSOUnlink, middleware.TokenCredentialEpoch(c)); e != nil {
+		e.Write(c)
 		return
 	}
-	if err != nil {
+	var pld bool
+	if err = tx.QueryRowContext(ctx, `SELECT password_login_disabled FROM users WHERE id = $1`, userID).Scan(&pld); err != nil {
 		h.log.Error("Failed to evaluate lockout check for SSO identity delete", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "lookup_failed"})
 		return
@@ -3448,6 +3570,9 @@ func (h *Handler) DeleteSSOIdentity(c *gin.Context) {
 		h.log.Error("Failed to commit SSO identity delete", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "delete_failed"})
 		return
+	}
+	if req.MFACode != "" {
+		h.clearDangerousMFA(c, userID)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

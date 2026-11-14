@@ -4,7 +4,7 @@ package mfa
 // RS11). Tokens come from a real ceremony (ipMintInlineToken), never from a
 // seeded key, so these tests do not depend on how a token is stored.
 //
-// Levels: the fourteen MFA-settings consumers are driven at the HANDLER; the
+// Levels: the fifteen MFA-settings consumers are driven at the HANDLER; the
 // twenty-eight consumers outside this package are driven through the entry point each
 // calls with the real verifier (stepup.VerifyMFAFactor/Tx, mfaenforce.ConfirmTx,
 // or VerifyCode/VerifyCodeTx directly), because their handlers live in packages
@@ -61,16 +61,22 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString([]byte("ip-overwrite-recovery-key-32-byt"))
 	salt := base64.StdEncoding.EncodeToString([]byte("ip-overwrite-salt-16"))
 	routes := []struct {
-		purpose stepup.Purpose
-		method  string
-		body    string // %[1]q = password, %[2]q = mfa code
-		param   string
-		prepare func(t *testing.T, userID string)
-		handler func(*gin.Context)
+		purpose  stepup.Purpose
+		method   string
+		body     string // %[1]q = password, %[2]q = mfa code
+		param    string
+		paramFor func(t *testing.T, userID string) string
+		prepare  func(t *testing.T, userID string)
+		handler  func(*gin.Context)
 	}{
 		{purpose: stepup.PurposeTOTPSetup, method: http.MethodPost, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.TOTPSetup},
 		{purpose: stepup.PurposeTOTPDisable, method: http.MethodPost, body: `{"password":%[1]q,"code":%[2]q}`, handler: h.TOTPDisable,
 			prepare: func(t *testing.T, userID string) { iuEnrollTOTP(t, db, kr, userID) }},
+		{purpose: stepup.PurposeWebAuthnDelete, method: http.MethodDelete, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.WebAuthnDeleteCredential,
+			prepare: func(t *testing.T, userID string) { iuEnrollTOTP(t, db, kr, userID) },
+			paramFor: func(t *testing.T, userID string) string {
+				return iuWebAuthnCredentialID(t, db, userID)
+			}},
 		{purpose: stepup.PurposeWebAuthnRegister, method: http.MethodPost, body: `{"password":%[1]q,"mfa_code":%[2]q,"credential_name":"k","credential_type":"hardware"}`, handler: h.WebAuthnRegisterBegin},
 		{purpose: stepup.PurposeRecoveryOnlySet, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"methods":[]}`, handler: h.SetRecoveryOnly},
 		{purpose: stepup.PurposeRecoveryHardenedSet, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"enabled":true}`, handler: h.SetRecoveryHardened},
@@ -89,7 +95,7 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 		{purpose: stepup.PurposeRecoveryCircleUpsert, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"threshold_k":2,"total_shares_n":3,"shares":[]}`, handler: h.UpsertRecoveryCircle},
 		{purpose: stepup.PurposeRecoveryCircleDelete, method: http.MethodDelete, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.DeleteRecoveryCircle},
 	}
-	require.Len(t, routes, 14, "every MFA-settings consumer, including TOTPDisable")
+	require.Len(t, routes, 15, "every MFA-settings consumer, including factor removal")
 
 	for _, r := range routes {
 		t.Run(string(r.purpose), func(t *testing.T) {
@@ -100,8 +106,12 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 			}
 			drive := func(token string) (int, map[string]interface{}) {
 				c, w := iuGinContext(r.method, "/api/v1/mfa/x", fmt.Sprintf(r.body, iuPassword, token), userID, "")
-				if r.param != "" {
-					c.Params = gin.Params{{Key: "id", Value: r.param}}
+				param := r.param
+				if r.paramFor != nil {
+					param = r.paramFor(t, userID)
+				}
+				if param != "" {
+					c.Params = gin.Params{{Key: "id", Value: param}}
 				}
 				r.handler(c)
 				return w.Code, iuBody(t, w)
@@ -193,6 +203,7 @@ func TestInlinePurpose_EveryOtherConsumerPurpose(t *testing.T) {
 		{stepup.PurposeSessionsRevokeAll, "VerifyCode (sessions.authenticateForRevoke)", pool},
 		{stepup.PurposeRevocationModeSet, "VerifyCode (sessions.authenticateForRevoke)", pool},
 		{stepup.PurposeOwnershipTransfer, "VerifyCode (ownership.verifyMFA)", pool},
+		{stepup.PurposeOwnershipTransferConfirm, "stepup.VerifyMFAFactorTx (ownership.executeConfirmedTransfer)", factorTx},
 		{stepup.PurposeOwnershipReverse, "VerifyCode (ownership.verifyMFA)", pool},
 		{stepup.PurposeDMPurge, "stepup.VerifyMFAFactor (dm.verifyPurgeStepUp)", factor},
 		{stepup.PurposeDMClear, "stepup.VerifyMFAFactorTx (dm.verifyClearStepUp)", factorTx},
@@ -238,7 +249,7 @@ func TestInlinePurpose_EveryOtherConsumerPurpose(t *testing.T) {
 // route passing another route's purpose: that is pinned at the handler, as in
 // internal/users/key_reset_inline_purpose_test.go.
 func TestInlinePurpose_TablesCoverTheClosedSet(t *testing.T) {
-	require.Len(t, stepup.Purposes(), 14+28)
+	require.Len(t, stepup.Purposes(), 14+33)
 }
 
 // TestInlinePurpose_ProductionVerifierCallerCensus makes a new verifier caller
@@ -297,17 +308,20 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 
 	want := []string{
 		"dm/purge.go:verifyPurgeStepUpWithMFA:VerifyMFAFactor",
-		"mfa/handlers.go:verifyAndDeleteTOTPTx:VerifyCodeTx",
+		"mfa/factor_removal_stepup.go:requireFactorRemovalStepUpTx:VerifyMFAFactorTx",
 		"mfa/settings_stepup.go:requirePasswordAndMFA:VerifyMFAFactor",
 		"mfa/settings_stepup.go:verifyMFASettingsStepUpTx:VerifyMFAFactorTx",
 		"mfaenforce/mfaenforce.go:ConfirmTx:VerifyMFAFactorTx",
+		"ownership/handlers.go:executeConfirmedTransfer:VerifyMFAFactorTx",
 		"ownership/handlers.go:verifyMFA:VerifyCode",
 		"sessions/handlers.go:authenticateForRevokeWithMFA:VerifyCode",
 		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx",
 		"stepup/stepup.go:VerifyMFAFactor:VerifyCode",
 		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx",
+		"users/delete_account.go:verifyErasureStepUpTx:VerifyMFAFactorTx",
 		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx",
 		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx",
+		"users/handlers.go:verifySSOStepUpLockedTx:VerifyMFAFactorTx",
 	}
 	sort.Strings(want)
 	require.Equal(t, want, got)

@@ -258,7 +258,7 @@ func TestReverseTransferMFARequired(t *testing.T) {
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
-	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{keyPassword: testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Enable MFA for original owner
@@ -293,7 +293,7 @@ func TestReverseTransferMFAValidCode(t *testing.T) {
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
-	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{keyPassword: testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Enable MFA for original owner
@@ -331,7 +331,7 @@ func TestReverseTransferOriginalOwnerLeftServer(t *testing.T) {
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
-	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{keyPassword: testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Remove original owner from server_members (simulating they left)
@@ -384,7 +384,7 @@ func TestConfirmTransferFromUserMembershipMissing(t *testing.T) {
 	// removal only affects the role swap in executeTransfer.
 
 	// Confirm — should fail because from_user membership is missing
-	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{keyPassword: testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusConflict, w.Code)
 
 	var body map[string]interface{}
@@ -410,7 +410,7 @@ func TestReverseTransferRecipientLeftServer(t *testing.T) {
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
-	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{keyPassword: testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Get reversal token
