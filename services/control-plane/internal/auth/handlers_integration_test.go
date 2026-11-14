@@ -924,6 +924,84 @@ func TestResendCooldown(t *testing.T) {
 	require.Equal(t, "cooldown_active", body.Code)
 }
 
+func TestRegistrationAttemptsSurviveCodeRotation(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	wrong := map[string]string{"pending_id": reg.PendingID, "code": "000000"} //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	var body struct {
+		AttemptsRemaining int `json:"attempts_remaining"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, 2, body.AttemptsRemaining)
+}
+
+func TestRegistrationAttemptsSurviveChangeEmail(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	wrong := map[string]string{"pending_id": reg.PendingID, "code": "000000"} //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{
+		"pending_id": reg.PendingID,
+		"new_email":  "attempts-survive-change@example.com",
+	}, nil).Code)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	var body struct {
+		AttemptsRemaining int `json:"attempts_remaining"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, 2, body.AttemptsRemaining)
+}
+
+func TestRegistrationAttemptKeyOutlivesOriginalCode(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	wrong := map[string]string{"pending_id": reg.PendingID, "code": "000000"} //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+
+	ttl, err := ts.Redis.TTL(context.Background(), "email_verify_attempts:"+reg.PendingID).Result()
+	require.NoError(t, err)
+	assert.Greater(t, ttl, 10*time.Minute, "attempt key must live through the pending row, not the original code")
+	require.NoError(t, ts.Redis.Del(context.Background(), "email_verify:"+reg.PendingID, "test_only:"+reg.PendingID).Err())
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil)
+	require.Equal(t, http.StatusGone, w.Code)
+	exists, err := ts.Redis.Exists(context.Background(), "email_verify_attempts:"+reg.PendingID).Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), exists, "expired-code handling must not reset a live pending registration budget")
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	var body struct {
+		AttemptsRemaining int `json:"attempts_remaining"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, 2, body.AttemptsRemaining)
+}
+
 // --- Change Email Tests ---
 
 func TestChangeEmailMidRegistration(t *testing.T) {
@@ -953,7 +1031,70 @@ func TestChangeEmailMidRegistration(t *testing.T) {
 		`SELECT resend_count FROM pending_registrations WHERE id = $1`,
 		reg.PendingID).Scan(&count)
 	require.NoError(t, err)
-	require.Equal(t, 0, count)
+	require.Equal(t, 1, count)
+}
+
+func TestChangeEmailSharesResendCooldown(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{
+		"pending_id": reg.PendingID,
+		"new_email":  "cooldown-shared@example.com",
+	}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "cooldown_active", body.Code)
+}
+
+func TestChangeEmailAndResendShareMaxResends(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	change := func(email string) {
+		require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{
+			"pending_id": reg.PendingID,
+			"new_email":  email,
+		}, nil).Code)
+	}
+	allowNext := func() {
+		_, err := ts.DB.Exec(`UPDATE pending_registrations SET last_resend_at = NOW() - INTERVAL '3 minutes' WHERE id = $1`, reg.PendingID)
+		require.NoError(t, err)
+	}
+
+	change("shared-cap-one@example.com")
+	allowNext()
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+	allowNext()
+	change("shared-cap-two@example.com")
+	allowNext()
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+	allowNext()
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{
+		"pending_id": reg.PendingID,
+		"new_email":  "shared-cap-three@example.com",
+	}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "resends_exhausted", body.Code)
 }
 
 func TestChangeRegistrationEmailRefusesFreshCodeInsideAdvertisedWindow(t *testing.T) {

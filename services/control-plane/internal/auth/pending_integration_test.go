@@ -191,6 +191,41 @@ func TestUpdateEmail_NormalizesCase(t *testing.T) {
 	assert.Equal(t, "mixed@test.concord.chat", storedEmail)
 }
 
+func TestRevertResendIfCurrentPreservesLaterReservation(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	repo := auth.NewPendingRepo(ts.DB)
+	ctx := context.Background()
+	id, _, _, err := repo.InsertOrTakeover(ctx,
+		insertPendingParams(t, "revert-current@test.concord.chat", "revertcurrent", "TestPassword123!"),
+		"TestPassword123!",
+	)
+	require.NoError(t, err)
+	count, _, err := repo.IncrementResend(ctx, id)
+	require.NoError(t, err)
+	var reservedAt time.Time
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT last_resend_at FROM pending_registrations WHERE id = $1`, id,
+	).Scan(&reservedAt))
+
+	_, err = ts.DB.ExecContext(ctx,
+		`UPDATE pending_registrations
+		    SET resend_count = resend_count + 1, last_resend_at = NOW() + INTERVAL '3 minutes'
+		  WHERE id = $1`, id,
+	)
+	require.NoError(t, err)
+	reverted, err := repo.RevertResendIfCurrent(ctx, id, count, reservedAt)
+	require.NoError(t, err)
+	require.False(t, reverted)
+
+	var storedCount int
+	var storedAt time.Time
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT resend_count, last_resend_at FROM pending_registrations WHERE id = $1`, id,
+	).Scan(&storedCount, &storedAt))
+	assert.Equal(t, count+1, storedCount)
+	assert.True(t, storedAt.After(reservedAt))
+}
+
 // TestInsertOrTakeover_UsesPolicyTTL regresses Copilot comment 3104406713:
 // expires_at must be derived from PendingRegistrationTTL, not a hardcoded
 // `NOW() + INTERVAL '15 minutes'`. A few seconds of clock skew tolerance is

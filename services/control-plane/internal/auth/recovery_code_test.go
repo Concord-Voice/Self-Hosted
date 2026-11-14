@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
@@ -139,4 +142,40 @@ func TestConsumeRecoveryCodeFailsClosedAfterCommit(t *testing.T) {
 	require.ErrorIs(t, err, commitErr)
 	require.Nil(t, record)
 	require.False(t, mini.Exists(key))
+}
+
+func TestDeleteRecoveryRecordIfUnchangedPreservesReplacement(t *testing.T) {
+	ctx := context.Background()
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	h := &Handler{redis: rdb}
+	key := recoveryRedisKey("replace-after-send-failure@test.local")
+
+	require.NoError(t, rdb.Set(ctx, key, "replacement", time.Minute).Err())
+	require.NoError(t, h.deleteRecoveryRecordIfUnchanged(ctx, key, "installed"))
+	stored, err := rdb.Get(ctx, key).Result()
+	require.NoError(t, err)
+	require.Equal(t, "replacement", stored)
+}
+
+func TestRecoveryFailureBudgetRoundsPTTLUp(t *testing.T) {
+	ctx := context.Background()
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	h := &Handler{redis: rdb}
+	key := recoveryFailureKeyPrefix + "retry-boundary@test.local"
+
+	for range recoveryFailureLimit {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		require.True(t, h.allowRecoveryFailureAttempt(ctx, c, key))
+	}
+	mini.FastForward(500 * time.Millisecond)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	require.False(t, h.allowRecoveryFailureAttempt(ctx, c, key))
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Equal(t, "86400", w.Header().Get("Retry-After"))
 }
