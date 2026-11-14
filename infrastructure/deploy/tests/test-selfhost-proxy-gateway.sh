@@ -4,6 +4,30 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 FIX="$(mktemp -d)"
 trap 'rm -rf "$FIX"' EXIT
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  # The protected cache-cold builder supplies only the control-plane stub.
+  compose_proxy_routes() {
+    env -i PATH="$PATH" HOME="${HOME:-/tmp}" \
+      POSTGRES_PASSWORD=ci-stub REDIS_PASSWORD=ci-stub JWT_SECRET=ci-stub \
+      TURN_SECRET=ci-stub MINIO_ROOT_USER=ci-stub MINIO_ROOT_PASSWORD=ci-stub \
+      MFA_ENCRYPTION_KEY=ci-stub DOMAIN=ci-stub.invalid SMTP_HOST=ci-stub.invalid \
+      SMTP_FROM=ci-stub@invalid.example PUBLIC_IP=127.0.0.1 \
+      FEEDBACK_PAT=ci-stub FEEDBACK_REPO=ci-stub/repo \
+      WS_EVENT_BUDGET_ENABLED=true WS_EVENT_BUDGET_SCALE_PERCENT=100 \
+      "$@" docker compose -p concord --env-file /dev/null \
+      -f "$ROOT/docker-compose.yml" -f "$ROOT/docker-compose.production.yml" \
+      --profile services config --format json \
+      | python3 -c 'import json,sys; model=json.load(sys.stdin); print(model["services"]["control-plane"]["environment"]["TRUSTED_PROXY_CIDRS"], model["services"]["media-plane"]["environment"]["TRUSTED_PROXIES"])'
+  }
+  [[ "$(compose_proxy_routes TRUSTED_PROXY_CIDRS=10.0.0.0/8)" == '10.0.0.0/8 10.0.0.0/8' ]]
+  [[ "$(compose_proxy_routes TRUSTED_PROXY_CIDRS=172.28.0.1/32 TRUSTED_PROXIES=172.28.0.1/32)" == '172.28.0.1/32 172.28.0.1/32' ]]
+  if compose_proxy_routes >"$FIX/empty-proxy-render" 2>"$FIX/empty-proxy-error"; then
+    echo 'FAIL: production Compose accepted missing proxy trust' >&2
+    exit 1
+  fi
+  grep -q 'required variable TRUSTED_PROXY_CIDRS' "$FIX/empty-proxy-error"
+  printf '%s\n' 'PASS: production Compose uses the control-plane stub only for config-only builds and fails when both proxy values are absent'
+fi
 printf 'TRUSTED_PROXY_CIDRS="172.16.0.0/12,10.0.0.0/8"\nSECRET=untouched\n' >"$FIX/.env"
 chmod 600 "$FIX/.env"
 original_owner="$(stat -f '%u:%g' "$FIX/.env" 2>/dev/null || stat -c '%u:%g' "$FIX/.env")"

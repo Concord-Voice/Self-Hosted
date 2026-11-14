@@ -250,7 +250,9 @@ services:
       NUM_WORKERS: "3"
       MEDIASOUP_ENABLE_TCP: "false"
       MEDIASOUP_SHARED_WEBRTC_SERVER: "false"
-      TRUSTED_PROXIES: "${TRUSTED_PROXIES:?TRUSTED_PROXIES must name the exact observed nginx peer}"
+      # A config-only build may have only the control-plane stub. Runtime
+      # validation still rejects empty or broad peers; self-host up pins both.
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-${TRUSTED_PROXY_CIDRS:?TRUSTED_PROXY_CIDRS must name the exact observed nginx peer}}"
     ports:
       - "40000-41999:40000-41999/udp"
     volumes:
