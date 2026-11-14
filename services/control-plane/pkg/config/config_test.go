@@ -1884,7 +1884,24 @@ func TestValidateAttestation_WarnsOnNameFormSubjectPrefix(t *testing.T) {
 		assert.Contains(t, out, marker)
 		assert.NotContains(t, out, "some-operator")
 	})
+	t.Run("name form with a later @ warns", func(t *testing.T) {
+		// The shape check reads only the start, so this is a valid name-form
+		// prefix; an "@" after it must not suppress the warning.
+		assert.Contains(t, run(t, "repo:some-operator/their.fork_name:ref:refs/heads/release@2026"), marker)
+	})
 	t.Run("immutable form does not warn", func(t *testing.T) {
 		assert.NotContains(t, run(t, "repo:some-operator@123/their.fork_name@456:"), marker)
 	})
+}
+
+// TestOIDCSubjectPrefixShapeMatchesVerifier keeps this package's shape regex
+// identical to subjectPrefixShape in internal/attestation, which refuses to
+// construct a verifier with a prefix this package would have accepted.
+func TestOIDCSubjectPrefixShapeMatchesVerifier(t *testing.T) {
+	// Package directory is services/control-plane/pkg/config.
+	src, err := os.ReadFile(filepath.Join("..", "..", "internal", "attestation", "oidc.go"))
+	require.NoError(t, err)
+	m := regexp.MustCompile("(?m)^var subjectPrefixShape = regexp\\.MustCompile\\(`([^`]*)`\\)$").FindSubmatch(src)
+	require.NotNil(t, m, "subjectPrefixShape declaration not found in oidc.go")
+	assert.Equal(t, oidcSubjectPrefixShape.String(), string(m[1]))
 }

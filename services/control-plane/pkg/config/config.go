@@ -1504,6 +1504,10 @@ func (c *Config) validateProduction() error {
 // internal/attestation/oidc.go.
 var oidcSubjectPrefixShape = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*|@[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*@[1-9][0-9]*):`)
 
+// oidcImmutableSubjectPrefix matches a prefix that starts with the immutable
+// owner@id/repo@id form, the immutable branch of oidcSubjectPrefixShape.
+var oidcImmutableSubjectPrefix = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*@[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*@[1-9][0-9]*:`)
+
 func (c *Config) validateAttestation() error {
 	if err := c.validateAppAttest(); err != nil {
 		return err
@@ -1520,12 +1524,14 @@ func (c *Config) validateAttestation() error {
 	if !oidcSubjectPrefixShape.MatchString(c.OIDCSubjectPrefix) {
 		return fmt.Errorf("ATTESTATION_OIDC_SUBJECT_PREFIX must start with %q — a fully-qualified %q or %q prefix (GitHub OIDC sub claim shape), got %q", "repo:", "repo:<owner>/<repo>:", "repo:<owner>@<id>/<repo>@<id>:", c.OIDCSubjectPrefix)
 	}
-	// The shape is valid here, so no "@" means the name-only form. It binds to
-	// names, which can be re-registered after a rename or deletion; the
-	// immutable form binds to ids, which cannot. Advisory: a repository without
+	// A prefix that does not start with the immutable form is the name-only
+	// form. Test the start, not for any "@": the shape check reads only the
+	// start, so a name-only prefix may carry an "@" later (a ref such as
+	// "release@2026") and must still warn. Name binding is open to reuse after
+	// a rename or deletion; id binding is not. Advisory: a repository without
 	// immutable subject claims has no other form to configure. The value is
 	// not logged.
-	if !strings.Contains(c.OIDCSubjectPrefix, "@") {
+	if !oidcImmutableSubjectPrefix.MatchString(c.OIDCSubjectPrefix) {
 		log.Printf("WARN: ATTESTATION_OIDC_SUBJECT_PREFIX uses the name-only form repo:<owner>/<repo>:, which is open to organization or repository name reuse and matches no token from a repository that issues immutable subject claims; prefer the immutable form repo:<owner>@<id>/<repo>@<id>: when the repository issues them")
 	}
 	if c.Environment == "production" && c.OIDCIssuer != "https://token.actions.githubusercontent.com" {

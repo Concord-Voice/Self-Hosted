@@ -11,8 +11,9 @@ import (
 )
 
 // subjectPrefixShape requires a fully-qualified repository SubjectPrefix.
-// Defence-in-depth: pkg/config enforces the same shape at startup, but the verifier must refuse to construct with an unbindable
-// prefix even when built outside that path. The prefix is the sole
+// Defence-in-depth: pkg/config enforces the same shape at startup, but the
+// verifier must refuse to construct with an unbindable prefix even when built
+// outside that path. The prefix is the sole
 // repository binding — matchWorkflow deliberately ignores the owner/repo
 // segment — so an under-qualified value silently admits any repo's token
 // (#2021).
