@@ -46,7 +46,7 @@ docker() {
   printf '%s\n' "$*" >>"$calls"
   case "$*" in
     'compose --env-file '* )
-      printf 'CIDRS=%s PROXIES=%s\n' "${TRUSTED_PROXY_CIDRS-<unset>}" "${TRUSTED_PROXIES-<unset>}" >"$FIX/storage-compose-env"
+      printf 'CIDRS=%s PROXIES=%s\n' "${TRUSTED_PROXY_CIDRS-UNSET}" "${TRUSTED_PROXIES-UNSET}" >"$FIX/storage-compose-env"
       case "$*" in
         *' config --format json') printf '{"name":"fixture"}\n' ;;
         *' up') : ;;
@@ -105,7 +105,7 @@ selfhost_proxy_compose() {
   selfhost_storage_compose config --format json >/dev/null
   grep -qFx 'CIDRS=127.0.0.1/32 PROXIES=127.0.0.1/32' "$FIX/storage-compose-env"
   selfhost_storage_compose up >/dev/null
-  grep -qFx 'CIDRS=<unset> PROXIES=<unset>' "$FIX/storage-compose-env"
+  grep -qFx 'CIDRS=UNSET PROXIES=UNSET' "$FIX/storage-compose-env"
 )
 printf '%s\n' 'PASS: legacy config render uses only transient exact placeholders'
 
