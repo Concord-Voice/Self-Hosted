@@ -218,9 +218,17 @@ REGISTRY_URL = re.compile(r"^https://(?P<host>[A-Za-z0-9.-]+)/?$")
 # Keys a tracked .npmrc may set. Everything else fails: proxies, TLS settings,
 # `//host/:` auth, replace-registry-host, userconfig/globalconfig and any
 # key npm adds later all change where or how packages are fetched, and a
-# deny-list cannot keep up. Add a key here, in a reviewed diff, if it is needed.
-NPMRC_KEYS = {"save-exact", "save-prefix", "engine-strict", "fund", "audit",
-              "package-lock", "ignore-scripts", "min-release-age", "legacy-peer-deps"}
+# deny-list cannot keep up. Each allowed key also has its allowed values:
+# package-lock=false drops the lockfile, ignore-scripts=false runs install
+# scripts, and a low min-release-age lets brand-new releases in.
+# Add a key here, in a reviewed diff, if it is needed.
+BOOL = {"true", "false"}
+NPMRC_KEYS = {
+    "save-exact": BOOL, "engine-strict": BOOL, "fund": BOOL, "legacy-peer-deps": BOOL,
+    "save-prefix": {"^", "~", "''", '""'},
+    "package-lock": {"true"}, "ignore-scripts": {"true"}, "audit": {"true"},
+    "min-release-age": {str(n) for n in range(7, 366)},
+}
 NPMRC_KEY = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*:)?[a-z][a-z0-9-]*$")
 
 
@@ -254,6 +262,8 @@ def npmrc_violations(path, hosts):
                 out.append(f"{path}:{number}: {key} = {value} is not an approved npm registry")
         elif key not in NPMRC_KEYS:
             out.append(f"{path}:{number}: {key} is not an allowed .npmrc setting")
+        elif value not in NPMRC_KEYS[key]:
+            out.append(f"{path}:{number}: {key} = {value} is not an allowed value")
     return out
 
 

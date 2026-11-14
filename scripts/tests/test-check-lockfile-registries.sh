@@ -114,11 +114,12 @@ printf 'registry=${EVIL_REGISTRY}\n' > "$WORK/var.npmrc"
 expect '.npmrc registry from a variable fails' 1 'registry = \$\{EVIL_REGISTRY\}' --npmrc "$WORK/var.npmrc"
 for line in 'https-proxy=http://proxy.example.invalid' 'strict-ssl=false' 'replace-registry-host=always' \
             '//npm.example.invalid/:_authToken=x' 'userconfig=/tmp/x' '"registry"=https://npm.example.invalid/' \
-            '[section]' 'registry[]=https://npm.example.invalid/'; do
+            '[section]' 'registry[]=https://npm.example.invalid/' \
+            'package-lock=false' 'ignore-scripts=false' 'audit=false' 'min-release-age=0'; do
   printf '%s\n' "$line" > "$WORK/k.npmrc"
   expect ".npmrc line fails: $line" 1 'k\.npmrc:1: ' --npmrc "$WORK/k.npmrc"
 done
-printf 'registry=https://registry.npmjs.org/\nsave-exact=true\n' > "$WORK/ok.npmrc"
+printf 'registry=https://registry.npmjs.org/\nsave-exact=true\nignore-scripts=true\nmin-release-age=7\n' > "$WORK/ok.npmrc"
 expect '.npmrc with the approved registry passes' 0 '^ok:' --npmrc "$WORK/ok.npmrc"
 
 # go.work overrides go.mod.
