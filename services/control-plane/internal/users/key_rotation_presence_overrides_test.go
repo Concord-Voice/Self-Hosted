@@ -484,7 +484,7 @@ func TestChangePasswordMFAReauthenticationUsesLockedTransactionConnection(t *tes
 	mfaRing, err := mfa.ParseKeyring(strings.Repeat("00", 32), 1, "")
 	require.NoError(t, err)
 	rdb, redisCleanup := testhelpers.SetupTestRedis(t)
-	defer redisCleanup()
+	t.Cleanup(redisCleanup)
 	mfaHandler := mfa.NewHandler(
 		db,
 		rdb,

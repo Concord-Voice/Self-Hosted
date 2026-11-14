@@ -220,7 +220,7 @@ func TestSecurityFallback_SequentialSaaSChanges(t *testing.T) {
 				}, testhelpers.AuthHeaders(user.AccessToken))
 			}
 			unlink := func() *httptest.ResponseRecorder {
-				return ts.DoRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+				return ts.DoRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", map[string]any{"password": user.Password}, testhelpers.AuthHeaders(user.AccessToken))
 			}
 			first, second := patch, unlink
 			if tc.unlinkFirst {
@@ -292,6 +292,7 @@ func TestSecurityFallback_DatabaseFailurePreservesState(t *testing.T) {
 					c.Request = httptest.NewRequest(http.MethodPatch, urlUsersMeSecurity, strings.NewReader(
 						`{"password_login_disabled":true,"trust_sso_security":true,"current_passphrase":"TestPassword123!"}`))
 					c.Request.Header.Set("Content-Type", "application/json")
+					attachAccessIdentity(t, c, user.AccessToken)
 					h.PatchSecurity(c)
 				}
 				return w
