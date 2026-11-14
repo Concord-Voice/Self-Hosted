@@ -97,7 +97,7 @@ Android.
 ### Security
 
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
-- **Self-hosting:** The Host Agent now requires a fresh security-key approval for every server write, including start and backup. It binds that approval to the exact action, keeps root-owned authorizer records, and records the outcome before a job starts.
+- **Self-hosting:** The Host Agent now requires a fresh security-key approval for every server write, including start and backup. It binds that approval to the exact action, keeps root-owned authorizer records, and records the outcome before a job starts ([#295](https://github.com/Concord-Voice/Self-Hosted/pull/295)).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
 - **Accounts:** **BREAKING** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. Wrong passwords there, and when changing your password, resetting your encryption keys or changing your sign-in security settings, now count toward the same lockout as sign-in: five lock the account. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401, a locked account gets 423 `account_locked`, and an account with no password gets 400 `no_password`.
