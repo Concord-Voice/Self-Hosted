@@ -42,9 +42,11 @@ fi
 PROGRAM='
 def ver: (capture("^(?<a>[0-9]+)\\.(?<b>[0-9]+)\\.(?<c>[0-9]+)(-(?<p>[0-9A-Za-z.-]+))?$")
           // error("not a semver version: \(.)"))
-  | [(.a | tonumber), (.b | tonumber), (.c | tonumber), (if .p then 0 else 1 end), (.p // "")];
+  | [(.a | tonumber), (.b | tonumber), (.c | tonumber), (if .p then 0 else 1 end),
+     ((.p // "") | split(".") | map(tonumber? // .))];
 def show: map("\(.path) \(.v)") | join(", ");
-[ .packages | to_entries[]
+(if length != 1 then error("expected one JSON document, got \(length)") else .[0] end)
+| [ .packages | to_entries[]
   | select(.key | test("(^|/)node_modules/(vitest|@vitest/coverage-istanbul)$"))
   | select(.value.link != true)
   | {path: .key, pkg: (.key | sub("^.*node_modules/"; "")), v: (.value.version // "")} ] as $c
@@ -69,7 +71,7 @@ for lock in "${locks[@]}"; do
     status=1
     continue
   fi
-  if ! out=$(jq -r "$PROGRAM" "$lock" 2>&1); then
+  if ! out=$(jq -r -s "$PROGRAM" "$lock" 2>&1); then
     echo "::error file=$lock::vitest pair: cannot read $lock: $out"
     status=1
     continue
@@ -93,14 +95,18 @@ for lock in "${locks[@]}"; do
       echo "::error file=$lock::vitest pair out of step in $root: the newest copy is $top; these copies are behind:"
       while IFS=$'\t' read -r pkg path v; do
         [ -n "$pkg" ] || continue
-        # A copy under a workspace (packages/x/node_modules/...) is fixed in
-        # that workspace; a hoisted copy is fixed at the root.
-        ws=""
+        # A hoisted copy is fixed at the root, a copy under a workspace
+        # (packages/x/node_modules/...) in that workspace. A copy nested under
+        # another package moves only when that package or an override does.
         case "$path" in
-          node_modules/*) ;;
-          *) ws=" -w ${path%%/node_modules/*}" ;;
+          node_modules/*/node_modules/*)
+            parent=${path%/node_modules/*}
+            echo "  $path is $v. Fix: in $root, update ${parent#node_modules/} so it takes $pkg@$top, or add an \"overrides\" entry for $pkg." ;;
+          node_modules/*)
+            echo "  $path is $v. Fix: in $root, run 'npm install --save-dev --ignore-scripts $pkg@$top'." ;;
+          *)
+            echo "  $path is $v. Fix: in $root, run 'npm install --save-dev --ignore-scripts $pkg@$top -w ${path%%/node_modules/*}'." ;;
         esac
-        echo "  $path is $v. Fix: in $root, run 'npm install --save-dev --ignore-scripts $pkg@$top$ws'."
       done < <(tail -n +2 <<<"$rest")
       echo "  Commit the changed package.json and package-lock.json files on this branch, or close this PR and open one that bumps vitest and @vitest/coverage-istanbul together."
       status=1

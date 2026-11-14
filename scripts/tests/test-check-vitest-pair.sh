@@ -55,6 +55,12 @@ variant numeric "$VITEST.version = \"5.10.0\" | $PLUGIN.version = \"5.9.0\""
 expect 'versions compare numerically, not as text' 1 'newest copy is 5\.10\.0.*' "$WORK/numeric/package-lock.json"
 variant pre "$VITEST.version = \"5.1.0-beta.1\""
 expect 'a release is ahead of its prerelease' 1 'node_modules/vitest is 5\.1\.0-beta\.1\. Fix: .*vitest@5\.1\.0' "$WORK/pre/package-lock.json"
+variant prenum "$VITEST.version = \"5.1.0-beta.10\" | $PLUGIN.version = \"5.1.0-beta.9\""
+expect 'prerelease numbers compare as numbers' 1 'newest copy is 5\.1\.0-beta\.10;' "$WORK/prenum/package-lock.json"
+variant nested ".packages[\"node_modules/foo/node_modules/vitest\"] = {version: \"5.0.5\"}"
+expect 'a copy nested under a dependency names that dependency' 1 'update foo so it takes vitest@5\.1\.0, or add an "overrides" entry' "$WORK/nested/package-lock.json"
+mkdir -p "$WORK/concat" && cat "$FIX/matched-lock.json" "$FIX/split-lock.json" > "$WORK/concat/package-lock.json"
+expect 'a file with two JSON documents fails closed' 1 'expected one JSON document, got 2' "$WORK/concat/package-lock.json"
 
 # Nested copies count, and get the workspace flag in the fix.
 variant nested '.packages["packages/protocol/node_modules/vitest"] = {"version": "4.9.0", "dev": true}'
