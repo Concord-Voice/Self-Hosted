@@ -660,3 +660,112 @@ func TestOIDCVerifier_UnpinnedVerifierAcceptsES256(t *testing.T) {
 	require.NoError(t, err,
 		"unpinned verifier must accept ES256 — this is the control proving the pinned rejection is non-vacuous")
 }
+
+// ── Immutable owner@id/repo@id subject ─────────────────────
+
+const (
+	immutableSubjectPrefix = "repo:Concord-Voice@264583090/Hosted@1158152129:"
+	immutableSubject       = immutableSubjectPrefix + "ref:refs/heads/main"
+)
+
+// TestValidateOIDCConfig_SubjectPrefixShape pins the verifier's own shape
+// guard: the immutable form and the name-only form are accepted, and every
+// under-qualified or half-immutable prefix is refused before any network call.
+func TestValidateOIDCConfig_SubjectPrefixShape(t *testing.T) {
+	base := oidcAlgPinConfig("https://token.actions.githubusercontent.com")
+	cases := []struct {
+		prefix string
+		ok     bool
+	}{
+		{immutableSubjectPrefix, true},
+		{"repo:Concord-Voice/Hosted:", true},
+		{"repo:some-operator/their.fork_name:", true},
+		{"repo:", false},
+		{"repo:Concord-Voice", false},
+		{"repo:Concord-Voice/Hosted", false},
+		{"repo:Concord-Voice@264583090:", false},
+		{"repo:Concord-Voice@264583090/", false},
+		{"repo:Concord-Voice@264583090/Hosted@1158152129", false},
+		{"repo:Concord-Voice@264583090/Hosted:", false},
+		{"repo:Concord-Voice/Hosted@1158152129:", false},
+		{"repo:Concord-Voice@abc/Hosted@1158152129:", false},
+		{"repo:Concord-Voice@264583090/Hosted@:", false},
+		{"repo:Concord-Voice@0264583090/Hosted@1158152129:", false},
+		{"repo:Concord-Voice@264583090/Hosted@01158152129:", false},
+		{"repo:Concord-Voice@264583090/Hosted@abc:", false},
+		{"xrepo:Concord-Voice@264583090/Hosted@1158152129:", false},
+		{"evil:repo:Concord-Voice/Hosted:", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.prefix, func(t *testing.T) {
+			cfg := base
+			cfg.SubjectPrefix = tc.prefix
+			err := validateOIDCConfig(cfg)
+			if tc.ok {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, "SubjectPrefix")
+		})
+	}
+}
+
+// TestOIDCVerifier_ImmutableSubjectPrefix drives signed tokens through the
+// production constructor with the immutable prefix configured. The matching
+// subject verifies; every near-miss is refused with ErrOIDCInvalidSubject and
+// nothing else, so the refusal is the prefix check and not a fixture defect.
+func TestOIDCVerifier_ImmutableSubjectPrefix(t *testing.T) {
+	srv, keys := newOIDCAlgPinFixture(t)
+	ctx, cancel := contextWithTimeout(10)
+	defer cancel()
+
+	cfg := oidcAlgPinConfig(srv.URL)
+	cfg.SubjectPrefix = immutableSubjectPrefix
+	v, err := NewOIDCVerifier(ctx, cfg)
+	require.NoError(t, err)
+
+	sign := func(sub string) string {
+		claims := oidcAlgPinClaims(srv.URL)
+		claims["sub"] = sub
+		return signOIDCPinToken(t, jwt.SigningMethodRS256, keys.rsaPriv, keys.rsaKid, claims)
+	}
+
+	sub, err := v.VerifySPA(ctx, sign(immutableSubject))
+	require.NoError(t, err)
+	require.Equal(t, immutableSubject, sub)
+
+	rejected := map[string]string{
+		"name-form token":     canonicalSubject,
+		"wrong owner id":      "repo:Concord-Voice@999999999/Hosted@1158152129:ref:refs/heads/main",
+		"wrong repo id":       "repo:Concord-Voice@264583090/Hosted@999:ref:refs/heads/main",
+		"repo id with suffix": "repo:Concord-Voice@264583090/Hosted@11581521290:ref:refs/heads/main",
+		"lookalike owner":     "repo:Concord-Voice-Evil@264583090/Hosted@1158152129:ref:refs/heads/main",
+		// The prefix must match at offset zero, not anywhere in the subject.
+		"prefix not at start":  "repository_owner:x:" + immutableSubject,
+		"other repo, same org": "repo:Concord-Voice@264583090/Release-Ops@1426201867:ref:refs/heads/main",
+	}
+	for name, s := range rejected {
+		t.Run(name, func(t *testing.T) {
+			_, err := v.VerifySPA(ctx, sign(s))
+			require.ErrorIs(t, err, ErrOIDCInvalidSubject)
+		})
+	}
+}
+
+// TestOIDCVerifier_NameFormPrefixRejectsImmutableToken is the converse: a
+// verifier left on the name-only prefix refuses the subject GitHub now issues.
+// A repository that issues immutable subjects needs the immutable prefix.
+func TestOIDCVerifier_NameFormPrefixRejectsImmutableToken(t *testing.T) {
+	srv, keys := newOIDCAlgPinFixture(t)
+	ctx, cancel := contextWithTimeout(10)
+	defer cancel()
+
+	v, err := NewOIDCVerifier(ctx, oidcAlgPinConfig(srv.URL))
+	require.NoError(t, err)
+
+	claims := oidcAlgPinClaims(srv.URL)
+	claims["sub"] = immutableSubject
+	raw := signOIDCPinToken(t, jwt.SigningMethodRS256, keys.rsaPriv, keys.rsaKid, claims)
+	_, err = v.VerifySPA(ctx, raw)
+	require.ErrorIs(t, err, ErrOIDCInvalidSubject)
+}
