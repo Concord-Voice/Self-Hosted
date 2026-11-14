@@ -825,6 +825,28 @@ func canonicalChannelKeyCandidates(channelIDs []string, candidates ChannelKeyCan
 	return canonicalChannelIDs, canonicalCandidates, nil
 }
 
+func deniedChannelKeyCandidates(candidateUserIDs, visibleUserIDs []string) ([]string, error) {
+	visible := make(map[uuid.UUID]struct{}, len(visibleUserIDs))
+	for _, userID := range visibleUserIDs {
+		parsed, err := uuid.Parse(userID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid visible user ID: %w", err)
+		}
+		visible[parsed] = struct{}{}
+	}
+	deniedUserIDs := make([]string, 0, len(candidateUserIDs))
+	for _, userID := range candidateUserIDs {
+		parsed, err := uuid.Parse(userID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid candidate user ID: %w", err)
+		}
+		if _, canView := visible[parsed]; !canView {
+			deniedUserIDs = append(deniedUserIDs, userID)
+		}
+	}
+	return deniedUserIDs, nil
+}
+
 // RevokeDeniedChannelKeyCandidatesTx rotates every changed synchronized
 // channel exactly once, and purges only the bounded durable recipients that
 // fail a fresh post-mutation VIEW check.
@@ -854,23 +876,9 @@ func (h *Handler) RevokeDeniedChannelKeyCandidatesTx(
 		if err != nil {
 			return nil, nil, fmt.Errorf("filter durable channel key candidates: %w", err)
 		}
-		visible := make(map[uuid.UUID]struct{}, len(visibleUserIDs))
-		for _, userID := range visibleUserIDs {
-			parsed, err := uuid.Parse(userID)
-			if err != nil {
-				return nil, nil, fmt.Errorf("invalid visible user ID: %w", err)
-			}
-			visible[parsed] = struct{}{}
-		}
-		deniedUserIDs := make([]string, 0, len(candidateUserIDs))
-		for _, userID := range candidateUserIDs {
-			parsed, err := uuid.Parse(userID)
-			if err != nil {
-				return nil, nil, fmt.Errorf("invalid candidate user ID: %w", err)
-			}
-			if _, canView := visible[parsed]; !canView {
-				deniedUserIDs = append(deniedUserIDs, userID)
-			}
+		deniedUserIDs, err := deniedChannelKeyCandidates(candidateUserIDs, visibleUserIDs)
+		if err != nil {
+			return nil, nil, err
 		}
 		rotation, err := keyrotation.RecordKeyRevocationAndPurgeUsersTx(
 			ctx, tx, h.resolver.CanDistributeChannelKeyTx, channelID,

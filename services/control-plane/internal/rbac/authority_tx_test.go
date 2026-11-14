@@ -383,6 +383,35 @@ func TestSecurity166_CanonicalChannelKeyCandidatesRejectMalformedIDs(t *testing.
 	}
 }
 
+func TestSecurity166_DeniedChannelKeyCandidatesComparesUUIDValues(t *testing.T) {
+	visibleID := uuid.NewString()
+	deniedID := uuid.NewString()
+
+	denied, err := deniedChannelKeyCandidates(
+		[]string{strings.ToUpper(visibleID), deniedID},
+		[]string{visibleID},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{deniedID}, denied,
+		"a visible UUID alias must be retained while a distinct candidate is denied")
+}
+
+func TestSecurity166_DeniedChannelKeyCandidatesRejectMalformedIDs(t *testing.T) {
+	validID := uuid.NewString()
+	for name, tc := range map[string]struct {
+		candidates []string
+		visible    []string
+	}{
+		"visible":   {[]string{validID}, []string{"bad-visible"}},
+		"candidate": {[]string{"bad-candidate"}, []string{validID}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := deniedChannelKeyCandidates(tc.candidates, tc.visible)
+			require.Error(t, err)
+		})
+	}
+}
+
 func advisoryKeyForTest(domain string) int64 {
 	digest := sha256.Sum256([]byte(domain))
 	return int64(binary.BigEndian.Uint64(digest[:8])) //nolint:gosec // test-local mirror of the production derivation
