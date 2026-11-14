@@ -25086,7 +25086,7 @@ components:
             the strongest (webauthn).
         backup_code_available:
           type: boolean
-          description: True when TOTP is active and at least one backup code is unspent.
+          description: True when TOTP is active and at least one valid backup code is unspent. A malformed stored hash fails the factor read closed instead of reporting availability.
     MfaChallenge:
       type: object
       description: An MFA challenge from login (200) or refresh (403). Answer it at /auth/mfa/verify with the token and one
@@ -25141,6 +25141,7 @@ components:
           description: Number of registered WebAuthn credentials
         backup_codes_remaining:
           type: integer
+          description: Number of valid unspent backup codes. A malformed stored hash fails the status read with 500 instead of contributing to this count.
         mfa_enabled:
           type: boolean
         methods:

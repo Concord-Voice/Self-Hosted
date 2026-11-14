@@ -13,6 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
+	"github.com/lib/pq"
 )
 
 // Factor names, as P1 and the wire spell them.
@@ -33,19 +36,17 @@ const totpStepSeconds = 30
 // picker defaults on. It is anchored on the users row so that a deleted user
 // is sql.ErrNoRows — a 401 — never an empty factor set (spec §2, SE-1).
 //
-// backup_code_available pairs the two parallel arrays with unnest, which pads
-// the shorter with NULL, so it agrees with mfa.VerifyBackupCode on a damaged
-// row: a hash with no used flag is not spendable (the verifier skips
-// i >= len(used)).
+// The backup arrays are validated in Go with the same parser as redemption.
+// Only active TOTP rows contribute backup codes to this presentation read.
 const inlineMFAFactorsSQL = `
 	SELECT ` + p1TOTPActive + `,
 	       (SELECT last_used_step FROM user_mfa_totp WHERE user_id = $1 AND enabled AND confirmed),
 	       ` + p1WebAuthnAny + `,
 	       (SELECT MAX(COALESCE(last_used_at, created_at)) FROM user_mfa_webauthn WHERE user_id = $1),
-	       EXISTS (SELECT 1
-	               FROM user_mfa_totp t, unnest(t.backup_codes_hash, t.backup_codes_used) AS b(h, used)
-	               WHERE t.user_id = $1 AND t.enabled AND t.confirmed
-	                 AND b.h IS NOT NULL AND b.used = FALSE)
+	       COALESCE((SELECT backup_codes_hash FROM user_mfa_totp
+	                 WHERE user_id = $1 AND enabled AND confirmed), '{}'::TEXT[]),
+	       COALESCE((SELECT backup_codes_used FROM user_mfa_totp
+	                 WHERE user_id = $1 AND enabled AND confirmed), '{}'::BOOLEAN[])
 	FROM users u WHERE u.id = $1`
 
 // Factors is one account's step-up factor state. The last-use times are
@@ -124,19 +125,25 @@ func chooseDefault(methods []string, totpAt, webauthnAt *time.Time) string {
 // subjectGone() (401); any other read failure is a 500 with Cause set — never
 // an empty Factors standing in for "unknown".
 func InlineMFAFactors(ctx context.Context, q RowQuerier, userID string) (Factors, *Error) {
-	var totp, webauthn, backup bool
+	var totp, webauthn bool
+	var backupHashes []string
+	var backupUsed []bool
 	var totpStep sql.NullInt64
 	var webauthnAt sql.NullTime
 	err := q.QueryRowContext(ctx, inlineMFAFactorsSQL, userID).
-		Scan(&totp, &totpStep, &webauthn, &webauthnAt, &backup)
+		Scan(&totp, &totpStep, &webauthn, &webauthnAt, pq.Array(&backupHashes), pq.Array(&backupUsed))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Factors{}, subjectGone()
 	}
 	if err != nil {
 		return Factors{}, verificationFailed(fmt.Errorf("read step-up factors: %w", err))
 	}
+	available, err := backuphash.CountAvailable(backupHashes, backupUsed)
+	if err != nil {
+		return Factors{}, verificationFailed(fmt.Errorf("validate stored backup codes: %w", err))
+	}
 
-	f := Factors{Methods: inlineMethods(totp, webauthn), BackupCodeAvailable: backup}
+	f := Factors{Methods: inlineMethods(totp, webauthn), BackupCodeAvailable: available > 0}
 	if totp && totpStep.Valid {
 		t := time.Unix(totpStep.Int64*totpStepSeconds, 0)
 		f.totpLastUse = &t

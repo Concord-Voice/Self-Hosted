@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ func TestRequirementsHandler(t *testing.T) {
 	t.Run("documented shape, no-store, and nothing logged", func(t *testing.T) {
 		userID := subjectTestUser(t, db)
 		subjectTestTOTP(t, db, userID, true, true)
-		factorsSetTOTP(t, db, userID, base.Unix()/totpStepSeconds, []string{"h1"}, []bool{false})
+		factorsSetTOTP(t, db, userID, base.Unix()/totpStepSeconds, []string{strings.Repeat("a", 64)}, []bool{false})
 		factorsAddKey(t, db, userID, base.Add(-time.Hour), base.Add(-time.Minute*30))
 
 		w, logs := serveRequirements(ctx, t, db, userID)
