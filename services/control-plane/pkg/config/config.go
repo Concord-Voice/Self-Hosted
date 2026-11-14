@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1379,8 +1380,8 @@ func (c *Config) validateProduction() error {
 			"CLOUDFLARE_R2_USEAST_ENDPOINT must use https:// — TLS is mandatory for the Cloudflare R2 attachment backend and there is no *_USE_SSL escape hatch."},
 		{invalidHSTSHeaderValue(c.HSTSHeaderValue),
 			"HSTS_HEADER_VALUE must be a valid STS policy containing exactly one decimal max-age directive when set, or be empty to use the built-in default."},
-		{len(c.TrustedProxyCIDRs) == 0,
-			"TRUSTED_PROXY_CIDRS must be set in production. Without it, c.ClientIP() returns the reverse-proxy address instead of the real client IP, breaking rate limiting and session audit logs."},
+		{!trustedProxyCIDRsAreHostRoutes(c.TrustedProxyCIDRs),
+			"TRUSTED_PROXY_CIDRS must contain only exact IPv4 /32 or IPv6 /128 proxy peers in production."},
 		// #725 review: MEDIA_PLANE_URL guard parity with other dev-default /
 		// unset checks. Rejects empty, dev-default, and root-zone variants.
 		{c.MediaPlaneURL == "",
@@ -1458,16 +1459,6 @@ func (c *Config) validateProduction() error {
 		if g.bad {
 			return fmt.Errorf("FATAL: %s", g.msg)
 		}
-	}
-
-	// Non-fatal: warn when production is using the broad RFC1918 fallback
-	// for trusted proxies (the provision-secrets.yml heredoc default). This
-	// is functional but permissive — see broadRFC1918CIDRs() for context.
-	if equalCIDRs(c.TrustedProxyCIDRs, broadRFC1918CIDRs()) {
-		log.Printf("WARNING: TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback (%s). Tighten the TRUSTED_PROXY_CIDRS allowlist for stricter X-Forwarded-For trust.", strings.Join(c.TrustedProxyCIDRs, ","))
-	}
-	if !containsCloudflareProxyCIDR(c.TrustedProxyCIDRs) {
-		log.Printf("WARNING: TRUSTED_PROXY_CIDRS does not include Cloudflare published proxy CIDRs. Public invite preview rate limiting may bucket by Cloudflare edge IP until vars.TRUSTED_PROXY_CIDRS is refreshed and provisioned.")
 	}
 
 	if err := c.validateAttestation(); err != nil {
@@ -1678,61 +1669,13 @@ func defaultTrustedProxyCIDRs() string {
 	return "172.16.0.0/12"
 }
 
-// broadRFC1918CIDRs returns the conservative fallback used by the
-// provision-secrets workflow when TRUSTED_PROXY_CIDRS is unset. Trusting
-// this entire range in production is operationally safer than failing
-// startup, but it permits any RFC1918 source (including Docker bridge
-// neighbors) to spoof X-Forwarded-For. validate() emits a warning when
-// production lands on this fallback so operators are aware to tighten it
-// via `gh variable set TRUSTED_PROXY_CIDRS --env production --body '<CIDR>'`.
-func broadRFC1918CIDRs() []string {
-	return []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
-}
-
-// cloudflareProxyCIDRs is a fallback snapshot of Cloudflare's published proxy
-// ranges. Refresh TRUSTED_PROXY_CIDRS via the invite landing runbook.
-var cloudflareProxyCIDRs = map[string]struct{}{
-	"173.245.48.0/20":  {},
-	"103.21.244.0/22":  {},
-	"103.22.200.0/22":  {},
-	"103.31.4.0/22":    {},
-	"141.101.64.0/18":  {},
-	"108.162.192.0/18": {},
-	"190.93.240.0/20":  {},
-	"188.114.96.0/20":  {},
-	"197.234.240.0/22": {},
-	"198.41.128.0/17":  {},
-	"162.158.0.0/15":   {},
-	"104.16.0.0/13":    {},
-	"104.24.0.0/14":    {},
-	"172.64.0.0/13":    {},
-	"131.0.72.0/22":    {},
-	"2400:cb00::/32":   {},
-	"2606:4700::/32":   {},
-	"2803:f800::/32":   {},
-	"2405:b500::/32":   {},
-	"2405:8100::/32":   {},
-	"2a06:98c0::/29":   {},
-	"2c0f:f248::/32":   {},
-}
-
-func containsCloudflareProxyCIDR(cidrs []string) bool {
-	for _, cidr := range cidrs {
-		if _, ok := cloudflareProxyCIDRs[cidr]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// equalCIDRs returns true if a and b contain the same CIDR strings in
-// the same order. Used by validate() to detect the broad-RFC1918 fallback.
-func equalCIDRs(a, b []string) bool {
-	if len(a) != len(b) {
+func trustedProxyCIDRsAreHostRoutes(cidrs []string) bool {
+	if len(cidrs) == 0 {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
+	for _, cidr := range cidrs {
+		prefix, err := parseTrustedProxyEntry(cidr)
+		if err != nil || prefix.Addr().Zone() != "" || prefix.Bits() != prefix.Addr().BitLen() {
 			return false
 		}
 	}
@@ -1749,7 +1692,7 @@ func equalCIDRs(a, b []string) bool {
 // In non-production, an empty/unset env value falls back to the broad RFC1918
 // Docker private range so dev/CI setups work without explicit configuration.
 //
-// A malformed CIDR returns the underlying parse error in all environments.
+// A malformed entry returns its position in all environments without logging the address.
 func computeTrustedProxyCIDRs(envValue, environment string) ([]string, error) {
 	if envValue == "" {
 		if environment == "production" {
@@ -1760,26 +1703,37 @@ func computeTrustedProxyCIDRs(envValue, environment string) ([]string, error) {
 	return parseTrustedProxyCIDRs(envValue)
 }
 
-// parseTrustedProxyCIDRs splits a comma-separated list of CIDRs and validates
+// parseTrustedProxyCIDRs splits a comma-separated list of proxy peers and validates
 // each. Returns an error on any malformed entry — silent skipping could leave
 // the allowlist empty, silently regressing c.ClientIP() to return the reverse-
 // proxy address and breaking IP-based rate limiting / session audit logs.
 //
-// Accepts both IPv4 and IPv6 CIDRs — net.ParseCIDR handles both uniformly.
+// Accepts IPv4/IPv6 CIDRs and bare host addresses.
 func parseTrustedProxyCIDRs(raw string) ([]string, error) {
 	parts := strings.Split(raw, ",")
 	cidrs := make([]string, 0, len(parts))
-	for _, p := range parts {
+	for i, p := range parts {
 		trimmed := strings.TrimSpace(p)
 		if trimmed == "" {
 			continue
 		}
-		if _, _, err := net.ParseCIDR(trimmed); err != nil {
-			return nil, fmt.Errorf("invalid CIDR %q in TRUSTED_PROXY_CIDRS: %w", trimmed, err)
+		if _, err := parseTrustedProxyEntry(trimmed); err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS entry %d is invalid", i+1)
 		}
 		cidrs = append(cidrs, trimmed)
 	}
 	return cidrs, nil
+}
+
+func parseTrustedProxyEntry(entry string) (netip.Prefix, error) {
+	if strings.Contains(entry, "/") {
+		return netip.ParsePrefix(entry)
+	}
+	addr, err := netip.ParseAddr(entry)
+	if err != nil || addr.Zone() != "" {
+		return netip.Prefix{}, errors.New("invalid proxy address")
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }
 
 // appAttestAppIDShape is Apple's TEAMID.bundle.id: a 10-character team id,
