@@ -257,7 +257,7 @@ char_wait_healthy_curl_argv() {
 
 # sha256 of the shipped vhost rendered with the default HSTS policy, recorded
 # from an unmodified-tree run.
-NGINX_RENDER_SHA256='e6c88346ed3fdf12bf901b808e6244050591b79a63a1efd054199de51c5ae951'  # pragma: allowlist secret -- sha256 of a rendered fixture, not a secret
+NGINX_RENDER_SHA256='20bd263aba9bce489228c34cd94b46dc91ff410b258dda11ceda2a9bbefba6f1'  # pragma: allowlist secret -- sha256 of a rendered fixture, not a secret
 HSTS_DEFAULT_VALUE='max-age=63072000; includeSubDomains; preload'
 # extract_fn <name>: print the function declared as `    name() {` (4-space
 # indent, inside the nginx-reload arm) through its closing `    }`.

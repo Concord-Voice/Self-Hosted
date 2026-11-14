@@ -30,7 +30,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
 fi
 printf 'TRUSTED_PROXY_CIDRS="172.16.0.0/12,10.0.0.0/8"\nSECRET=untouched\n' >"$FIX/.env"
 chmod 600 "$FIX/.env"
-original_owner="$(stat -f '%u:%g' "$FIX/.env" 2>/dev/null || stat -c '%u:%g' "$FIX/.env")"
+original_owner="$(stat -c '%u:%g' "$FIX/.env" 2>/dev/null || stat -f '%u:%g' "$FIX/.env")"
 DEPLOY_DIR="$FIX"
 CONFIG_ROOT="$FIX"
 COMPOSE_CMD='docker compose'
@@ -115,8 +115,8 @@ grep -qFx 'TRUSTED_PROXIES="172.28.0.1/32"' "$FIX/.env"
 grep -qFx 'SECRET=untouched' "$FIX/.env"
 printf 'TRUSTED_PROXY_CIDRS="172.28.0.1/32"\nSECRET=untouched\nTRUSTED_PROXIES="172.28.0.1/32"\n' >"$FIX/expected-env"
 cmp -s "$FIX/expected-env" "$FIX/.env"
-[[ "$(stat -f '%u:%g' "$FIX/.env" 2>/dev/null || stat -c '%u:%g' "$FIX/.env")" == "$original_owner" ]]
-[[ $(stat -f '%Lp' "$FIX/.env" 2>/dev/null || stat -c '%a' "$FIX/.env") == 600 ]]
+[[ "$(stat -c '%u:%g' "$FIX/.env" 2>/dev/null || stat -f '%u:%g' "$FIX/.env")" == "$original_owner" ]]
+[[ $(stat -c '%a' "$FIX/.env" 2>/dev/null || stat -f '%Lp' "$FIX/.env") == 600 ]]
 ! compgen -G "$FIX/.env.proxy.*" >/dev/null
 ! grep -q 'up --no-start' "$calls"
 printf '%s\n' 'PASS: measured exact gateway persisted without starting services'

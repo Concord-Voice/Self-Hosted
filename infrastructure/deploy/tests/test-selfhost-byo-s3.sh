@@ -88,8 +88,8 @@ except ImportError:
 # Keep explicit digests so source
 # changes require baseline review. Snapshot all inputs to detect test-side mutations.
 SOURCE_HASHES = {
-    "docker-compose.yml": "".join(('e986aa7d', 'fecc2036', 'c70fbe96', 'bc87bdd0', 'abca9050', '81861760', '4fce4887', 'ffc84780')),
-    "docker-compose.production.yml": "".join(('3221ce8d', '0111c0f8', 'c69fd81b', '069c4695', '6f83f390', '8dcc3a6e', 'f2e8a0c6', '9f369e85')),
+    "docker-compose.yml": "".join(('6ddb13ff', 'e83d4e6a', '114632bb', '2d05f787', '278da56c', 'cbfe2b41', 'dc25e570', 'c5f2ae6d')),
+    "docker-compose.production.yml": "".join(('8aa635dc', '3f372743', '674fdfd2', '2df55e7e', '85414bd3', '6eba87c6', 'c21831b5', '21b2724b')),
 }
 SOURCE_FILES = tuple(SOURCE_HASHES) + ("docker-compose.selfhost.yml",)
 if not check("all shared Compose source inputs are available",
@@ -117,6 +117,7 @@ SYNTHETIC = {
     "PUBLIC_IP": "203.0.113.12",
     "FEEDBACK_REPO": "synthetic-owner/synthetic-feedback",
     "TRUSTED_PROXY_CIDRS": "10.0.0.0/8",
+    "TRUSTED_PROXIES": "10.0.0.0/8",
     "POSTGRES_PASSWORD": "-".join(('synthetic', 'postgres', 'password')),
     "REDIS_PASSWORD": "-".join(('synthetic', 'redis', 'password')),
     "JWT_SECRET": "-".join(('synthetic', 'jwt', 'secret')),

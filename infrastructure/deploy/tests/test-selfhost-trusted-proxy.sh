@@ -112,7 +112,8 @@ http {{
     }}
 }}
 """)
-    subprocess.run([nginx, "-p", f"{temp}/", "-c", str(conf), "-t"], check=True, capture_output=True)
+    syntax = subprocess.run([nginx, "-p", f"{temp}/", "-c", str(conf), "-t"], capture_output=True, text=True)
+    assert syntax.returncode == 0, f"nginx fixture config refused: {syntax.stderr[-1200:]}"
     process = subprocess.Popen([nginx, "-p", f"{temp}/", "-c", str(conf), "-g", "daemon off;"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(50):

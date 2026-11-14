@@ -312,11 +312,11 @@ namespace_installer_case() {
     printf '%s\n' 'CFG_DOMAIN=example.com' 'CFG_TLS_MODE=local' 'CFG_TURN_REALM=example.com' \
       'CFG_PUBLIC_IP=10.0.0.5' 'CFG_STORAGE_MODE=bundled' 'CFG_SMTP_HOST=relay.lan' \
       'CFG_SMTP_PORT=587' 'CFG_SMTP_FROM=operator@example.invalid' \
-      'CFG_TRUSTED_CIDRS=172.16.0.0/12' 'CFG_FEEDBACK_ENABLED=no' >"$STATE/fresh-answers"
+      'CFG_FEEDBACK_ENABLED=no' >"$STATE/fresh-answers"
     main --env-file "$STATE/fresh-answers" >"$STATE/fresh-entry-output" 2>&1 || rc=$?
   else
     printf '%s\n' example.com local example.com 10.0.0.5 bundled relay.lan 587 fixture-user \
-      fixture-password operator@example.invalid 172.16.0.0/12 '' '' no >"$STATE/fresh-stdin"
+      fixture-password operator@example.invalid '' '' no >"$STATE/fresh-stdin"
     main <"$STATE/fresh-stdin" >"$STATE/fresh-entry-output" 2>&1 || rc=$?
   fi
   [[ -z $conserved ]] || source_volume_conserved "$conserved"
