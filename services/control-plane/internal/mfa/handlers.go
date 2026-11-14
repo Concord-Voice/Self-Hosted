@@ -657,6 +657,7 @@ func containsStr(ss []string, target string) bool {
 // errSubjectGone reports that the authenticated account's users row no longer
 // exists (a deleted account holding a still-valid JWT).
 var errSubjectGone = errors.New("user no longer exists")
+var errWebAuthnCredentialLimit = errors.New("WebAuthn credential limit reached")
 
 // mfaFlagsExactSQL writes the flags when the email/SMS state is known. It is
 // also the first-activation rule: mfa_enabled_at is set only on a NULL → on
@@ -1768,6 +1769,13 @@ func (h *Handler) WebAuthnRegisterFinish(c *gin.Context) {
 	// but not listed is never challenged at login.
 	es := h.readEmailSmsForSync(ctx, userID)
 	if err := h.withMFAFactorWriteTx(ctx, userID, es, func(tx *sql.Tx) error {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_mfa_webauthn WHERE user_id = $1`, userID).Scan(&count); err != nil {
+			return fmt.Errorf("count WebAuthn credentials: %w", err)
+		}
+		if count >= 10 {
+			return errWebAuthnCredentialLimit
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO user_mfa_webauthn (user_id, credential_id, public_key, aaguid, sign_count, credential_name, credential_type, transports)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1777,6 +1785,10 @@ func (h *Handler) WebAuthnRegisterFinish(c *gin.Context) {
 		}
 		return nil
 	}); err != nil {
+		if errors.Is(err, errWebAuthnCredentialLimit) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Maximum of 10 WebAuthn credentials reached. Remove an existing key first."})
+			return
+		}
 		h.failMFAFactorWrite(c, "Failed to store WebAuthn credential", "Failed to store credential", err)
 		return
 	}
@@ -2439,6 +2451,10 @@ func (h *Handler) verifyWebAuthnChallenge(ctx context.Context, c *gin.Context, a
 		h.log.Warn("WebAuthn login verification failed", "error", err, "user_id", claims.UserID)
 		return false, false
 	}
+	if credential.Authenticator.CloneWarning {
+		h.log.Warn("WebAuthn clone warning", "user_id", claims.UserID)
+		return false, false
+	}
 	// Cloned-authenticator detection compares the next assertion against this
 	// value, so the login does not verify unless it landed.
 	if _, err := h.db.ExecContext(ctx, `
@@ -2846,6 +2862,11 @@ func (h *Handler) WebAuthnVerifyInlineFinish(c *gin.Context) {
 	credential, err := h.webauthn.FinishLogin(user, session.SessionData, c.Request)
 	if err != nil {
 		h.log.Warn("WebAuthn inline verify assertion failed", "error", err, "user_id", userID)
+		c.JSON(http.StatusForbidden, gin.H{"error": "Verification failed. Try again."})
+		return
+	}
+	if credential.Authenticator.CloneWarning {
+		h.log.Warn("WebAuthn clone warning", "user_id", userID)
 		c.JSON(http.StatusForbidden, gin.H{"error": "Verification failed. Try again."})
 		return
 	}
