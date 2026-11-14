@@ -22,6 +22,27 @@ const (
 	authorizerUsage     = "usage: concord-agent authorizer <list|import|revoke> [flags]"
 )
 
+type authorizerStore interface {
+	List() ([]hostagent.AuthorizerListing, error)
+	ImportMany(hostagent.AuthorizerImport) (int, error)
+	Revoke(string) (int, error)
+}
+
+type authorizerStoreLoader interface {
+	Load(string) (authorizerStore, error)
+	LoadOrCreate(string, string, []string) (authorizerStore, error)
+}
+
+type fileAuthorizerStoreLoader struct{}
+
+func (fileAuthorizerStoreLoader) Load(path string) (authorizerStore, error) {
+	return hostagent.LoadAuthorizers(path)
+}
+
+func (fileAuthorizerStoreLoader) LoadOrCreate(path, rpID string, origins []string) (authorizerStore, error) {
+	return hostagent.LoadOrCreateAuthorizers(path, rpID, origins)
+}
+
 // runAuthorizerCLI is deliberately separate from the socket server. Only a
 // host-root operator may inspect or change the agent's independent trust root.
 func runAuthorizerCLI(args []string) int {
@@ -29,6 +50,10 @@ func runAuthorizerCLI(args []string) int {
 }
 
 func runAuthorizerCLIAt(path string, args []string, stdout, stderr io.Writer, euid int) int {
+	return runAuthorizerCLIWith(path, args, stdout, stderr, euid, fileAuthorizerStoreLoader{})
+}
+
+func runAuthorizerCLIWith(path string, args []string, stdout, stderr io.Writer, euid int, stores authorizerStoreLoader) int {
 	if euid != 0 {
 		_, _ = fmt.Fprintln(stderr, "authorizer: host root is required")
 		return 1
@@ -44,8 +69,8 @@ func runAuthorizerCLIAt(path string, args []string, stdout, stderr io.Writer, eu
 			err = errors.New("list takes no arguments")
 			break
 		}
-		var store *hostagent.AuthorizerStore
-		store, err = hostagent.LoadAuthorizers(path)
+		var store authorizerStore
+		store, err = stores.Load(path)
 		if err != nil {
 			break
 		}
@@ -55,9 +80,9 @@ func runAuthorizerCLIAt(path string, args []string, stdout, stderr io.Writer, eu
 			err = json.NewEncoder(stdout).Encode(entries)
 		}
 	case "import":
-		err = importAuthorizers(path, args[1:], stdout, stderr)
+		err = importAuthorizersWith(stores, path, args[1:], stdout, stderr)
 	case "revoke":
-		err = revokeAuthorizers(path, args[1:], stdout, stderr)
+		err = revokeAuthorizersWith(stores, path, args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintln(stderr, authorizerUsage)
 		return 2
@@ -69,7 +94,7 @@ func runAuthorizerCLIAt(path string, args []string, stdout, stderr io.Writer, eu
 	return 0
 }
 
-func importAuthorizers(path string, args []string, stdout, stderr io.Writer) error {
+func importAuthorizersWith(stores authorizerStoreLoader, path string, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	file := fs.String("file", "", "path to the admin export JSON")
@@ -104,7 +129,7 @@ func importAuthorizers(path string, args []string, stdout, stderr io.Writer) err
 		subtle.ConstantTimeCompare([]byte(*confirm), []byte(fingerprint)) != 1 {
 		return errors.New("--confirm-sha256 must exactly match the export fingerprint")
 	}
-	store, err := hostagent.LoadOrCreateAuthorizers(path, doc.RPID, doc.Origins)
+	store, err := stores.LoadOrCreate(path, doc.RPID, doc.Origins)
 	if err != nil {
 		return err
 	}
@@ -116,7 +141,7 @@ func importAuthorizers(path string, args []string, stdout, stderr io.Writer) err
 	return err
 }
 
-func revokeAuthorizers(path string, args []string, stdout, stderr io.Writer) error {
+func revokeAuthorizersWith(stores authorizerStoreLoader, path string, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("revoke", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	adminID := fs.String("admin-id", "", "admin UUID to revoke")
@@ -126,7 +151,7 @@ func revokeAuthorizers(path string, args []string, stdout, stderr io.Writer) err
 	if *adminID == "" || fs.NArg() != 0 {
 		return errors.New("--admin-id is required and no positional arguments are allowed")
 	}
-	store, err := hostagent.LoadAuthorizers(path)
+	store, err := stores.Load(path)
 	if err != nil {
 		return err
 	}

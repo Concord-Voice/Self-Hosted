@@ -120,6 +120,37 @@ func TestExpectedControlPlaneUIDRejectsRootAndInvalidValues(t *testing.T) {
 	}
 }
 
+func TestConfigureWriteAccessRejectsUnknownApplianceAndKeepsAuditlessAgentReadOnly(t *testing.T) {
+	agent := hostagent.NewServer(hostagent.ExecRunner{})
+	if err := configureWriteAccess(agent, "", "", "", false, "unknown"); err == nil {
+		t.Fatal("unknown appliance accepted")
+	}
+	if err := configureWriteAccess(agent, "", "", "", false, ""); err != nil {
+		t.Fatalf("auditless agent failed instead of remaining read-only: %v", err)
+	}
+}
+
+func TestWriteTokenFileCreatesPrivateFileAndRefusesOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), setupTokenFile)
+	if err := writeTokenFile(path, "one-time-token\n"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("token mode %v, want 0600", info.Mode())
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is created in the test temp directory
+	if err != nil || string(data) != "one-time-token\n" {
+		t.Fatalf("token content %q, err %v", data, err)
+	}
+	if err := writeTokenFile(path, "replacement"); err == nil {
+		t.Fatal("existing token file was overwritten")
+	}
+}
+
 func TestRunServesAndStopsOnSIGTERM(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
