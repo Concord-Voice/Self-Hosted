@@ -68,7 +68,7 @@ func TestWebAuthnZeroCounterDoesNotLowerExistingCounter(t *testing.T) {
 	require.Equal(t, 7, count, "a zero-counter assertion must not lower an established counter")
 }
 
-func TestWebAuthnConcurrentStaleLoginCeremoniesMintOnlyOneSession(t *testing.T) {
+func TestWebAuthnConcurrentStaleLoginCeremoniesAcceptOnlyOne(t *testing.T) {
 	db := iuNewTestDB(t)
 	h, clean, auth, userID := sfInlineFixture(t, db)
 	_, err := db.Exec(`UPDATE user_mfa_webauthn SET sign_count = 7 WHERE user_id = $1`, userID)
