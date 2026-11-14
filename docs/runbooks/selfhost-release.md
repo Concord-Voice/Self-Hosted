@@ -21,8 +21,19 @@ published before that acceptance, so its docs say install is unsupported.
    0644/0755, and the commit time as every member's mtime. The manifest
    (`selfhost-bundle/v2`) records the version, tag, source SHA and the SHA-256
    of every file.
-4. Uploads the three files as artifact `concord-selfhost-v<version>` and
-   attests the build provenance of each file.
+4. In a separate job with no `id-token`, scans the same exported tree with
+   syft (pinned by version and SHA-256) and writes a CycloneDX JSON SBOM,
+   `concord-selfhost-v<version>.cdx.json`. Dev dependencies are included,
+   because the bundle ships every lockfile whole.
+   `scripts/release/check-selfhost-sbom.py` then fails the run unless the
+   SBOM lists every npm package locked in a `package-lock.json` and every Go
+   module a `go.mod` requires, at the locked version. The job uploads it as
+   the intermediate artifact `selfhost-sbom`.
+5. Uploads the bundle files and the SBOM as artifact
+   `concord-selfhost-v<version>` and attests the build provenance of each
+   file. `SHA256SUMS` lists only the archive and manifest. Release-Ops requires
+   the SBOM at the top of this artifact and attaches it to the release as an
+   asset.
 
 The workflow holds no credential and never creates a release.
 
@@ -48,6 +59,11 @@ python3 scripts/release/selfhost-bundle.py verify --public-tree /tmp/tree \
 gh attestation verify concord-selfhost-<version>.tar.gz --repo Concord-Voice/Self-Hosted \
   --signer-workflow Concord-Voice/Self-Hosted/.github/workflows/release.yml \
   --source-ref refs/tags/v<version>
+# The SBOM: same attestation check, then the completeness check.
+gh attestation verify concord-selfhost-v<version>.cdx.json --repo Concord-Voice/Self-Hosted \
+  --signer-workflow Concord-Voice/Self-Hosted/.github/workflows/release.yml \
+  --source-ref refs/tags/v<version>
+python3 scripts/release/check-selfhost-sbom.py --sbom concord-selfhost-v<version>.cdx.json --tree /tmp/tree
 ```
 
 ## Failures
@@ -57,4 +73,6 @@ gh attestation verify concord-selfhost-<version>.tar.gz --repo Concord-Voice/Sel
 | `tag vX does not match VERSION Y` | The tag and `VERSION` differ | Delete the tag and tag the commit whose `VERSION` matches. |
 | `<sha> is not on main` | Tagged a branch commit | Tag the merged commit on `main`. |
 | `VERSION must be one X.Y.Z line` | Prefix, suffix or extra text in `VERSION` | Fix `VERSION` through a PR. |
+| `<file>.cdx.json: missing npm …` or `missing golang …` | syft did not catalog a locked package (a syft upgrade or a config change) | Fix the syft version or options in `release.yml` through a PR, then re-tag. |
+| `sha256sum: WARNING: 1 computed checksum did NOT match` in the SBOM job | The syft download does not match the pinned checksum | Do not change the checksum to the new value. Check the syft release, then pin a version and checksum through a PR. |
 | `selfhost bundle refused: unsafe payload type/link` | A tracked symlink or special file | Remove it from the tree through a PR. |

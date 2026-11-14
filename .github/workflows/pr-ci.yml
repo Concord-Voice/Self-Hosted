@@ -950,6 +950,7 @@ jobs:
         run: |
           bash scripts/tests/test-check-release-tag.sh
           python3 scripts/tests/test-selfhost-bundle.py
+          python3 scripts/tests/test-check-selfhost-sbom.py
 
       - name: Self-test — lint scripts pass their own test suites
         # Defense-in-depth: re-run each lint's hermetic test suite in CI

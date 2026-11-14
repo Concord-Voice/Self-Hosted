@@ -546,6 +546,7 @@ workflow_lint:
   - 'scripts/release/**'
   - 'scripts/tests/test-check-release-tag.sh'
   - 'scripts/tests/test-selfhost-bundle.py'
+  - 'scripts/tests/test-check-selfhost-sbom.py'
   - 'scripts/ci/require-docker-engine.sh'
   - 'scripts/ci/require-remote-buildkit.py'
   - 'scripts/test-check-*.sh'
