@@ -45,11 +45,12 @@ class CheckTests(unittest.TestCase):
         (self.tree / 'package-lock.json').write_text(json.dumps(LOCK))
         (self.tree / 'svc' / 'go.mod').write_text(GOMOD)
 
-    def run_check(self, purls, fmt='CycloneDX'):
+    def run_check(self, purls, fmt='CycloneDX', name='concord-selfhost', version='1.0.0', extra=''):
         sbom = self.base / 'x.cdx.json'
-        sbom.write_text(json.dumps({'bomFormat': fmt, 'components': [{'purl': p} for p in purls]}))
-        r = subprocess.run([sys.executable, str(CHECK), '--sbom', str(sbom), '--tree', str(self.tree)],
-                           capture_output=True, text=True)
+        sbom.write_text(json.dumps({'bomFormat': fmt, 'metadata': {'component': {'name': name, 'version': version}},
+                                    'components': [{'purl': p} for p in purls]}) + extra)
+        r = subprocess.run([sys.executable, str(CHECK), '--sbom', str(sbom), '--tree', str(self.tree),
+                            '--version', '1.0.0'], capture_output=True, text=True)
         return r.returncode, r.stdout
 
     def test_complete_sbom_passes(self):
@@ -75,7 +76,34 @@ class CheckTests(unittest.TestCase):
     def test_not_cyclonedx_fails(self):
         rc, out = self.run_check(PURLS, fmt='SPDX')
         self.assertEqual(rc, 1)
-        self.assertIn('not CycloneDX', out)
+        self.assertIn('not a CycloneDX document', out)
+
+    def test_wrong_metadata_fails(self):
+        self.assertEqual(self.run_check(PURLS, version='0.9.0')[0], 1)
+        self.assertEqual(self.run_check(PURLS, name='other')[0], 1)
+
+    def test_trailing_json_value_fails(self):
+        rc, out = self.run_check(PURLS, extra='{"bomFormat": "CycloneDX"}')
+        self.assertEqual(rc, 1)
+        self.assertIn('cannot check', out)
+
+    def test_require_paren_without_space_is_read(self):
+        (self.tree / 'svc' / 'go.mod').write_text(GOMOD.replace('require (', 'require('))
+        rc, out = self.run_check([p for p in PURLS if 'indirect' not in p])
+        self.assertEqual(rc, 1)
+        self.assertIn('example.com/indirect', out)
+
+    def test_replace_fails_closed(self):
+        (self.tree / 'svc' / 'go.mod').write_text(GOMOD + 'replace example.com/direct => example.com/fork v1.0.0\n')
+        rc, out = self.run_check(PURLS)
+        self.assertEqual(rc, 1)
+        self.assertIn('replace is not modelled', out)
+
+    def test_lockfile_v1_fails_closed(self):
+        (self.tree / 'package-lock.json').write_text(json.dumps({'lockfileVersion': 1, 'dependencies': {}}))
+        rc, out = self.run_check(PURLS)
+        self.assertEqual(rc, 1)
+        self.assertIn('lockfile version 1', out)
 
     def test_tree_without_go_fails(self):
         (self.tree / 'svc' / 'go.mod').unlink()
@@ -122,6 +150,9 @@ class WorkflowTests(unittest.TestCase):
         add = next(s['run'] for s in self.steps('bundle') if s['name'] == 'Add the SBOM')
         self.assertIn('"f $name"', add)
         self.assertIn('cp "$RUNNER_TEMP/sbom-in/$name" "$RUNNER_TEMP/assets/$name"', add)
+        self.assertLess(add.index('check-selfhost-sbom.py'), add.index('cp "$RUNNER_TEMP'))
+        gen = next(s['run'] for s in self.steps('sbom') if s['name'] == 'Generate the SBOM')
+        self.assertIn('export HOME="$RUNNER_TEMP/syft-home"', gen)
         attest = next(s for s in self.steps('bundle') if s['name'] == 'Attest build provenance')
         self.assertIn('concord-selfhost-v*.cdx.json', attest['with']['subject-path'])
 

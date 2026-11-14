@@ -88,20 +88,25 @@ jobs:
           echo "${SYFT_SHA256}  $RUNNER_TEMP/syft.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$RUNNER_TEMP/bin" syft
       # Dev dependencies are included: the bundle ships every lockfile whole.
+      # syft runs from an empty directory with an empty HOME, so no config file
+      # in the tagged tree or the runner's home can change what it catalogs.
       - name: Generate the SBOM
         env:
           SYFT_CHECK_FOR_APP_UPDATE: 'false'
           SYFT_JAVASCRIPT_INCLUDE_DEV_DEPENDENCIES: 'true'
         run: |
           set -euo pipefail
-          mkdir "$RUNNER_TEMP/sbom"
+          mkdir "$RUNNER_TEMP/sbom" "$RUNNER_TEMP/syft-home"
+          cd "$RUNNER_TEMP/syft-home"
+          export HOME="$RUNNER_TEMP/syft-home" XDG_CONFIG_HOME="$RUNNER_TEMP/syft-home"
           "$RUNNER_TEMP/bin/syft" scan "dir:$RUNNER_TEMP/tree" -q \
             --source-name concord-selfhost --source-version "$VERSION" \
             -o "cyclonedx-json=$RUNNER_TEMP/sbom/concord-selfhost-v${VERSION}.cdx.json"
       - name: Check the SBOM lists every locked package
         run: |
           python3 scripts/release/check-selfhost-sbom.py \
-            --sbom "$RUNNER_TEMP/sbom/concord-selfhost-v${VERSION}.cdx.json" --tree "$RUNNER_TEMP/tree"
+            --sbom "$RUNNER_TEMP/sbom/concord-selfhost-v${VERSION}.cdx.json" --tree "$RUNNER_TEMP/tree" \
+            --version "$VERSION"
       - name: Upload the SBOM
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -166,7 +171,10 @@ jobs:
             printf '%s\n' "$found"
             exit 1
           fi
-          jq -e '.bomFormat == "CycloneDX"' "$RUNNER_TEMP/sbom-in/$name" >/dev/null
+          # Checked again here, with this job's own tree and copy of the check:
+          # the sbom job ran syft and could have changed both of its own.
+          python3 -I scripts/release/check-selfhost-sbom.py \
+            --sbom "$RUNNER_TEMP/sbom-in/$name" --tree "$RUNNER_TEMP/tree" --version "$VERSION"
           cp "$RUNNER_TEMP/sbom-in/$name" "$RUNNER_TEMP/assets/$name"
       - name: Upload the bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
