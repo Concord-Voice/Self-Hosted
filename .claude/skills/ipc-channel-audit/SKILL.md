@@ -15,7 +15,8 @@ allowed-tools:
 # IPC Channel Audit
 
 Audit the Electron IPC surface for completeness and security per
-`.claude/rules/electron.md`. This skill is read-only by default; pass
+the repo's own `.claude/rules/electron.md` when it has one (the tooling does not ship that
+file; without it, the Background rules below are the baseline). This skill is read-only by default; pass
 `--fix` to have Claude propose patches for any gaps found.
 
 > Paths below assume the Electron app lives at the repo root (`.`) — the
@@ -29,7 +30,7 @@ Args: $0
 
 ## Background (Read First)
 
-`.claude/rules/electron.md` says:
+The baseline (a repo's `.claude/rules/electron.md`, when present, adds to it):
 - All renderer→main IPC goes through `src/preload/` via `contextBridge.exposeInMainWorld`
 - Main-process handlers MUST validate `event.senderFrame.url` before processing
 - No `@electron/remote`, no `nodeIntegration`, sandbox ON, contextIsolation ON

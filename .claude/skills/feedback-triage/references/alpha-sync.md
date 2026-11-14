@@ -10,7 +10,7 @@ Dispatch `/issue-creation` (it is model-invocable — no `disable-model-invocati
 - **Body seed** handed to `/issue-creation`'s Pre-Spec:
   - The public report's `## Description` (verbatim, fenced).
   - `Demand: <reports> user report(s)` — the prioritization signal.
-  - `Refs https://github.com/example-org/example-repo/issues/<N>` — the back-reference (full URL, **not** a bare `#N`, and **not** `Closes` — cross-repo `Closes` is wrong here and a bare number could auto-link the wrong issue).
+  - `Refs https://github.com/$PUBLIC/issues/<N>` — the back-reference (full URL, **not** a bare `#N`, and **not** `Closes` — cross-repo `Closes` is wrong here and a bare number could auto-link the wrong issue).
 - **Pre-answered metadata** (see mappings below) so `/issue-creation` doesn't have to guess.
 
 `/issue-creation` then runs its own adjacency scan — so a feedback item that matches an existing tracker issue or epic is attached/cross-referenced rather than duplicated. That dedup-against-the-tracker is exactly why we route through it instead of `gh issue create`.

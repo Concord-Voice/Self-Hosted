@@ -25,7 +25,8 @@ config reader and defaults its env vars from it.
 
 **Canonical reference (labels):** the labels source file (config `.labels.source`,
 default `.claude/rules/labels.md`) — label inheritance is validated against its Active section
-when the file exists. If the file is absent, validation degrades to passthrough.
+when the file exists. If no source is configured and the default file is absent, validation
+degrades to passthrough; a configured source that is missing fails closed.
 
 **Catalog Dispatch:** when this repo defines a shared dispatchable-skills catalog
 (`.claude/skills/_shared/dispatchable-skills.md`), this skill's catalog obligation is narrow — it
@@ -38,12 +39,37 @@ A repo may add an automated-reviewer-assignment workflow later.
 
 ## Execution
 
-All phases source the helpers in `.claude/skills/pr-creation/lib.sh` (which in turn sources
-`scripts/repo-config.sh` for `rc_get`/`rc_has`):
+All phases load the helpers in `.claude/skills/pr-creation/lib.sh` and `scripts/repo-config.sh`
+from the default branch, never from this checkout, because on a PR branch both are the PR's code:
 
 ```bash
-REPO_ROOT=$(git rev-parse --show-toplevel)
-source "${REPO_ROOT}/.claude/skills/pr-creation/lib.sh"
+RC_REF="refs/remotes/origin/$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"   # the API is the authority; origin/HEAD goes stale after a rename
+[ "$RC_REF" != refs/remotes/origin/ ] || RC_REF="$(git symbolic-ref --quiet refs/remotes/origin/HEAD || echo refs/remotes/origin/main)"
+case "$RC_REF" in refs/remotes/origin/HEAD) RC_REF= ;; refs/remotes/origin/?*) ;; *) RC_REF= ;; esac
+RC_OID="$([ -n "$RC_REF" ] && git show-ref --verify --hash "$RC_REF" 2>/dev/null)"   # exact refname, no DWIM: a same-named branch or tag cannot stand in
+case "$([ -n "$RC_OID" ] && git ls-tree "$RC_OID" -- scripts/repo-config.sh | cut -d' ' -f1)" in
+  100644|100755) ;;
+  *) echo "FATAL: ${RC_REF:-the default branch} is not fetched or has no regular scripts/repo-config.sh" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+RC_SRC="$(git show "$RC_OID:scripts/repo-config.sh")" || { echo "FATAL: could not read the default-branch helper" >&2; return 1 2>/dev/null || exit 1; }
+eval "$RC_SRC"   # the commit that was checked; the checkout's copy is never sourced
+unset RC_TRUSTED_STATE RC_TRUSTED_CFG   # nothing carries over from an earlier run in this shell
+# Presence comes from the tree, not from a read: a blob that is listed but cannot be read is an
+# error, never "absent". RC_TRUSTED_STATE: absent = no config on the default branch; present = read.
+RC_ENT="$(git ls-tree "$RC_OID" -- .claude/repo-config.json)" || { echo "FATAL: could not list the default-branch tree" >&2; return 1 2>/dev/null || exit 1; }
+case "${RC_ENT%% *}" in
+  "") RC_TRUSTED_STATE=absent ;;
+  100644|100755)
+    RC_TRUSTED_CFG="$(git show "$RC_OID:.claude/repo-config.json")" && [ -n "$RC_TRUSTED_CFG" ] \
+      || { echo "FATAL: could not read the default-branch .claude/repo-config.json" >&2; return 1 2>/dev/null || exit 1; }
+    RC_TRUSTED_STATE=present ;;
+  *) echo "FATAL: the default-branch .claude/repo-config.json is not a regular file" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+DEFAULT_BRANCH="${RC_REF#refs/remotes/origin/}"
+case "$(git ls-tree "$RC_OID" -- .claude/skills/pr-creation/lib.sh | cut -d' ' -f1)" in
+  100644|100755) eval "$(git show "$RC_OID:.claude/skills/pr-creation/lib.sh")" ;;   # rc_get is already defined, so lib.sh skips its own helper load
+  *) echo "FATAL: $RC_REF has no regular .claude/skills/pr-creation/lib.sh" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
 ```
 
 ### Phase 1 — Resolve underlying issue(s)
@@ -57,11 +83,19 @@ CLOSES=$(parse_pr_closes "$PR_BODY")
 REFS=$(parse_pr_refs "$PR_BODY")
 ```
 
-If `$CLOSES` is empty: emit a warning and skip Phase 2 (no labels to inherit) AND skip Phase 3 (no Status change). Proceed to Phase 4 (assignee + invariant validation still apply).
+> Both parsers strip fenced **and inline** code spans before matching, so a
+> reference written as `` `Refs #123` `` is invisible to them — no label,
+> board, or milestone inheritance fires for it. This is deliberate (it stops
+> example snippets in a Test Plan from being read as real references), so write
+> every real `Closes`/`Refs` reference as plain text.
+
+If `$CLOSES` is empty: emit a warning and skip Phase 3a (no issue Status to change). **Phase 3c still runs** — like Phase 4, it inherits onto the PR's own board item via `pick_inheritance_source`, so it falls back to `$REFS`. Skip Phase 2 only when `$REFS` is **also** empty — Phase 2 iterates `$CLOSES $REFS`, so a `Refs`-only PR still has labels to inherit. **Phase 3b still runs** (when a board is configured) — it places the PR itself on the board, which does not depend on a linked issue. Proceed to Phase 4 (assignee + invariant validation still apply; milestone inheritance uses the same `pick_inheritance_source` and self-skips only when both are empty).
 
 ### Phase 2 — Inherit labels from issue(s)
 
-Union of labels across all closing-referenced AND refs-referenced issues. Filter out `routine:*` and `type: epic`, then validate against the Active labels section in the configured labels source (`.labels.source`, default `.claude/rules/labels.md`). When that file is absent, `validate_against_active_labels` passes labels through unchanged.
+Union of labels across all closing-referenced AND refs-referenced issues. Filter out `routine:*`, `type: epic`, and `risk: hotfix`, then validate against the Active labels section in the configured labels source (`.labels.source`, default `.claude/rules/labels.md`). When no labels source is configured and the default file is absent, `validate_against_active_labels` passes labels through unchanged; a configured source (`LABELS_FILE` or `.labels.source`) that is missing fails closed (exit 1).
+
+> **`risk: hotfix` is filtered for a different reason than the other two.** They are semantically wrong on a PR; this one is a *release control* in repos that define it — on a PR it cuts a release the moment it merges, bypassing the scheduled blocking-red gate, so it can ship on a red suite. On the issue it meant only "this problem is urgent", decided at triage. Inheriting would turn a weeks-old triage opinion into an ungated release nobody chose. The skill warns and prints the exact `gh pr edit` command instead, so a person decides at PR time.
 
 ```bash
 ALL_LABELS=""
@@ -74,6 +108,13 @@ for issue_n in $CLOSES $REFS; do
     fi
     INHERITED=$(filter_inherited_labels "$ISSUE_LABELS")
     ALL_LABELS="${ALL_LABELS}${INHERITED}"$'\n'
+
+    # `risk: hotfix` is deliberately NOT inherited — on a PR it is a release
+    # control (in repos that define it) that cuts a release on merge and
+    # bypasses the scheduled blocking-red gate. Surface it; never apply it automatically. The loop
+    # lives in lib.sh (and is tested there) because label names contain a
+    # space, and the obvious inline `for ... in $(...)` word-splits on it.
+    warn_dropped_release_controls "$ISSUE_LABELS" "$issue_n" "$PR_NUMBER"
 done
 
 # Dedupe + validate against the labels source Active section (no-op passthrough
@@ -106,6 +147,15 @@ fi
 ```
 
 Everything in 3a/3b/3c below runs **only** inside the `rc_has '.project'` branch.
+
+> **Cloud sessions behave differently here, and the difference is not visible at the call sites.** Projects v2 is GraphQL-only, and a cloud agent session's GitHub proxy serves only a pinned set of GraphQL operations — every board call 403s there regardless of the token. So when `CLAUDE_CODE_REMOTE=true`:
+>
+> - `find_project_item_id` / `ensure_pr_on_project` / `get_issue_priority_option_id` return a **sentinel string** (`CLOUD_NOCREATE:<n>` / `CLOUD:<n>` / `CLOUD_INHERIT:<n>`), not a Projects v2 node ID. Treat the value as opaque: pass it to `move_to_status` / `set_priority` and nothing else. Do not log it as an item ID, compare it, cache it, or interpolate it into a query.
+> - `move_to_status` / `set_priority` do **not** mutate the board. They call a repo-provided `scripts/board-op.sh`, which dispatches the repo's board-sync workflow, and the runner performs the GraphQL. The board update is therefore **eventually consistent**, not synchronous with this phase — a success here means "dispatch accepted", not "board updated".
+> - `find_project_item_id`'s lookup-only contract is preserved across the boundary by the `CLOUD_NOCREATE:` variant, which forwards `--no-create` so an issue deliberately kept off the board is still skipped rather than force-added.
+> - The dispatch is a **no-op until the board-sync workflow is on the default branch** (`workflow_dispatch` only registers a workflow there) and it needs a board-scoped token secret on the runner. When the repo has no `scripts/board-op.sh`, or the dispatch fails, the call returns non-zero and the phase WARNs and continues — board Status is recoverable bookkeeping.
+>
+> Locally nothing changes; every step below describes the local path exactly.
 
 #### Phase 3a — Issue Status sync
 
@@ -153,28 +203,30 @@ fi
 
 ### Phase 3c — Inherit Project Priority onto the PR
 
-PRs should carry the same Project Priority as their underlying issue. Read the first `Closes` issue's Priority option ID and apply it to the PR's project item.
+PRs should carry the same Project Priority as their underlying issue. Read that issue's Priority option ID and apply it to the PR's project item.
+
+Source selection is `pick_inheritance_source` — the SAME source Phase 4 uses for milestone, and for the same reason: this writes `$PR_ITEM_ID`, the **PR's own** board item, so a `Refs`-only staged PR needs it exactly as much as a `Closes` PR does. (Phase 3a stays `Closes`-only because it mutates the *issue's* Status, which is a different question.)
 
 **Important:** `set_priority` calls `${PRIORITY_FIELD_ID:?}` — it aborts (non-zero) when the Priority field is not configured. Gate the call with an explicit pre-check so this branch is simply skipped for repos without a Priority field, rather than aborting the skill with an unhelpful `:?` message.
 
 ```bash
-FIRST_CLOSES=$(printf '%s' "$CLOSES" | head -n1)
+PRIORITY_SRC=$(pick_inheritance_source "$CLOSES" "$REFS")
 # Only attempt Priority inheritance when the repo config defines the Priority field.
 # set_priority uses ${PRIORITY_FIELD_ID:?} internally — calling it without the
 # field configured aborts the skill. The explicit pre-check keeps the skip path
 # visible and avoids masking real failures with `if ! ...`.
-if [ -n "$FIRST_CLOSES" ] && [ -n "$PR_ITEM_ID" ] \
+if [ -n "$PRIORITY_SRC" ] && [ -n "$PR_ITEM_ID" ] \
         && rc_has '.project.fields.priority.id' \
         && [ -n "$(rc_get '.project.fields.priority.id')" ]; then
-    if ! ISSUE_PRIORITY=$(get_issue_priority_option_id "$FIRST_CLOSES"); then
-        echo "WARN: could not read Priority from issue #${FIRST_CLOSES}; skipping PR Priority sync" >&2
+    if ! ISSUE_PRIORITY=$(get_issue_priority_option_id "$PRIORITY_SRC"); then
+        echo "WARN: could not read Priority from issue #${PRIORITY_SRC}; skipping PR Priority sync" >&2
     elif [ -z "$ISSUE_PRIORITY" ]; then
-        echo "INFO: issue #${FIRST_CLOSES} has no Priority set; nothing to inherit" >&2
+        echo "INFO: issue #${PRIORITY_SRC} has no Priority set; nothing to inherit" >&2
     else
         if ! set_priority "$PR_ITEM_ID" "$ISSUE_PRIORITY"; then
             echo "WARN: failed to set Priority on PR #${PR_NUMBER} (see previous error)" >&2
         else
-            echo "INFO: inherited Priority from issue #${FIRST_CLOSES} onto PR #${PR_NUMBER}" >&2
+            echo "INFO: inherited Priority from issue #${PRIORITY_SRC} onto PR #${PR_NUMBER}" >&2
         fi
     fi
 fi
@@ -189,17 +241,19 @@ if [ -n "$GITHUB_USER" ]; then
 fi
 # (Reviewer field intentionally NOT modified — see top-of-file note.)
 
-# Inherit milestone from the first Closes issue (symmetric with /issue-creation,
-# which SETS milestone explicitly). Without this, a PR auto-closes its issue at
-# merge but the milestone stays on the issue — the release-tracking view loses
-# the PR.
-FIRST_CLOSES=$(printf '%s' "$CLOSES" | head -n1)
-if [ -n "$FIRST_CLOSES" ]; then
-    ISSUE_MILESTONE=$(gh issue view "$FIRST_CLOSES" --json milestone --jq '.milestone.title // empty' 2>/dev/null || true)
+# Inherit milestone from the first Closes issue, falling back to the first Refs
+# issue (symmetric with /issue-creation, which SETS milestone explicitly).
+# Without this, a PR auto-closes its issue at merge but the milestone stays on
+# the issue — the release-tracking view loses the PR. The Refs fallback matches
+# Phase 2's `$CLOSES $REFS` label iteration: a staged multi-PR issue is
+# referenced with `Refs #N` on purpose, and those PRs need the milestone too.
+MILESTONE_SRC=$(pick_inheritance_source "$CLOSES" "$REFS")
+if [ -n "$MILESTONE_SRC" ]; then
+    ISSUE_MILESTONE=$(gh issue view "$MILESTONE_SRC" --json milestone --jq '.milestone.title // empty' 2>/dev/null || true)
     PR_MILESTONE=$(gh pr view "$PR_NUMBER" --json milestone --jq '.milestone.title // empty' 2>/dev/null || true)
     if [ -n "$ISSUE_MILESTONE" ] && [ -z "$PR_MILESTONE" ]; then
         gh pr edit "$PR_NUMBER" --milestone "$ISSUE_MILESTONE" \
-            && echo "INFO: inherited milestone '$ISSUE_MILESTONE' from issue #${FIRST_CLOSES}" >&2 \
+            && echo "INFO: inherited milestone '$ISSUE_MILESTONE' from issue #${MILESTONE_SRC}" >&2 \
             || echo "WARN: failed to set milestone '$ISSUE_MILESTONE' on PR" >&2
     fi
 fi
@@ -258,7 +312,7 @@ and write the ids back into the config.
 ## Notes
 
 - Reviewer assignment is OUT of scope — reviewer assignment is a manual decision.
-- The Closes issue's milestone IS auto-inherited from the first `Closes` issue in Phase 4 (if the PR has no milestone yet). Use `gh pr edit --milestone` to override.
+- Milestone IS auto-applied at Phase 4, from the first `Closes` issue or (failing that) the first `Refs` issue — but only when the PR has no milestone already, so a deliberate override is never clobbered. Use `gh pr edit --milestone` to override.
 - This skill is idempotent: re-running on the same PR re-applies the same metadata.
 
 ## What this skill does NOT do
@@ -267,9 +321,9 @@ and write the ids back into the config.
 - Does not modify PR title or body.
 - Does not assign reviewers.
 - Does not change issue labels, milestone, or body.
-- **Dispatches no agents — deliberately.** This skill is metadata mechanics (labels, board status, priority, assignee, milestone, invariant checks); every step is a deterministic `gh` call with a correct answer, so there is nothing for an agent to judge. Its absence from the agent dispatch tables is a decision, not an oversight.
-- Does not summon bot reviewers — that is `/dev-lifecycle` Phase 7.2, after the ready flip (bots do not review drafts).
 - Does not bypass any merge gates — Phase 5 is advisory only (logs WARNs, exits 0).
+- **Dispatches no agents — deliberately.** This skill is metadata mechanics (labels, board status, priority, assignee, milestone, invariant checks); every step is a deterministic `gh` call with a correct answer, so there is nothing for an agent to judge. It is the one orchestrator with no row in [`_shared/lifecycle-agent-dispatch.md`](../_shared/lifecycle-agent-dispatch.md), and that absence is a decision, not an oversight — do not add one to be symmetric with the other orchestrators.
+- Does not summon bot reviewers. That is [`/dev-lifecycle`](../dev-lifecycle/SKILL.md) **Phase 7.2**, which runs after the ready flip — bots do not review drafts, so summoning at PR-creation time would be a no-op.
 
 ## Tests
 
@@ -279,5 +333,7 @@ Lib tests live at `skills/pr-creation/test-lib.sh`. Run with:
 bash skills/pr-creation/test-lib.sh
 ```
 
-Covers the pure parsers (`parse_pr_closes`, `parse_pr_refs`) and asserts no hard-coded
-project-board defaults leak into `lib.sh` (config-driven generalization guard).
+Hermetic: covers the pure parsers (`parse_pr_closes`, `parse_pr_refs`), `pick_inheritance_source`,
+the `risk: hotfix` filter and its warning, and the cloud-routing block (via a `BOARD_OP_BIN` stub
+that records argv), and asserts no hard-coded project-board defaults leak into `lib.sh`
+(config-driven generalization guard). The suite prints `ALL PASS` or the first failure.
