@@ -202,23 +202,25 @@ func (h *Handler) lockSSOMintUser(ctx context.Context, tx *sql.Tx, userID string
 	if err := credepoch.MatchEpoch(state.credentialEpoch, *expectedEpoch); err != nil {
 		return ssoMintUserState{}, fmt.Errorf("credential epoch: %w", err)
 	}
-	if linking {
-		if EffectivePasswordLoginDisabled(h.instanceType, passwordDisabled) {
-			return ssoMintUserState{}, ErrSSOPasswordDisabled
-		}
-		loginMethods := ssoLoginMethods(methods, recoveryOnly)
-		if len(loginMethods) > 0 && proof == nil {
-			return ssoMintUserState{}, ErrMFARequired
-		}
-		if proof != nil {
-			method := proof.verifiedMethod
-			if method == "backup_code" {
-				method = "totp"
-			}
-			if !ssoHasMethod(loginMethods, method) {
-				return ssoMintUserState{}, ErrSSOLinkProofInvalid
-			}
-		}
+	if !linking {
+		return state, nil
+	}
+	if EffectivePasswordLoginDisabled(h.instanceType, passwordDisabled) {
+		return ssoMintUserState{}, ErrSSOPasswordDisabled
+	}
+	loginMethods := ssoLoginMethods(methods, recoveryOnly)
+	if len(loginMethods) > 0 && proof == nil {
+		return ssoMintUserState{}, ErrMFARequired
+	}
+	if proof == nil {
+		return state, nil
+	}
+	method := proof.verifiedMethod
+	if method == "backup_code" {
+		method = "totp"
+	}
+	if !ssoHasMethod(loginMethods, method) {
+		return ssoMintUserState{}, ErrSSOLinkProofInvalid
 	}
 	return state, nil
 }
