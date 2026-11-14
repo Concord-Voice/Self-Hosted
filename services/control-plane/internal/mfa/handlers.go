@@ -82,6 +82,7 @@ const (
 	errMsgFailedDeleteCredential     = "Failed to delete credential"
 	errMsgFailedSendCode             = "Failed to send code"
 	errMsgFailedVerify               = "Failed to verify"
+	errMsgInlineVerificationFailed   = "Verification failed. Try again."
 	errMsgFailedLoadShares           = "Failed to load recovery shares"
 	errMsgEmailNotConfigured         = "Email delivery is not configured"
 	errMsgFailedRemoveDevice         = "Failed to remove trusted device"
@@ -2865,12 +2866,12 @@ func (h *Handler) WebAuthnVerifyInlineFinish(c *gin.Context) {
 	credential, err := h.webauthn.FinishLogin(user, session.SessionData, c.Request)
 	if err != nil {
 		h.log.Warn("WebAuthn inline verify assertion failed", "error", err, "user_id", userID)
-		c.JSON(http.StatusForbidden, gin.H{"error": "Verification failed. Try again."})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInlineVerificationFailed})
 		return
 	}
 	if credential.Authenticator.CloneWarning {
 		h.log.Warn("WebAuthn clone warning", "user_id", userID)
-		c.JSON(http.StatusForbidden, gin.H{"error": "Verification failed. Try again."})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInlineVerificationFailed})
 		return
 	}
 
@@ -2884,7 +2885,7 @@ func (h *Handler) WebAuthnVerifyInlineFinish(c *gin.Context) {
 	}
 	if !advanced {
 		h.log.Warn("WebAuthn credential counter did not advance", "user_id", userID)
-		c.JSON(http.StatusForbidden, gin.H{"error": "Verification failed. Try again."})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInlineVerificationFailed})
 		return
 	}
 
