@@ -75,6 +75,9 @@ func (s *mfaMethodsStub) GenerateLoginChallenge(_ context.Context, _ string, _ b
 	}
 	return s.challengeTok, "stub-jti", nil
 }
+func (s *mfaMethodsStub) GenerateSSOLinkChallenge(context.Context, string, string) (string, string, error) {
+	return "", "", nil
+}
 func (s *mfaMethodsStub) GenerateUpgradeChallenge(_ context.Context, _, refreshSessionID string) (string, string, error) {
 	s.upgradeCalls++
 	s.upgradeSession = refreshSessionID

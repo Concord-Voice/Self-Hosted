@@ -181,6 +181,49 @@ func TestIssueAccessAndRefreshBound_MatchingCredentialEpoch_Succeeds(t *testing.
 	assert.Equal(t, "bound@example.test", email)
 }
 
+func TestIssueAccessAndRefreshBound_RejectsMFAWithoutVerifiedLinkProof(t *testing.T) {
+	rig := newAdapterRig(t)
+	userID := insertAdapterUser(t, rig, "bound-mfa@example.test", "boundmfa", "Password!1234") // pragma: allowlist secret
+	_, err := rig.DB.ExecContext(context.Background(),
+		`UPDATE users SET mfa_enabled = TRUE, mfa_methods = '{totp}' WHERE id = $1`, userID)
+	require.NoError(t, err)
+
+	access, refresh, sid, err := rig.Handler.IssueAccessAndRefreshBound(context.Background(), userID, "", auth.SSOIdentityLink{
+		Provider: "google", ProviderUserID: "mfa-subject", ProviderEmail: "bound-mfa@example.test",
+	})
+	require.ErrorIs(t, err, auth.ErrMFARequired)
+	require.Empty(t, access)
+	require.Empty(t, refresh)
+	require.Empty(t, sid)
+	for _, table := range []string{"user_sso_identities", "login_families", "refresh_tokens"} {
+		var count int
+		require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE user_id = $1`, userID).Scan(&count))
+		require.Zero(t, count, table)
+	}
+}
+
+func TestPrepareSSOLink_StoresOnlyPendingChallenge(t *testing.T) {
+	rig := newAdapterRig(t)
+	userID := insertAdapterUser(t, rig, "pending-link@example.test", "pendinglink", "Password!1234") // pragma: allowlist secret
+	checker := &stubMFAChecker{LoginMethodsResult: []string{"totp"}, EnabledMethodsResult: []string{"totp"}}
+	rig.Handler.SetMFAChecker(checker)
+	identity := auth.SSOIdentityLink{Provider: "google", ProviderUserID: "pending-subject", ProviderEmail: "pending-link@example.test"}
+	challenge, err := rig.Handler.PrepareSSOLink(context.Background(), userID, "", identity)
+	require.NoError(t, err)
+	require.NotNil(t, challenge)
+	require.Equal(t, "stub-sso-link", challenge.Token)
+	require.Equal(t, []string{"totp"}, challenge.Methods)
+	pending, err := rig.Redis.Get(context.Background(), "mfa_sso_link:stub-sso-jti").Bytes()
+	require.NoError(t, err)
+	require.Contains(t, string(pending), "pending-subject")
+	require.NotContains(t, string(pending), "Password!1234") // pragma: allowlist secret
+	for _, table := range []string{"user_sso_identities", "login_families", "refresh_tokens"} {
+		var count int
+		require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE user_id = $1`, userID).Scan(&count))
+		require.Zero(t, count, table)
+	}
+}
+
 func TestIssueAccessAndRefreshBound_RejectsAdvancedCredentialEpoch(t *testing.T) {
 	rig := newAdapterRig(t)
 	const password = "CorrectHorseBatteryStaple1!" // pragma: allowlist secret
@@ -432,6 +475,11 @@ func (s *stubMFAChecker) GenerateLoginChallenge(_ context.Context, _ string, _ b
 	}
 	return tok, jti, nil
 }
+
+func (s *stubMFAChecker) GenerateSSOLinkChallenge(context.Context, string, string) (string, string, error) {
+	return "stub-sso-link", "stub-sso-jti", nil
+}
+
 func (s *stubMFAChecker) GenerateUpgradeChallenge(_ context.Context, _, _ string) (string, string, error) {
 	return "", "", nil
 }

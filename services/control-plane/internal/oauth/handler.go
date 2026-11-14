@@ -64,9 +64,12 @@ type AuthAdapter interface {
 	// IssueAccessAndRefresh mints the access token, refresh token, and refresh-row
 	// session ID for the given userID. The caller owns the response cookie/body.
 	IssueAccessAndRefresh(ctx context.Context, userID string) (accessToken, refreshToken, sessionID string, err error)
-	// IssueAccessAndRefreshBound additionally refuses when the credential epoch
-	// has advanced since authorization.
+	// IssueAccessAndRefreshBound refuses a changed credential epoch, effective
+	// password disable, or newly enrolled login MFA at the locked final read.
 	IssueAccessAndRefreshBound(ctx context.Context, userID, expectedEpoch string, identity auth.SSOIdentityLink) (accessToken, refreshToken, sessionID string, err error)
+	// PrepareSSOLink returns a signed MFA challenge when the password-authorized
+	// target has a login-eligible factor; nil permits the locked no-proof mint.
+	PrepareSSOLink(ctx context.Context, userID, expectedEpoch string, identity auth.SSOIdentityLink) (*auth.SSOLinkChallenge, error)
 	// IssueMFAChallenge mints a short-lived MFA challenge token for users with
 	// MFA enabled. Returns:
 	//   - challengeToken: short-lived JWT the renderer presents to the modal
@@ -710,6 +713,14 @@ func handleSSOIssueError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
 		return true
 	}
+	if errors.Is(err, auth.ErrSSOPasswordDisabled) {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_uses_sso"})
+		return true
+	}
+	if errors.Is(err, auth.ErrMFARequired) {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "mfa_required"})
+		return true
+	}
 	if errors.Is(err, auth.ErrSSOIdentityInsert) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "sso_identity_insert_failed"})
 		return true
@@ -1075,8 +1086,11 @@ type completeLinkRequest struct {
 //     the SAME counter that gates /login. The adapter returns the
 //     auth.ErrAccountLocked sentinel when the threshold is reached
 //     (matched via errors.Is); the handler translates that to 423 Locked.
-//  5. Atomically insert user_sso_identities and issue a bound access + refresh
-//     pair under the users row lock. password_login_disabled is NOT modified.
+//  5. If login MFA is enrolled, return a signed sso_link challenge and store
+//     only pending provider identity; the verifier performs the final mint.
+//  6. Otherwise atomically insert identity and issue access + refresh under
+//     the users row lock, rechecking current policy. The stored password
+//     preference is not modified.
 //
 // The password proof is authorized under the epoch returned by VerifyPassword.
 // The bound mint compares it and persists both the identity and refresh row in
@@ -1124,15 +1138,40 @@ func (h *Handler) CompleteLink(c *gin.Context) {
 		return
 	}
 
-	// Do NOT modify password_login_disabled — the user is opting INTO an
-	// additional sign-in option, not opting OUT. Persist the identity in the
-	// same transaction as the bound mint so a reset-race rolls back both.
-	access, refresh, sessionID, err := h.deps.AuthHandler.IssueAccessAndRefreshBound(ctx, info.TargetUserID, expectedEpoch, auth.SSOIdentityLink{
+	// The password proof alone cannot complete a link when current login MFA is
+	// enabled. Keep provider identity server-side until the signed challenge is
+	// verified; the response carries no credential or session cookie.
+	identity := auth.SSOIdentityLink{
 		Provider:       info.Provider,
 		ProviderUserID: info.ProviderUserID,
 		ProviderEmail:  info.ProviderEmail,
 		IsRelayEmail:   info.IsRelayEmail,
-	})
+	}
+	challenge, err := h.deps.AuthHandler.PrepareSSOLink(ctx, info.TargetUserID, expectedEpoch, identity)
+	if handleSSOIssueError(c, err) {
+		return
+	}
+	if challenge != nil {
+		body := gin.H{
+			"mfa_required":        true,
+			"mfa_challenge_token": challenge.Token,
+			"methods":             challenge.Methods,
+		}
+		if len(challenge.RecoveryOnlyMethods) > 0 {
+			body["recovery_only_methods"] = challenge.RecoveryOnlyMethods
+		}
+		if method := h.deps.AuthHandler.ChallengeDefaultMethod(ctx, info.TargetUserID, challenge.Methods); method != "" {
+			body["default_method"] = method
+		}
+		if challenge.WebAuthnOptions != nil {
+			body["webauthn_options"] = challenge.WebAuthnOptions
+		}
+		c.JSON(http.StatusOK, body)
+		return
+	}
+	// Do not modify password_login_disabled. The final locked transaction
+	// independently refuses policy or MFA enrollment changes before any insert.
+	access, refresh, sessionID, err := h.deps.AuthHandler.IssueAccessAndRefreshBound(ctx, info.TargetUserID, expectedEpoch, identity)
 	if handleSSOIssueError(c, err) {
 		return
 	}

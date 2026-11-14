@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
@@ -55,6 +56,10 @@ type ssoMintUserState struct {
 	credentialEpoch sql.NullString
 }
 
+// ssoLinkProof can only be constructed after MFA.Verify has claimed a signed
+// sso_link challenge and CompleteSSOLink has consumed its matching pending JTI.
+type ssoLinkProof struct{ verifiedMethod string }
+
 // IssueAccessAndRefresh mints an access token and a refresh token for the
 // given userID, persisting the refresh-token hash and returning its session ID.
 // Used by internal/oauth.Handler when an SSO sign-in succeeds.
@@ -85,16 +90,16 @@ type ssoMintUserState struct {
 // SSO as a flow that must not mint unfenced; this is that fix. The unlocked
 // `disabled` read had the identical shape and is closed by the same change.
 func (h *Handler) IssueAccessAndRefresh(ctx context.Context, userID string) (accessToken, refreshToken, sessionID string, err error) {
-	return h.issueAccessAndRefresh(ctx, userID, nil, nil)
+	return h.issueAccessAndRefresh(ctx, userID, nil, nil, nil)
 }
 
 // IssueAccessAndRefreshBound mints a session only when the credential epoch
 // remains the one under which the caller authorized the request.
 func (h *Handler) IssueAccessAndRefreshBound(ctx context.Context, userID, expectedEpoch string, identity SSOIdentityLink) (accessToken, refreshToken, sessionID string, err error) {
-	return h.issueAccessAndRefresh(ctx, userID, &expectedEpoch, &identity)
+	return h.issueAccessAndRefresh(ctx, userID, &expectedEpoch, &identity, nil)
 }
 
-func (h *Handler) issueAccessAndRefresh(ctx context.Context, userID string, expectedEpoch *string, identity *SSOIdentityLink) (accessToken, refreshToken, sessionID string, err error) {
+func (h *Handler) issueAccessAndRefresh(ctx context.Context, userID string, expectedEpoch *string, identity *SSOIdentityLink, proof *ssoLinkProof) (accessToken, refreshToken, sessionID string, err error) {
 	// Resolve the tier BEFORE opening the transaction. GetTier is a Redis GET
 	// that reads through to the subscriptions table on a miss, so calling it
 	// under the row lock would acquire a second pool connection while this
@@ -117,7 +122,7 @@ func (h *Handler) issueAccessAndRefresh(ctx context.Context, userID string, expe
 	if err != nil {
 		return "", "", "", err
 	}
-	userState, err := h.lockSSOMintUser(ctx, tx, userID, expectedEpoch)
+	userState, err := h.lockSSOMintUser(ctx, tx, userID, expectedEpoch, identity != nil, proof)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -176,12 +181,13 @@ func (h *Handler) issueAccessAndRefresh(ctx context.Context, userID string, expe
 
 // lockSSOMintUser reads SSO state after lockMintUserTx has acquired authority.
 // Keeping this read separate gives it a fresh snapshot after the user-lock wait.
-func (h *Handler) lockSSOMintUser(ctx context.Context, tx *sql.Tx, userID string, expectedEpoch *string) (ssoMintUserState, error) {
+func (h *Handler) lockSSOMintUser(ctx context.Context, tx *sql.Tx, userID string, expectedEpoch *string, linking bool, proof *ssoLinkProof) (ssoMintUserState, error) {
 	var state ssoMintUserState
-	var disabled bool
+	var disabled, passwordDisabled bool
+	var methods, recoveryOnly []string
 	if err := tx.QueryRowContext(ctx,
-		`SELECT email_verified, disabled, credential_epoch FROM users WHERE id = $1`, userID,
-	).Scan(&state.emailVerified, &disabled, &state.credentialEpoch); err != nil {
+		`SELECT email_verified, disabled, credential_epoch, password_login_disabled, mfa_methods, recovery_only_methods FROM users WHERE id = $1`, userID,
+	).Scan(&state.emailVerified, &disabled, &state.credentialEpoch, &passwordDisabled, pq.Array(&methods), pq.Array(&recoveryOnly)); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ssoMintUserState{}, fmt.Errorf("user %s not found", userID)
 		}
@@ -196,7 +202,56 @@ func (h *Handler) lockSSOMintUser(ctx context.Context, tx *sql.Tx, userID string
 	if err := credepoch.MatchEpoch(state.credentialEpoch, *expectedEpoch); err != nil {
 		return ssoMintUserState{}, fmt.Errorf("credential epoch: %w", err)
 	}
+	if linking {
+		if EffectivePasswordLoginDisabled(h.instanceType, passwordDisabled) {
+			return ssoMintUserState{}, ErrSSOPasswordDisabled
+		}
+		loginMethods := ssoLoginMethods(methods, recoveryOnly)
+		if len(loginMethods) > 0 && proof == nil {
+			return ssoMintUserState{}, ErrMFARequired
+		}
+		if proof != nil {
+			method := proof.verifiedMethod
+			if method == "backup_code" {
+				method = "totp"
+			}
+			if !ssoHasMethod(loginMethods, method) {
+				return ssoMintUserState{}, ErrSSOLinkProofInvalid
+			}
+		}
+	}
 	return state, nil
+}
+
+// Mirror mfa.GetLoginMethods on the already-locked users row. The recovery-only
+// restriction lapses when it would leave the user without a sign-in factor.
+func ssoLoginMethods(methods, recoveryOnly []string) []string {
+	hasOtherSignInFactor := false
+	for _, method := range methods {
+		if (method == "totp" || method == "webauthn" || method == "email") && !ssoHasMethod(recoveryOnly, method) {
+			hasOtherSignInFactor = true
+			break
+		}
+	}
+	if !hasOtherSignInFactor {
+		return methods
+	}
+	var eligible []string
+	for _, method := range methods {
+		if !ssoHasMethod(recoveryOnly, method) {
+			eligible = append(eligible, method)
+		}
+	}
+	return eligible
+}
+
+func ssoHasMethod(methods []string, candidate string) bool {
+	for _, method := range methods {
+		if method == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // IssueMFAChallenge mints a short-lived MFA challenge token for users with

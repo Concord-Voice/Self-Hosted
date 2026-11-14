@@ -50,6 +50,19 @@ func TestGenerateLoginChallenge_StampsEpoch(t *testing.T) {
 	assert.Equal(t, "1", remembered, "remember_me must be stored keyed by the challenge JTI")
 }
 
+func TestGenerateSSOLinkChallengeSignsOnlyLinkCompletion(t *testing.T) {
+	h := mfa.NewHandler(nil, nil, logger.New("test"), testRing(t), testhelpers.TestJWTSecret, nil, "test")
+	token, jti, err := h.GenerateSSOLinkChallenge(context.Background(), "user-xyz", "epoch-E1")
+	require.NoError(t, err)
+	require.NotEmpty(t, jti)
+	claims, err := mfa.ValidateChallengeToken(token, testhelpers.TestJWTSecret, mfa.PurposeLogin)
+	require.NoError(t, err)
+	require.Equal(t, jti, claims.ID)
+	require.Equal(t, "user-xyz", claims.UserID)
+	require.Equal(t, "epoch-E1", claims.CredentialEpoch)
+	require.Equal(t, mfa.CompletionKindSSOLink, claims.CompletionKind)
+}
+
 // TestGenerateUpgradeChallenge_CarriesNoEpoch covers the #2418 decision that an
 // MFA-upgrade challenge is unstamped: it completes into a 30s Redis bypass key, not
 // a session mint, so binding it to an epoch would be incoherent.

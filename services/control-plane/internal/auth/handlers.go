@@ -86,6 +86,9 @@ type MFAChecker interface {
 	// for any user who has rotated. primaryAuthMethod is the server-authenticated
 	// password, SSO, or session path whose provenance must survive MFA completion.
 	GenerateLoginChallenge(ctx context.Context, userID string, rememberMe bool, credEpoch string, primaryAuthMethod securityevent.AuthMethod) (token string, jti string, err error)
+	// GenerateSSOLinkChallenge signs a login-purpose MFA challenge whose only
+	// completion authority is the pending SSO identity bound to its JTI.
+	GenerateSSOLinkChallenge(ctx context.Context, userID, credEpoch string) (token string, jti string, err error)
 	// GenerateUpgradeChallenge creates a challenge token for pre-MFA sessions that
 	// need to verify MFA before continuing. The signed challenge is bound to the
 	// refresh session that requested it.

@@ -82,6 +82,10 @@ func (*ambiguousRecoveryMFAChecker) GenerateLoginChallenge(context.Context, stri
 	return "", "", nil
 }
 
+func (*ambiguousRecoveryMFAChecker) GenerateSSOLinkChallenge(context.Context, string, string) (string, string, error) {
+	return "", "", nil
+}
+
 func (*ambiguousRecoveryMFAChecker) GenerateUpgradeChallenge(context.Context, string, string) (string, string, error) {
 	return "", "", nil
 }

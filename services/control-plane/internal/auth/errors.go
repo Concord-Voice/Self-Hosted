@@ -42,3 +42,15 @@ var ErrAccountDisabled = errors.New("account_disabled: account is terminally dis
 // the requested SSO identity. The OAuth handler preserves its established
 // sso_identity_insert_failed response without exposing the database error.
 var ErrSSOIdentityInsert = errors.New("sso identity insert failed")
+
+// ErrMFARequired refuses an SSO account-link mint without verifier proof when
+// a login-eligible factor is enrolled at the final locked policy read.
+var ErrMFARequired = errors.New("mfa_required")
+
+// ErrSSOPasswordDisabled refuses password-authorized SSO linking when the
+// deployment's effective password policy disables that credential.
+var ErrSSOPasswordDisabled = errors.New("account_uses_sso")
+
+// ErrSSOLinkProofInvalid means the factor that completed a link challenge is
+// no longer login-eligible when final policy is read under the user lock.
+var ErrSSOLinkProofInvalid = errors.New("sso_link_proof_invalid")

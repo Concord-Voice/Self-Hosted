@@ -261,6 +261,8 @@ type fakeAuthAdapter struct {
 	IssueAccessAndRefreshBoundCalls int
 	IssueAccessAndRefreshBoundErr   error
 	LinkedIdentity                  *auth.SSOIdentityLink
+	PrepareSSOLinkResult            *auth.SSOLinkChallenge
+	PrepareSSOLinkErr               error
 	// AdvanceCredentialEpochAfterVerify models a destructive credential reset
 	// committing immediately after CompleteLink verifies the password.
 	AdvanceCredentialEpochAfterVerify bool
@@ -307,6 +309,9 @@ func (f *fakeAuthAdapter) IssueAccessAndRefreshBound(ctx context.Context, userID
 	}
 	f.LinkedIdentity = &identity
 	return f.IssueAccessAndRefresh(ctx, userID)
+}
+func (f *fakeAuthAdapter) PrepareSSOLink(_ context.Context, _, _ string, _ auth.SSOIdentityLink) (*auth.SSOLinkChallenge, error) {
+	return f.PrepareSSOLinkResult, f.PrepareSSOLinkErr
 }
 func (f *fakeAuthAdapter) IssueMFAChallenge(_ context.Context, userID string) (string, []string, []string, interface{}, bool, error) {
 	if f.IssueMFAFail {
@@ -1115,6 +1120,43 @@ func TestCompleteLink_HappyPath(t *testing.T) {
 	_, err = rig.Redis.Get(context.Background(), "sso_token:"+ssoToken).Bytes()
 	require.Error(t, err, "sso_token must be deleted after consumption")
 	assert.Equal(t, 1, rig.Adapter.IssueAccessAndRefreshBoundCalls)
+}
+
+func TestCompleteLink_MFAChallengeHasNoSessionOrIdentity(t *testing.T) {
+	rig := newSSOCallbackTestRig(t, "http://unused")
+	rig.Engine.POST("/api/v1/auth/sso/:provider/complete-link", rig.Handler.CompleteLink)
+	userID := insertSSOTestUser(t, rig.DB, "linkmfa@example.test", "linkmfa")
+	rig.Adapter.PrepareSSOLinkResult = &auth.SSOLinkChallenge{Token: "signed-link-challenge", Methods: []string{"totp"}}
+	payload, err := json.Marshal(map[string]any{
+		"provider": "google", "provider_user_id": "google-sub-link-mfa", "provider_email": "linkmfa@example.test",
+		"target_user_id": userID, "branch": "account_link", "created_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.NoError(t, rig.Redis.Set(context.Background(), "sso_token:link-mfa-token", payload, 15*time.Minute).Err())
+	body, err := json.Marshal(map[string]string{"sso_token": "link-mfa-token", "password": "correct-password"}) //nolint:gosec // test-only credential fixture
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/complete-link", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var response map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&response))
+	require.Equal(t, true, response["mfa_required"])
+	require.Equal(t, "signed-link-challenge", response["mfa_challenge_token"])
+	require.Empty(t, response["access_token"])
+	require.Empty(t, response["refresh_token"])
+	require.Empty(t, response["session_id"])
+	require.Empty(t, w.Header().Get(middleware.SessionIDHeader))
+	require.Empty(t, w.Header().Values("Set-Cookie"))
+	require.Zero(t, rig.Adapter.IssueAccessAndRefreshBoundCalls)
+	var identities, families, refreshes int
+	require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM user_sso_identities WHERE user_id=$1`, userID).Scan(&identities))
+	require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM login_families WHERE user_id=$1`, userID).Scan(&families))
+	require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM refresh_tokens WHERE user_id=$1`, userID).Scan(&refreshes))
+	require.Zero(t, identities)
+	require.Zero(t, families)
+	require.Zero(t, refreshes)
 }
 
 // TestCompleteLink_RefusesMintAfterCredentialEpochAdvances is a regression for
