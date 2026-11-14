@@ -81,12 +81,18 @@ newer snapshot than the active or staged session state, with equal duplicates
 inert. Promotion preserves a stored snapshot when it is at least as new as the
 A2 revision, preserving newer successors. The retained reservation plus the `voice.joined` timeout backstop
 closes landing races. Never treat A2 or prepare as promotion.
-An exact redelivery of a `voice.joined` whose row already carries its stamp is
-a replay: it skips the reservation consume instead of failing as an admission
-mismatch, which would eject the peer that just joined. This is the normal case
-when two control planes run at once (blue-green cutover, #253). Key it on the
-row's stamp, never on the Redis claim's duplicate status, because a claim can
-outlive a rolled-back first attempt that still owes the consume.
+On the full-lifecycle join path (`moveServerVoiceParticipant`), a join always
+tries to consume its reservation first. When none is left and the row already
+carries the join's stamp, it is a replay of the committed join, not an
+admission mismatch that would eject the peer who just joined. Two control planes running at once
+(blue-green cutover, #253) both apply every `voice.joined`, so this is where the
+replay comes from. Key it on the row's stamp, never on the Redis claim's
+duplicate status, because a claim can outlive a rolled-back first attempt that
+still owes the consume. The rule depends on every `voice_participants` deleter
+holding the per-user lifecycle lock. It does not cover the refresh-only path
+(`refreshOnlyJoined`), which still consumes and still ejects a duplicate, or a
+stamp the two control planes clamp to different receipt times
+(`parseVoiceEventTime`); both fail closed with the old eject.
 
 `voice_participants.lifecycle_event_at` is producer ordering evidence. The
 PostgreSQL-assigned `lifecycle_observed_at` is lease evidence for reconciliation.

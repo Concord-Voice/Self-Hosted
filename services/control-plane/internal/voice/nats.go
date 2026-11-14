@@ -3919,15 +3919,20 @@ func moveServerVoiceParticipant(
 			"server voice participant upsert affected %d rows", upsertedCount,
 		)
 	}
-	// priorExact means this exact join already committed: the row carries its
-	// stamp, and that commit consumed the reservation in the same transaction.
-	// Requiring the reservation again would turn a second delivery into an
-	// ejection of the peer that just joined. Core NATS delivers every voice.*
-	// event to every control plane, so this is the normal case whenever two run
-	// at once (blue-green cutover, #253). Do NOT key this on the Redis claim's
-	// duplicate status: a first attempt can claim and then roll back, and its
-	// redelivery is a duplicate claim that must still consume the reservation.
-	if upsertedCount == 1 && admission != nil && !priorExact {
+	// Always try the consume first. If no reservation is left, priorExact
+	// decides: the row already carries this join's stamp, so this exact join
+	// committed and consumed it, and a second delivery is a replay rather than
+	// an admission mismatch that would eject the peer who just joined. Core NATS
+	// delivers every voice.* event to every control plane, so a replay happens
+	// whenever two run at once (blue-green cutover, #253). Trying the consume
+	// first means a stamp collision with a heartbeat-written row cannot strand a
+	// valid reservation. Do NOT key the replay on the Redis claim's duplicate
+	// status: a first attempt can claim and then roll back, and its redelivery
+	// is a duplicate claim that must still consume the reservation.
+	// priorExact is sound only because every voice_participants deleter holds
+	// the per-user lifecycle lock this transaction holds; an unlocked deleter
+	// could remove the row between the snapshot and ON CONFLICT.
+	if upsertedCount == 1 && admission != nil {
 		result, err := tx.ExecContext(ctx, `
 			DELETE FROM voice_pending_admissions
 			WHERE channel_id = $1 AND user_id = $2
@@ -3939,7 +3944,7 @@ func moveServerVoiceParticipant(
 		}
 		if rowsAffected, err := result.RowsAffected(); err != nil {
 			return serverVoiceMutationResult{}, fmt.Errorf("read pending voice admission consume result: %w", err)
-		} else if rowsAffected != 1 {
+		} else if rowsAffected != 1 && !priorExact {
 			return serverVoiceMutationResult{}, fmt.Errorf(
 				"%w: consume affected %d rows", errVoicePendingAdmissionMismatch, rowsAffected,
 			)

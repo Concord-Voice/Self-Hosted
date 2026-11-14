@@ -37,24 +37,30 @@ func newDuplicateJoinFixture(t *testing.T) duplicateJoinFixture {
 		t.Skipf("NATS unavailable (%v); skipping duplicate-join replay test", err)
 	}
 	t.Cleanup(func() { _ = publisher.Close() })
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "dup_join_replay_user")
+	serverID := ts.CreateTestServer(t, user.ID, "Dup Join Replay")
+	channelID := ts.CreateVoiceChannel(t, serverID, "voice-dup-replay")
+
+	// Keep only this test's user, so a late disconnect from another test on the
+	// shared subject cannot land in the window. Never block the NATS callback.
 	observer, err := natsclient.Connect(natsTestURL())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = observer.Close() })
 	disconnects := make(chan map[string]interface{}, 4)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnectForTest, func(data []byte) {
 		var payload map[string]interface{}
-		if json.Unmarshal(data, &payload) == nil {
-			disconnects <- payload
+		if json.Unmarshal(data, &payload) != nil || payload["userId"] != user.ID {
+			return
+		}
+		select {
+		case disconnects <- payload:
+		default:
 		}
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = subscription.Unsubscribe() })
 	require.NoError(t, observer.Flush())
-
-	ts := testhelpers.SetupTestServer(t)
-	user := ts.CreateTestUser(t, "dup_join_replay_user")
-	serverID := ts.CreateTestServer(t, user.ID, "Dup Join Replay")
-	channelID := ts.CreateVoiceChannel(t, serverID, "voice-dup-replay")
 	return duplicateJoinFixture{
 		ts: ts, publisher: publisher, disconnects: disconnects,
 		channelID: channelID, userID: user.ID, admissionID: uuid.New(),
@@ -165,4 +171,30 @@ func TestHandleJoined_DuplicateClaimAfterRolledBackAttemptStillConsumesAdmission
 		f.channelID, f.userID,
 	).Scan(&pending))
 	assert.Zero(t, pending, "the join committed without consuming its reservation")
+}
+
+// A row can carry a join's stamp without that join having committed, for
+// example a heartbeat clamped to the same receipt microsecond. The join must
+// still consume its own valid reservation rather than leave it to expire.
+func TestHandleJoined_StampCollisionStillConsumesValidAdmission(t *testing.T) {
+	f := newDuplicateJoinFixture(t)
+	f.reserve(t)
+	home := newTestSubscriberWithHubAndNATS(f.ts, f.ts.Hub, f.publisher)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	_, err := f.ts.DB.Exec(`
+		INSERT INTO voice_participants (channel_id, user_id, lifecycle_event_at)
+		VALUES ($1, $2, $3)
+	`, f.channelID, f.userID, now)
+	require.NoError(t, err)
+
+	home.HandleJoinedAt(f.joinedEvent(t, now), now)
+
+	payload, ejected := f.awaitDisconnect(t)
+	assert.False(t, ejected, "a valid admission was rejected: %v", payload)
+	var pending int
+	require.NoError(t, f.ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM voice_pending_admissions WHERE channel_id = $1 AND user_id = $2`,
+		f.channelID, f.userID,
+	).Scan(&pending))
+	assert.Zero(t, pending, "a stamp collision stranded a valid reservation")
 }
