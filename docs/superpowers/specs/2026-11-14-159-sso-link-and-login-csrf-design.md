@@ -340,7 +340,7 @@ If the MFA factor-writer audit finds an unserialized policy writer, edit only it
 - `docs/api/openapi.yaml` — headers, MFA branch, error statuses and key `maxLength`
 - `docs/api/README.md` if the new contract needs prose beyond generated schema
 - `docs/development.md` — focused test commands and Desktop-first rollout
-- `CHANGELOG.md` — user/security-visible behavior under Unreleased
+- `CHANGELOG.md` — user/security-visible behavior under Prerelease
 
 ### Hosted semantic mirror
 
