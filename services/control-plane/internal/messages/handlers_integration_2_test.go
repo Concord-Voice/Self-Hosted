@@ -132,6 +132,9 @@ func TestSendMessageInvalidChannelID(t *testing.T) {
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var messageCount int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM messages`).Scan(&messageCount))
+	assert.Zero(t, messageCount, "malformed channel_id must be rejected before creating a message")
 }
 
 // regression for Security #166: accepted UUID aliases must not leak back in a

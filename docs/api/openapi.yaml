@@ -7179,7 +7179,7 @@ paths:
                   maxProperties: 500
                   additionalProperties:
                     type: integer
-                  description: Map of channel_id → key_version
+                  description: Map of channel_id → key_version. Malformed channel IDs return 400; accepted UUID aliases are returned canonically.
       responses:
         '200':
           description: Epoch validation results

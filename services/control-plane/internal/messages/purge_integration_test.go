@@ -561,12 +561,17 @@ func TestPurgeChannel_RejectsInvalidInput(t *testing.T) {
 	owner := ts.CreateTestUser(t, "iv_owner")
 	serverID := ts.CreateTestServer(t, owner.ID, "iv-server")
 	channelID := ts.CreateTestChannel(t, serverID, "general")
+	ts.CreateTestMessage(t, channelID, owner, "must survive malformed purge path")
 	hdrs := testhelpers.AuthHeaders(owner.AccessToken)
 
 	t.Run("non-uuid channel id", func(t *testing.T) {
 		w := ts.DoRequest(http.MethodDelete, "/api/v1/channels/not-a-uuid/messages",
 			map[string]any{"range": "all"}, hdrs)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, 1, countChannelMessages(t, ts, channelID),
+			"malformed channel ID must be rejected before any purge write")
+		assert.Zero(t, countPurgeAudits(t, ts, channelID),
+			"malformed channel ID must not create a purge audit row")
 	})
 
 	t.Run("missing range", func(t *testing.T) {

@@ -428,17 +428,45 @@ func TestPurgeConversation_GroupAdminDeletesAll(t *testing.T) {
 	assert.Equal(t, "group", ctxType)
 }
 
+// regression for Security #166: a UUID alias in a destructive DM route is
+// accepted, but externally visible event identities remain canonical.
+func TestPurgeConversation_UppercaseConversationIDEmitsCanonicalEvent(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	alice := ts.CreateTestUser(t, "purge_uuid_alice")
+	bob := ts.CreateTestUser(t, "purge_uuid_bob")
+	convID := ts.CreateDMConversation(t, alice.ID, bob.ID)
+	insertDMMsg(t, ts, convID, alice.ID, "canonical event identity")
+	bobConn := dialDMObserver(t, ts, bob.ID, convID)
+	t.Cleanup(func() { _ = bobConn.Close() })
+
+	w := ts.DoRequest(http.MethodDelete, purgeConvPath(strings.ToUpper(convID)),
+		map[string]any{"range": "all", "current_password": alice.Password},
+		testhelpers.AuthHeaders(alice.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	event := readUntilDMEvent(t, bobConn, "dm_purged")
+	assert.Equal(t, convID, event["conversation_id"],
+		"accepted UUID aliases must not leak into dm_purged payloads")
+	assert.Equal(t, alice.ID, event["purged_by"])
+}
+
 func TestPurgeConversation_RejectsInvalidInput(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	alice := ts.CreateTestUser(t, "ivd_alice")
 	bob := ts.CreateTestUser(t, "ivd_bob")
 	convID := ts.CreateDMConversation(t, alice.ID, bob.ID)
+	insertDMMsg(t, ts, convID, alice.ID, "must survive malformed purge path")
 	hdrs := testhelpers.AuthHeaders(alice.AccessToken)
 
 	t.Run("non-uuid conversation id", func(t *testing.T) {
 		w := ts.DoRequest(http.MethodDelete, "/api/v1/dm/conversations/not-a-uuid/messages",
 			map[string]any{"range": "all", "current_password": alice.Password}, hdrs)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, 1, countDMMessages(t, ts, convID),
+			"malformed conversation ID must be rejected before deleting messages")
+		var auditCount int
+		require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM message_purges WHERE context_id = $1`, convID).Scan(&auditCount))
+		assert.Zero(t, auditCount, "malformed conversation ID must not create a purge audit row")
 	})
 
 	t.Run("missing range", func(t *testing.T) {

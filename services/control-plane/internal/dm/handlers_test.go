@@ -3618,6 +3618,31 @@ func TestUpdateMemberRoleCannotDemoteCreatorWithUppercaseID(t *testing.T) {
 	assert.Equal(t, "admin", role, "creator role must remain unchanged after refused alternate-ID request")
 }
 
+// regression for Security #166: accepted UUID aliases must be canonical in the
+// response and the role-change frame seen by another group participant.
+func TestUpdateMemberRoleUppercaseTargetEmitsCanonicalIDs(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "roluuidframecreator")
+	member := ts.CreateTestUser(t, "roluuidframemember")
+	convID := createTestGroup(t, ts, creator, member)
+	observer := dialDMObserver(t, ts, member.ID, convID)
+
+	w := ts.DoRequest(http.MethodPatch,
+		pathDMConversationsPrefix+convID+pathMembersSlash+strings.ToUpper(member.ID),
+		map[string]interface{}{"role": "admin"}, testhelpers.AuthHeaders(creator.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, member.ID, body["user_id"], "response must emit canonical target ID")
+
+	event := readUntilDMEvent(t, observer, "dm_role_changed")
+	assert.Equal(t, convID, event["conversation_id"], "event must emit canonical conversation ID")
+	assert.Equal(t, member.ID, event["user_id"], "event must emit canonical target ID")
+	assert.Equal(t, creator.ID, event["changed_by"], "event must emit canonical actor ID")
+	assert.Equal(t, "admin", event["role"])
+}
+
 func TestUpdateMemberRoleCannotChangeSelf(t *testing.T) {
 	ts := setupTS(t)
 	admin := ts.CreateTestUser(t, "rolself1")
@@ -4086,6 +4111,10 @@ func TestUpdateMemberRoleInvalidTargetUserID(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Equal(t, "Invalid user ID", body["error"])
+
+	var role string
+	require.NoError(t, ts.DB.QueryRow(`SELECT role FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID).Scan(&role))
+	assert.Equal(t, "member", role, "malformed target ID must be rejected before the role write")
 }
 
 func TestUpdateMemberRoleMissingBody(t *testing.T) {

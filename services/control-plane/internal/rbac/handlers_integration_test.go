@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1483,6 +1484,65 @@ func TestAssignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
 		LIMIT 1`, member.ID).Scan(&auditedRoleID))
 	assert.Equal(t, roleID, auditedRoleID,
 		"accepted UUID aliases must be emitted to audit metadata in canonical form")
+}
+
+// regression for Security #166: unassignment must carry accepted aliases into
+// the audit record in canonical form too.
+func TestUnassignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "CanonicalUnassign", 0)
+
+	w := ts.DoRequest("POST", assignRolePath(serverID, member.ID), map[string]interface{}{
+		"role_id": roleID,
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "canonical control must create the assignment")
+
+	w = ts.DoRequest("DELETE", unassignRolePath(
+		strings.ToUpper(serverID), strings.ToUpper(member.ID), strings.ToUpper(roleID),
+	), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "alternate UUID spellings must preserve role-unassignment authorization")
+
+	var auditedRoleID string
+	require.NoError(t, ts.DB.QueryRow(`
+		SELECT metadata->>'role_id'
+		FROM audit_log
+		WHERE action = 'role_unassigned' AND target_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1`, member.ID).Scan(&auditedRoleID))
+	assert.Equal(t, roleID, auditedRoleID,
+		"accepted UUID aliases must be emitted to audit metadata in canonical form")
+}
+
+// Security #166 keeps raw route UUID text out of the two role-mutation
+// handlers, so no new request-vs-database string comparison can be introduced
+// there without this guard failing.
+func TestSecurity166_RoleMutationHandlersUseCanonicalRequestIDs(t *testing.T) {
+	source, err := os.ReadFile("handlers.go")
+	require.NoError(t, err)
+
+	for _, name := range []string{"AssignRole", "UnassignRole"} {
+		t.Run(name, func(t *testing.T) {
+			body := roleMutationHandlerBody(t, string(source), name)
+			assert.NotContains(t, body, "c.Param(",
+				"raw request IDs must not reach role mutation authorization or writes")
+			assert.Contains(t, body, "requestid.Param(",
+				"route IDs must be canonicalized at the handler boundary")
+		})
+	}
+
+	body := roleMutationHandlerBody(t, string(source), "AssignRole")
+	assert.Contains(t, body, "requestid.Canonical(req.RoleID)",
+		"the role body ID must be canonicalized before audit and mutation")
+}
+
+func roleMutationHandlerBody(t *testing.T, source, name string) string {
+	t.Helper()
+	start := strings.Index(source, "func (h *Handler) "+name+"(")
+	require.GreaterOrEqual(t, start, 0)
+	tail := source[start:]
+	end := strings.Index(tail[1:], "\nfunc ")
+	require.Greater(t, end, 0)
+	return tail[:end+1]
 }
 
 func TestAssignRole_BaseMember_Forbidden(t *testing.T) {

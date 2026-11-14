@@ -78,11 +78,14 @@ func TestServerMuteFiltersVoiceStateUpdateByChannelView(t *testing.T) {
 		synchronizeVoiceWireClient(t, conn)
 	}
 
-	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMute), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w := ts.DoRequest("POST", voiceEnforcePath(strings.ToUpper(serverID), strings.ToUpper(target.ID), pathMute), nil, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
 	for {
 		envelope := waitForVoiceWireType(t, allowedConn, "voice_state_update")
 		if envelope.Data["action"] == "server_muted" {
+			assert.Equal(t, target.ID, envelope.Data["user_id"])
+			assert.Equal(t, serverID, envelope.Data["server_id"])
+			assert.Equal(t, channelID, envelope.Data["channel_id"])
 			break
 		}
 	}
@@ -470,6 +473,46 @@ func TestAuthorizeVoiceAction_UppercaseOwnerStillProtectedByHierarchy(t *testing
 	}, testhelpers.AuthHeaders(moderator.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"alternate owner UUID spelling must retain owner hierarchy protection")
+}
+
+// regression for Security #166: every hierarchy-enforcing server moderation
+// route must treat an alternate spelling of the owner ID as the owner.
+func TestServerModeration_UppercaseOwnerStillProtectedByHierarchy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		suffix string
+	}{
+		{"mute", http.MethodPost, pathMute},
+		{"unmute", http.MethodDelete, pathMute},
+		{"deafen", http.MethodPost, pathDeafen},
+		{"undeafen", http.MethodDelete, pathDeafen},
+		{"user mute", http.MethodPost, pathUserMute},
+		{"user deafen", http.MethodPost, pathUserDeafen},
+		{"disconnect", http.MethodPost, pathDisconnect},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := setupTS(t)
+			owner := ts.CreateTestUser(t, "voicecaseowner")
+			moderator := ts.CreateTestUser(t, "voicecasemod")
+			serverID := ts.CreateTestServer(t, owner.ID, "Voice UUID Owner Routes")
+			ts.AddMemberToServer(t, serverID, moderator.ID, roleMember)
+			roleID := ts.CreateTestRole(t, serverID, "Moderator", 5,
+				int64(rbac.PermMuteMembers|rbac.PermDeafenMembers|rbac.PermMoveMembers))
+			ts.AssignRoleToUser(t, serverID, moderator.ID, roleID)
+			channelID := ts.CreateVoiceChannel(t, serverID, "voice-uuid-owner-routes")
+			_, err := ts.DB.Exec(`INSERT INTO voice_participants (channel_id, user_id) VALUES ($1, $2)`, channelID, owner.ID)
+			require.NoError(t, err)
+			seedOutboxVoiceSession(t, ts, channelID, owner.ID)
+
+			w := ts.DoRequest(tc.method,
+				voiceEnforcePath(serverID, strings.ToUpper(owner.ID), tc.suffix), nil,
+				testhelpers.AuthHeaders(moderator.AccessToken))
+			assert.Equal(t, http.StatusForbidden, w.Code,
+				"alternate owner UUID spelling must retain hierarchy protection")
+			requireNoServerOutboxCommands(t, ts.DB)
+		})
+	}
 }
 
 func TestAuthorizeVoiceAction_WithCustomPermission(t *testing.T) {

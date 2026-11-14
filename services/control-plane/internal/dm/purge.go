@@ -15,6 +15,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 )
@@ -56,8 +57,8 @@ type dmPurgeRequest struct {
 // server's MFA enforcement on dangerous actions, in internal/messages).
 func (h *Handler) PurgeConversation(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-	if _, err := uuid.Parse(convID); err != nil {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
