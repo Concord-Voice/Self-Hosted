@@ -94,6 +94,17 @@ func TestAuditRejectsUnsafePathAndFullStream(t *testing.T) {
 	require.Error(t, audit.Write(AuditEvent{Outcome: "denied", Reason: "peer_forbidden"}))
 }
 
+func TestAuditPublicSetupAndIdentityValidationFailClosed(t *testing.T) {
+	_, err := OpenAudit(filepath.Join(t.TempDir(), "events.jsonl"))
+	require.Error(t, err)
+
+	id := uuid.NewString()
+	require.Equal(t, id, canonicalAuditAdminID(id))
+	require.Empty(t, canonicalAuditAdminID("not-a-uuid"))
+	require.False(t, validAuditEvent(AuditEvent{Action: "start/extra", Outcome: "denied", Reason: "peer_forbidden"}))
+	require.False(t, validAuditEvent(AuditEvent{Outcome: "denied", Reason: "client_reason"}))
+}
+
 func TestAuditUnavailableDisablesWritesBeforeProof(t *testing.T) {
 	runner := &fakeRunner{}
 	server := NewServer(&fakeRunner{})

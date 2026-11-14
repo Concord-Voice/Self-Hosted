@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func post(t *testing.T, s *Server, target, body string) *httptest.ResponseRecorder {
@@ -352,6 +354,19 @@ func TestBackupAdmissionAuditFailurePreventsLimitResponse(t *testing.T) {
 	if len(s.writes.list) != 1 {
 		t.Fatalf("audit failure started another job: %#v", s.writes.list)
 	}
+}
+
+func TestBackupAdmissionRejectsInvalidAndUntrustedState(t *testing.T) {
+	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	s, _ := writeServer(t, &fakeRunner{})
+	require.NoError(t, os.WriteFile(s.writes.admission, []byte("-1\n"), 0o600))
+	require.Error(t, s.writes.admitBackup(now))
+
+	s, _ = writeServer(t, &fakeRunner{})
+	target := filepath.Join(t.TempDir(), "admission-target")
+	require.NoError(t, os.WriteFile(target, []byte("0\n"), 0o600))
+	require.NoError(t, os.Symlink(target, s.writes.admission))
+	require.Error(t, s.writes.admitBackup(now))
 }
 
 func TestBackupAdmissionConcurrent(t *testing.T) {

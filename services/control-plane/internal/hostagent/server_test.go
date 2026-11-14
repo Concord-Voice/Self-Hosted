@@ -69,6 +69,36 @@ func TestRefusesUnknownActionsAndMethods(t *testing.T) {
 	}
 }
 
+func TestServerSetupAndAuthorizationFailuresFailClosed(t *testing.T) {
+	s := NewServer(&fakeRunner{})
+	for _, uid := range []int{-1, 0} {
+		if err := s.SetExpectedPeerUID(uid); err == nil {
+			t.Fatalf("accepted invalid peer UID %d", uid)
+		}
+	}
+	if s.expectedPeerUID != 10006 {
+		t.Fatalf("invalid UID changed expected peer to %d", s.expectedPeerUID)
+	}
+	if err := s.SetAuthorizationStore(nil); err == nil {
+		t.Fatal("accepted an unavailable authorization store")
+	}
+	if err := s.SetAudit(nil); err == nil {
+		t.Fatal("accepted an unavailable audit")
+	}
+
+	s, _ = writeServer(t, &fakeRunner{})
+	if rec := get(t, s, http.MethodGet, "/v1/authorizations"); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("begin GET: got %d %s", rec.Code, rec.Body)
+	}
+	if rec := post(t, s, "/v1/authorizations", `{}{}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("extra authorization value: got %d %s", rec.Code, rec.Body)
+	}
+	s.authorizations = nil
+	if rec := post(t, s, "/v1/authorizations", `{}`); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing authorizer: got %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	f := &fakeRunner{out: statusJSON}
 	rec := get(t, NewServer(f), http.MethodGet, "/v1/status")

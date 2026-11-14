@@ -127,11 +127,7 @@ func (s *Server) auditEvent(event AuditEvent) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	peer, ok := peerFromContext(r.Context())
 	if !ok || peer.UID != s.expectedPeerUID {
-		action := ""
-		if value, found := strings.CutPrefix(r.URL.Path, "/v1/actions/"); found {
-			action = actionName(value)
-		}
-		s.auditEvent(AuditEvent{Action: action, Outcome: "denied", Reason: "peer_forbidden"})
+		s.auditEvent(AuditEvent{Action: requestAction(r.URL.Path), Outcome: "denied", Reason: "peer_forbidden"})
 		refuse(w, http.StatusForbidden, "peer_forbidden")
 		return
 	}
@@ -139,38 +135,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.refuseManaged(w)
 		return
 	}
-	if s.writes != nil {
-		if r.URL.Path == "/v1/authorizations" {
-			s.handleAuthorizationBegin(w, r)
-			return
-		}
-		if r.URL.Path == "/v1/backups" {
-			s.handleBackups(w, r)
-			return
-		}
-		if action, ok := strings.CutPrefix(r.URL.Path, "/v1/actions/"); ok && !strings.Contains(action, "/") {
-			s.handleWrite(w, r, action)
-			return
-		}
-		if r.URL.Path == "/v1/jobs" {
-			s.handleJobs(w, r, "")
-			return
-		}
-		if id, ok := strings.CutPrefix(r.URL.Path, "/v1/jobs/"); ok && id != "" {
-			s.handleJobs(w, r, id)
-			return
-		}
+	if s.handleWriteRoute(w, r) {
+		return
 	}
-	var handle func(http.ResponseWriter, *http.Request) string
-	var action string
-	switch r.URL.Path {
-	case "/v1/status":
-		handle, action = s.status, "status"
-	case "/v1/health":
-		handle, action = s.health, "health"
-	case "/v1/logs":
-		handle, action = s.logs, "logs"
-	default:
+	handle, action := s.readRoute(r.URL.Path)
+	if handle == nil {
 		refuse(w, http.StatusNotFound, "unknown_action")
 		log.Printf("concord-agent: refused unknown action")
 		return
@@ -191,6 +160,47 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(healthTimeout + s.writeGrace))
 	outcome := handle(w, r)
 	log.Printf("concord-agent: action=%s outcome=%s", action, outcome)
+}
+
+func requestAction(path string) string {
+	action, _ := strings.CutPrefix(path, "/v1/actions/")
+	return actionName(action)
+}
+
+func (s *Server) handleWriteRoute(w http.ResponseWriter, r *http.Request) bool {
+	if s.writes == nil {
+		return false
+	}
+	switch r.URL.Path {
+	case "/v1/authorizations":
+		s.handleAuthorizationBegin(w, r)
+	case "/v1/backups":
+		s.handleBackups(w, r)
+	case "/v1/jobs":
+		s.handleJobs(w, r, "")
+	default:
+		if action, ok := strings.CutPrefix(r.URL.Path, "/v1/actions/"); ok && !strings.Contains(action, "/") {
+			s.handleWrite(w, r, action)
+		} else if id, ok := strings.CutPrefix(r.URL.Path, "/v1/jobs/"); ok && id != "" {
+			s.handleJobs(w, r, id)
+		} else {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) readRoute(path string) (func(http.ResponseWriter, *http.Request) string, string) {
+	switch path {
+	case "/v1/status":
+		return s.status, "status"
+	case "/v1/health":
+		return s.health, "health"
+	case "/v1/logs":
+		return s.logs, "logs"
+	default:
+		return nil, ""
+	}
 }
 
 func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +225,7 @@ func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request
 		refuse(w, http.StatusBadRequest, "invalid_authorization")
 		return
 	}
-	if err := dec.Decode(new(any)); err != io.EOF {
+	if dec.Decode(new(any)) != io.EOF {
 		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
 		refuse(w, http.StatusBadRequest, "invalid_authorization")
 		return

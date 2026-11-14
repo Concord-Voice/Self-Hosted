@@ -230,30 +230,44 @@ func (j *jobs) admitBackup(now time.Time) error {
 	if err := trustedEntry(dir); err != nil {
 		return fmt.Errorf("backup admission directory: %w", err)
 	}
-	if st, err := os.Lstat(j.admission); err == nil {
-		if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || trustedEntry(j.admission) != nil {
-			return errors.New("backup admission state is untrusted")
-		}
-		f, err := os.OpenFile(j.admission, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-		if err != nil {
-			return fmt.Errorf("open backup admission state: %w", err)
-		}
-		b, readErr := io.ReadAll(f)
-		closeErr := f.Close()
-		if readErr != nil || closeErr != nil {
-			return errors.New("read backup admission state")
-		}
-		last, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-		if err != nil || last < 0 {
-			return errors.New("backup admission state is invalid")
-		}
-		if now.Before(time.Unix(0, last).Add(backupWindow)) {
-			return errBackupLimited
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect backup admission state: %w", err)
+	last, found, err := j.backupAdmissionTimestamp()
+	if err != nil {
+		return err
 	}
+	if found && now.Before(time.Unix(0, last).Add(backupWindow)) {
+		return errBackupLimited
+	}
+	return j.writeBackupAdmission(dir, now)
+}
 
+func (j *jobs) backupAdmissionTimestamp() (int64, bool, error) {
+	st, err := os.Lstat(j.admission)
+	if os.IsNotExist(err) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("inspect backup admission state: %w", err)
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || trustedEntry(j.admission) != nil {
+		return 0, false, errors.New("backup admission state is untrusted")
+	}
+	f, err := os.OpenFile(j.admission, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return 0, false, fmt.Errorf("open backup admission state: %w", err)
+	}
+	b, readErr := io.ReadAll(f)
+	closeErr := f.Close()
+	if readErr != nil || closeErr != nil {
+		return 0, false, errors.New("read backup admission state")
+	}
+	last, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || last < 0 {
+		return 0, false, errors.New("backup admission state is invalid")
+	}
+	return last, true, nil
+}
+
+func (j *jobs) writeBackupAdmission(dir string, now time.Time) error {
 	tmp, err := os.CreateTemp(dir, ".backup-admission-")
 	if err != nil {
 		return fmt.Errorf("create backup admission state: %w", err)
@@ -327,7 +341,7 @@ func (j *jobs) execute(job *Job, cmds [][]string, budget time.Duration) {
 		if err != nil {
 			outcome, reason = "failed", "job_failed"
 		}
-		if auditErr := j.audit.Write(AuditEvent{Action: job.Action, Outcome: outcome, Reason: reason, AdminID: job.adminID, JobID: job.ID}); auditErr != nil {
+		if j.audit.Write(AuditEvent{Action: job.Action, Outcome: outcome, Reason: reason, AdminID: job.adminID, JobID: job.ID}) != nil {
 			log.Print("concord-agent: host-agent audit completion event unavailable")
 		}
 	}
@@ -428,7 +442,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 	job, err := s.writes.start(name, adminID, cmds, budget)
 	if err != nil {
 		if errors.Is(err, errBackupLimited) {
-			if auditErr := s.audit.Write(AuditEvent{Action: name, Outcome: "denied", Reason: "backup_rate_limited", AdminID: adminID}); auditErr != nil {
+			if s.audit.Write(AuditEvent{Action: name, Outcome: "denied", Reason: "backup_rate_limited", AdminID: adminID}) != nil {
 				refuse(w, http.StatusServiceUnavailable, "job_unavailable")
 				log.Printf("concord-agent: action=%s outcome=error", name)
 				return
