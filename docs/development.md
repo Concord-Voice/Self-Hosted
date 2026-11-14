@@ -821,11 +821,13 @@ npm install --global windows-build-tools
 
 ## SSO security cutover
 
-The Desktop companion must ship before mandatory server enforcement. Its main
+An observable shipped Desktop build with IPC contract 34 must precede mandatory server enforcement. Its main
 process sends the same 32-byte, canonical base64url value in
 `X-Concord-SSO-Client-Binding` on both SSO initiation and session exchange, and
 its MFA modal completes an account link through `/auth/mfa/verify`. Advance the
-supported Desktop minimum to that build before deploying this server change.
+supported Desktop minimum to that build before deploying this server change;
+`SPA_MIN_CONTRACT` metadata or a green source build alone does not prove the
+client floor is live.
 Old in-flight SSO states and MFA challenges restart after deployment; older
 Desktop builds cannot initiate Apple or Google SSO once the header is required.
 
