@@ -46,7 +46,10 @@ newer. `down` can remove that network, so a later `up` measures its new gateway
 instead of reusing the previous route. A stopped container cannot hold a Docker
 network; when needed, the locked path starts only NATS to hold the measured
 bridge before updating trust. A failed live endpoint check reports failure and
-leaves exact under-trust in place. Verify host-nginx attribution at the edge
+leaves exact under-trust in place. `concord-selfhost health` also refuses a
+running gateway or application trust mismatch; `health --json` reports the
+`proxy_provenance` check with `ok: false` (see [machine-readable
+output](selfhost-machine-output.md)). Verify host-nginx attribution at the edge
 for the selected release. Generic Cloudflare traffic remains attributed to
 the edge until authenticated origin provenance is supplied by #80.
 

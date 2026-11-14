@@ -520,7 +520,12 @@ cp "$AUTHORITY_HELPER" "$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-authority.
 cat >"$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-proxy.sh" <<'PROXY_FIXTURE'
 selfhost_prepare_trusted_proxy_provenance() { return 0; }
 selfhost_proxy_live_check() { return 0; }
-selfhost_proxy_restart_preflight() { return 0; }
+selfhost_proxy_restart_preflight() {
+  [[ "${STUB_PROXY_MISMATCH:-}" != 1 ]] || {
+    echo 'selfhost-proxy: restart proxy route differs from live bridge' >&2
+    return 1
+  }
+}
 PROXY_FIXTURE
 SELFHOST_LOCK_PARENT="$STUB/selfhost-lock-parent"
 lock_declaration='DEPLOY_TRANSACTION_LOCK_PATH="/var/lib/concord/deploy-transaction.lock"'
@@ -1155,7 +1160,7 @@ reset_selfhost_behavior() {
     STUB_VERSION_FAIL STUB_ENGINE_EXIT STUB_ENGINE_END STUB_PS_FAIL STUB_INSPECT_FAIL STUB_RENDER_FAIL STUB_LOG_MODEL_FAIL STUB_RENDER_NAME \
     STUB_PROJECT_NAME STUB_STOPPED_IDS STUB_CONFIG_CODE STUB_ENGINE_VERSION \
     STUB_NETWORKS_JSON STUB_NETWORK_INSPECT_FAIL STUB_NETWORK_INSPECT_PARTIAL_OK \
-    STUB_INSPECT_NETIDS_FAIL STUB_PGREP_MATCH STUB_MEDIA_PRESENT STUB_MEDIA_ENV_JSON
+    STUB_INSPECT_NETIDS_FAIL STUB_PGREP_MATCH STUB_MEDIA_PRESENT STUB_MEDIA_ENV_JSON STUB_PROXY_MISMATCH
   chmod 600 "$SELFHOST_DOCKER_DAEMON_JSON" 2>/dev/null || true
   rm -f "$SELFHOST_DOCKER_DAEMON_JSON"
   rm -rf "$SELFHOST_VOICE_STATE" && mkdir -p "$SELFHOST_VOICE_STATE"
@@ -1805,11 +1810,25 @@ export STUB_PROJECT_IDS=$'cp1\npg1' STUB_INSPECT_JSON
 run_selfhost health
 if [[ $selfhost_rc -eq 0 ]] \
   && grep -q 'curl .*127\.0\.0\.1:8080/api/v1/client/config' "$SELFHOST_DOCKER_LOG" \
+  && grep -qF 'proxy gateway provenance verified' <<<"$selfhost_output" \
   && ! grep -q 'T2-SENTINEL' <<<"$selfhost_output"; then
   pass "health passes when every live binding is inside the posture"
 else
   fail "health failed a clean live set (rc=$selfhost_rc): $selfhost_output"
 fi
+
+reset_selfhost_behavior false 1 '' ''
+export STUB_PROXY_MISMATCH=1
+run_selfhost health --json
+if [[ $selfhost_rc -ne 0 ]] \
+  && grep -qF 'restart proxy route differs from live bridge' <<<"$selfhost_output" \
+  && grep -qF '"name":"proxy_provenance","ok":false' <<<"$selfhost_output" \
+  && grep -qF '"ok":false}' <<<"$selfhost_output"; then
+  pass 'health --json refuses a mismatched live proxy gateway and reports proxy_provenance false'
+else
+  fail "health accepted a mismatched live proxy gateway (rc=$selfhost_rc): $selfhost_output"
+fi
+unset STUB_PROXY_MISMATCH
 
 STUB_INSPECT_JSON="$(live_inspect '{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5432"}]}')"
 export STUB_INSPECT_JSON

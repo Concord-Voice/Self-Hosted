@@ -7253,6 +7253,16 @@ else:
     echo "selfhost-posture: live port bindings match the self-host allowlist"
     ;;
 
+  selfhost-proxy-check)
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost || $# -ne 1 ]]; then
+      echo 'selfhost-proxy-check runs only in the self-host contract mode (use concord-selfhost health)' >&2
+      exit 2
+    fi
+    source "$SCRIPT_DIR/selfhost-proxy.sh" || exit 1
+    selfhost_proxy_restart_preflight || exit 1
+    echo 'selfhost-proxy: live gateway and application trust match the persisted route'
+    ;;
+
   media-shared-listeners-check)
     [[ $# -eq 1 ]] || { echo 'Usage: concord-ctl.sh media-shared-listeners-check < rendered-compose.json' >&2; exit 2; }
     media_shared_listeners_check_model
@@ -8493,6 +8503,7 @@ else:
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
     echo "  media-shared-listeners-check  validate a lab Compose JSON render on stdin; does not admit deployment"
     echo "  selfhost-port-check  Self-host only: refuse live port bindings outside the posture allowlist (#3538)"
+    echo "  selfhost-proxy-check Self-host only: verify persisted proxy trust against the live gateway"
     echo "  attachment-probe  Validate the armed attachment backend without pulling images"
     echo "  attachment-probe-cron-install  Idempotently install the nightly attachment probe"
     echo "  nginx-reload   Validate/render HSTS, atomically swap main/admin nginx files,"
