@@ -89,8 +89,11 @@ func (h *Handler) PurgeConversation(c *gin.Context) {
 	}
 
 	// Step-up BEFORE any mutation. Failure paths inside write their own response.
-	if h.requireAuthBeforePurge(purgeCtx, userID) {
-		if !h.verifyPurgeStepUp(purgeCtx, c, userID, req.CurrentPassword, req.MFACode) {
+	requiresStepUp := h.requireAuthBeforePurge(purgeCtx, userID)
+	mfaVerified := false
+	if requiresStepUp {
+		var passed bool
+		if passed, mfaVerified = h.verifyPurgeStepUpWithMFA(purgeCtx, c, userID, req.CurrentPassword, req.MFACode); !passed {
 			return
 		}
 	}
@@ -155,6 +158,9 @@ func (h *Handler) PurgeConversation(c *gin.Context) {
 			return
 		}
 		res.HiddenCount = hidden
+	}
+	if mfaVerified {
+		h.clearPurgeMFABudget(purgeCtx, userID)
 	}
 
 	h.log.Info("DM conversation purged", "conversation_id", convID, "actor", userID,
@@ -338,6 +344,11 @@ var purgeStepUpCopy = stepup.Copy{
 // recorded at once (no transaction is open), and the count is reset only
 // once every factor has passed.
 func (h *Handler) verifyPurgeStepUp(ctx context.Context, c *gin.Context, userID, currentPassword, mfaCode string) bool {
+	passed, _ := h.verifyPurgeStepUpWithMFA(ctx, c, userID, currentPassword, mfaCode)
+	return passed
+}
+
+func (h *Handler) verifyPurgeStepUpWithMFA(ctx context.Context, c *gin.Context, userID, currentPassword, mfaCode string) (passed, mfaVerified bool) {
 	attempt, rErr := stepup.ReserveUserPasswordAttempt(ctx, h.db, h.redis, userID, currentPassword)
 	if rErr != nil {
 		if rErr.Status == http.StatusLocked {
@@ -345,7 +356,7 @@ func (h *Handler) verifyPurgeStepUp(ctx context.Context, c *gin.Context, userID,
 		}
 		h.logPurgeStepUpFailure(rErr)
 		rErr.Write(c)
-		return false
+		return false, false
 	}
 	// LoadSubject derives MFA from the factor tables (policy P1) and fails
 	// closed on a read error; it no longer consults IsEnabled.
@@ -353,7 +364,7 @@ func (h *Handler) verifyPurgeStepUp(ctx context.Context, c *gin.Context, userID,
 	if sErr != nil {
 		h.logPurgeStepUpFailure(sErr)
 		sErr.Write(c)
-		return false
+		return false, false
 	}
 	// Settled before the MFA leg, as /auth/login does: a correct password
 	// resets the lockout count even if the MFA code is then wrong.
@@ -364,16 +375,28 @@ func (h *Handler) verifyPurgeStepUp(ctx context.Context, c *gin.Context, userID,
 	if pErr != nil {
 		h.logPurgeStepUpFailure(pErr)
 		pErr.Write(c)
-		return false
+		return false, false
 	}
 	if subj.MFAEnabled {
+		if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+			h.logPurgeStepUpFailure(e)
+			e.Write(c)
+			return false, false
+		}
 		if mErr := stepup.VerifyMFAFactor(ctx, h.mfaVerifier, userID, stepup.PurposeDMPurge, mfaCode, subj.MFAMethods); mErr != nil {
 			h.logPurgeStepUpFailure(mErr)
 			mErr.Write(c)
-			return false
+			return false, false
 		}
+		mfaVerified = true
 	}
-	return true
+	return true, mfaVerified
+}
+
+func (h *Handler) clearPurgeMFABudget(ctx context.Context, userID string) {
+	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, userID); err != nil {
+		h.log.Warn("Could not reset DM-purge MFA budget after a successful purge", "error", err)
+	}
 }
 
 // logPurgeStepUpFailure records the root cause of a step-up 500. A 4xx carries

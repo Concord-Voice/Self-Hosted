@@ -16,7 +16,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -233,6 +239,94 @@ func TestInlinePurpose_EveryOtherConsumerPurpose(t *testing.T) {
 // internal/users/key_reset_inline_purpose_test.go.
 func TestInlinePurpose_TablesCoverTheClosedSet(t *testing.T) {
 	require.Len(t, stepup.Purposes(), 14+28)
+}
+
+// TestInlinePurpose_ProductionVerifierCallerCensus makes a new verifier caller
+// an explicit review decision. Direct calls are the only places an inline MFA
+// token can be spent, so silently adding one can bypass the shared attempt
+// budget even when its purpose binding is correct.
+func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	internal := filepath.Dir(wd)
+
+	var got []string
+	err = filepath.WalkDir(internal, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if parseErr != nil {
+			return parseErr
+		}
+		rel, relErr := filepath.Rel(internal, path)
+		if relErr != nil {
+			return relErr
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				name := ""
+				switch target := call.Fun.(type) {
+				case *ast.SelectorExpr:
+					name = target.Sel.Name
+				case *ast.Ident:
+					name = target.Name
+				}
+				switch name {
+				case "VerifyCode", "VerifyCodeTx", "VerifyMFAFactor", "VerifyMFAFactorTx":
+					got = append(got, filepath.ToSlash(rel)+":"+fn.Name.Name+":"+name)
+				}
+				return true
+			})
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	sort.Strings(got)
+
+	want := []string{
+		"dm/purge.go:verifyPurgeStepUpWithMFA:VerifyMFAFactor",
+		"mfa/handlers.go:verifyAndDeleteTOTPTx:VerifyCodeTx",
+		"mfa/settings_stepup.go:requirePasswordAndMFA:VerifyMFAFactor",
+		"mfa/settings_stepup.go:verifyMFASettingsStepUpTx:VerifyMFAFactorTx",
+		"mfaenforce/mfaenforce.go:ConfirmTx:VerifyMFAFactorTx",
+		"ownership/handlers.go:verifyMFA:VerifyCode",
+		"sessions/handlers.go:authenticateForRevokeWithMFA:VerifyCode",
+		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx",
+		"stepup/stepup.go:VerifyMFAFactor:VerifyCode",
+		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx",
+		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx",
+		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx",
+	}
+	sort.Strings(want)
+	require.Equal(t, want, got)
+
+	// These are the five admission owners that were missing from the original
+	// census. The handler-level checks keep the fixed sink list above from
+	// becoming a label-only inventory: a refactor that removes the admission
+	// before its verifier call fails this test until it is reclassified.
+	for path, admission := range map[string]string{
+		"dm/purge.go":           "stepup.Charge",
+		"mfa/handlers.go":       "chargeMFASettingsCode",
+		"ownership/handlers.go": "stepup.Charge",
+		"sessions/handlers.go":  "stepup.Charge",
+		"users/handlers.go":     "chargeDangerousMFA",
+	} {
+		source, readErr := os.ReadFile(filepath.Join(internal, filepath.FromSlash(path))) //nolint:gosec // path is a fixed test map, not input
+		require.NoError(t, readErr)
+		require.Contains(t, string(source), admission, "%s must retain its MFA-budget admission owner", path)
+	}
 }
 
 func TestInlinePurpose_VerifyCodeRefusesAnInvalidPurpose(t *testing.T) {

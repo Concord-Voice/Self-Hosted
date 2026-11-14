@@ -45,6 +45,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -206,6 +207,7 @@ func krKeyResetFixture(t *testing.T, name string) (*testhelpers.TestServer, test
 	mh := krMFAHandler(t, ts.DB, ts.Redis)
 	// router.go wiring: the users handler's MFAVerifier is the *mfa.Handler.
 	h := users.NewHandler(ts.DB, logger.NewWithWriter(io.Discard), nil, mh, nil, testCredFence(t, ts.DB), nil)
+	h.SetRedis(ts.Redis)
 	h.SetPasswordVerifier(testhelpers.HashVerifier{DB: ts.DB})
 	service := presencehistory.NewService(ts.DB, presencehistory.DisclosureState{}, false)
 	require.NoError(t, service.BindDelivery(immediatePresenceDelivery{}))
@@ -219,6 +221,63 @@ const (
 	krPurposeKeyReset       = "account.e2ee_key_reset"
 	krPurposePasswordChange = "account.password_change" // pragma: allowlist secret
 )
+
+func TestKeyRotationMFABudgetStopsBothRoutesBeforeMutation(t *testing.T) {
+	for _, route := range []struct {
+		name    string
+		purpose stepup.Purpose
+		call    func(*testing.T, *users.Handler, testhelpers.TestUser, string) *httptest.ResponseRecorder
+		version func(*testing.T, *sql.DB, string) int
+	}{
+		{"password change", stepup.PurposePasswordChange, krChangePassword, func(t *testing.T, db *sql.DB, id string) int { return len(krPasswordHash(t, db, id)) }},
+		{"key reset", stepup.PurposeE2EEKeyReset, krReplaceKeys, krKeyVersion},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			ts, user, authn, mh, h := krKeyResetFixture(t, "budget_"+strings.ReplaceAll(route.name, " ", "_"))
+			token := krMint(t, mh, ts.Redis, authn, user.ID, string(route.purpose))
+			key := stepup.DangerousActionBudget(ts.Redis).Key(user.ID)
+			require.NoError(t, ts.Redis.Set(context.Background(), key, stepup.BudgetLimit, 0).Err())
+			before := route.version(t, ts.DB, user.ID)
+
+			w := route.call(t, h, user, token)
+			require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+			require.NotEmpty(t, w.Header().Get("Retry-After"))
+			require.Contains(t, w.Body.String(), "step_up_budget_exhausted")
+			require.Equal(t, before, route.version(t, ts.DB, user.ID), "the budget must stop the write before its transaction")
+		})
+	}
+}
+
+func TestKeyRotationMFABudgetSharedAcrossPasswordAndKeyReset(t *testing.T) {
+	ts, user, _, _, h := krKeyResetFixture(t, "budget_shared_routes")
+	routes := []func(*testing.T, *users.Handler, testhelpers.TestUser, string) *httptest.ResponseRecorder{
+		krChangePassword,
+		krReplaceKeys,
+	}
+	for i := 0; i < stepup.BudgetLimit; i++ {
+		w := routes[i%len(routes)](t, h, user, "wrong-mfa-code")
+		require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	}
+	// A sixth submission on the other destructive route must observe the same
+	// per-account budget, and every request has charged exactly once.
+	w := krReplaceKeys(t, h, user, "wrong-mfa-code")
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	count, err := ts.Redis.Get(context.Background(), stepup.DangerousActionBudget(ts.Redis).Key(user.ID)).Int()
+	require.NoError(t, err)
+	require.Equal(t, stepup.BudgetLimit+1, count)
+}
+
+func TestKeyResetMFABudgetUnavailableStopsBeforeMutation(t *testing.T) {
+	ts, user, authn, mh, h := krKeyResetFixture(t, "budget_unavailable")
+	token := krMint(t, mh, ts.Redis, authn, user.ID, string(stepup.PurposeE2EEKeyReset))
+	before := krKeyVersion(t, ts.DB, user.ID)
+	h.SetRedis(nil)
+
+	w := krReplaceKeys(t, h, user, token)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "step_up_budget_unavailable")
+	require.Equal(t, before, krKeyVersion(t, ts.DB, user.ID))
+}
 
 // Control: the key reset's MFA gate is live. A token minted for an unrelated
 // purpose is refused as an invalid code, and the keys are untouched.

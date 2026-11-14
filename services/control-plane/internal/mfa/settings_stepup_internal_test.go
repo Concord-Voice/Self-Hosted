@@ -39,6 +39,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -200,6 +201,160 @@ func iuBody(t *testing.T, w *httptest.ResponseRecorder) map[string]interface{} {
 	var body map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	return body
+}
+
+func TestLegacyMFASettingsMFABudgetStopsTOTPDisableAndBackupRegeneration(t *testing.T) {
+	db := iuNewTestDB(t)
+	rdb := iuNewTestRedis(t)
+	kr := iuKeyring(t)
+	h := iuHandler(db, rdb, kr)
+
+	for _, route := range []struct {
+		name string
+		call func(userID string, code string) *httptest.ResponseRecorder
+	}{
+		{
+			name: "TOTP disable",
+			call: func(userID, code string) *httptest.ResponseRecorder {
+				c, w := iuGinContext(http.MethodPost, "/mfa/totp/disable", fmt.Sprintf(`{"password":%q,"code":%q}`, iuPassword, code), userID, "")
+				h.TOTPDisable(c)
+				return w
+			},
+		},
+		{
+			name: "backup regeneration",
+			call: func(userID, code string) *httptest.ResponseRecorder {
+				c, w := iuGinContext(http.MethodPost, "/mfa/backup-codes/regenerate", fmt.Sprintf(`{"password":%q,"code":%q}`, iuPassword, code), userID, "")
+				h.RegenerateBackupCodes(c)
+				return w
+			},
+		},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			userID := iuCreateUser(t, db, iuPassword)
+			secret := iuEnrollTOTP(t, db, kr, userID)
+			require.NoError(t, rdb.Set(context.Background(), mfaSettingsStepUpKey(userID), stepup.BudgetLimit, 0).Err())
+
+			w := route.call(userID, iuTOTPCode(t, secret))
+			require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+			require.NotEmpty(t, w.Header().Get("Retry-After"))
+			require.True(t, iuBody(t, w)["step_up_budget_exhausted"].(bool))
+			var rows int
+			require.NoError(t, db.QueryRow(`SELECT count(*) FROM user_mfa_totp WHERE user_id = $1`, userID).Scan(&rows))
+			require.Equal(t, 1, rows, "the budget must stop the write before factor mutation")
+		})
+	}
+}
+
+// RegenerateBackupCodes intentionally stays TOTP-only: unlike a generic
+// VerifyCode step-up, a backup code cannot authorize replacing the backup set.
+func TestRegenerateBackupCodesRejectsBackupCode(t *testing.T) {
+	db := iuNewTestDB(t)
+	rdb := iuNewTestRedis(t)
+	kr := iuKeyring(t)
+	h := iuHandler(db, rdb, kr)
+	userID := iuCreateUser(t, db, iuPassword)
+	iuEnrollTOTP(t, db, kr, userID)
+	codes, hashes, err := GenerateBackupCodes()
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRow(`UPDATE user_mfa_totp
+		SET backup_codes_hash = $1, backup_codes_used = $2 WHERE user_id = $3
+		RETURNING user_id`, pq.Array(hashes), pq.Array(make([]bool, len(hashes))), userID).Scan(new(string)))
+
+	c, w := iuGinContext(http.MethodPost, "/mfa/backup-codes/regenerate", fmt.Sprintf(`{"password":%q,"code":%q}`, iuPassword, codes[0]), userID, "")
+	h.RegenerateBackupCodes(c)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	require.Equal(t, errMsgInvalidTOTPCode, iuBody(t, w)["error"])
+}
+
+func TestTOTPDisableWithoutVerifiedFactorDoesNotClearMFABudget(t *testing.T) {
+	db := iuNewTestDB(t)
+	rdb := iuNewTestRedis(t)
+	h := iuHandler(db, rdb, iuKeyring(t))
+	for _, withWebAuthn := range []bool{false, true} {
+		t.Run(fmt.Sprintf("webauthn=%t", withWebAuthn), func(t *testing.T) {
+			userID := iuCreateUser(t, db, iuPassword)
+			if withWebAuthn {
+				iuAddWebAuthnCredential(t, db, userID)
+			}
+			key := mfaSettingsStepUpKey(userID)
+			require.NoError(t, rdb.Set(context.Background(), key, 1, 0).Err())
+			c, w := iuGinContext(http.MethodPost, "/mfa/totp/disable", fmt.Sprintf(`{"password":%q,"code":"arbitrary"}`, iuPassword), userID, "")
+			h.TOTPDisable(c)
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			count, err := rdb.Get(context.Background(), key).Int()
+			require.NoError(t, err)
+			require.Equal(t, 1, count, "a submitted code without a TOTP verifier must neither charge nor clear the MFA budget")
+		})
+	}
+}
+
+func TestTOTPDisableWithoutTOTPDoesNotChargeMFABudget(t *testing.T) {
+	db := iuNewTestDB(t)
+	rdb := iuNewTestRedis(t)
+	h := iuHandler(db, rdb, iuKeyring(t))
+	userID := iuCreateUser(t, db, iuPassword)
+	var email string
+	require.NoError(t, db.QueryRow(`SELECT email FROM users WHERE id = $1`, userID).Scan(&email))
+	for i := 0; i < stepup.BudgetLimit+1; i++ {
+		c, w := iuGinContext(http.MethodPost, "/mfa/totp/disable", fmt.Sprintf(`{"password":%q,"code":"arbitrary"}`, iuPassword), userID, "")
+		h.TOTPDisable(c)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		// The legacy no-TOTP branch intentionally does not check the password,
+		// so its deferred attempt settlement is an unrelated password-lockout
+		// behavior. Clear only that fixture counter between requests to prove
+		// each reaches the no-factor branch; never touch the MFA budget key.
+		require.NoError(t, rdb.Del(context.Background(), "login_attempts:"+email).Err())
+	}
+	exists, err := rdb.Exists(context.Background(), mfaSettingsStepUpKey(userID)).Result()
+	require.NoError(t, err)
+	require.Zero(t, exists, "a no-TOTP request never reaches VerifyCodeTx and must not consume the shared budget")
+}
+
+// TOTPDisable's budget is conditional on the preflight enrollment probe, but
+// must never issue Redis I/O after LockSubjectTx has acquired the users-row
+// lock. The real no-TOTP test above covers the behavioral half; this focused
+// source guard keeps the ordering/race contract visible to refactors.
+func TestTOTPDisableBudgetPreflightPrecedesLockedTransaction(t *testing.T) {
+	source, err := os.ReadFile("handlers.go") //nolint:gosec // fixed sibling test fixture
+	require.NoError(t, err)
+	start := strings.Index(string(source), "func (h *Handler) TOTPDisable(")
+	require.GreaterOrEqual(t, start, 0)
+	rest := string(source)[start:]
+	end := strings.Index(rest, "\nfunc ")
+	require.Greater(t, end, 0)
+	body := rest[:end]
+	preflight := strings.Index(body, "preflightTOTPExists")
+	charge := strings.Index(body, "h.chargeMFASettingsCode")
+	begin := strings.Index(body, "h.db.BeginTx")
+	lockedRecheck := strings.Index(body, "if !preflightTOTPExists")
+	require.GreaterOrEqual(t, preflight, 0)
+	require.Greater(t, charge, preflight, "charge must follow the unlocked enrollment probe")
+	require.Greater(t, begin, charge, "Redis admission must finish before the SQL transaction starts")
+	require.Greater(t, lockedRecheck, begin, "a factor appearing after preflight must be refused under the lock")
+	require.Contains(t, body[lockedRecheck:], "http.StatusConflict")
+}
+
+func TestLegacyMFASettingsBudgetIsSharedAndChargesOncePerRequest(t *testing.T) {
+	db := iuNewTestDB(t)
+	rdb := iuNewTestRedis(t)
+	kr := iuKeyring(t)
+	h := iuHandler(db, rdb, kr)
+	userID := iuCreateUser(t, db, iuPassword)
+	iuEnrollTOTP(t, db, kr, userID)
+
+	for i := 0; i < stepup.BudgetLimit; i++ {
+		c, w := iuGinContext(http.MethodPost, "/mfa/totp/disable", fmt.Sprintf(`{"password":%q,"code":"not-a-totp"}`, iuPassword), userID, "")
+		h.TOTPDisable(c)
+		require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	}
+	c, denied := iuGinContext(http.MethodPost, "/mfa/backup-codes/regenerate", fmt.Sprintf(`{"password":%q,"code":"not-a-totp"}`, iuPassword), userID, "")
+	h.RegenerateBackupCodes(c)
+	require.Equal(t, http.StatusTooManyRequests, denied.Code, denied.Body.String())
+	require.NotEmpty(t, denied.Header().Get("Retry-After"))
+	count, err := rdb.Get(context.Background(), mfaSettingsStepUpKey(userID)).Int()
+	require.NoError(t, err)
+	require.Equal(t, stepup.BudgetLimit+1, count, "each request must charge exactly once across route boundaries")
 }
 
 // ── Case 1: inlineMFAMethods table ───────────────────────────────────────
