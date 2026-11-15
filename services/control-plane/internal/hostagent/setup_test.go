@@ -22,6 +22,17 @@ type runFunc func(ctx context.Context, args []string, w io.Writer) error
 
 func (f runFunc) Run(ctx context.Context, args []string, w io.Writer) error { return f(ctx, args, w) }
 
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadline    time.Time
+	deadlineErr error
+}
+
+func (r *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	r.deadline = deadline
+	return r.deadlineErr
+}
+
 const preflightOK = `{"schema":1,"checks":[{"name":"os","ok":true},{"name":"ports","ok":true}],"ok":true}`
 
 func newTestSetup(t *testing.T, r Runner) (*Setup, string) {
@@ -48,7 +59,7 @@ func call(s *Setup, method, target, token, body string) *httptest.ResponseRecord
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
+	s.ServeHTTP(&deadlineRecorder{ResponseRecorder: rec}, req)
 	return rec
 }
 
@@ -189,6 +200,50 @@ func TestSetupPreflightRunsOneAtATime(t *testing.T) {
 	}
 }
 
+func TestSetupInstallExtendsOnlyValidatedRequestDeadline(t *testing.T) {
+	ran := false
+	var s *Setup
+	s, tok := newTestSetup(t, runFunc(func(_ context.Context, _ []string, _ io.Writer) error {
+		ran = true
+		return os.WriteFile(s.envPath, []byte("X=1\n"), 0o600)
+	}))
+	invalid := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	invalidRequest := httptest.NewRequest(http.MethodPost, "/api/install", strings.NewReader(`{"unknown":"value"}`))
+	invalidRequest.Header.Set("Authorization", "Bearer "+tok)
+	s.ServeHTTP(invalid, invalidRequest)
+	if invalid.Code != http.StatusBadRequest || !invalid.deadline.IsZero() {
+		t.Fatalf("invalid install: status %d deadline %v", invalid.Code, invalid.deadline)
+	}
+
+	valid := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	validRequest := httptest.NewRequest(http.MethodPost, "/api/install", strings.NewReader(`{"CFG_DOMAIN":"example.com"}`))
+	validRequest.Header.Set("Authorization", "Bearer "+tok)
+	before := time.Now()
+	s.ServeHTTP(valid, validRequest)
+	after := time.Now()
+	if valid.Code != http.StatusOK || !ran {
+		t.Fatalf("valid install: status %d ran=%t", valid.Code, ran)
+	}
+	if valid.deadline.Before(before.Add(setupInstallWriteTimeout)) || valid.deadline.After(after.Add(setupInstallWriteTimeout)) {
+		t.Fatalf("deadline %v is not a %s install deadline", valid.deadline, setupInstallWriteTimeout)
+	}
+}
+
+func TestSetupInstallFailsClosedWhenDeadlineCannotBeExtended(t *testing.T) {
+	ran := false
+	s, tok := newTestSetup(t, runFunc(func(context.Context, []string, io.Writer) error {
+		ran = true
+		return nil
+	}))
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder(), deadlineErr: fmt.Errorf("unsupported")}
+	req := httptest.NewRequest(http.MethodPost, "/api/install", strings.NewReader(`{"CFG_DOMAIN":"example.com"}`))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || ran {
+		t.Fatalf("deadline failure: status %d ran=%t", rec.Code, ran)
+	}
+}
+
 func TestSetupInstallWritesPrivateAnswersAndBurnsToken(t *testing.T) {
 	var answersPath string
 	var s *Setup
@@ -313,7 +368,7 @@ func TestSetupInstallRechecksUsed(t *testing.T) {
 	s, _ := newTestSetup(t, runFunc(func(context.Context, []string, io.Writer) error { ran = true; return nil }))
 	// As if another install succeeded after this request was authorized.
 	s.used = true
-	rec := httptest.NewRecorder()
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	s.install(rec, httptest.NewRequest(http.MethodPost, "/api/install", strings.NewReader(`{"CFG_DOMAIN":"a"}`)))
 	if rec.Code != http.StatusGone || ran {
 		t.Fatalf("second install ran after the first succeeded: %d ran=%v", rec.Code, ran)
@@ -379,7 +434,7 @@ func TestSetupInstallOutlivesTheBrowser(t *testing.T) {
 	cancel() // the browser has gone
 	req := httptest.NewRequest(http.MethodPost, "/api/install", strings.NewReader(`{"CFG_DOMAIN":"a"}`)).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	s.ServeHTTP(httptest.NewRecorder(), req)
+	s.ServeHTTP(&deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}, req)
 }
 
 func TestSetupPreflightFindsTheReportAmongStderr(t *testing.T) {

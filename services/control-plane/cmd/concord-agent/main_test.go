@@ -286,8 +286,8 @@ func TestStartSetupSkipsAnInstalledHost(t *testing.T) {
 
 func TestNewSetupServerSetsWriteTimeout(t *testing.T) {
 	server := newSetupServer(http.NotFoundHandler())
-	if server.WriteTimeout < hostagent.SetupWindow/6 {
-		t.Fatalf("write timeout %v ends before the ten-minute installer budget", server.WriteTimeout)
+	if server.WriteTimeout != setupWriteTimeout {
+		t.Fatalf("write timeout %v, want %v", server.WriteTimeout, setupWriteTimeout)
 	}
 }
 

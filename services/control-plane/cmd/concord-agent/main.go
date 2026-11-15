@@ -46,9 +46,7 @@ const (
 	// setupMaxConns bounds the TLS connections a LAN client can hold open.
 	setupMaxConns          = 16
 	setupMaxConnsPerSource = 4
-	// The installer has a ten-minute execution budget; keep its HTTP response
-	// writable for the entire operation plus a small shutdown margin.
-	setupWriteTimeout = 11 * time.Minute
+	setupWriteTimeout      = 30 * time.Second
 )
 
 func main() {
