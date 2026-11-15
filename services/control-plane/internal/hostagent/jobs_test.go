@@ -100,7 +100,9 @@ func started(t *testing.T, rec *httptest.ResponseRecorder) Job {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
 	}
 	var j Job
-	if err := json.Unmarshal(rec.Body.Bytes(), &j); err != nil || !jobIDPattern.MatchString(j.ID) || j.State != "running" {
+	// The worker may finish before the accepted response is decoded.
+	if err := json.Unmarshal(rec.Body.Bytes(), &j); err != nil || !jobIDPattern.MatchString(j.ID) ||
+		(j.State != "running" && j.State != "succeeded" && j.State != "failed") {
 		t.Fatalf("bad job %s", rec.Body)
 	}
 	return j
