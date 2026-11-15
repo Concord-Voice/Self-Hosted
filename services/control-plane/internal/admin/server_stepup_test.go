@@ -21,7 +21,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
 
-const stepUpJobID = "fedcba9876543210fedcba9876543210"
+const stepUpJobID = "00000000000000000000000000000001"
 
 // stepUpAgent accepts every action but restart, which it refuses as busy, and
 // records the request bodies.
@@ -154,4 +154,63 @@ func TestServerActionStepUp(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT (detail->>'stepup')::bool FROM admin_audit_log
 		WHERE event_type = $1 AND detail->>'job_id' = $2`, admin.EventServerWrite, stepUpJobID).Scan(&stepup))
 	assert.True(t, stepup)
+}
+
+func TestServerStepUpRejectsRepeatedOrLowerCounters(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+	adminID, _, va := enrolledAdmin(t, db, rdb)
+	h, err := admin.NewHandler(db, rdb, logger.NewWithWriter(io.Discard), authHandlerCfg())
+	require.NoError(t, err)
+	sock, bodies := stepUpAgent(t)
+	admin.UseServerAgentForTest(h, sock)
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) { c.Set("admin_id", adminID); c.Next() })
+	engine.POST("/stepup", h.ServerStepUpBegin)
+	engine.POST("/actions/:action", h.ServerAction)
+
+	begin := func() (string, string) {
+		rec := postJSON(engine, "/stepup", map[string]string{"action": "update"})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp struct {
+			Handle    string                        `json:"handle"`
+			PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.Handle, resp.PublicKey.Response.Challenge.String()
+	}
+	action := func(handle string, assertion json.RawMessage) int {
+		return postJSON(engine, "/actions/update", map[string]any{"tag": "v1.2.3", "stepup": map[string]any{"handle": handle, "assertion": assertion}}).Code
+	}
+	sign := func(challenge string) json.RawMessage {
+		return va.assertionResponse(t, testAdminRPID, challenge, testAdminOrigin, flagUP|flagUV, false)
+	}
+
+	// Authenticators that always report zero remain usable. The virtual key
+	// enrolls with counter 1, so model a zero-counter key from enrollment on.
+	va.signCount = 0
+	_, err = db.Exec(`UPDATE admin_webauthn_credentials SET sign_count = 0 WHERE admin_id = $1`, adminID)
+	require.NoError(t, err)
+	handle, challenge := begin()
+	require.Equal(t, http.StatusAccepted, action(handle, sign(challenge)))
+	handle, challenge = begin()
+	require.Equal(t, http.StatusAccepted, action(handle, sign(challenge)))
+	va.signCount = 1
+	handle, challenge = begin()
+	require.Equal(t, http.StatusAccepted, action(handle, sign(challenge)))
+	handle, challenge = begin()
+	assert.Equal(t, http.StatusForbidden, action(handle, sign(challenge)), "a repeated advanced counter cannot authorize an action")
+	va.signCount = 2
+	handle, challenge = begin()
+	require.Equal(t, http.StatusAccepted, action(handle, sign(challenge)))
+	va.signCount = 1
+	handle, challenge = begin()
+	assert.Equal(t, http.StatusForbidden, action(handle, sign(challenge)), "a lower advanced counter cannot authorize an action")
+	assert.Len(t, *bodies, 4, "rejected counter assertions must not reach the agent")
+	var stored int64
+	require.NoError(t, db.QueryRow(`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&stored))
+	assert.Equal(t, int64(2), stored, "rejected assertions must not roll the counter back")
 }

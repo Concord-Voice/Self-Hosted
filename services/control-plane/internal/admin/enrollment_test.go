@@ -18,13 +18,14 @@ func TestEnrollmentToken_MintThenConsume(t *testing.T) {
 	store := admin.NewEnrollmentStore(rdb)
 
 	adminID := uniqueAdminUsername("admin-id")
-	token, err := store.MintEnrollmentToken(ctx, adminID)
+	token, err := store.MintEnrollmentToken(ctx, adminID, 7)
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
 
-	got, err := store.ConsumeEnrollmentToken(ctx, token)
+	got, generation, err := store.ConsumeEnrollmentToken(ctx, token)
 	require.NoError(t, err)
 	assert.Equal(t, adminID, got)
+	assert.Equal(t, int64(7), generation)
 }
 
 func TestEnrollmentToken_StoresOnlyHashNotPlaintext(t *testing.T) {
@@ -33,7 +34,7 @@ func TestEnrollmentToken_StoresOnlyHashNotPlaintext(t *testing.T) {
 	ctx := context.Background()
 	store := admin.NewEnrollmentStore(rdb)
 
-	token, err := store.MintEnrollmentToken(ctx, uniqueAdminUsername("admin-id"))
+	token, err := store.MintEnrollmentToken(ctx, uniqueAdminUsername("admin-id"), 1)
 	require.NoError(t, err)
 
 	// The plaintext token must never be a Redis key: looking up the plaintext
@@ -50,14 +51,14 @@ func TestEnrollmentToken_SingleUse(t *testing.T) {
 	ctx := context.Background()
 	store := admin.NewEnrollmentStore(rdb)
 
-	token, err := store.MintEnrollmentToken(ctx, uniqueAdminUsername("admin-id"))
+	token, err := store.MintEnrollmentToken(ctx, uniqueAdminUsername("admin-id"), 1)
 	require.NoError(t, err)
 
-	_, err = store.ConsumeEnrollmentToken(ctx, token)
+	_, _, err = store.ConsumeEnrollmentToken(ctx, token)
 	require.NoError(t, err)
 
 	// Second consume of the same token fails (GETDEL removed it).
-	_, err = store.ConsumeEnrollmentToken(ctx, token)
+	_, _, err = store.ConsumeEnrollmentToken(ctx, token)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, admin.ErrEnrollTokenInvalid)
 }
@@ -68,11 +69,11 @@ func TestEnrollmentToken_RejectsUnknownToken(t *testing.T) {
 	ctx := context.Background()
 	store := admin.NewEnrollmentStore(rdb)
 
-	_, err := store.ConsumeEnrollmentToken(ctx, "deadbeefdeadbeefdeadbeefdeadbeef")
+	_, _, err := store.ConsumeEnrollmentToken(ctx, "deadbeefdeadbeefdeadbeefdeadbeef")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, admin.ErrEnrollTokenInvalid)
 
-	_, err = store.ConsumeEnrollmentToken(ctx, "")
+	_, _, err = store.ConsumeEnrollmentToken(ctx, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, admin.ErrEnrollTokenInvalid)
 }
@@ -83,6 +84,6 @@ func TestEnrollmentToken_MintRequiresAdminID(t *testing.T) {
 	ctx := context.Background()
 	store := admin.NewEnrollmentStore(rdb)
 
-	_, err := store.MintEnrollmentToken(ctx, "")
+	_, err := store.MintEnrollmentToken(ctx, "", 1)
 	require.Error(t, err)
 }

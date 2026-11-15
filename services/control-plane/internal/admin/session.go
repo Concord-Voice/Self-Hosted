@@ -47,10 +47,11 @@ var ErrSessionInvalid = errors.New("admin: session is invalid or expired")
 // Session is the data bound to a session id in Redis. AbsoluteExpiry is fixed at
 // mint; LastSeen slides forward on each Get.
 type Session struct {
-	AdminID        string    `json:"admin_id"`
-	CreatedAt      time.Time `json:"created_at"`
-	LastSeen       time.Time `json:"last_seen"`
-	AbsoluteExpiry time.Time `json:"absolute_expiry"`
+	AdminID           string    `json:"admin_id"`
+	SessionGeneration int64     `json:"session_generation"`
+	CreatedAt         time.Time `json:"created_at"`
+	LastSeen          time.Time `json:"last_seen"`
+	AbsoluteExpiry    time.Time `json:"absolute_expiry"`
 }
 
 // SessionStore mints, resolves, rotates, and revokes opaque admin sessions in
@@ -79,12 +80,13 @@ func newSessionID() (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-// Mint creates a new session bound to adminID, persisted in Redis with the idle
-// TTL. The absolute expiry is stamped at mint (now + 8h) and stored in the value
-// so Get can enforce it independently of the key TTL.
-func (s *SessionStore) Mint(ctx context.Context, adminID string) (string, error) {
+// Mint creates a session bound to the durable generation observed at authentication.
+func (s *SessionStore) Mint(ctx context.Context, adminID string, sessionGeneration int64) (string, error) {
 	if adminID == "" {
 		return "", errors.New("admin: Mint requires an adminID")
+	}
+	if sessionGeneration < 0 {
+		return "", errors.New("admin: Mint requires a non-negative session generation")
 	}
 	sid, err := newSessionID()
 	if err != nil {
@@ -92,10 +94,11 @@ func (s *SessionStore) Mint(ctx context.Context, adminID string) (string, error)
 	}
 	now := s.now()
 	sess := Session{
-		AdminID:        adminID,
-		CreatedAt:      now,
-		LastSeen:       now,
-		AbsoluteExpiry: now.Add(sessionAbsoluteTTL),
+		AdminID:           adminID,
+		SessionGeneration: sessionGeneration,
+		CreatedAt:         now,
+		LastSeen:          now,
+		AbsoluteExpiry:    now.Add(sessionAbsoluteTTL),
 	}
 	if err := s.persist(ctx, sid, sess, now); err != nil {
 		return "", err
