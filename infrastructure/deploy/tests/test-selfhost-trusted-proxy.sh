@@ -24,6 +24,7 @@ root = Path(sys.argv[1])
 vhost = (root / "infrastructure/deploy/nginx/concordvoice.conf").read_text()
 aop = (root / "infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf").read_text()
 admin = (root / "infrastructure/deploy/nginx/admin-console.conf.template").read_text()
+ctl = (root / "infrastructure/deploy/concord-ctl.sh").read_text()
 
 
 def check_headers(source, name):
@@ -39,6 +40,13 @@ check_headers(vhost, "public vhost")
 check_headers(admin, "admin vhost")
 assert vhost.count("    # CONCORD_CLIENT_IP_PROVENANCE") == 1, "client-IP provenance marker must be API-only and unique"
 assert "# HTTPS — Media Plane" in vhost and vhost.index("CONCORD_CLIENT_IP_PROVENANCE") < vhost.index("# HTTPS — Media Plane"), "media must not receive AOP"
+assert admin.count("    # CONCORD_ADMIN_CLIENT_IP_PROVENANCE") == 1, "admin client-IP provenance marker must be unique"
+assert "if ($ssl_server_name != $host) { return 444; }" in admin, "admin must bind TLS SNI to HTTP Host before AOP real-IP restoration"
+admin_renderer = re.search(r"(?ms)^    render_admin_config\(\) \{(.*?)^    \}", ctl)
+assert admin_renderer, "managed admin renderer missing"
+assert 'validate_aop_fragment && aop_ca_safe || return 1' in admin_renderer.group(1), "admin renderer must fail closed unless the complete AOP fragment and fixed CA validate"
+assert "CONCORD_ADMIN_CLIENT_IP_PROVENANCE" in admin_renderer.group(1), "admin renderer does not consume the provenance marker"
+assert "provenance_markers != 1" in admin_renderer.group(1), "admin renderer must reject missing or duplicate provenance markers"
 assert re.search(r"(?m)^ssl_client_certificate /etc/concord/nginx/cloudflare-aop-ca\.pem;$", aop), "AOP CA path changed"
 assert [line for line in aop.splitlines() if line and not line.startswith("#")] == [
     "ssl_client_certificate /etc/concord/nginx/cloudflare-aop-ca.pem;",
@@ -53,6 +61,15 @@ api_start = vhost.index("# HTTPS — API + WebSocket Hub")
 media_start = vhost.index("# HTTPS — Media Plane")
 api_block = vhost[api_start:media_start]
 assert 'map "$ssl_server_name:$validated_host" $api_tls_name_match {' in vhost, "API SNI/Host guard map missing"
+tls_map = re.search(r'map "\$ssl_server_name:\$validated_host" \$api_tls_name_match \{(?P<body>.*?)^\}', vhost, re.MULTILINE | re.DOTALL)
+assert tls_map, "API SNI/Host guard map is unterminated"
+tls_pairs = set(re.findall(r'^\s*"([^"]+)"\s+1;$', tls_map.group("body"), re.MULTILINE))
+assert tls_pairs == {
+    "api.concordvoice.chat:api.concordvoice.chat",
+    "concordvoice.chat:concordvoice.chat",
+    "api.concordvoice.chat:concordvoice.chat",
+    "concordvoice.chat:api.concordvoice.chat",
+}, f"API SNI/Host guard allow-list drifted: {tls_pairs}"
 assert "if ($api_tls_name_match = 0) { return 444; }" in api_block, "API must reject Host routing after a different TLS SNI handshake"
 assert "if ($api_tls_name_match = 0) { return 444; }" not in vhost[media_start:], "media must not receive the API SNI/Host guard"
 try:
@@ -204,14 +221,17 @@ error_log {temp}/error.log;
 events {{ worker_connections 128; }}
 http {{
     access_log {temp}/access.log;
-    map $host $validated_host {{ default ""; api.example.test api.example.test; }}
+    map $host $validated_host {{ default ""; api.example.test api.example.test; apex.example.test apex.example.test; }}
     map \"$ssl_server_name:$validated_host\" $api_tls_name_match {{
         default 0;
         \"api.example.test:api.example.test\" 1;
+        \"apex.example.test:apex.example.test\" 1;
+        \"api.example.test:apex.example.test\" 1;
+        \"apex.example.test:api.example.test\" 1;
     }}
     server {{
-        listen 127.0.0.1:{tls_port} ssl;
-        server_name api.example.test;
+        listen 127.0.0.1:{tls_port} ssl default_server;
+        server_name api.example.test apex.example.test;
         ssl_certificate {server_cert};
         ssl_certificate_key {server_key};
         ssl_client_certificate {ca_cert};
@@ -224,10 +244,31 @@ http {{
         location / {{ return 204; }}
     }}
     server {{
-        listen 127.0.0.1:{tls_port} ssl default_server;
+        listen 127.0.0.1:{tls_port} ssl;
         server_name media.example.test;
         ssl_certificate {server_cert};
         ssl_certificate_key {server_key};
+        location / {{ return 204; }}
+    }}
+    server {{
+        listen 127.0.0.1:{tls_port} ssl;
+        server_name turn.example.test;
+        ssl_certificate {server_cert};
+        ssl_certificate_key {server_key};
+        location / {{ return 204; }}
+    }}
+    server {{
+        listen 127.0.0.1:{tls_port} ssl;
+        server_name admin.example.test;
+        ssl_certificate {server_cert};
+        ssl_certificate_key {server_key};
+        ssl_client_certificate {ca_cert};
+        ssl_verify_client on;
+        set_real_ip_from 0.0.0.0/0;
+        set_real_ip_from ::/0;
+        real_ip_header CF-Connecting-IP;
+        real_ip_recursive off;
+        if ($ssl_server_name != $host) {{ return 444; }}
         location / {{ return 204; }}
     }}
 }}
@@ -245,25 +286,51 @@ http {{
         else:
             raise AssertionError("TLS nginx did not start")
 
-        untrusted_media = ssl.create_default_context(cafile=ca_cert)
-        untrusted_media.check_hostname = False
-        with socket.create_connection(("127.0.0.1", tls_port), timeout=3) as raw:
-            with untrusted_media.wrap_socket(raw, server_hostname="media.example.test") as connection:
-                connection.sendall(b"GET / HTTP/1.1\r\nHost: api.example.test\r\nCF-Connecting-IP: 198.51.100.14\r\nConnection: close\r\n\r\n")
-                response = connection.recv(4096)
-        # nginx may reject the SNI/Host mismatch with 421 before our 444 guard.
-        assert response == b"" or response.startswith(b"HTTP/1.1 421 Misdirected Request\r\n"), \
-            f"media-SNI/API-Host bypass was accepted: {response[:120]!r}"
+        def tls_request(sni, host):
+            client = ssl.create_default_context(cafile=ca_cert)
+            client.check_hostname = False
+            client.load_cert_chain(certfile=client_cert, keyfile=client_key)
+            with socket.create_connection(("127.0.0.1", tls_port), timeout=3) as raw:
+                with client.wrap_socket(raw, server_hostname=sni) as connection:
+                    connection.sendall(
+                        f"GET / HTTP/1.1\r\nHost: {host}\r\nCF-Connecting-IP: 198.51.100.14\r\nConnection: close\r\n\r\n".encode()
+                    )
+                    return connection.recv(4096)
 
-        trusted_api = ssl.create_default_context(cafile=ca_cert)
-        trusted_api.check_hostname = False
-        trusted_api.load_cert_chain(certfile=client_cert, keyfile=client_key)
-        with socket.create_connection(("127.0.0.1", tls_port), timeout=3) as raw:
-            with trusted_api.wrap_socket(raw, server_hostname="api.example.test") as connection:
-                connection.sendall(b"GET / HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n")
-                response = connection.recv(4096)
-        assert response.startswith(b"HTTP/1.1 204"), f"valid AOP API request rejected: {response[:120]!r}"
-        print("PASS: media-SNI/API-Host request without an AOP client certificate is rejected")
+        for sni, host in (
+            ("api.example.test", "api.example.test"),
+            ("api.example.test", "apex.example.test"),
+            ("apex.example.test", "api.example.test"),
+            ("apex.example.test", "apex.example.test"),
+        ):
+            response = tls_request(sni, host)
+            assert response.startswith(b"HTTP/1.1 204"), \
+                f"same-policy API SNI/Host pair {sni}/{host} rejected: {response[:120]!r}"
+
+        for label, sni in (
+            ("media", "media.example.test"),
+            ("TURN", "turn.example.test"),
+            ("unknown", "unknown.example.test"),
+            ("no-SNI", None),
+        ):
+            response = tls_request(sni, "api.example.test")
+            # nginx can issue 421 for a server-name mismatch before the API
+            # block's 444 guard. Either way, the request must not reach API.
+            assert not response.startswith(b"HTTP/1.1 204"), \
+                f"{label}-SNI/API-Host bypass was accepted: {response[:120]!r}"
+
+        response = tls_request("admin.example.test", "admin.example.test")
+        assert response.startswith(b"HTTP/1.1 204"), f"valid admin AOP request rejected: {response[:120]!r}"
+        for label, sni in (
+            ("media", "media.example.test"),
+            ("TURN", "turn.example.test"),
+            ("unknown", "unknown.example.test"),
+            ("no-SNI", None),
+        ):
+            response = tls_request(sni, "admin.example.test")
+            assert not response.startswith(b"HTTP/1.1 204"), \
+                f"{label}-SNI/admin-Host bypass was accepted: {response[:120]!r}"
+        print("PASS: API and admin reject media, TURN, unknown, and no-SNI Host-routing after TLS")
     finally:
         process.terminate()
         process.wait(timeout=5)

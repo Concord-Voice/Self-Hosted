@@ -1883,10 +1883,10 @@ The self-hosted CLI runs the selected stack on a single server using repo-root `
 
 For proxy provenance, the installer writes only placeholders for `TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES`. Under the deploy lock, `concord-selfhost up` measures the selected services-bridge gateway, persists its exact canonical IPv4 `/32` or IPv6 `/128` route for both services, and refuses an ambiguous or changed topology. IPv4-mapped IPv6 trust entries are rejected. Both application services set `gw_priority: 1` for that bridge, which requires Compose 2.33.1 or newer. `restart` proceeds only when the existing running topology matches the measured trust. See the quickstart's [trusted proxy gateway provenance](runbooks/selfhost-quickstart.md#trusted-proxy-gateway-provenance) for the operator procedure.
 
-For Cloudflare-proxied API/apex traffic, nginx restores `CF-Connecting-IP` only
+For Cloudflare-proxied API/apex and managed admin traffic, nginx restores `CF-Connecting-IP` only
 in explicit `cloudflare-aop` mode after it verifies a deployment-specific
 Authenticated Origin Pull client certificate against a fixed root-owned public
-CA bundle. The self-host `direct` default and the direct media vhost do not
+CA bundle. The admin vhost also binds TLS SNI to HTTP Host. The self-host `direct` default and the direct media vhost do not
 restore that header. The managed nginx renderer requires the same provenance
 fragment and fails closed when its CA prerequisite is absent or unsafe. Source
 merge does not configure Cloudflare or prove that the custom certificate,

@@ -90,8 +90,8 @@ deployment's authenticated Cloudflare path.
 
 The generic self-hosted vhost has two explicit modes. `direct`, the default,
 does not restore `CF-Connecting-IP`; Cloudflare-proxied requests are attributed
-to the edge address. `cloudflare-aop` restores that header only in the API/apex
-TLS server after nginx verifies a custom zone-level or hostname-level
+to the edge address. `cloudflare-aop` restores that header in the API/apex and
+managed admin TLS servers after nginx verifies a custom zone-level or hostname-level
 Cloudflare Authenticated Origin Pull client certificate against an
 operator-provided public CA. The direct media vhost never enables this path.
 The shared global AOP certificate is insufficient because it proves only that
@@ -102,13 +102,16 @@ In `cloudflare-aop` mode, the API/apex fragment deliberately uses
 deployment-specific mTLS authenticates the TLS peer before nginx considers
 `CF-Connecting-IP`; the all-address setting must never appear without that
 client-certificate requirement. Static tests enforce this complete group and
-its API/apex-only placement.
+its placement in the API/apex and managed admin TLS servers. The admin vhost
+also binds TLS SNI to its HTTP Host so a direct-media connection cannot route
+into an admin request without the admin client-certificate policy.
 
 The AOP CA is a root-owned regular file at the fixed nginx path. It is public
 CA material only: neither the Cloudflare client private key nor a CA private
 key belongs in the repository or root `.env`. Both the self-host and managed
-renderers consume the same API-server marker and fail before publishing nginx
-configuration if that marker or the selected provenance fragment is missing.
+renderers consume the same API-server fragment, and the managed admin renderer
+requires it at its own marker. They fail before publishing nginx configuration
+if a marker or the selected provenance fragment is missing.
 The managed renderer requires AOP; it must not silently select `direct` for a
 Cloudflare-proxied managed API.
 
@@ -280,7 +283,7 @@ These are one contract and change together:
 | Media admission gate | Continues matching the compiled list; untrusted peers use their socket peer |
 | nginx user/API/media/admin locations | Both client-address headers overwrite with `$remote_addr` |
 | API/apex Cloudflare provenance | `direct` removes the marker; `cloudflare-aop` injects custom-AOP mTLS before real-IP restoration |
-| Managed API renderer | Requires the same custom-AOP fragment and validated public CA; never defaults to edge-IP restoration |
+| Managed API/admin renderers | Require the same custom-AOP fragment and validated public CA; admin binds SNI to Host |
 | Examples and operator docs | Exact-route semantics and migration behavior |
 
 The callers of `c.ClientIP()` do not change. Tests at login, recovery,
@@ -375,7 +378,7 @@ fixed source, with retained positive tests proving correct attribution.
 5. Deploy the managed environment only after its own config, CI, and live canary prove the exact
    peer and end-client attribution.
 6. Before enabling `cloudflare-aop`, configure the custom AOP client
-   certificate for both API and apex at Cloudflare, install the public CA at
+   certificate for API, apex, and managed admin at Cloudflare, install the public CA at
    the fixed root-owned path, and prove ordinary Cloudflare traffic still
    succeeds while direct-origin TLS without the client certificate fails.
 7. Keep the separate IPv6 aggregation and Redis failure posture work separate.

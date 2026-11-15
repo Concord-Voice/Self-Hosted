@@ -21,6 +21,12 @@ server {
     ssl_certificate     /etc/nginx/cloudflare/origin.pem;
     ssl_certificate_key /etc/nginx/cloudflare/origin.key;
 
+    # CONCORD_ADMIN_CLIENT_IP_PROVENANCE
+
+    # TLS selects the client-certificate policy before HTTP Host routing. Do
+    # not permit another SNI vhost to route into this AOP-protected admin host.
+    if ($ssl_server_name != $host) { return 444; }
+
     client_max_body_size 1M;             # WebAuthn assertions are tiny
 
     # Admin console + ceremony — all under /admin (control_plane 127.0.0.1:8080).

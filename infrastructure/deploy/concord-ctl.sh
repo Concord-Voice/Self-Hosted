@@ -7672,6 +7672,49 @@ else:
       openssl x509 -in "$path" -noout -checkend 0 >/dev/null 2>&1
     }
 
+    render_admin_config() {
+      local admin_domain="$1" line expanded tmp provenance_markers=0 server_blocks=0 provenance_bad=0
+      [[ -f "$ADMIN_TMPL" && ! -L "$ADMIN_TMPL" ]] || return 1
+      [[ -f "$CLOUDFLARE_AOP_FRAGMENT" && ! -L "$CLOUDFLARE_AOP_FRAGMENT" ]] || return 1
+      validate_aop_fragment && aop_ca_safe || return 1
+      mkdir -p "$NGINX_RENDER_DIR" || return 1
+      expanded="$(mktemp "${ADMIN_RENDER}.expanded.XXXXXX")" || return 1
+      tmp="$(mktemp "${ADMIN_RENDER}.tmp.XXXXXX")" || { rm -f "$expanded"; return 1; }
+      if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$expanded"; then
+        rm -f "$expanded" "$tmp"
+        return 1
+      fi
+      if while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == 'server {' ]]; then
+          server_blocks=$((server_blocks + 1))
+          printf '%s\n' "$line"
+        elif [[ "$line" == '    # CONCORD_ADMIN_CLIENT_IP_PROVENANCE' ]]; then
+          if (( server_blocks != 1 )); then
+            provenance_bad=1
+          else
+            sed 's/^/    /' "$CLOUDFLARE_AOP_FRAGMENT" || { rm -f "$expanded" "$tmp"; return 1; }
+            provenance_markers=$((provenance_markers + 1))
+          fi
+        else
+          printf '%s\n' "$line"
+        fi
+      done < "$expanded" > "$tmp"; then
+        :
+      else
+        rm -f "$expanded" "$tmp"
+        return 1
+      fi
+      rm -f "$expanded"
+      if (( server_blocks != 1 || provenance_markers != 1 || provenance_bad )); then
+        rm -f "$tmp"
+        return 1
+      fi
+      if ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$ADMIN_RENDER"; then
+        rm -f "$tmp"
+        return 1
+      fi
+    }
+
     render_nginx_config() {
       local policy="$1" cp_port="${2:-}" encoded line tmp
       local in_api=0 scoped_replacements=0 owner_markers=0 provenance_markers=0 provenance_bad=0
@@ -7798,13 +7841,8 @@ else:
         echo "    key:  $ADMIN_ORIGIN_KEY" >&2
         echo "    Keeping admin closed; install the cert/key and rerun deploy to enable it." >&2
         # ponytail: fail closed but keep service deploys green; hard-fail here if admin availability becomes deploy-critical.
-      elif [[ ! -f "$ADMIN_TMPL" ]]; then
-        echo "  ✗ nginx-reload: admin template not found at $ADMIN_TMPL" >&2
-        exit 1
       else
-        mkdir -p "$NGINX_RENDER_DIR"
-        if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$ADMIN_RENDER" \
-           || ! chmod 0644 "$ADMIN_RENDER"; then
+        if ! render_admin_config "$admin_domain"; then
           echo "  ✗ nginx-reload: failed to render admin vhost template" >&2
           exit 1
         fi
