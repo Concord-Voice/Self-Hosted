@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1615,4 +1616,41 @@ func TestLogin_PasswordDisabled_NoIdentities_Returns500(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), exists,
 		"sso_account_misconfigured path must not engage per-email lockout — it's a server fault, not a credential failure")
+}
+
+// A re-registration of the same address mints a new pending ID, whose own
+// attempt count starts at zero. The per-address budget must keep confirm
+// refused after the first row's guesses were spent, both on a password
+// takeover and on cancel-then-register.
+func TestRegistrationAttemptsSurviveReRegistration(t *testing.T) {
+	for _, path := range []string{"takeover", "cancel then register"} {
+		t.Run(path, func(t *testing.T) {
+			ts := setupTS(t)
+			register := func() string {
+				w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+				require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+				var reg struct {
+					PendingID string `json:"pending_id"`
+				}
+				testhelpers.ParseJSON(t, w, &reg)
+				return reg.PendingID
+			}
+			first := register()
+			wrong := map[string]string{"pending_id": first, "code": "000000"} //nolint:gosec // test value, not a credential
+			for i := 0; i < auth.MaxCodeAttempts; i++ {
+				require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+			}
+			if path == "cancel then register" {
+				w := ts.DoRequest("DELETE", pathRegister+"/"+first, nil, nil)
+				require.Less(t, w.Code, 300, w.Body.String())
+			}
+			second := register()
+			require.NotEqual(t, first, second)
+
+			w := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+				map[string]string{"pending_id": second, "code": "000000"}, nil) //nolint:gosec // test value, not a credential
+			require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), "too_many_attempts")
+		})
+	}
 }

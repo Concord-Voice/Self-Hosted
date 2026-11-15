@@ -752,6 +752,9 @@ func (h *Handler) ConfirmRegistration(c *gin.Context) {
 		return
 	}
 
+	if !h.allowRegistrationEmailAttempt(ctx, c, pending.Email) {
+		return
+	}
 	if !h.attemptsGuard(ctx, c, req.PendingID, sanitized, time.Until(pending.ExpiresAt)) {
 		return
 	}
@@ -808,6 +811,40 @@ func (h *Handler) validateConfirmRequest(c *gin.Context) (*ConfirmRegistrationRe
 		return nil, "", false
 	}
 	return &req, sanitized, true
+}
+
+// registrationEmailAttemptsKey keys the per-address count of registration
+// code guesses. It sits under the email_verify_attempts: prefix the Redis ACL
+// already grants, and "email:" can never collide with a pending UUID.
+func registrationEmailAttemptsKey(email string) string {
+	return "email_verify_attempts:email:" + strings.ToLower(strings.TrimSpace(email))
+}
+
+// allowRegistrationEmailAttempt charges one code guess against the address,
+// before the per-pending reservation. The per-pending count lives with a
+// pending ID, and a re-registration of the same address (a takeover, or a
+// cancel and register) mints a new ID with a fresh count; this one bounds the
+// guesses an address gets in a pending row's lifetime however many rows it
+// has. It fails closed: a Redis error is a 503, never an unbounded guess.
+func (h *Handler) allowRegistrationEmailAttempt(ctx context.Context, c *gin.Context, email string) bool {
+	allowed, err := middleware.AllowUserAction(ctx, h.redis, registrationEmailAttemptsKey(email), MaxCodeAttempts, PendingRegistrationTTL)
+	if err != nil {
+		h.log.Error("confirm: email attempt budget unavailable", "error", err)
+		writeRegistrationAttemptsUnavailable(c)
+		return false
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": "too_many_attempts"})
+		return false
+	}
+	return true
+}
+
+// writeRegistrationAttemptsUnavailable is the confirm route's answer when an
+// attempt cannot be counted: the shared step-up budget's 503 body, so a
+// client never reads a server fault as a wrong code.
+func writeRegistrationAttemptsUnavailable(c *gin.Context) {
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": stepUpBudgetUnavailableMessage, "step_up_budget_unavailable": true})
 }
 
 // attemptsGuard reserves an attempt atomically before comparing the code.
@@ -3358,8 +3395,12 @@ func (h *Handler) allowRecoveryFailureAttempt(ctx context.Context, c *gin.Contex
 	return false
 }
 
+// stepUpBudgetUnavailableMessage is stepup.ErrMsgBudgetUnavailable's text.
+// internal/stepup imports this package, so the copy cannot be imported here.
+const stepUpBudgetUnavailableMessage = "Verification is temporarily unavailable. Try again in a few minutes."
+
 func writeRecoveryBudgetUnavailable(c *gin.Context) {
-	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Verification is temporarily unavailable. Try again in a few minutes.", "step_up_budget_unavailable": true})
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": stepUpBudgetUnavailableMessage, "step_up_budget_unavailable": true})
 }
 
 func (h *Handler) recoveryPolicyAllowsEmailCompletion(ctx context.Context, c *gin.Context, userID string) bool {
