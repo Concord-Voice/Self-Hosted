@@ -47,12 +47,12 @@ The new signing secret invalidates every pre-restore signed access, challenge, a
 3. Replace `.env` with it, and set its mode to `0600`. Restore retains its database and encryption keys but replaces its `JWT_SECRET`.
 4. Run `restore`.
 
-The `.env` check exists because the database and its keys must come from the same install. Copying the archived `env` into place is therefore a deliberate step. A release without this restore behavior must be upgraded or backported before restoring to a new host or after losing Redis.
+The `.env` check exists because the database and its keys must come from the same install. Copying the archived `env` into place is therefore a deliberate step. Older archives remain pinned to their original release identity; upgrading the checkout makes restore refuse them. Before a new-host or Redis-loss restore of an older archive, use a reviewed backport of this restore helper on the matching-release checkout, or arrange equivalent signing-key rotation before either application plane starts.
 
 ### When restore fails partway
 
 - **A database step fails:** `--single-transaction` means the database is left unchanged. The stack stays stopped. Run `concord-selfhost up` to resume on the old data. The new signing secret remains installed, so sign in again.
-- **The MinIO step fails:** the archive is unpacked beside the live objects and swapped in only after it unpacks fully, so a bad stream leaves the old objects in place. The database has already been restored by then. Re-run the same restore.
+- **The MinIO step fails:** the archive is unpacked beside the live objects and swapped in only after it unpacks fully, so a bad stream leaves the old objects in place. The database has already been restored by then. Re-run the same restore. The signing secret was already rotated; pre-restore access, challenge, and recovery tokens remain invalid, so users must sign in again.
 
 ## Updating to a release tag
 
