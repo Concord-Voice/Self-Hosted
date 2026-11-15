@@ -929,11 +929,12 @@ func (h *Handler) allowRegistrationIssuance(ctx context.Context, c *gin.Context,
 }
 
 // refundRegistrationIssuanceLua returns one issuance to an address, never
-// below zero and never creating the key.
+// below zero and never creating the key. It uses DECRBY because the managed
+// Redis ACL grants DECRBY, not DECR, and checks every command a script calls.
 const refundRegistrationIssuanceLua = `
 local n = tonumber(redis.call("GET", KEYS[1]) or "0")
 if n > 0 then
-  return redis.call("DECR", KEYS[1])
+  return redis.call("DECRBY", KEYS[1], 1)
 end
 return 0
 `
