@@ -84,7 +84,7 @@ func iuTOTPEnrolled(t *testing.T, db *sql.DB, userID string) bool {
 	return enrolled
 }
 
-func TestTOTPDisable_RedisDownIs500(t *testing.T) {
+func TestTOTPDisable_RedisDownFailsClosedWith503(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := iuNewTestDB(t)
 	kr := iuKeyring(t)
@@ -96,8 +96,9 @@ func TestTOTPDisable_RedisDownIs500(t *testing.T) {
 
 	h.TOTPDisable(c)
 
-	assert.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
-	assert.Equal(t, stepup.ErrMsgVerificationFailed, iuBody(t, w)["error"])
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Equal(t, stepup.ErrMsgBudgetUnavailable, iuBody(t, w)["error"])
+	assert.Equal(t, true, iuBody(t, w)["step_up_budget_unavailable"])
 	assert.True(t, iuTOTPEnrolled(t, db, userID), "an uncountable guess removes nothing")
 }
 

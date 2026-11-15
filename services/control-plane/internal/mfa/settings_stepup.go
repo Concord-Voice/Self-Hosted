@@ -347,6 +347,22 @@ func (h *Handler) allowMFASettingsStepUp(c *gin.Context, userID string) bool {
 	if e == nil {
 		return true
 	}
+	h.refuseMFASettingsBudget(c, e)
+	return false
+}
+
+// chargeMFASettingsCode is the code-only counterpart for the two legacy MFA
+// settings routes that do not use the shared settings gate.
+func (h *Handler) chargeMFASettingsCode(c *gin.Context, userID, code string) bool {
+	e := stepup.Charge(c.Request.Context(), h.stepUpBudget(), userID, code)
+	if e == nil {
+		return true
+	}
+	h.refuseMFASettingsBudget(c, e)
+	return false
+}
+
+func (h *Handler) refuseMFASettingsBudget(c *gin.Context, e *stepup.Error) {
 	if e.Status == http.StatusServiceUnavailable {
 		h.log.Error("MFA settings step-up budget unavailable", "error", e.Cause)
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonRateLimitBackendUnavailable})
@@ -354,7 +370,6 @@ func (h *Handler) allowMFASettingsStepUp(c *gin.Context, userID string) bool {
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonRateLimitExceeded})
 	}
 	e.Write(c)
-	return false
 }
 
 // clearMFASettingsStepUp resets the budget after a VERIFIED success, so a

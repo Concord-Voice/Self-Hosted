@@ -600,7 +600,12 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	pendingID, expiresAt, _, err := h.pending.InsertOrTakeover(
+	refundIssuance, ok := h.allowRegistrationIssuance(c.Request.Context(), c, normalizedEmail)
+	if !ok {
+		return
+	}
+
+	pendingID, expiresAt, takenOverID, err := h.pending.InsertOrTakeover(
 		c.Request.Context(),
 		InsertParams{
 			Email:             normalizedEmail,
@@ -614,8 +619,24 @@ func (h *Handler) Register(c *gin.Context) {
 		req.Password,
 	)
 	if err != nil {
+		refundIssuance()
 		h.respondPendingError(c, err)
 		return
+	}
+
+	// A takeover carries the replaced row's attempt count (its resend state
+	// rode the INSERT). Without it the new row would be a fresh code with
+	// fresh guesses, so a failed carry refuses the registration.
+	if takenOverID != "" {
+		if err := h.carryVerificationAttempts(c.Request.Context(), takenOverID, pendingID); err != nil {
+			h.log.Error("register: attempt carry failed", "error", err)
+			if _, delErr := h.pending.Delete(c.Request.Context(), pendingID); delErr != nil {
+				h.log.Error("Failed to roll back pending after attempt carry error", "error", delErr)
+			}
+			refundIssuance()
+			writeRegistrationAttemptsUnavailable(c)
+			return
+		}
 	}
 
 	// Generate + send code synchronously. On failure, roll back the pending
@@ -624,6 +645,10 @@ func (h *Handler) Register(c *gin.Context) {
 	if err != nil {
 		if _, delErr := h.pending.Delete(c.Request.Context(), pendingID); delErr != nil {
 			h.log.Error("Failed to roll back pending after email send error", "error", delErr)
+		} else {
+			// The row, and with it any code it holds, is gone, so nothing
+			// issued survives the failed send.
+			refundIssuance()
 		}
 		h.log.Error("Failed to send verification code", "error", err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -733,9 +758,6 @@ func (h *Handler) sendInitialCode(ctx context.Context, pendingID, userEmail stri
 		return time.Time{}, fmt.Errorf("marshal verification record: %w", err)
 	}
 
-	if err := h.redis.Del(ctx, verificationAttemptsKey(pendingID)).Err(); err != nil {
-		return time.Time{}, fmt.Errorf("reset verification attempts: %w", err)
-	}
 	if err := h.redis.Set(ctx, redisKey(pendingID), raw, codeTTL).Err(); err != nil {
 		return time.Time{}, fmt.Errorf("store code in Redis: %w", err)
 	}
@@ -749,8 +771,7 @@ func (h *Handler) sendInitialCode(ctx context.Context, pendingID, userEmail stri
 	}
 
 	if err := h.emailSvc.SendVerificationCode(userEmail, code); err != nil {
-		// Best-effort cleanup so a retry starts fresh.
-		h.clearVerificationCode(ctx, pendingID)
+		h.clearVerificationCodeMaterial(ctx, pendingID)
 		return time.Time{}, fmt.Errorf("send email: %w", err)
 	}
 
@@ -772,13 +793,8 @@ if not code then
   return {0, 0, ""}
 end
 local attempts = redis.call("INCR", KEYS[2])
-if redis.call("PTTL", KEYS[2]) < 0 then
-  local code_ttl = redis.call("PTTL", KEYS[1])
-  if code_ttl > 0 then
-    redis.call("PEXPIRE", KEYS[2], code_ttl)
-  else
-    redis.call("PEXPIRE", KEYS[2], ARGV[1])
-  end
+if redis.call("PTTL", KEYS[2]) < tonumber(ARGV[1]) then
+	redis.call("PEXPIRE", KEYS[2], ARGV[1])
 end
 return {1, attempts, code}
 `
@@ -799,7 +815,8 @@ func (h *Handler) ConfirmRegistration(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	if _, err := h.pending.GetByID(ctx, req.PendingID); err != nil {
+	pending, err := h.pending.GetByID(ctx, req.PendingID)
+	if err != nil {
 		switch {
 		case errors.Is(err, ErrPendingNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
@@ -812,7 +829,7 @@ func (h *Handler) ConfirmRegistration(c *gin.Context) {
 		return
 	}
 
-	if !h.attemptsGuard(ctx, c, req.PendingID, sanitized) {
+	if !h.attemptsGuard(ctx, c, req.PendingID, sanitized, time.Until(pending.ExpiresAt)) {
 		return
 	}
 
@@ -870,29 +887,130 @@ func (h *Handler) validateConfirmRequest(c *gin.Context) (*ConfirmRegistrationRe
 	return &req, sanitized, true
 }
 
+// registrationIssuanceKey keys the per-address count of registration codes
+// issued. It sits under the email_verify_attempts: prefix the Redis ACL
+// already grants, and "issued:" can never collide with a pending UUID.
+func registrationIssuanceKey(email string) string {
+	return "email_verify_attempts:issued:" + strings.ToLower(strings.TrimSpace(email))
+}
+
+// registrationIssuanceLimit is how many codes one address may be issued in a
+// pending row's lifetime: the initial code plus MaxResends, the most one
+// pending row can issue.
+const registrationIssuanceLimit = MaxResends + 1
+
+// allowRegistrationIssuance charges one code issuance to an address, on every
+// code-issuing path (register, resend, change-email to the new address),
+// before the code is minted. Guesses are bounded per code, and a cancel then
+// register leaves no row to carry state from; bounding issuance per address
+// bounds the total guesses an address can draw. It gates issuance only: a
+// confirm of a code already sent is never refused because of it. Accepted
+// trade-off (ADR-0046): anyone who knows an address can spend this limit and
+// delay its registration for up to the pending TTL, but only by causing codes
+// to be issued. It fails closed: a Redis error is a 503.
+//
+// The limit counts codes issued, so the caller must call refund on every exit
+// that ends before a code is minted (no pending row, a cooldown, a conflict).
+// A failed resend or change-email send keeps its charge: the pending row and
+// the code may survive it. A failed initial send deletes the row, so it refunds.
+func (h *Handler) allowRegistrationIssuance(ctx context.Context, c *gin.Context, email string) (refund func(), ok bool) {
+	key := registrationIssuanceKey(email)
+	allowed, err := middleware.AllowUserAction(ctx, h.redis, key, registrationIssuanceLimit, PendingRegistrationTTL)
+	if err != nil {
+		h.log.Error("register: code issuance limit unavailable", "error", err)
+		writeRegistrationAttemptsUnavailable(c)
+		return nil, false
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": "registration_codes_exhausted"})
+		return nil, false
+	}
+	return func() { h.refundRegistrationIssuance(key) }, true
+}
+
+// refundRegistrationIssuanceLua returns one issuance to an address, never
+// below zero and never creating the key. It uses DECRBY because the managed
+// Redis ACL grants DECRBY, not DECR, and checks every command a script calls.
+const refundRegistrationIssuanceLua = `
+local n = tonumber(redis.call("GET", KEYS[1]) or "0")
+if n > 0 then
+  return redis.call("DECRBY", KEYS[1], 1)
+end
+return 0
+`
+
+// refundRegistrationIssuance gives back an issuance charged for a request that
+// minted no code. It runs detached from the request, since a client that
+// disconnects must not keep the charge. A failed refund only over-counts.
+func (h *Handler) refundRegistrationIssuance(key string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.redis.Eval(ctx, refundRegistrationIssuanceLua, []string{key}).Err(); err != nil {
+		h.log.Warn("register: code issuance refund failed", "error", err)
+	}
+}
+
+// carryVerificationAttemptsLua copies a taken-over pending row's attempt
+// count, with its remaining lifetime, to the row that replaced it.
+const carryVerificationAttemptsLua = `
+local attempts = redis.call("GET", KEYS[1])
+if not attempts then
+  return 0
+end
+local ttl = redis.call("PTTL", KEYS[1])
+if ttl > 0 then
+  redis.call("SET", KEYS[2], attempts, "PX", ttl)
+end
+redis.call("DEL", KEYS[1])
+return 1
+`
+
+// carryVerificationAttempts moves a takeover's attempt count onto the new
+// pending ID, so re-registering does not mint a code with fresh guesses.
+func (h *Handler) carryVerificationAttempts(ctx context.Context, oldPendingID, newPendingID string) error {
+	if err := h.redis.Eval(ctx, carryVerificationAttemptsLua,
+		[]string{verificationAttemptsKey(oldPendingID), verificationAttemptsKey(newPendingID)}).Err(); err != nil {
+		return fmt.Errorf("carry verification attempts: %w", err)
+	}
+	return nil
+}
+
+// writeRegistrationAttemptsUnavailable is the confirm route's answer when an
+// attempt cannot be counted: the shared step-up budget's 503 body, so a
+// client never reads a server fault as a wrong code.
+func writeRegistrationAttemptsUnavailable(c *gin.Context) {
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": stepUpBudgetUnavailableMessage, "step_up_budget_unavailable": true})
+}
+
 // attemptsGuard reserves an attempt atomically before comparing the code.
 // It fetches the verification record after reservation so resend/change-email
 // cannot leave a stale code eligible for promotion.
 // Returns true if the code matched and the caller should proceed; false if a response
 // has already been written (too_many_attempts or invalid_code).
-func (h *Handler) attemptsGuard(ctx context.Context, c *gin.Context, pendingID string, sanitized string) bool {
-	rec, attempts, err := h.reserveVerificationAttempt(ctx, pendingID)
+func (h *Handler) attemptsGuard(ctx context.Context, c *gin.Context, pendingID string, sanitized string, expiry ...time.Duration) bool {
+	attemptTTL := VerifyCodeTTLNew
+	if len(expiry) > 0 && expiry[0] > 0 {
+		attemptTTL = expiry[0]
+	}
+	rec, attempts, err := h.reserveVerificationAttempt(ctx, pendingID, attemptTTL)
 	if errors.Is(err, redis.Nil) {
 		if h.isVerificationExhausted(ctx, pendingID) {
 			c.JSON(http.StatusTooManyRequests, gin.H{"code": "too_many_attempts"})
 			return false
 		}
-		h.clearVerificationCode(ctx, pendingID)
+		h.clearVerificationCodeMaterial(ctx, pendingID)
 		c.JSON(http.StatusGone, gin.H{"code": "code_expired"})
 		return false
 	}
 	if err != nil {
+		// The attempt cannot be counted, so the code is not judged: a 503 with
+		// the step-up budget's body, never a 500 or a wrong-code answer.
 		h.log.Error("confirm: attempts reservation failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		writeRegistrationAttemptsUnavailable(c)
 		return false
 	}
 	if attempts > MaxCodeAttempts {
-		h.exhaustVerificationCode(ctx, pendingID)
+		h.exhaustVerificationCode(ctx, pendingID, attemptTTL)
 		c.JSON(http.StatusTooManyRequests, gin.H{"code": "too_many_attempts"})
 		return false
 	}
@@ -912,10 +1030,10 @@ func (h *Handler) attemptsGuard(ctx context.Context, c *gin.Context, pendingID s
 	return false
 }
 
-func (h *Handler) reserveVerificationAttempt(ctx context.Context, pendingID string) (*verificationRecord, int, error) {
+func (h *Handler) reserveVerificationAttempt(ctx context.Context, pendingID string, attemptTTL time.Duration) (*verificationRecord, int, error) {
 	result, err := h.redis.Eval(ctx, reserveVerificationAttemptLua,
 		[]string{redisKey(pendingID), verificationAttemptsKey(pendingID)},
-		int64(VerifyCodeTTLNew/time.Millisecond),
+		int64(attemptTTL/time.Millisecond),
 	).Result()
 	if err != nil {
 		return nil, 0, err
@@ -961,14 +1079,41 @@ func (h *Handler) verificationCodeTTL(ctx context.Context, pendingID string) tim
 	return ttl
 }
 
-func (h *Handler) clearVerificationCode(ctx context.Context, pendingID string) {
-	_ = h.redis.Del(ctx, redisKey(pendingID), redisKeyTestOnly+pendingID, verificationAttemptsKey(pendingID)).Err()
+// revertResendReservation returns a failed send's reservation. A reservation
+// that changed first (a later resend) is left in place, and both outcomes are
+// logged with the pending id so a lost refund is visible.
+func (h *Handler) revertResendReservation(ctx context.Context, op, pendingID string, count int, reservedAt time.Time) {
+	reverted, err := h.pending.RevertResendIfCurrent(ctx, pendingID, count, reservedAt)
+	if err != nil {
+		h.log.Error(op+": failed to revert resend", "pending_id", pendingID, "error", err)
+		return
+	}
+	if !reverted {
+		h.log.Warn(op+": resend reservation changed before its revert; left in place", "pending_id", pendingID)
+	}
 }
 
-func (h *Handler) exhaustVerificationCode(ctx context.Context, pendingID string) {
+func (h *Handler) clearVerificationCode(ctx context.Context, pendingID string) {
+	if err := h.redis.Del(ctx, redisKey(pendingID), redisKeyTestOnly+pendingID, verificationAttemptsKey(pendingID)).Err(); err != nil {
+		h.log.Warn("Failed to clear verification code state", "pending_id", pendingID, "error", err)
+	}
+}
+
+func (h *Handler) clearVerificationCodeMaterial(ctx context.Context, pendingID string) {
+	if err := h.redis.Del(ctx, redisKey(pendingID), redisKeyTestOnly+pendingID).Err(); err != nil {
+		h.log.Warn("Failed to clear verification code", "pending_id", pendingID, "error", err)
+	}
+}
+
+func (h *Handler) exhaustVerificationCode(ctx context.Context, pendingID string, expiry ...time.Duration) {
 	ttl := h.verificationCodeTTL(ctx, pendingID)
-	_ = h.redis.Set(ctx, verificationAttemptsKey(pendingID), MaxCodeAttempts, ttl).Err()
-	_ = h.redis.Del(ctx, redisKey(pendingID), redisKeyTestOnly+pendingID).Err()
+	if len(expiry) > 0 && expiry[0] > ttl {
+		ttl = expiry[0]
+	}
+	if err := h.redis.Set(ctx, verificationAttemptsKey(pendingID), MaxCodeAttempts, ttl).Err(); err != nil {
+		h.log.Warn("Failed to record exhausted verification attempts", "pending_id", pendingID, "error", err)
+	}
+	h.clearVerificationCodeMaterial(ctx, pendingID)
 }
 
 // issueSessionTokens generates an access+refresh token pair and sets the refresh
@@ -1037,8 +1182,13 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 		return
 	}
 
-	newCount, err := h.pending.IncrementResend(ctx, pending.ID)
+	refundIssuance, ok := h.allowRegistrationIssuance(ctx, c, pending.Email)
+	if !ok {
+		return
+	}
+	newCount, reservedAt, err := h.pending.IncrementResend(ctx, pending.ID)
 	if err != nil {
+		refundIssuance()
 		switch {
 		case errors.Is(err, ErrResendsExhausted):
 			c.JSON(http.StatusTooManyRequests, gin.H{"code": "resends_exhausted"})
@@ -1056,10 +1206,10 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 		return
 	}
 
-	h.clearVerificationCode(ctx, pending.ID)
+	h.clearVerificationCodeMaterial(ctx, pending.ID)
 	codeExpires, err := h.sendInitialCode(ctx, pending.ID, pending.Email)
 	if err != nil {
-		_ = h.pending.RevertResend(ctx, pending.ID)
+		h.revertResendReservation(ctx, "resend", pending.ID, newCount, reservedAt)
 		if errors.Is(err, ErrPendingExpired) {
 			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
 			return
@@ -1092,8 +1242,14 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
+	refundIssuance, ok := h.allowRegistrationIssuance(ctx, c, req.NewEmail)
+	if !ok {
+		return
+	}
 
-	if err := h.pending.UpdateEmail(ctx, req.PendingID, req.NewEmail); err != nil {
+	reservedCount, reservedAt, err := h.pending.updateEmail(ctx, req.PendingID, req.NewEmail)
+	if err != nil {
+		refundIssuance()
 		switch {
 		case errors.Is(err, ErrPendingNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
@@ -1103,6 +1259,10 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"code": "email_already_registered"})
 		case errors.Is(err, ErrEmailPending):
 			c.JSON(http.StatusConflict, gin.H{"code": "registration_pending"})
+		case errors.Is(err, ErrResendsExhausted):
+			c.JSON(http.StatusTooManyRequests, gin.H{"code": "resends_exhausted"})
+		case errors.Is(err, ErrResendCooldown):
+			c.JSON(http.StatusTooManyRequests, gin.H{"code": "cooldown_active", "retry_after_seconds": int(ResendCooldown.Seconds())})
 		default:
 			h.log.Error("change-email: update failed", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
@@ -1110,10 +1270,11 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 		return
 	}
 
-	h.clearVerificationCode(ctx, req.PendingID)
+	h.clearVerificationCodeMaterial(ctx, req.PendingID)
 	newEmailLower := strings.ToLower(strings.TrimSpace(req.NewEmail))
 	codeExpires, err := h.sendInitialCode(ctx, req.PendingID, newEmailLower)
 	if err != nil {
+		h.revertResendReservation(ctx, "change-email", req.PendingID, reservedCount, reservedAt)
 		if errors.Is(err, ErrPendingExpired) {
 			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
 			return
@@ -3061,15 +3222,20 @@ func (h *Handler) revokeLogoutSession(c *gin.Context, claims *Claims, refreshTok
 // ── Account Recovery Endpoints ──────────────────────────────────────────────
 
 const (
-	recoveryCodeTTL      = 10 * time.Minute // Recovery code expires after 10 minutes
-	recoveryMaxAttempts  = 5                // Max wrong-code attempts before invalidating
-	recoveryTokenUsedTTL = 25 * time.Hour   // Must match or exceed mfa.recoveryTTL
+	recoveryCodeTTL       = 10 * time.Minute // Recovery code expires after 10 minutes
+	recoveryMaxAttempts   = 5                // Max wrong-code attempts before invalidating
+	recoveryTokenUsedTTL  = 25 * time.Hour   // Must match or exceed mfa.recoveryTTL
+	recoveryFailureLimit  = 10
+	recoveryFailureWindow = 24 * time.Hour
 )
+
+const recoveryFailureKeyPrefix = "recovery_fail:"
 
 // recoveryRecord is stored in Redis keyed by "recovery_code:{email}".
 type recoveryRecord struct {
 	CodeHash string `json:"code_hash"`
 	UserID   string `json:"user_id"`
+	SendID   string `json:"send_id,omitempty"`
 	Attempts int    `json:"attempts"`
 }
 
@@ -3135,9 +3301,16 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 	}
 
 	// Store SHA-256 hash in Redis
+	var sendID [16]byte
+	if _, err := rand.Read(sendID[:]); err != nil {
+		h.log.Error("Failed to generate recovery send identity", "error", err)
+		c.JSON(http.StatusOK, successMsg)
+		return
+	}
 	record := recoveryRecord{
 		CodeHash: hashRecoveryCode(code),
 		UserID:   userID,
+		SendID:   hex.EncodeToString(sendID[:]),
 		Attempts: 0,
 	}
 	data, err := json.Marshal(record)
@@ -3150,26 +3323,53 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := h.redis.Set(ctx, recoveryRedisKey(email), data, recoveryCodeTTL).Err(); err != nil {
+	installed, err := h.redis.SetNX(ctx, recoveryRedisKey(email), data, recoveryCodeTTL).Result()
+	if err != nil {
 		h.log.Error("Failed to store recovery code in Redis", "error", err)
+		c.JSON(http.StatusOK, successMsg)
+		return
+	}
+	if !installed {
+		// A live code already exists for this address: send nothing new, and
+		// answer exactly as a send would (anti-enumeration). No PII is logged.
+		h.log.Info("Recovery code already pending; no new code sent")
 		c.JSON(http.StatusOK, successMsg)
 		return
 	}
 
 	// Send code via email
 	if err := h.emailSvc.SendRecoveryCode(email, code); err != nil {
-		h.log.Error("Failed to send recovery code email", "error", err, "email", email)
+		h.log.Error("Failed to send recovery code email", "error", err)
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		if delErr := h.redis.Del(cleanupCtx, recoveryRedisKey(email)).Err(); delErr != nil {
+		if delErr := h.deleteRecoveryRecordIfSameSend(cleanupCtx, recoveryRedisKey(email), string(data)); delErr != nil {
 			h.log.Warn("Failed to clear unsent recovery code", "error", delErr)
 		}
 		c.JSON(http.StatusOK, successMsg)
 		return
 	}
 
-	h.log.Info("Recovery code sent", "email", email)
+	h.log.Info("Recovery code sent")
 	c.JSON(http.StatusOK, successMsg)
+}
+
+var deleteRecoveryRecordIfSameSendLua = redis.NewScript(`
+local raw = redis.call("GET", KEYS[1])
+if not raw then return 0 end
+local current = cjson.decode(raw)
+local installed = cjson.decode(ARGV[1])
+if type(installed.send_id) == "string" and installed.send_id ~= ""
+  and current.send_id == installed.send_id
+  and current.user_id == installed.user_id
+  and current.code_hash == installed.code_hash then
+  return redis.call("DEL", KEYS[1])
+end
+return 0
+`)
+
+func (h *Handler) deleteRecoveryRecordIfSameSend(ctx context.Context, key, value string) error {
+	_, err := deleteRecoveryRecordIfSameSendLua.Run(ctx, h.redis, []string{key}, value).Result()
+	return err
 }
 
 // validateRecoveryCodeFormat normalises and validates a 6-digit recovery code.
@@ -3242,11 +3442,16 @@ func commitRecoveryCodeAttempt(ctx context.Context, tx *redis.Tx, redisKey, code
 	}
 	matched := record.Attempts < recoveryMaxAttempts &&
 		subtle.ConstantTimeCompare([]byte(hashRecoveryCode(code)), []byte(record.CodeHash)) == 1
+	if !matched {
+		record.Attempts++
+	}
 	_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		// The guess that spends the last attempt deletes the record rather
+		// than keeping a dead one: RecoveryBegin installs with SETNX, so a kept
+		// record would stop it sending a new code for the rest of its TTL.
 		if matched || record.Attempts >= recoveryMaxAttempts {
 			return pipe.Del(ctx, redisKey).Err()
 		}
-		record.Attempts++
 		updated, err := json.Marshal(record)
 		if err != nil {
 			return err
@@ -3314,6 +3519,10 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
+	budgetKey := recoveryFailureKeyPrefix + email
+	if !h.allowRecoveryFailureAttempt(ctx, c, budgetKey) {
+		return
+	}
 
 	record, err := h.consumeRecoveryCode(ctx, recoveryRedisKey(email), code)
 	if errors.Is(err, redis.Nil) {
@@ -3328,10 +3537,62 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
-
-	if h.recoveryPolicyAllowsEmailCompletion(ctx, c, record.UserID) {
-		h.CompleteRecovery(c, record.UserID, "email")
+	// The budget is cleared only once recovery has completed: a consumed code
+	// whose completion was refused or failed proved nothing that should
+	// return the address's failed attempts.
+	if h.recoveryPolicyAllowsEmailCompletion(ctx, c, record.UserID) && h.CompleteRecovery(c, record.UserID, "email") {
+		h.clearRecoveryFailureBudget(c, budgetKey)
 	}
+}
+
+// clearRecoveryFailureBudget resets the address's recovery failure budget
+// after a completed recovery, on a context detached from the request so a
+// client hang-up cannot cancel it. Best-effort: a failure fails toward more
+// limiting.
+func (h *Handler) clearRecoveryFailureBudget(c *gin.Context, budgetKey string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
+	defer cancel()
+	if err := h.redis.Del(ctx, budgetKey).Err(); err != nil {
+		h.log.Warn("Failed to clear recovery attempt budget", "error", err)
+	}
+}
+
+func (h *Handler) allowRecoveryFailureAttempt(ctx context.Context, c *gin.Context, key string) bool {
+	if h.redis == nil {
+		writeRecoveryBudgetUnavailable(c)
+		return false
+	}
+	allowed, err := middleware.AllowUserAction(ctx, h.redis, key, recoveryFailureLimit, recoveryFailureWindow)
+	if err != nil {
+		h.log.Error("Recovery attempt budget unavailable", "error", err)
+		writeRecoveryBudgetUnavailable(c)
+		return false
+	}
+	if allowed {
+		return true
+	}
+	ttl, err := h.redis.PTTL(ctx, key).Result()
+	if err != nil {
+		h.log.Error("Recovery attempt budget PTTL unavailable", "error", err)
+		writeRecoveryBudgetUnavailable(c)
+		return false
+	}
+	if ttl <= 0 {
+		h.log.Error("Recovery attempt budget PTTL unavailable", "error", fmt.Errorf("non-positive PTTL %s", ttl))
+		writeRecoveryBudgetUnavailable(c)
+		return false
+	}
+	c.Header("Retry-After", strconv.Itoa(int((ttl+time.Second-1)/time.Second)))
+	c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many verification attempts", "step_up_budget_exhausted": true})
+	return false
+}
+
+// stepUpBudgetUnavailableMessage is stepup.ErrMsgBudgetUnavailable's text.
+// internal/stepup imports this package, so the copy cannot be imported here.
+const stepUpBudgetUnavailableMessage = "Verification is temporarily unavailable. Try again in a few minutes."
+
+func writeRecoveryBudgetUnavailable(c *gin.Context) {
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": stepUpBudgetUnavailableMessage, "step_up_budget_unavailable": true})
 }
 
 func (h *Handler) recoveryPolicyAllowsEmailCompletion(ctx context.Context, c *gin.Context, userID string) bool {
@@ -3397,9 +3658,24 @@ func (h *Handler) CompleteRecovery(c *gin.Context, userID, verifiedFactor string
 		return false
 	}
 
+	// An MFA-backed completion arrives here from the MFA challenge, not from
+	// RecoveryVerifyCode, so it clears the address's email-code budget itself.
+	// Recovery begins only from the primary address, which keys that budget.
+	var budgetEmail string
+	if verifiedFactor != "email" {
+		if err := tx.QueryRowContext(c.Request.Context(),
+			`SELECT LOWER(email) FROM users WHERE id = $1`, userID).Scan(&budgetEmail); err != nil {
+			h.log.Warn("Failed to read recovery address for budget clear", "error", err, "user_id", userID)
+			budgetEmail = ""
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errRecoveryVerificationFailed})
 		return false
+	}
+	if budgetEmail != "" {
+		h.clearRecoveryFailureBudget(c, recoveryFailureKeyPrefix+budgetEmail)
 	}
 	h.addVerifyCodeHints(resp, userID)
 

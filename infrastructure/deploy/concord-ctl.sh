@@ -119,7 +119,7 @@ if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
   unset INSTANCE_TYPE ACTIVITY_HISTORY_CLUSTER_ENABLED \
     CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME \
     ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE \
-    COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+    COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE TRUSTED_PROXY_CIDRS TRUSTED_PROXIES
   COMPOSE_OVERRIDE=docker-compose.production.yml
   unset COMPOSE_PROFILES
 fi
@@ -1378,7 +1378,7 @@ selfhost_posture_verdict() {
       # A publication is fixed by the compose model or by up; a network attachment is not.
       if grep -qvE ' network(_mode)?=' <<<"$violations"; then
         if [[ "$mode" == --rendered ]]; then
-          echo "  Either Compose is too old to honour !override in docker-compose.selfhost.yml (upgrade to >= 2.24.5)," >&2
+          echo "  Either Compose is too old to honour !override or gw_priority in docker-compose.selfhost.yml (upgrade to >= 2.33.1)," >&2
           echo "  or a compose file was changed to publish this. Revert that change." >&2
         else
           echo "  Run ./infrastructure/deploy/concord-selfhost up to recreate the listed services (never a two-file docker compose up)." >&2
@@ -6689,6 +6689,12 @@ case "${1:-help}" in
     ;;
 
   restart)
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      # Restart does not recreate containers, so it cannot apply migrated env.
+      # Only an already exact live stack may use this direct controller verb.
+      source "$SCRIPT_DIR/selfhost-proxy.sh" || exit 1
+      selfhost_proxy_restart_preflight || exit 1
+    fi
     redis_managed_host_preflight || exit 1
     turn_managed_restart_guard || exit 1
     turn_managed_init_schema_before_coturn || exit 1
@@ -6711,6 +6717,7 @@ case "${1:-help}" in
     if [[ "$REDIS_CREDENTIAL_MODE" == managed && "$MEDIA_DEPLOY_PROFILE" == media-single ]]; then
       redis_managed_restart_bound_stack || exit 1
       selfhost_post_up_check || exit 1
+      [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
       selfhost_tls_ready_gate || exit 1
       echo "Done."
       exit 0
@@ -6722,6 +6729,7 @@ case "${1:-help}" in
     voice_enforcement_rollout_activate || exit 1
     voice_enforcement_rollout_wait_media productive || exit 1
     selfhost_post_up_check || exit 1
+    [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
     selfhost_tls_ready_gate || exit 1
     echo "Done."
     ;;
@@ -7063,12 +7071,20 @@ else:
       west_stage_prepare_owned_stack || exit 1
     fi
 
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      # All ordinary admission guards ran under the deploy lock. Establish the
+      # selected bridge before the canonical rebuild can start either app.
+      source "$SCRIPT_DIR/selfhost-proxy.sh" || exit 1
+      selfhost_prepare_trusted_proxy_provenance || exit 1
+    fi
+
     # Unscoped — or escalated from a scoped call whose peers were not up — runs
     # every service in order (#3524). The image-selector clear happens inside
     # the paired handoff, immediately before the control-plane build.
     if [[ $_rebuild_scoped -eq 0 ]]; then
       rebuild_unscoped
       selfhost_post_up_check || exit 1
+      [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
       [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
       echo "Done."
       exit 0
@@ -7084,6 +7100,7 @@ else:
         voice_enforcement_rollout_media_rebuild || exit 1
       fi
       selfhost_post_up_check || exit 1
+      [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
       [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
       echo "Done."
       exit 0
@@ -7139,6 +7156,7 @@ else:
       managed_compose_build up -d --build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
     fi
     selfhost_post_up_check || exit 1
+    [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]] || selfhost_proxy_live_check || exit 1
     [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
     echo "Done."
     ;;
@@ -7233,6 +7251,16 @@ else:
     fi
     selfhost_live_port_check || exit 1
     echo "selfhost-posture: live port bindings match the self-host allowlist"
+    ;;
+
+  selfhost-proxy-check)
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost || $# -ne 1 ]]; then
+      echo 'selfhost-proxy-check runs only in the self-host contract mode (use concord-selfhost health)' >&2
+      exit 2
+    fi
+    source "$SCRIPT_DIR/selfhost-proxy.sh" || exit 1
+    selfhost_proxy_restart_preflight || exit 1
+    echo 'selfhost-proxy: live gateway and application trust match the persisted route'
     ;;
 
   media-shared-listeners-check)
@@ -7367,6 +7395,8 @@ else:
     ADMIN_BACKUP="/etc/nginx/conf.d/.concord-admin.backup"
     ADMIN_ORIGIN_CERT="${ADMIN_ORIGIN_CERT:-/etc/nginx/cloudflare/origin.pem}"
     ADMIN_ORIGIN_KEY="${ADMIN_ORIGIN_KEY:-/etc/nginx/cloudflare/origin.key}"
+    CLOUDFLARE_AOP_CA=/etc/concord/nginx/cloudflare-aop-ca.pem
+    CLOUDFLARE_AOP_FRAGMENT="${DEPLOY_DIR}/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
     CONCORD_ENV_FILE="${CONCORD_ENV_FILE:-/opt/concord/.env}"
     HSTS_DEFAULT='max-age=63072000; includeSubDomains; preload'
     if [[ ! -f "$NGINX_SRC" ]]; then
@@ -7550,6 +7580,17 @@ else:
       decode_concord_env_value "$raw"
     }
 
+    NGINX_CLIENT_IP_MODE=cloudflare-aop
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      NGINX_CLIENT_IP_MODE="$(CONCORD_ENV_FILE="${CONFIG_ROOT}/.env" read_concord_env_value NGINX_CLIENT_IP_MODE)" \
+        || { echo 'nginx-reload: could not read self-host client IP mode' >&2; exit 1; }
+      NGINX_CLIENT_IP_MODE="${NGINX_CLIENT_IP_MODE:-direct}"
+      case "$NGINX_CLIENT_IP_MODE" in
+        direct|cloudflare-aop) ;;
+        *) echo 'nginx-reload: invalid self-host client IP mode' >&2; exit 1 ;;
+      esac
+    fi
+
     # Keep this in lockstep with config.invalidHSTSHeaderValue: printable ASCII
     # plus TAB, semicolon-separated unique directives, exactly one decimal
     # max-age, valueless includeSubDomains/preload, and token/quoted values.
@@ -7623,9 +7664,73 @@ else:
       printf '%s' "$encoded"
     }
 
+    validate_aop_fragment() {
+      local expected actual
+      expected=$'ssl_client_certificate /etc/concord/nginx/cloudflare-aop-ca.pem;\nssl_verify_client on;\nssl_verify_depth 2;\nset_real_ip_from 0.0.0.0/0;\nset_real_ip_from ::/0;\nreal_ip_header CF-Connecting-IP;\nreal_ip_recursive off;'
+      actual="$(grep -Ev '^(#|[[:space:]]*$)' "$CLOUDFLARE_AOP_FRAGMENT")" || return 1
+      [[ "$actual" == "$expected" ]]
+    }
+
+    aop_ca_safe() {
+      local path="$CLOUDFLARE_AOP_CA" mode owner entry
+      [[ "$path" == /etc/concord/nginx/cloudflare-aop-ca.pem && -f "$path" && ! -L "$path" ]] || return 1
+      for entry in /etc /etc/concord /etc/concord/nginx "$path"; do
+        [[ -e "$entry" && ! -L "$entry" ]] || return 1
+        owner="$(stat -Lc %u -- "$entry" 2>/dev/null || stat -f %u "$entry" 2>/dev/null)" || return 1
+        mode="$(stat -Lc %a -- "$entry" 2>/dev/null || stat -f %Lp "$entry" 2>/dev/null)" || return 1
+        [[ "$owner" == 0 && "$mode" =~ ^[0-7]{1,2}[0145][0145]$ ]] || return 1
+      done
+      openssl x509 -in "$path" -noout -checkend 0 >/dev/null 2>&1
+    }
+
+    render_admin_config() {
+      local admin_domain="$1" line expanded tmp provenance_markers=0 server_blocks=0 provenance_bad=0
+      [[ -f "$ADMIN_TMPL" && ! -L "$ADMIN_TMPL" ]] || return 1
+      if [[ "$NGINX_CLIENT_IP_MODE" == cloudflare-aop ]]; then
+        [[ -f "$CLOUDFLARE_AOP_FRAGMENT" && ! -L "$CLOUDFLARE_AOP_FRAGMENT" ]] || return 1
+        validate_aop_fragment && aop_ca_safe || return 1
+      fi
+      mkdir -p "$NGINX_RENDER_DIR" || return 1
+      expanded="$(mktemp "${ADMIN_RENDER}.expanded.XXXXXX")" || return 1
+      tmp="$(mktemp "${ADMIN_RENDER}.tmp.XXXXXX")" || { rm -f "$expanded"; return 1; }
+      if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$expanded"; then
+        rm -f "$expanded" "$tmp"
+        return 1
+      fi
+      if while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == 'server {' ]]; then
+          server_blocks=$((server_blocks + 1))
+          printf '%s\n' "$line"
+        elif [[ "$line" == '    # CONCORD_ADMIN_CLIENT_IP_PROVENANCE' ]]; then
+          if (( server_blocks != 1 )); then
+            provenance_bad=1
+          elif [[ "$NGINX_CLIENT_IP_MODE" == cloudflare-aop ]]; then
+            sed 's/^/    /' "$CLOUDFLARE_AOP_FRAGMENT" || { rm -f "$expanded" "$tmp"; return 1; }
+          fi
+          provenance_markers=$((provenance_markers + 1))
+        else
+          printf '%s\n' "$line"
+        fi
+      done < "$expanded" > "$tmp"; then
+        :
+      else
+        rm -f "$expanded" "$tmp"
+        return 1
+      fi
+      rm -f "$expanded"
+      if (( server_blocks != 1 || provenance_markers != 1 || provenance_bad )); then
+        rm -f "$tmp"
+        return 1
+      fi
+      if ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$ADMIN_RENDER"; then
+        rm -f "$tmp"
+        return 1
+      fi
+    }
+
     render_nginx_config() {
       local policy="$1" cp_port="${2:-}" encoded line tmp
-      local in_api=0 scoped_replacements=0 owner_markers=0
+      local in_api=0 scoped_replacements=0 owner_markers=0 provenance_markers=0 provenance_bad=0
       # Rail only: the control_plane upstream block, parsed with the rules of
       # control_plane_bluegreen_live_port, gets its one server line rewritten
       # to cp_port. With the rail off the port is ignored and nothing changes.
@@ -7635,6 +7740,10 @@ else:
         [[ "$cp_port" == 8080 || "$cp_port" == 8081 ]] || return 1
       fi
       encoded="$(encode_hsts_for_nginx "$policy")" || return 1
+      if [[ "$NGINX_CLIENT_IP_MODE" == cloudflare-aop ]]; then
+        [[ -f "$CLOUDFLARE_AOP_FRAGMENT" && ! -L "$CLOUDFLARE_AOP_FRAGMENT" ]] || return 1
+        validate_aop_fragment && aop_ca_safe || return 1
+      fi
       mkdir -p "$NGINX_RENDER_DIR" || return 1
       tmp="$(mktemp "${NGINX_RENDER}.tmp.XXXXXX")" || return 1
       if while IFS= read -r line || [[ -n "$line" ]]; do
@@ -7660,6 +7769,13 @@ else:
           printf '    proxy_hide_header Strict-Transport-Security;\n'
           printf '    add_header Strict-Transport-Security "%s" always;\n' "$encoded"
           owner_markers=$((owner_markers + 1))
+        elif [[ "$line" == '    # CONCORD_CLIENT_IP_PROVENANCE' ]]; then
+          if (( ! in_api )); then
+            provenance_bad=1
+          elif [[ "$NGINX_CLIENT_IP_MODE" == cloudflare-aop ]]; then
+            sed 's/^/    /' "$CLOUDFLARE_AOP_FRAGMENT" || { rm -f "$tmp"; return 1; }
+          fi
+          provenance_markers=$((provenance_markers + 1))
         elif (( in_api )) && [[ "$line" == "        add_header Strict-Transport-Security "* ]]; then
           printf '        add_header Strict-Transport-Security "%s" always;\n' "$encoded"
           scoped_replacements=$((scoped_replacements + 1))
@@ -7672,7 +7788,7 @@ else:
         rm -f "$tmp"
         return 1
       fi
-      if (( owner_markers != 1 || scoped_replacements != 3 )); then
+      if (( owner_markers != 1 || scoped_replacements != 3 || provenance_markers != 1 || provenance_bad )); then
         rm -f "$tmp"
         return 1
       fi
@@ -7730,8 +7846,8 @@ else:
       # value first is still required: nginx metacharacters must never reach a
       # generated directive. Accept only an ordinary DNS hostname here.
       if [[ -z "$admin_domain" \
-         || ! "$admin_domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]; then
-        echo "  ✗ nginx-reload: ADMIN_WEBAUTHN_RP_ID must be a valid FQDN — REFUSING to stage nginx" >&2
+         || ! "$admin_domain" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]]; then
+        echo "  ✗ nginx-reload: ADMIN_WEBAUTHN_RP_ID must be a lowercase FQDN — REFUSING to stage nginx" >&2
         exit 1
       fi
       if [[ ! -e "$ADMIN_ORIGIN_CERT" || ! -e "$ADMIN_ORIGIN_KEY" ]]; then
@@ -7740,13 +7856,8 @@ else:
         echo "    key:  $ADMIN_ORIGIN_KEY" >&2
         echo "    Keeping admin closed; install the cert/key and rerun deploy to enable it." >&2
         # ponytail: fail closed but keep service deploys green; hard-fail here if admin availability becomes deploy-critical.
-      elif [[ ! -f "$ADMIN_TMPL" ]]; then
-        echo "  ✗ nginx-reload: admin template not found at $ADMIN_TMPL" >&2
-        exit 1
       else
-        mkdir -p "$NGINX_RENDER_DIR"
-        if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$ADMIN_RENDER" \
-           || ! chmod 0644 "$ADMIN_RENDER"; then
+        if ! render_admin_config "$admin_domain"; then
           echo "  ✗ nginx-reload: failed to render admin vhost template" >&2
           exit 1
         fi
@@ -8475,6 +8586,7 @@ else:
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
     echo "  media-shared-listeners-check  validate a lab Compose JSON render on stdin; does not admit deployment"
     echo "  selfhost-port-check  Self-host only: refuse live port bindings outside the posture allowlist (#3538)"
+    echo "  selfhost-proxy-check Self-host only: verify persisted proxy trust against the live gateway"
     echo "  attachment-probe  Validate the armed attachment backend without pulling images"
     echo "  attachment-probe-cron-install  Idempotently install the nightly attachment probe"
     echo "  nginx-reload   Validate/render HSTS, atomically swap main/admin nginx files,"

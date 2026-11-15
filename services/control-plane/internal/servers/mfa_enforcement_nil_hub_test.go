@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
 
@@ -34,4 +35,17 @@ func TestRefreshMFAEnforcementViews_NilHubSkipsAnnouncementSilently(t *testing.T
 	})
 	assert.NotContains(t, logs.String(), "perm_change_broadcast")
 	assert.Empty(t, logs.String(), "a skipped announcement logs nothing")
+}
+
+// A recipient lookup that cannot complete must fail closed: the caller cannot
+// substitute every server subscriber when the protected audience is unknown.
+func TestMFAEnforcementAnnouncementRecipients_CanceledQueryReturnsError(t *testing.T) {
+	db, _ := testdb.SetupTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	h := &Handler{db: db}
+	recipients, err := h.mfaEnforcementAnnouncementRecipients(ctx, uuid.New())
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, recipients)
 }
