@@ -307,7 +307,7 @@ func TestPurgeChannel_ViewDenyBlocksPurge(t *testing.T) {
 	assert.Equal(t, 0, countPurgeAudits(t, ts, channelID), "denied purge must write no audit row")
 }
 
-// regression for Security #166: a route UUID spelling must not change the
+// regression: a route UUID spelling must not change the
 // permission result or permit a destructive purge of a hidden channel.
 func TestPurgeChannel_UppercaseIDStillHonorsViewDeny(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)

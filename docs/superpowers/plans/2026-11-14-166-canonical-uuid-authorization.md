@@ -1,8 +1,8 @@
-# Security #166 Canonical UUID Authorization Implementation Plan
+# Canonical UUID Authorization Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make UUID spelling unable to change an authorization decision, key revocation, or emitted identity on the six confirmed Security #166 paths.
+**Goal:** Make UUID spelling unable to change an authorization decision, key revocation, or emitted identity on the six confirmed paths.
 
 **Architecture:** Normalize IDs at the affected HTTP boundaries and again in shared resolver, hierarchy, and revocation code. Use canonical keys for the batch permission map and a same-statement creator guard for group-DM role changes. Keep string APIs and existing transaction ownership.
 
@@ -35,7 +35,7 @@
 - [x] Replay VULN-077, 064, 099, 195, 196, and 205 against `origin/main` at `7e66479b`; all six currently demonstrate attacker success.
 - [ ] Provision an isolated PostgreSQL database or mark the real-DB cases unavailable; never use the shared `concord` database.
 - [ ] Write the smallest failing behavior tests for resolver spelling equivalence, owner hierarchy, key candidate visibility, group creator demotion, and affected handler canonical output/refusal. Use the existing package test fixtures where possible.
-- [ ] Run each targeted test against the unfixed branch. Require an assertion failure on the expected security property, plus a positive control showing the authorized path works. Commit the red tests alone: `test: reproduce Security #166 UUID authorization bypasses`.
+- [ ] Run each targeted test against the unfixed branch. Require an assertion failure on the expected security property, plus a positive control showing the authorized path works. Commit the red tests alone: `test: reproduce UUID authorization bypasses`.
 
 ### Task 2: Shared canonicalization and RBAC foundation
 

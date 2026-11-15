@@ -703,7 +703,7 @@ func TestGetChannelKeys_HiddenChannelDeniedToMember(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code, "view-denied member must not fetch channel keys")
 }
 
-// regression for Security #166: an uppercase path ID must not bypass the
+// regression: an uppercase path ID must not bypass the
 // channel-VIEW gate that protects wrapped channel-key material.
 func TestGetChannelKeys_HiddenChannelDeniedWithUppercaseID(t *testing.T) {
 	ts, owner, serverID, channelID := setupEncryptedChannel(t)

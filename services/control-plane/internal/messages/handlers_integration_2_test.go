@@ -137,7 +137,7 @@ func TestSendMessageInvalidChannelID(t *testing.T) {
 	assert.Zero(t, messageCount, "malformed channel_id must be rejected before creating a message")
 }
 
-// regression for Security #166: accepted UUID aliases must not leak back in a
+// regression: accepted UUID aliases must not leak back in a
 // response or a stored message identity.
 func TestSendMessage_UppercaseChannelIDReturnsCanonicalIdentity(t *testing.T) {
 	ts := setupTS(t)

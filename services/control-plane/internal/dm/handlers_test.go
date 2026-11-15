@@ -3594,7 +3594,7 @@ func TestUpdateMemberRoleCannotDemoteCreator(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-// regression for Security #166: PostgreSQL accepts uppercase UUID input, so the
+// regression: PostgreSQL accepts uppercase UUID input, so the
 // creator guard must compare identity values rather than UUID text spellings.
 func TestUpdateMemberRoleCannotDemoteCreatorWithUppercaseID(t *testing.T) {
 	ts := setupTS(t)
@@ -3618,7 +3618,7 @@ func TestUpdateMemberRoleCannotDemoteCreatorWithUppercaseID(t *testing.T) {
 	assert.Equal(t, "admin", role, "creator role must remain unchanged after refused alternate-ID request")
 }
 
-// regression for Security #166: accepted UUID aliases must be canonical in the
+// regression: accepted UUID aliases must be canonical in the
 // response and the role-change frame seen by another group participant.
 func TestUpdateMemberRoleUppercaseTargetEmitsCanonicalIDs(t *testing.T) {
 	ts := setupTS(t)

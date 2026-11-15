@@ -310,7 +310,7 @@ func TestWithAuthorityCapture_NilRecheck_SkipsCaptureEntirely(t *testing.T) {
 	assert.Nil(t, plan, "a nil recheck produces no plan and therefore no dispatch")
 }
 
-// regression for Security #166: a visible member's UUID spelling cannot turn
+// regression: a visible member's UUID spelling cannot turn
 // them into a denied key recipient and purge their durable key.
 func TestSecurity166_UppercaseVisibleCandidateKeepsChannelKey(t *testing.T) {
 	db, cleanup := dbtest.SetupTestDB(t)

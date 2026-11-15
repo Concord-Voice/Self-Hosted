@@ -428,7 +428,7 @@ func TestPurgeConversation_GroupAdminDeletesAll(t *testing.T) {
 	assert.Equal(t, "group", ctxType)
 }
 
-// regression for Security #166: a UUID alias in a destructive DM route is
+// regression: a UUID alias in a destructive DM route is
 // accepted, but externally visible event identities remain canonical.
 func TestPurgeConversation_UppercaseConversationIDEmitsCanonicalEvent(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)

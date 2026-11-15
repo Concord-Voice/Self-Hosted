@@ -455,7 +455,7 @@ func TestAuthorizeVoiceAction_HierarchyViolation(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-// regression for Security #166: a moderator must not target the server owner
+// regression: a moderator must not target the server owner
 // merely by changing the owner's UUID spelling.
 func TestAuthorizeVoiceAction_UppercaseOwnerStillProtectedByHierarchy(t *testing.T) {
 	ts := setupTS(t)
@@ -475,7 +475,7 @@ func TestAuthorizeVoiceAction_UppercaseOwnerStillProtectedByHierarchy(t *testing
 		"alternate owner UUID spelling must retain owner hierarchy protection")
 }
 
-// regression for Security #166: every hierarchy-enforcing server moderation
+// regression: every hierarchy-enforcing server moderation
 // route must treat an alternate spelling of the owner ID as the owner.
 func TestServerModeration_UppercaseOwnerStillProtectedByHierarchy(t *testing.T) {
 	for _, tc := range []struct {

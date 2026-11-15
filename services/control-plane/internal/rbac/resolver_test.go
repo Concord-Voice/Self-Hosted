@@ -483,7 +483,7 @@ func TestResolveEffectivePermissionsForChannelsFreshMatchesSingleChannelResoluti
 	}
 }
 
-// regression for Security #166: PostgreSQL compares UUID inputs by value but
+// regression: PostgreSQL compares UUID inputs by value but
 // scans UUID columns in canonical form, so authorization must do the same.
 func TestSecurity166_AlternateChannelUUIDSpellingKeepsDenyAndCanonicalBatchKey(t *testing.T) {
 	resolver, ts := setupResolver(t)
@@ -546,7 +546,7 @@ func TestSecurity166_MalformedBatchChannelIDFailsBeforeDatabaseWork(t *testing.T
 	}, "malformed channel IDs must be rejected before opening a database transaction")
 }
 
-// Security #166 canonicalizes every resolver boundary before a cache or
+// The canonical-UUID fix canonicalizes every resolver boundary before a cache or
 // database lookup, so alternate UUID spellings cannot change authorization.
 func TestSecurity166_ResolverEntryPointsCanonicalizeServerAndMemberIDs(t *testing.T) {
 	resolver, ts := setupResolver(t)
@@ -915,7 +915,7 @@ func TestCheckHierarchy(t *testing.T) {
 	assert.ErrorIs(t, err, rbac.ErrHierarchyViolation, "PermAdministrator should not outrank server owner")
 }
 
-// regression for Security #166: owner immunity compares UUID values, not text.
+// regression: owner immunity compares UUID values, not text.
 func TestSecurity166_UppercaseOwnerIDRetainsHierarchyImmunity(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()

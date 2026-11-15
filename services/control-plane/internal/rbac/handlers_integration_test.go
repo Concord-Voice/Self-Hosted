@@ -1457,7 +1457,7 @@ func TestAssignRole_Success_Owner(t *testing.T) {
 	assert.Equal(t, "Role assigned", resp["message"])
 }
 
-// regression for Security #166: accepted UUID aliases must not be retained in
+// regression: accepted UUID aliases must not be retained in
 // identity-bearing audit metadata after a role mutation.
 func TestAssignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
@@ -1489,7 +1489,7 @@ func TestAssignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
 		"accepted UUID aliases must be emitted to audit metadata in canonical form")
 }
 
-// regression for Security #166: unassignment must carry accepted aliases into
+// regression: unassignment must carry accepted aliases into
 // the audit record in canonical form too.
 func TestUnassignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
@@ -1516,7 +1516,7 @@ func TestUnassignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
 		"accepted UUID aliases must be emitted to audit metadata in canonical form")
 }
 
-// Security #166 keeps raw route UUID text out of the two role-mutation
+// The canonical-UUID fix keeps raw route UUID text out of the two role-mutation
 // handlers, so no new request-vs-database string comparison can be introduced
 // there without this guard failing.
 func TestSecurity166_RoleMutationHandlersUseCanonicalRequestIDs(t *testing.T) {

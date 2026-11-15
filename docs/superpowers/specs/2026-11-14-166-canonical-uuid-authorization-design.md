@@ -1,4 +1,4 @@
-# Security #166: Canonical UUID Authorization Design
+# Canonical UUID Authorization Design
 
 ## Intent
 
