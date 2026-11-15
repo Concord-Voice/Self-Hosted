@@ -259,15 +259,35 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 		return
 	}
 
-	targetUserID := c.Param("user_id")
+	targetUserID, err := uuid.Parse(c.Param("user_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
 
 	var user models.User
-	err := h.db.QueryRow(
-		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
-		        COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, created_at, updated_at
-		 FROM users WHERE id = $1`,
-		targetUserID,
+	err = h.db.QueryRowContext(c.Request.Context(),
+		`SELECT u.id, u.email, u.username, u.display_name, u.bio, u.avatar_url, u.header_image_url, u.color_scheme,
+		        COALESCE(u.links, '[]'::jsonb),
+		        u.email_verified, u.age_verified, u.created_at, u.updated_at
+		 FROM users u
+		 LEFT JOIN privacy_settings ps ON ps.user_id = u.id
+		 WHERE u.id = $1
+		   AND (
+		     u.id = $2
+		     OR (
+		       COALESCE(ps.searchable_by_username, FALSE)
+		       AND NOT EXISTS (
+		         SELECT 1 FROM friendships blocked
+		         WHERE blocked.status = 'blocked'
+		           AND (
+		             (blocked.requester_id = u.id AND blocked.addressee_id = $2)
+		             OR (blocked.addressee_id = u.id AND blocked.requester_id = $2)
+		           )
+		       )
+		     )
+		   )`,
+		targetUserID.String(), c.GetString("user_id"),
 	).Scan(
 		&user.ID,
 		&user.Email,

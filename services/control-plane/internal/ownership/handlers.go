@@ -247,8 +247,8 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 
 	h.sendTransferEmail(ctx, userID, serverID, req.TargetUserID, reversalToken)
 
-	if serverUUID, err := uuid.Parse(serverID); err == nil {
-		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+	if sourceUserID, err := uuid.Parse(userID); err == nil && h.hub != nil {
+		message := websocket.OutgoingMessage{
 			Type: "ownership_transfer_initiated",
 			Data: map[string]interface{}{
 				keyServerID:   serverID,
@@ -256,7 +256,9 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 				keyToUserID:   req.TargetUserID,
 				keyExpiresAt:  rec.expiresAt.Format(time.RFC3339),
 			},
-		})
+		}
+		h.hub.BroadcastToUser(sourceUserID, message)
+		h.hub.BroadcastToUser(targetUserID, message)
 	}
 
 	if err := h.audit.Log(ctx, serverID, &userID, "ownership_transfer_initiated", keyServer, &serverID, map[string]interface{}{
@@ -1704,6 +1706,6 @@ func (h *Handler) sendTransferEmail(ctx context.Context, ownerID, serverID, targ
 	}
 
 	if err := h.emailSvc.SendOwnershipTransferNotification(ownerEmail, serverName, targetUsername, reversalToken); err != nil {
-		h.log.Error("Failed to send ownership transfer email", "error", err, "to", ownerEmail)
+		h.log.Error("Failed to send ownership transfer email", "failure_class", "ownership_transfer_email_delivery")
 	}
 }

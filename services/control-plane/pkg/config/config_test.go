@@ -371,8 +371,14 @@ func TestComputeTrustedProxyCIDRs(t *testing.T) {
 		assert.Equal(t, []string{"172.16.0.0/12"}, got)
 	})
 
-	t.Run("empty env in staging falls back to default", func(t *testing.T) {
+	t.Run("empty env in staging trusts no proxy", func(t *testing.T) {
 		got, err := computeTrustedProxyCIDRs("", "staging")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("empty env in test falls back to default", func(t *testing.T) {
+		got, err := computeTrustedProxyCIDRs("", "test")
 		require.NoError(t, err)
 		assert.Equal(t, []string{"172.16.0.0/12"}, got)
 	})
@@ -392,13 +398,15 @@ func TestComputeTrustedProxyCIDRs(t *testing.T) {
 	t.Run("malformed env value returns error in production", func(t *testing.T) {
 		_, err := computeTrustedProxyCIDRs("not-a-cidr", "production")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not-a-cidr")
+		assert.Contains(t, err.Error(), "entry 1")
+		assert.NotContains(t, err.Error(), "not-a-cidr")
 	})
 
 	t.Run("malformed env value returns error in development", func(t *testing.T) {
 		_, err := computeTrustedProxyCIDRs("not-a-cidr", "development")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not-a-cidr")
+		assert.Contains(t, err.Error(), "entry 1")
+		assert.NotContains(t, err.Error(), "not-a-cidr")
 	})
 }
 
@@ -423,7 +431,7 @@ func validProductionConfig() *Config { // #nosec G101 -- test fixture with fake 
 			SecretAccessKey: "test-r2-secret-access-key", // pragma: allowlist secret
 		},
 		SMTPHost:          "smtp.example.com",
-		TrustedProxyCIDRs: []string{"10.0.0.0/8"},
+		TrustedProxyCIDRs: []string{"172.19.0.1/32"},
 		// #3931 — production requires exactly one TURN credential source.
 		TURNSecret: "real-production-turn-secret", //nolint:gosec // G101: test fixture, not a real secret
 		// Satisfy the #725 MEDIA_PLANE_URL production guards: must be set,
@@ -454,6 +462,49 @@ func TestValidateDevelopmentSkipsAllChecks(t *testing.T) {
 func TestValidateProductionPassesWithValidConfig(t *testing.T) {
 	cfg := validProductionConfig()
 	assert.NoError(t, cfg.validate())
+}
+
+func TestValidateProductionTrustedProxyHostRoutes(t *testing.T) {
+	for _, tt := range []struct {
+		name, cidr string
+		valid      bool
+	}{
+		{"IPv4 bare", "172.19.0.1", true},
+		{"IPv4 host route", "172.19.0.1/32", true},
+		{"IPv6 bare", "2001:db8::1", true},
+		{"IPv6 host route", "2001:db8::1/128", true},
+		{"IPv4-mapped IPv6 bare", "::ffff:172.19.0.1", false},
+		{"IPv4-mapped IPv6 host route", "::ffff:172.19.0.1/128", false},
+		{"IPv4 all", "0.0.0.0/0", false},
+		{"IPv4 private broad", "10.0.0.0/8", false},
+		{"IPv4 bridge broad", "172.19.0.0/16", false},
+		{"IPv4 subnet", "172.19.0.0/24", false},
+		{"IPv4 pair", "172.19.0.0/31", false},
+		{"IPv6 all", "::/0", false},
+		{"IPv6 subnet", "2001:db8::/64", false},
+		{"IPv6 pair", "2001:db8::/127", false},
+		{"malformed", "not-an-address", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validProductionConfig()
+			cfg.TrustedProxyCIDRs = []string{tt.cidr}
+			err := cfg.validate()
+			if tt.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "TRUSTED_PROXY_CIDRS")
+			}
+		})
+	}
+
+	for _, cidrs := range [][]string{nil, {"172.19.0.1/32", "10.0.0.0/8"}, {"172.19.0.1/32", "bad"}} {
+		cfg := validProductionConfig()
+		cfg.TrustedProxyCIDRs = cidrs
+		require.ErrorContains(t, cfg.validate(), "TRUSTED_PROXY_CIDRS")
+	}
+
+	dev := &Config{Environment: "development", TrustedProxyCIDRs: []string{"10.0.0.0/8"}}
+	require.NoError(t, dev.validate())
 }
 
 func TestValidateSiteID(t *testing.T) {
@@ -601,20 +652,29 @@ func TestParseTrustedProxyCIDRs(t *testing.T) {
 	t.Run("rejects malformed CIDR", func(t *testing.T) {
 		_, err := parseTrustedProxyCIDRs("not-a-cidr")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not-a-cidr")
+		assert.Contains(t, err.Error(), "entry 1")
+		assert.NotContains(t, err.Error(), "not-a-cidr")
 		assert.Contains(t, err.Error(), "TRUSTED_PROXY_CIDRS")
 	})
 
-	t.Run("rejects missing mask", func(t *testing.T) {
-		_, err := parseTrustedProxyCIDRs("172.19.0.0")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "172.19.0.0")
+	t.Run("accepts bare addresses", func(t *testing.T) {
+		cidrs, err := parseTrustedProxyCIDRs("172.19.0.1,2001:db8::1")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"172.19.0.1", "2001:db8::1"}, cidrs)
+	})
+
+	t.Run("rejects IPv4-mapped IPv6 addresses", func(t *testing.T) {
+		for _, value := range []string{"::ffff:172.19.0.1", "::ffff:172.19.0.1/128"} {
+			_, err := parseTrustedProxyCIDRs(value)
+			require.ErrorContains(t, err, "entry 1")
+		}
 	})
 
 	t.Run("rejects one bad entry in a list", func(t *testing.T) {
 		_, err := parseTrustedProxyCIDRs("172.19.0.0/16,not-a-cidr,10.0.0.0/8")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not-a-cidr")
+		assert.Contains(t, err.Error(), "entry 2")
+		assert.NotContains(t, err.Error(), "not-a-cidr")
 	})
 }
 
@@ -1469,30 +1529,6 @@ func TestValidateAttestation_AcceptsFullyQualifiedSubjectPrefix(t *testing.T) {
 		cfg.OIDCSubjectPrefix = prefix
 		require.NoError(t, cfg.validateAttestation(), "prefix %q must be accepted", prefix)
 	}
-}
-
-// TestValidate_WarnsOnBroadRFC1918Fallback verifies that production with
-// the broad RFC1918 fallback for TRUSTED_PROXY_CIDRS does NOT fail
-// startup but emits a warning log line. The test captures the standard
-// log output via a buffer.
-func TestValidate_WarnsOnBroadRFC1918Fallback(t *testing.T) {
-	var buf bytes.Buffer
-	oldFlags := log.Flags()
-	oldOutput := log.Writer()
-	log.SetFlags(0)
-	log.SetOutput(&buf)
-	t.Cleanup(func() {
-		log.SetFlags(oldFlags)
-		log.SetOutput(oldOutput)
-	})
-
-	cfg := validProductionConfig()
-	cfg.TrustedProxyCIDRs = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
-
-	err := cfg.validate()
-	require.NoError(t, err)
-	assert.Contains(t, buf.String(), "TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback")
-	assert.Contains(t, buf.String(), "does not include Cloudflare published proxy CIDRs")
 }
 
 // GitHub Feedback config tests (#158).

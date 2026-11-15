@@ -279,6 +279,7 @@ compose_minio_contract() {
     "SMTP_PASSWORD=$placeholder"
     "SMTP_FROM=stage@example.invalid"
     "TRUSTED_PROXY_CIDRS=127.0.0.1/32"
+    "TRUSTED_PROXIES=127.0.0.1/32"
     "TURN_SECRET=$placeholder"
     "WS_EVENT_BUDGET_ENABLED=true"
     "WS_EVENT_BUDGET_SCALE_PERCENT=100"

@@ -187,11 +187,9 @@ func (a *permissionCheckerAdapter) FilterVisibleUserIDsForChannelFresh(
 // preserving anti-spoof semantics.
 func configureTrustedProxies(router *gin.Engine, cfg *config.Config, log *logger.Logger) {
 	if err := router.SetTrustedProxies(cfg.TrustedProxyCIDRs); err != nil {
-		log.Fatal("Failed to configure trusted proxies", "error", err)
+		log.Fatal("Failed to configure trusted proxies")
 	}
-	log.Info("Trusted proxies configured",
-		"cidrs", cfg.TrustedProxyCIDRs,
-		"count", len(cfg.TrustedProxyCIDRs))
+	log.Info("Trusted proxies configured", "count", len(cfg.TrustedProxyCIDRs))
 }
 
 // testEnvAuthFlowCap is the per-IP auth-flow rate-limit cap applied when the
@@ -3340,8 +3338,10 @@ func NewRouter(
 	opsRuntime := wireOpsMetricsRuntimeWithSecurityEvents(db, natsClient, hub, opsCounters, cfg.OpsMetrics, log, securityEvents)
 	// Start only after every dependency, observer, and route has been injected.
 	go hub.Run()
-	// Fold the readiness prober's cancel into the presence closer IN PLACE,
-	// rather than returning a differently-named closure. The return statement
+	// Fold the readiness stop and recovery queue drain into the presence closer
+	// IN PLACE, rather than returning a differently-named closure. Presence drains
+	// first so a slow mail server cannot starve their fail-closed disconnects.
+	// The return statement
 	// below is pinned by TestNewRouterActivityHistoryWiringOrderIsSingleAndFinal,
 	// which matches its literal text — renaming the value silently breaks that
 	// wiring-order guard, which is exactly the kind of assertion that should
@@ -3350,6 +3350,7 @@ func NewRouter(
 	closePresenceWorkers = func() {
 		readinessProber.Stop()
 		presenceCloser()
+		authHandler.CloseRecoveryJobs()
 	}
 
 	return router, hub, natsClient, opsRuntime, voicePermEnforcer, presenceRecheckExecutor, closePresenceWorkers, activePlanRail, activePlanReconciler, ownershipHandler.CompleteExpiredTransfers, nil

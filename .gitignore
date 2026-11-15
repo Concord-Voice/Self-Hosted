@@ -305,6 +305,8 @@ graphify-out/*
 
 # concord-selfhost backup archives hold .env secrets
 /backups/
+# An interrupted restore can leave its staged .env copy behind.
+/.env.restore.*
 
 # A stray `go build ./cmd/concord-agent` output.
 services/control-plane/concord-agent

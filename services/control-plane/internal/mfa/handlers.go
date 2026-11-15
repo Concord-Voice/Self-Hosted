@@ -383,7 +383,7 @@ func (h *Handler) verifyCodeMatchedMethod(ctx context.Context, store codeVerific
 			return false, "", fmt.Errorf("TOTP secret decryption failed: %w", decErr)
 		}
 		if step, matched := MatchCodeStep(string(secret), code); matched {
-			return acceptTOTPStep(ctx, store, userID, step)
+			return acceptTOTPStep(ctx, store, userID, step, secretNonce)
 		}
 
 		backupVerified, backupErr := consumeBackupCode(ctx, store, userID, code)
@@ -431,10 +431,14 @@ func (h *Handler) consumeWebAuthnInlineToken(ctx context.Context, store codeVeri
 // rollback un-burns the step with everything else, as it does a backup code.
 // On the pool the advance commits at once, so an action that fails after
 // verification has still spent the step.
-func acceptTOTPStep(ctx context.Context, store codeVerificationStore, userID string, step int64) (bool, string, error) {
+//
+// The update is fenced on the secret the code was matched against (its nonce)
+// and on TOTP still being enabled and confirmed: a re-enrollment or disable
+// that lands between the read and this update must make the old code fail.
+func acceptTOTPStep(ctx context.Context, store codeVerificationStore, userID string, step int64, secretNonce []byte) (bool, string, error) {
 	result, err := store.ExecContext(ctx,
-		`UPDATE user_mfa_totp SET last_used_step = $2, updated_at = NOW() WHERE user_id = $1 AND (last_used_step IS NULL OR last_used_step < $2)`,
-		userID, step,
+		`UPDATE user_mfa_totp SET last_used_step = $2, updated_at = NOW() WHERE user_id = $1 AND (last_used_step IS NULL OR last_used_step < $2) AND enabled AND confirmed AND totp_secret_nonce = $3`,
+		userID, step, secretNonce,
 	)
 	if err != nil {
 		return false, "", fmt.Errorf("record TOTP step: %w", err)
@@ -470,8 +474,10 @@ func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID 
 	updatedUsed := append([]bool(nil), used...)
 	updatedUsed[idx] = true
 	result, err := store.ExecContext(ctx,
-		`UPDATE user_mfa_totp SET backup_codes_used = $1, updated_at = NOW() WHERE user_id = $2 AND backup_codes_used = $3`,
-		pq.Array(updatedUsed), userID, pq.Array(used),
+		// Match the hashes read above too: a regeneration resets every used flag,
+		// so the flags alone cannot tell a revoked set from the current one.
+		`UPDATE user_mfa_totp SET backup_codes_used = $1, updated_at = NOW() WHERE user_id = $2 AND backup_codes_used = $3 AND backup_codes_hash = $4`,
+		pq.Array(updatedUsed), userID, pq.Array(used), pq.Array(hashes),
 	)
 	if err != nil {
 		return false, fmt.Errorf("consume backup code: %w", err)
