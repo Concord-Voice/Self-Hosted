@@ -912,8 +912,10 @@ func (h *Handler) attemptsGuard(ctx context.Context, c *gin.Context, pendingID s
 		return false
 	}
 	if err != nil {
+		// The attempt cannot be counted, so the code is not judged: a 503 with
+		// the step-up budget's body, never a 500 or a wrong-code answer.
 		h.log.Error("confirm: attempts reservation failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		writeRegistrationAttemptsUnavailable(c)
 		return false
 	}
 	if attempts > MaxCodeAttempts {

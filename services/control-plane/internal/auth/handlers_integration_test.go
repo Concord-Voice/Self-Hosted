@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1672,4 +1674,41 @@ func TestRegistrationIssuanceIsBoundedPerAddress(t *testing.T) {
 	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
 	assert.Contains(t, w.Body.String(), "registration_codes_exhausted")
+}
+
+type confirmEvalFaultHook struct{}
+
+func (confirmEvalFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (confirmEvalFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "eval" || cmd.Name() == "evalsha" {
+			err := errors.New("forced attempt reservation failure")
+			cmd.SetErr(err)
+			return err
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (confirmEvalFaultHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// An attempt that cannot be counted is not judged, and the answer says the
+// server is at fault: the budget's 503, not a 500 or a wrong-code 401.
+func TestConfirmRegistrationAttemptReservationFailureIs503(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	ts.Redis.AddHook(confirmEvalFaultHook{})
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": "000000"}, nil) //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "step_up_budget_unavailable")
 }
