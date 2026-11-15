@@ -62,7 +62,9 @@ _backup_prepare_dir() {
     (umask 077; mkdir -p -- "$1") || { _backup_fail 'cannot create the backup directory'; return 1; }
     return 0
   fi
-  [[ -d "$1" && ! -L "$1" && "$(stat -c '%u %a' -- "$1")" =~ ^$(id -u)\ [0-7]00$ ]] \
+  local owner_mode
+  owner_mode="$(stat -c '%u %a' -- "$1" 2>/dev/null)" || owner_mode=''
+  [[ -d "$1" && ! -L "$1" && "$owner_mode" =~ ^[0-9]+\ [0-7]00$ && "${owner_mode%% *}" == "$(id -u)" ]] \
     || { _backup_fail 'backup directory must be owned by this user with no group or other access (0700)'; return 1; }
 }
 
