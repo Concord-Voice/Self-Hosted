@@ -2752,23 +2752,79 @@ var purgeFenceStepUpCopy = stepup.Copy{
 	CredentialRequired: "Current password required to turn off purge verification",
 }
 
-// The purge fence's attempt budget is the shared dangerous-action budget
-// (stepup.DangerousActionBudget), not one of its own. Turning the fence off is
-// what lets DM purge and Clear run with no code at all, so a separate budget
-// handed a stolen session five more MFA guesses at the one change that removes
-// the next gate. The bound, the fail-closed posture (a nil or erroring Redis
-// DENIES with a 503, never a 429 that blames the user) and the
-// clear-after-verified-commit rule are internal/stepup's Budget.
+// The purge fence carries two budgets. Its own, keyed purgeFenceStepUpPrefix,
+// is charged on every disable request and bounds the route as a whole,
+// password guesses included. An MFA code is ALSO charged against the shared
+// dangerous-action budget (stepup.DangerousActionBudget), and only when the
+// account has an inline factor: turning the fence off is what lets DM purge
+// and Clear run with no code at all, so a fence-only MFA budget handed a
+// stolen session five more guesses at the one change that removes the next
+// gate. Charging the shared budget for a request with no code, or for an
+// account with no factor, would instead let a session holder lock the user
+// out of every MFA step-up route without guessing anything. Both budgets are
+// internal/stepup's Budget: a nil or erroring Redis DENIES with a 503, never a
+// 429 that blames the user, and each is cleared only after a verified commit.
 //
 // The route's own limiter stays fail-OPEN by design — it protects twelve
-// innocuous fields — so without this budget a Redis outage would remove every
+// innocuous fields — so without these budgets a Redis outage would remove every
 // bound from a path that verifies passwords.
+const purgeFenceStepUpPrefix = "stepup:privacy_purge_fence:"
+
+func (h *Handler) purgeFenceStepUpBudget() stepup.Budget {
+	return stepup.NewBudget(h.redis, purgeFenceStepUpPrefix)
+}
+
+// purgeFenceAdmission is the purge fence's pre-transaction step-up state,
+// handed to the gate and to the post-commit clear.
+type purgeFenceAdmission struct {
+	attempt *stepup.PasswordAttempt
+	// mfaCharged: the shared budget was charged for this request's code.
+	mfaCharged bool
+	// mfaVerified: the gate verified that code under the lock.
+	mfaVerified bool
+}
+
+// settle settles the password guess against the login lockout. A request
+// that does not disable the fence has no admission and nothing to settle.
+func (a *purgeFenceAdmission) settle(ctx context.Context) error {
+	if a == nil {
+		return nil
+	}
+	return a.attempt.Settle(ctx)
+}
+
+// chargePurgeFenceMFA charges the shared dangerous-action budget for the
+// request's MFA code when the account has an inline factor (the P1 probe the
+// other dangerous gates use). It returns whether it charged, and ok=false once
+// it has written a refusal. A factor committed after the probe is refused
+// under the lock (gatePurgeFenceDisable), so the race buys no free guess.
+func (h *Handler) chargePurgeFenceMFA(ctx context.Context, c *gin.Context, userID, mfaCode string) (charged, ok bool) {
+	if mfaCode == "" {
+		return false, true
+	}
+	methods, err := stepup.InlineMFAMethods(ctx, h.db, userID)
+	if err != nil {
+		e := &stepup.Error{Status: http.StatusInternalServerError, Body: gin.H{"error": stepup.ErrMsgVerificationFailed}, Cause: err}
+		h.logPurgeFenceStepUpFailure(e)
+		e.Write(c)
+		return false, false
+	}
+	if len(methods) == 0 {
+		return false, true
+	}
+	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+		h.logPurgeFenceStepUpFailure(e)
+		e.Write(c)
+		return false, false
+	}
+	return true, true
+}
 
 // allowPurgeFenceStepUp consumes the fail-closed attempt budget before the
 // transaction begins. It writes the budget's 429 (exhausted) or 503 (cannot
 // be evaluated) and returns false when the budget does not admit the request.
 func (h *Handler) allowPurgeFenceStepUp(ctx context.Context, c *gin.Context, userID string) bool {
-	e := stepup.DangerousActionBudget(h.redis).Consume(ctx, userID)
+	e := h.purgeFenceStepUpBudget().Consume(ctx, userID)
 	if e == nil {
 		return true
 	}
@@ -2812,11 +2868,21 @@ func (h *Handler) reservePurgeFencePassword(
 // toward MORE limiting, never less. It runs post-commit because only a
 // committed disable is a success, and on a context detached from the request
 // so a client that hangs up after the commit cannot cancel it.
-func (h *Handler) clearPurgeFenceStepUpAttempts(ctx context.Context, userID string) {
+//
+// The shared MFA budget is reset only when the gate verified a code: a
+// password-only disable proved nothing about the second factor.
+func (h *Handler) clearPurgeFenceStepUpAttempts(ctx context.Context, userID string, adm *purgeFenceAdmission) {
 	ctx, cancel := stepup.SettleContext(ctx)
 	defer cancel()
-	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, userID); err != nil {
+	if err := h.purgeFenceStepUpBudget().Clear(ctx, userID); err != nil {
 		h.log.Warn("Could not reset the purge-fence step-up budget after a successful disable",
+			"user_id", userID, "error", err)
+	}
+	if adm == nil || !adm.mfaVerified {
+		return
+	}
+	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, userID); err != nil {
+		h.log.Warn("Could not reset the shared MFA budget after a successful purge-fence disable",
 			"user_id", userID, "error", err)
 	}
 }
@@ -2835,11 +2901,12 @@ func (h *Handler) clearPurgeFenceStepUpAttempts(ctx context.Context, userID stri
 // handler unwraps it with errors.As so the closure's blanket 500 does not
 // swallow the real status.
 //
-// attempt is the password's shared /auth/login lockout reservation, taken by
-// the caller before BeginTx: the hash check here makes no Redis call.
+// adm carries the password's shared /auth/login lockout reservation and
+// whether the code was charged, both taken by the caller before BeginTx: the
+// checks here make no Redis call. The gate records a verified code on adm.
 func (h *Handler) gatePurgeFenceDisable(
 	ctx context.Context, c *gin.Context, tx *sql.Tx, userID string, creds updatePrivacyStepUp,
-	attempt *stepup.PasswordAttempt,
+	adm *purgeFenceAdmission,
 ) error {
 	// The attempt budget is NOT taken here. It runs before BeginTx in the
 	// caller — a Redis round trip inside an open transaction pins a pooled DB
@@ -2860,7 +2927,7 @@ func (h *Handler) gatePurgeFenceDisable(
 		return e
 	}
 
-	if pErr := stepup.VerifyPasswordFactor(attempt, subj, creds.CurrentPassword, purgeFenceStepUpCopy); pErr != nil {
+	if pErr := stepup.VerifyPasswordFactor(adm.attempt, subj, creds.CurrentPassword, purgeFenceStepUpCopy); pErr != nil {
 		return pErr
 	}
 	if !subj.MFAEnabled {
@@ -2876,11 +2943,17 @@ func (h *Handler) gatePurgeFenceDisable(
 			Cause:  errors.New("MFA verifier is not configured for an MFA-enabled user"),
 		}
 	}
+	// A code the probe found no factor to charge for, against a factor the lock
+	// now shows, would be a free guess: refuse it for a retry, which charges.
+	if creds.MFACode != "" && !adm.mfaCharged {
+		return &stepup.Error{Status: http.StatusConflict, Body: gin.H{"error": errMsgMFAEnrollmentChanged}}
+	}
 	// Tx form: backup-code redemption is a write, and a rollback must not burn a
 	// single-use factor.
 	if mErr := stepup.VerifyMFAFactorTx(ctx, tx, h.mfaVerifier, userID, stepup.PurposePurgeFenceDisable, creds.MFACode, subj.MFAMethods); mErr != nil {
 		return mErr
 	}
+	adm.mfaVerified = true
 	return nil
 }
 
@@ -2933,15 +3006,19 @@ func (h *Handler) respondPresenceTerminal(c *gin.Context, message string, err er
 // does not disable the fence takes neither.
 func (h *Handler) beginPurgeFenceStepUp(
 	ctx context.Context, c *gin.Context, userID string, req *updatePrivacyBody,
-) (bool, *stepup.PasswordAttempt, bool) {
+) (bool, *purgeFenceAdmission, bool) {
 	if req.RequireAuthBeforePurge == nil || *req.RequireAuthBeforePurge {
 		return false, nil, true
 	}
 	if !h.allowPurgeFenceStepUp(ctx, c, userID) {
 		return true, nil, false
 	}
+	mfaCharged, ok := h.chargePurgeFenceMFA(ctx, c, userID, req.MFACode)
+	if !ok {
+		return true, nil, false
+	}
 	attempt, ok := h.reservePurgeFencePassword(ctx, c, userID, req.CurrentPassword)
-	return true, attempt, ok
+	return true, &purgeFenceAdmission{attempt: attempt, mfaCharged: mfaCharged}, ok
 }
 
 // UpdatePrivacySettings updates the current user's privacy settings.
@@ -2990,7 +3067,7 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	// disablingPurgeFence is computed once and reused below: gate on the
 	// REQUESTED value, never a computed transition — a prior-value read is
 	// ambiguous on a lazily-created row and would be a fail-open surface.
-	disablingPurgeFence, passwordAttempt, ok := h.beginPurgeFenceStepUp(ctx, c, userID, &req)
+	disablingPurgeFence, fenceAdmission, ok := h.beginPurgeFenceStepUp(ctx, c, userID, &req)
 	if !ok {
 		return
 	}
@@ -3054,7 +3131,7 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 		// durable trace — otherwise a 403 would still create a privacy_settings
 		// row and flip the fail-closed "no row means true" default.
 		if disablingPurgeFence {
-			if err := h.gatePurgeFenceDisable(ctx, c, tx, userID, req.updatePrivacyStepUp, passwordAttempt); err != nil {
+			if err := h.gatePurgeFenceDisable(ctx, c, tx, userID, req.updatePrivacyStepUp, fenceAdmission); err != nil {
 				return err
 			}
 		}
@@ -3142,7 +3219,7 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	// The transaction has ended either way: settle the password guess against
 	// the login lockout (record a wrong one, reset after a correct one). A
 	// no-op unless the gate checked a password.
-	if err := passwordAttempt.Settle(ctx); err != nil {
+	if err := fenceAdmission.settle(ctx); err != nil {
 		h.log.Warn("Could not settle a purge-fence password against the lockout", "error", err)
 	}
 	if txErr != nil {
@@ -3165,7 +3242,7 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	// credential whose transaction then rolled back changed nothing and should
 	// still cost an attempt.
 	if disablingPurgeFence {
-		h.clearPurgeFenceStepUpAttempts(ctx, userID)
+		h.clearPurgeFenceStepUpAttempts(ctx, userID, fenceAdmission)
 	}
 
 	h.log.Info("Privacy settings updated", "user_id", userID)

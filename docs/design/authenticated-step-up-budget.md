@@ -20,7 +20,9 @@ user in fifteen minutes, across these protected actions: session revoke,
 revoke-all, and revocation-mode; TOTP disable and backup-code regeneration;
 password change and E2EE key replacement; ownership transfer and reversal;
 DM/group bulk purge and DM clear history; and turning off the purge
-authentication requirement. Each route charges before factor verification. TOTP
+authentication requirement, which charges the shared budget only for a code
+on an account with an inline factor and keeps its own route budget for
+password guesses. Each route charges before factor verification. TOTP
 disable probes enrollment before its SQL transaction and charges only when a
 factor is present; the locked recheck refuses a newly enrolled factor before
 verification so there is no free guess. DM clear charges whenever the request

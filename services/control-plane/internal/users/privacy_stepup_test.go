@@ -553,7 +553,7 @@ func TestUpdatePrivacy_SuccessfulDisableClearsTheAttemptBudget(t *testing.T) {
 	user := ts.CreateTestUser(t, "purgefencebudgetreset")
 	materializePrivacyRow(t, ts, user)
 
-	budgetKey := stepup.DangerousActionBudget(ts.Redis).Key(user.ID)
+	budgetKey := "stepup:privacy_purge_fence:" + user.ID
 	unmatchedValue := "NotTheRightValue123!"
 
 	// Spend part of the budget on genuinely wrong credentials.
@@ -647,4 +647,41 @@ func TestUpdatePrivacy_PurgeFenceSharesTheDangerousActionBudget(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
 	require.Contains(t, w.Body.String(), "step_up_budget_exhausted")
 	require.True(t, storedPurgeFence(t, ts, user.ID), "an exhausted shared budget must keep the fence up")
+}
+
+// A disable request with no MFA code guesses nothing at the second factor, so
+// it must leave the shared MFA budget untouched, whether the password is
+// wrong, right, or the account has MFA and the code was left out. Charging it
+// would let a session holder lock the user out of every MFA step-up route.
+func TestUpdatePrivacy_PurgeFenceWithoutCodeLeavesTheSharedBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mfa      bool
+		password string
+		want     int
+	}{
+		{"no MFA, wrong password", false, "NotTheRightValue123!", http.StatusForbidden},
+		{"no MFA, right password", false, testhelpers.TestAuthPlaintext, http.StatusOK},
+		{"MFA account, code left out", true, testhelpers.TestAuthPlaintext, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := setupTS(t)
+			user := ts.CreateTestUser(t, "purgefencenocode"+strings.ReplaceAll(tc.name[:6], " ", ""))
+			materializePrivacyRow(t, ts, user)
+			if tc.mfa {
+				enableTOTP(t, ts, user)
+			}
+			key := stepup.DangerousActionBudget(ts.Redis).Key(user.ID)
+			require.NoError(t, ts.Redis.Set(context.Background(), key, 3, 0).Err())
+
+			w := patchPrivacy(t, ts, user.AccessToken, map[string]interface{}{
+				keyRequireAuthBeforePurge: false,
+				keyCurrentPassword:        tc.password,
+			})
+			require.Equal(t, tc.want, w.Code, w.Body.String())
+			n, err := ts.Redis.Get(context.Background(), key).Int()
+			require.NoError(t, err)
+			require.Equal(t, 3, n, "a request without a code must neither charge nor clear the shared budget")
+		})
+	}
 }
