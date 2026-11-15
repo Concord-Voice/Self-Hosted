@@ -33,13 +33,14 @@ When every check passes, the command:
 
 1. Stops the stack.
 2. Replaces `JWT_SECRET` with a new random value while preserving every other `.env` byte.
-3. Starts Postgres alone.
+3. Starts Redis and Postgres alone.
 4. Runs `pg_restore --clean --if-exists --single-transaction`.
-5. Revokes every restored refresh token outside the grace-recovery window, so a token revoked after the backup cannot be used again.
-6. In bundled mode, unpacks the archived MinIO copy into the volume, then replaces the old objects with it.
-7. Runs `concord-selfhost up`, then `concord-selfhost health`.
+5. Revokes every restored active refresh token with a timestamp one hour in the past, so the 30-second grace-recovery path cannot revive it.
+6. Deletes old opaque admin sessions, enrollment and login challenges, step-up grants, WebSocket tickets, recovery-code markers, email verification tokens, and SSO continuation tokens from Redis, then verifies none remain. Other Redis state is preserved.
+7. In bundled mode, unpacks the archived MinIO copy into the volume, then replaces the old objects with it.
+8. Runs `concord-selfhost up`, then `concord-selfhost health`.
 
-The new signing secret invalidates every pre-restore signed access, challenge, and recovery token; restored refresh tokens are revoked too. Sign in again after a successful restore. This prevents a recovery token consumed after the backup was made from becoming valid when the restored system has no Redis replay marker, and prevents an old refresh token from regaining access. Both application planes start together with the same new secret.
+The new signing secret invalidates every pre-restore signed access, challenge, and recovery token; restored refresh tokens are revoked and old opaque Redis authorization state is cleared too. Sign in again after a successful restore. This prevents a recovery token consumed after the backup was made from becoming valid when the restored system has no Redis replay marker, and prevents an old refresh token or admin session from regaining access. Both application planes start together with the same new secret.
 
 ### Restoring onto a new host
 
@@ -52,9 +53,8 @@ The `.env` check exists because the database and its keys must come from the sam
 
 ### When restore fails partway
 
-- **`pg_restore` fails:** `--single-transaction` means the database is left unchanged. The stack stays stopped. Run `concord-selfhost up` to resume on the old data. The new signing secret remains installed, so sign in again.
-- **Refresh-token revocation fails:** The database was restored, but old tokens may still be active. The stack stays stopped; re-run restore before starting it.
-- **The MinIO step fails:** the archive is unpacked beside the live objects and swapped in only after it unpacks fully, so a bad stream leaves the old objects in place. The database has already been restored by then. Re-run the same restore. The signing secret was already rotated; pre-restore access, challenge, and recovery tokens remain invalid, so users must sign in again.
+- **Redis startup, `pg_restore`, refresh-token revocation, or Redis cleanup fails:** The stack stays stopped. Even if `pg_restore --single-transaction` left the database unchanged, authorization invalidation is incomplete. Fix the failure and re-run restore; do not run `concord-selfhost up` first.
+- **The MinIO step fails:** the archive is unpacked beside the live objects and swapped in only after it unpacks fully, so a bad stream leaves the old objects in place. The database has already been restored by then. Fix the failure and re-run the same restore before starting the stack.
 
 ## Updating to a release tag
 

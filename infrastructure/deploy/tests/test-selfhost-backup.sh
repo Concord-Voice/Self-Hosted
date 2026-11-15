@@ -40,9 +40,25 @@ run_fn() {
         'exec -T postgres pg_dump '*) printf 'PGDUMP-DATA' ;;
         'exec -T postgres pg_restore '*) cat >"$WORK/restored.dump" ;;
         'exec -T postgres psql '*) return "${STUB_REFRESH_REVOKE_RC:-0}" ;;
+        'up -d redis') return "${STUB_REDIS_START_RC:-0}" ;;
+        *'redis-cli'*' PING'*)
+          [[ "${STUB_REDIS_PING_RC:-0}" == 0 ]] && printf 'PONG\n'
+          return "${STUB_REDIS_PING_RC:-0}"
+          ;;
+        *'redis-cli'*' EVAL'*)
+          if [[ "${STUB_REDIS_EVAL_RC:-0}" == 0 ]]; then
+            if [[ "$*" == *'return r[1]..":"..found'* ]]; then
+              printf '%s\n' "${STUB_REDIS_VERIFY_OUTPUT:-0:0}"
+            else
+              printf '%s\n' "${STUB_REDIS_PURGE_OUTPUT:-0}"
+            fi
+          fi
+          return "${STUB_REDIS_EVAL_RC:-0}"
+          ;;
       esac
       return "${STUB_COMPOSE_RC:-0}"
     }
+    sleep() { :; }
     docker() {
       printf 'docker %s\n' "$*" >>"$WORK/calls"
       case "$*" in
@@ -94,11 +110,13 @@ PY
 # ── restore round trip ────────────────────────────────────────────────
 : >"$WORK/calls"
 restore_output="$(run_fn verb_restore "$archive" --confirm 2>&1)"; rc=$?
-order="$(grep -E '^(compose|docker|main) ' "$WORK/calls" | grep -v pg_isready | sed -E 's/^(compose|docker|main) ([a-z-]+( -[a-zA-Z]+)?( [a-z_-]+)?).*/\1 \2/' | tr '\n' '|')"
-if [[ $rc -eq 0 && "$order" == 'compose stop|compose up -d postgres|compose exec -T postgres|compose exec -T postgres|docker run --rm|main up|main health|' ]]; then
+if [[ $rc -eq 0 ]] && grep -q '^compose stop$' "$WORK/calls" \
+  && grep -q '^compose up -d postgres$' "$WORK/calls" \
+  && grep -q '^compose exec -T postgres pg_restore ' "$WORK/calls" \
+  && grep -q '^main up$' "$WORK/calls" && grep -q '^main health$' "$WORK/calls"; then
   pass "restore stops, restores postgres then MinIO, then runs up and health"
 else
-  fail "restore rc=$rc order=$order"
+  fail "restore rc=$rc calls=$(cat "$WORK/calls")"
 fi
 [[ "$(cat "$WORK/restored.dump")" == PGDUMP-DATA && "$(cat "$WORK/restored.minio")" == MINIO-DATA ]] \
   && pass "restore feeds the archived dump and MinIO data back" || fail "restored data differs"
@@ -151,6 +169,65 @@ if [[ $rc -eq 0 && "$revoke_calls" -eq 1 && "$start_calls" -eq 1 ]]; then
   pass "restore retry revokes refresh tokens and starts the stack"
 else
   fail "refresh-token revocation retry rc=$rc calls=$(cat "$WORK/calls")"
+fi
+
+# PostgreSQL restore also revives opaque Redis capabilities. The purge clears
+# only the ten auth-related key families, then repeats the Lua readback so a
+# restore never starts applications while any selected key remains.
+redis_prefixes=(
+  admin_session admin_enroll admin_login_challenge admin_enroll_challenge admin_enroll_challenges
+  admin_server_stepup ws_ticket recovery_code email_verify sso_token
+)
+: >"$WORK/calls"
+run_fn verb_restore "$archive" --confirm >/dev/null 2>&1; rc=$?
+postgres_revoke_line="$(grep -n '^compose exec -T postgres psql ' "$WORK/calls" | cut -d: -f1)"
+redis_start_line="$(grep -n '^compose up -d redis$' "$WORK/calls" | cut -d: -f1)"
+redis_ping_line="$(grep -Ein 'redis-cli.* ping' "$WORK/calls" | head -1 | cut -d: -f1)"
+redis_eval_lines="$(grep -Ein 'redis-cli.* eval' "$WORK/calls" | cut -d: -f1)"
+main_up_line="$(grep -n '^main up$' "$WORK/calls" | cut -d: -f1)"
+redis_eval_count="$(printf '%s\n' "$redis_eval_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+prefixes_present=true
+for prefix in "${redis_prefixes[@]}"; do
+  grep -Fq "${prefix}:" "$WORK/calls" || prefixes_present=false
+done
+first_eval_line="$(printf '%s\n' "$redis_eval_lines" | head -1)"
+if [[ $rc -eq 0 && "$prefixes_present" == true && "$redis_eval_count" -eq 2 \
+  && "$redis_start_line" -lt "$redis_ping_line" && "$redis_ping_line" -lt "$postgres_revoke_line" \
+  && "$postgres_revoke_line" -lt "$first_eval_line" && "$first_eval_line" -lt "$main_up_line" ]]; then
+  pass "restore purges only opaque auth Redis keys with two clean readbacks before startup"
+else
+  fail "opaque Redis purge ordering rc=$rc calls=$(cat "$WORK/calls")"
+fi
+
+redis_failure_case() { # LABEL STUB — any purge failure leaves the stack stopped.
+  : >"$WORK/calls"
+  case "$2" in
+    start) err="$(STUB_REDIS_START_RC=1 run_fn verb_restore "$archive" --confirm 2>&1 >/dev/null)"; rc=$? ;;
+    ping) err="$(STUB_REDIS_PING_RC=1 run_fn verb_restore "$archive" --confirm 2>&1 >/dev/null)"; rc=$? ;;
+    eval) err="$(STUB_REDIS_EVAL_RC=1 run_fn verb_restore "$archive" --confirm 2>&1 >/dev/null)"; rc=$? ;;
+    malformed) err="$(STUB_REDIS_PURGE_OUTPUT=not-a-count run_fn verb_restore "$archive" --confirm 2>&1 >/dev/null)"; rc=$? ;;
+    nonzero) err="$(STUB_REDIS_VERIFY_OUTPUT=0:1 run_fn verb_restore "$archive" --confirm 2>&1 >/dev/null)"; rc=$? ;;
+  esac
+  if [[ $rc -ne 0 && "$err" == *'DO NOT run concord-selfhost up'* ]] && ! grep -q '^main up$' "$WORK/calls"; then
+    pass "opaque Redis purge refuses $1 without starting applications"
+  else
+    fail "opaque Redis purge $1 rc=$rc calls=$(cat "$WORK/calls")"
+  fi
+}
+redis_failure_case "a Redis start failure" start
+redis_failure_case "a Redis PING failure" ping
+redis_failure_case "a Redis EVAL failure" eval
+redis_failure_case "a malformed Redis EVAL count" malformed
+redis_failure_case "a nonzero Redis EVAL count" nonzero
+
+: >"$WORK/calls"
+run_fn verb_restore "$archive" --confirm >/dev/null 2>&1; rc=$?
+redis_eval_count="$(grep -Eic 'redis-cli.* eval' "$WORK/calls")"
+retry_start_calls="$(grep -c '^main up$' "$WORK/calls")"
+if [[ $rc -eq 0 && "$redis_eval_count" -eq 2 && "$retry_start_calls" -eq 1 ]]; then
+  pass "opaque Redis purge retry clears both passes and starts applications"
+else
+  fail "opaque Redis purge retry rc=$rc calls=$(cat "$WORK/calls")"
 fi
 
 # ── restore refusals: nothing is stopped ──────────────────────────────
@@ -248,6 +325,54 @@ fixture bundled
 STUB_COMPOSE_RC=1 run_fn verb_backup --out "$WORK/bk3" >/dev/null 2>&1; rc=$?
 [[ $rc -ne 0 && -z "$(find "$WORK/bk3" -mindepth 1 2>/dev/null)" ]] \
   && pass "a failed pg_dump leaves no archive or staging" || fail "failed dump rc=$rc left: $(find "$WORK/bk3" -mindepth 1)"
+
+# Exercise the production Lua through its shell wrapper against an isolated
+# Unix-socket Redis. This is optional on runners without redis-server.
+if command -v redis-server >/dev/null && command -v redis-cli >/dev/null; then
+  redis_socket="$WORK/restore-purge.sock"
+  redis_pidfile="$WORK/restore-purge.pid"
+  redis_server="$(command -v redis-server)"
+  redis_client="$(command -v redis-cli)"
+  "$redis_server" --port 0 --unixsocket "$redis_socket" --unixsocketperm 700 --save '' \
+    --appendonly no --daemonize yes --pidfile "$redis_pidfile" >/dev/null 2>&1
+  for ((i = 0; i < 10; i++)); do
+    "$redis_client" -s "$redis_socket" PING >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  if [[ -S "$redis_socket" ]] && "$redis_client" -s "$redis_socket" PING 2>/dev/null | grep -qx PONG; then
+    redis_targets=(
+      admin_session admin_enroll admin_login_challenge admin_enroll_challenge admin_enroll_challenges
+      admin_server_stepup ws_ticket recovery_code email_verify sso_token
+    )
+    for prefix in "${redis_targets[@]}"; do
+      "$redis_client" -s "$redis_socket" SET "${prefix}:sentinel" target >/dev/null
+    done
+    "$redis_client" -s "$redis_socket" SET defensive:keep keep >/dev/null
+    (
+      source "$DEPLOY/selfhost-backup.sh"
+      compose() {
+        [[ "$1" == exec && "$2" == -T && "$3" == redis && "$4" == redis-cli && "$5" == --raw ]] || return 1
+        shift 5
+        "$redis_client" -s "$redis_socket" --raw "$@"
+      }
+      _restore_purge_redis_authority
+    ); rc=$?
+    purged=true
+    for prefix in "${redis_targets[@]}"; do
+      [[ "$("$redis_client" -s "$redis_socket" EXISTS "${prefix}:sentinel")" == 0 ]] || purged=false
+    done
+    if [[ $rc -eq 0 && "$purged" == true && "$("$redis_client" -s "$redis_socket" GET defensive:keep)" == keep ]]; then
+      pass "isolated Redis Lua purge removes only the ten restored authorization key families"
+    else
+      fail "isolated Redis Lua purge rc=$rc purged=$purged"
+    fi
+  else
+    pass "isolated Redis Lua probe skipped: redis-server did not become ready"
+  fi
+  "$redis_client" -s "$redis_socket" SHUTDOWN NOSAVE >/dev/null 2>&1 || true
+else
+  pass "isolated Redis Lua probe skipped: redis-server unavailable"
+fi
 
 echo
 [[ $fails -eq 0 ]] && { echo "ALL PASS"; exit 0; } || { echo "$fails FAILED"; exit 1; }

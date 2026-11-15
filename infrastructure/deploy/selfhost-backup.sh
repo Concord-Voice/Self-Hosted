@@ -246,6 +246,82 @@ PY
   }
 }
 
+# _restore_start_redis — start only the legacy Redis service and prove its
+# password-protected command path works before restoring authorization state.
+_restore_start_redis() {
+  local i reply=''
+  echo 'Starting Redis for authorization cleanup...'
+  compose up -d redis || { _restore_auth_incomplete 'cannot start Redis for authorization cleanup'; return 1; }
+  for ((i = 0; i < 30; i++)); do
+    reply="$(compose exec -T redis redis-cli --raw PING 2>/dev/null)" || reply=''
+    [[ "$reply" == PONG ]] && return 0
+    sleep 1
+  done
+  _restore_auth_incomplete 'Redis authentication did not become ready'
+  return 1
+}
+
+# _restore_purge_redis_authority — remove only opaque authorization state that
+# can survive a same-host Redis volume across a database restore. Each Redis
+# script processes one bounded SCAN page; unrelated keys are never deleted.
+_restore_purge_redis_authority() {
+  local cursor=0 reply scans=0 found=0
+  local prefixes=(
+    'admin_session:'
+    'admin_enroll:'
+    'admin_login_challenge:'
+    'admin_enroll_challenge:'
+    'admin_enroll_challenges:'
+    'admin_server_stepup:'
+    'ws_ticket:'
+    'recovery_code:'
+    'email_verify:'
+    'sso_token:'
+  )
+  local purge_script='local r=redis.call("SCAN",ARGV[1],"COUNT",256); local del={}; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then table.insert(del,k); break end end end; if #del>0 then redis.call("UNLINK",unpack(del)) end; return r[1]'
+  local verify_script='local r=redis.call("SCAN",ARGV[1],"COUNT",256); local found=0; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then found=found+1; break end end end; return r[1]..":"..found'
+
+  echo 'Purging restored Redis authorization state...'
+  while (( scans < 100000 )); do
+    reply="$(compose exec -T redis redis-cli --raw EVAL "$purge_script" 0 "$cursor" "${prefixes[@]}" 2>/dev/null)" || {
+      _restore_auth_incomplete 'cannot purge Redis authorization state'
+      return 1
+    }
+    [[ "$reply" =~ ^[0-9]+$ ]] || {
+      _restore_auth_incomplete 'Redis purge returned an invalid cursor'
+      return 1
+    }
+    cursor="$reply"
+    ((scans += 1))
+    [[ "$cursor" == 0 ]] && break
+  done
+  [[ "$cursor" == 0 ]] || {
+    _restore_auth_incomplete 'Redis purge did not finish'
+    return 1
+  }
+
+  cursor=0
+  scans=0
+  while (( scans < 100000 )); do
+    reply="$(compose exec -T redis redis-cli --raw EVAL "$verify_script" 0 "$cursor" "${prefixes[@]}" 2>/dev/null)" || {
+      _restore_auth_incomplete 'cannot verify Redis authorization cleanup'
+      return 1
+    }
+    [[ "$reply" =~ ^([0-9]+):([0-9]+)$ ]] || {
+      _restore_auth_incomplete 'Redis verification returned an invalid cursor'
+      return 1
+    }
+    cursor="${BASH_REMATCH[1]}"
+    found=$((found + BASH_REMATCH[2]))
+    ((scans += 1))
+    [[ "$cursor" == 0 ]] && break
+  done
+  [[ "$cursor" == 0 && "$found" == 0 ]] || {
+    _restore_auth_incomplete 'Redis authorization state remains after cleanup'
+    return 1
+  }
+}
+
 _restore_body() {
   local archive="$1" stage="$2" release="$3" i staged_env=''
   # One read of the archive: only a top-level directory and the known parts as
@@ -285,22 +361,24 @@ PY
   mv -f -- "$staged_env" "$PROJECT_ROOT/.env" \
     || { rm -f -- "$staged_env"; _restore_stopped 'cannot install the new signing secret'; return 1; }
   staged_env=''
+  _restore_start_redis || return 1
   echo 'Restoring the database...'
-  compose up -d "$BACKUP_PG_SERVICE" || { _restore_stopped 'cannot start postgres; nothing was restored'; return 1; }
+  compose up -d "$BACKUP_PG_SERVICE" || { _restore_auth_incomplete 'cannot start postgres before authorization cleanup'; return 1; }
   for ((i = 0; ; i++)); do
     compose exec -T "$BACKUP_PG_SERVICE" pg_isready -U concord >/dev/null 2>&1 && break
-    (( i < 30 )) || { _restore_stopped 'postgres did not become ready; nothing was restored'; return 1; }
+    (( i < 30 )) || { _restore_auth_incomplete 'postgres did not become ready before authorization cleanup'; return 1; }
     sleep 2
   done
   # --single-transaction: a failed restore leaves the database as it was.
   compose exec -T "$BACKUP_PG_SERVICE" pg_restore -U concord -d concord --clean --if-exists \
     --no-owner --single-transaction <"$stage/postgres.dump" \
-    || { _restore_stopped 'pg_restore failed; the database is unchanged'; return 1; }
+    || { _restore_auth_incomplete 'pg_restore failed; the database is unchanged but authorization cleanup did not run'; return 1; }
   # An older backup can revive a refresh token revoked after it was taken.
   # Use a past timestamp so the 30-second grace-refresh path cannot recover it.
   compose exec -T "$BACKUP_PG_SERVICE" psql -U concord -d concord -v ON_ERROR_STOP=1 \
     -c "UPDATE refresh_tokens SET revoked_at = now() - interval '1 hour' WHERE revoked_at IS NULL" >/dev/null \
-    || { _restore_stopped 'cannot revoke restored sessions; re-run restore'; return 1; }
+    || { _restore_auth_incomplete 'cannot revoke restored sessions'; return 1; }
+  _restore_purge_redis_authority || return 1
   if [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == bundled ]]; then
     echo 'Restoring bundled MinIO data...'
     # Unpack beside the live data and swap only after tar succeeds, so a bad
@@ -315,15 +393,30 @@ PY
         find "$new" -mindepth 1 -maxdepth 1 -exec mv {} /data/ \;
         rmdir "$new"' \
       <"$stage/minio.tar" \
-      || { _restore_stopped 'MinIO restore failed after the database was restored; re-run restore'; return 1; }
+      || { _restore_incomplete 'MinIO restore failed after the database was restored'; return 1; }
   fi
   echo 'Starting the stack...'
   main up || return 1
   main health
 }
 
-# _restore_stopped MSG — a failure after the stack was stopped says so.
+# _restore_stopped MSG — a pre-restore failure left the prior authorization
+# state intact, so the operator can resume it.
 _restore_stopped() {
   _backup_fail "$1"
-  printf 'selfhost-backup: the stack is stopped; run concord-selfhost up to start it again\n' >&2
+  printf 'selfhost-backup: the stack is stopped; run concord-selfhost up to resume the prior state\n' >&2
+}
+
+# _restore_auth_incomplete MSG — JWT rotation or database restore has started,
+# but its matching opaque authorization cleanup did not complete.
+_restore_auth_incomplete() {
+  _backup_fail "$1"
+  printf 'selfhost-backup: authorization invalidation is incomplete; DO NOT run concord-selfhost up; fix the failure and re-run restore\n' >&2
+}
+
+# _restore_incomplete MSG — persistent state has changed but the restore did
+# not reach its completed state.
+_restore_incomplete() {
+  _backup_fail "$1"
+  printf 'selfhost-backup: the stack is stopped; the restore is incomplete; DO NOT run concord-selfhost up; fix the failure and re-run restore\n' >&2
 }
