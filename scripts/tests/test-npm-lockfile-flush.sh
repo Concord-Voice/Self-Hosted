@@ -101,6 +101,8 @@ case "$NPM_STUB_MODE" in
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.5.0"},"node_modules/a/node_modules/x":{"version":"2.3.3"}}}\n' > package-lock.json ;;
   moved)    [ "$PWD" = "$NPM_STUB_ROOT/client/admin" ] && \
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.3.0"},"node_modules/b/node_modules/x":{"version":"2.5.0"}}}\n' > package-lock.json ;;
+  dupe)     [ "$PWD" = "$NPM_STUB_ROOT/client/admin" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.5.0"},"node_modules/a/node_modules/x":{"version":"2.3.0"}}}\n' > package-lock.json ;;
   zero)     [ "$PWD" = "$NPM_STUB_ROOT" ] && \
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/s":{"version":"0.27.0"}}}\n' > package-lock.json ;;
   zeropatch) [ "$PWD" = "$NPM_STUB_ROOT" ] && \
@@ -192,6 +194,13 @@ run_refresh moved "" 'node_modules/x:2.5.0 node_modules/a/node_modules/x:2.3.0'
   && ok "a same-line re-hoist that keeps both versions passes" \
   || bad "a same-line re-hoist must not count as a downgrade" "rc=$RC"$'\n'"$OUT"
 
+# Two paths at one version, and one of them drops inside the line. The old
+# version is still in the lock, but at fewer paths, so a copy was lost.
+run_refresh dupe "" 'node_modules/x:2.5.0 node_modules/a/node_modules/x:2.5.0'
+[ "$RC" -ne 0 ] && grep -q 'client/admin/package-lock.json: node_modules/a/node_modules/x 2.5.0 -> 2.3.0' <<<"$OUT" \
+  && ok "a duplicated version that loses one path inside its line fails the run" \
+  || bad "a same-line drop must fail even when the old version stays at another path" "rc=$RC"$'\n'"$OUT"
+
 # 0.x: a minor is a major under ^, so 0.28 -> 0.27 is a line change, not a
 # downgrade within a line. A patch inside one 0.x line still is.
 run_refresh zero "" 'node_modules/s:0.28.0'
@@ -225,6 +234,7 @@ case "$1" in
     while [ $# -gt 0 ]; do
       case "$1" in --paginate) paginate=1 ;; --jq) filter="$2"; shift ;; esac; shift
     done
+    [ -n "${GH_STUB_API_FAIL:-}" ] && { echo "HTTP 502" >&2; exit 1; }
     for page in ${GH_STUB_PAGES:-}; do
       jq -r "$filter" "$page" || exit 1
       [ "$paginate" = 1 ] || break
@@ -258,6 +268,11 @@ GH_STUB_PAGES="$WORK/page1.json $WORK/page2.json" \
 [ "$RC" -eq 0 ] && [ "$OUTPUTS" = "deferred=true" ] && [ ! -s "$WORK/gh.log" ] && grep -q 'already has a recent deferral comment' <<<"$OUT" \
   && ok "a recent deferral comment past the first page of comments suppresses another" \
   || bad "the deferral lookup must read every page of comments" "rc=$RC log=$(cat "$WORK/gh.log")"$'\n'"$OUT"
+# A failed comment lookup must stop the step, not read as "no comment yet".
+GH_STUB_API_FAIL=1 run_guard "[{\"number\":1,\"headRefName\":\"dependabot/npm_and_yarn/vite-1\",$DEP}]"
+[ "$RC" -ne 0 ] && [ ! -s "$WORK/gh.log" ] \
+  && ok "a failed deferral lookup fails the step and posts no comment" \
+  || bad "a gh api failure in the deferral lookup must fail the step" "rc=$RC log=$(cat "$WORK/gh.log")"$'\n'"$OUT"
 run_guard "[{\"number\":3,\"headRefName\":\"dependabot/npm_and_yarn/evil\",\"author\":{\"login\":\"mallory\"},\"isCrossRepository\":true}]"
 [ "$RC" -eq 0 ] && [ "$OUTPUTS" = "deferred=false" ] && [ ! -s "$WORK/gh.log" ] \
   && ok "a spoofed dependabot/... branch does not defer the run" \

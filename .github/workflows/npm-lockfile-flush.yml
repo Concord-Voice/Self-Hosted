@@ -178,9 +178,10 @@ jobs:
           #   per line   the highest copy of each name and line went down. This
           #              catches a dedupe or hoist that drops the newer copy.
           #   per path   the copy at one install path went down inside its line,
-          #              and that old version is gone from the lock. npm re-hoists,
-          #              so a path can change line, or swap versions with another
-          #              path, while nothing is lost; neither counts.
+          #              and that old version is now at fewer paths than before.
+          #              npm re-hoists, so a path can change line, or swap
+          #              versions with another path, while nothing is lost;
+          #              neither counts.
           DOWNGRADES=""
           for lock in package-lock.json client/admin/package-lock.json services/media-plane/package-lock.json; do
             FOUND=$(jq -rn --slurpfile old <(git show "HEAD:$lock") --slurpfile new "$lock" --arg lock "$lock" '
@@ -193,14 +194,15 @@ jobs:
                   | {p: .key, n: (.value.name // (.key | sub("^.*node_modules/"; ""))), s: .value.version}];
               def bymajor: map({k: "\(.n)@\(.s | line)", v: (.s | core), s})
                 | group_by(.k) | map({key: .[0].k, value: max_by(.v)}) | from_entries;
+              def count: map("\(.n)@\(.s)") | group_by(.) | map({key: .[0], value: length}) | from_entries;
               ($old[0] | entries) as $oe | ($new[0] | entries) as $ne
               | ($oe | bymajor) as $O | ($ne | bymajor) as $N
               | ($ne | map({key: .p, value: .s}) | from_entries) as $np
-              | ($ne | map({key: "\(.n)@\(.s)", value: true}) | from_entries) as $kept
+              | ($oe | count) as $oc | ($ne | count) as $nc
               | [ ($O | keys[] | select($N[.] != null and ($N[.].v < $O[.].v))
                     | "\($lock): \(.) \($O[.].s) -> \($N[.].s)"),
                   ($oe[] | select($np[.p] != null and ($np[.p] | line) == (.s | line)
-                                  and ($np[.p] | core) < (.s | core) and ($kept["\(.n)@\(.s)"] | not))
+                                  and ($np[.p] | core) < (.s | core) and (($nc["\(.n)@\(.s)"] // 0) < $oc["\(.n)@\(.s)"]))
                     | "\($lock): \(.p) \(.s) -> \($np[.p])") ]
               | unique[]')
             if [ -n "$FOUND" ]; then DOWNGRADES+="$FOUND"$'\n'; fi
