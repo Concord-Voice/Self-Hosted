@@ -39,7 +39,23 @@ const (
 	errMsgAuthUnavailable       = "Authentication temporarily unavailable"
 )
 
-var errCurrentSessionUnknown = errors.New("current session cannot be identified")
+var (
+	errCurrentSessionUnknown = errors.New("current session cannot be identified")
+
+	// reserveFreeRevokeScript prunes the rolling window and claims its sole
+	// unauthenticated allowance in one Redis operation. Recording only after the
+	// SQL mutation would let concurrent requests all observe an empty window.
+	reserveFreeRevokeScript = redis.NewScript(`
+local key = KEYS[1]
+redis.call('ZREMRANGEBYSCORE', key, '-inf', ARGV[1])
+if redis.call('ZCARD', key) ~= 0 then
+  return 0
+end
+redis.call('ZADD', key, ARGV[2], ARGV[3])
+redis.call('EXPIRE', key, ARGV[4])
+return 1
+`)
+)
 
 // SessionDisconnector synchronously fences the WebSocket transports of one
 // exact login family. Defined as an interface to avoid coupling to the
@@ -74,10 +90,11 @@ var (
 
 // Revocation rate-limiting constants.
 const (
-	revokeWindowDuration       = 24 * time.Hour
-	revokeTrackingTTL          = 25 * time.Hour
-	simpleAuthWindowTTL        = 5 * time.Minute
-	freeRevokeSessionThreshold = 3 // Must have >= 3 active sessions for a free revoke
+	revokeWindowDuration            = 24 * time.Hour
+	revokeTrackingTTL               = 25 * time.Hour
+	revokeReservationCleanupTimeout = 2 * time.Second
+	simpleAuthWindowTTL             = 5 * time.Minute
+	freeRevokeSessionThreshold      = 3 // Must have >= 3 active sessions for a free revoke
 )
 
 // maskIPAddress masks the last octet of an IPv4 address (e.g., "192.168.1.x")
@@ -159,15 +176,6 @@ func simpleAuthWindowKey(userID string) string {
 	return fmt.Sprintf("session_revoke_auth:%s", userID)
 }
 
-// countRevokesInWindow prunes expired entries from the tracking set and returns
-// the number of revokes recorded within the current 24-hour rolling window.
-func (h *Handler) countRevokesInWindow(ctx context.Context, userID string) (int64, error) {
-	key := revokeTrackingKey(userID)
-	cutoff := fmt.Sprintf("%f", float64(time.Now().Add(-revokeWindowDuration).Unix()))
-	h.redis.ZRemRangeByScore(ctx, key, "-inf", cutoff)
-	return h.redis.ZCard(ctx, key).Result()
-}
-
 // countActiveSessions returns the number of non-revoked, non-expired sessions for a user.
 func (h *Handler) countActiveSessions(ctx context.Context, userID string) (int, error) {
 	var count int
@@ -178,15 +186,19 @@ func (h *Handler) countActiveSessions(ctx context.Context, userID string) (int, 
 	return count, err
 }
 
-// recordRevoke adds a revoke entry to the tracking set. Called for ALL revokes
-// (both free and authenticated) so the rolling window slides forward.
-func (h *Handler) recordRevoke(ctx context.Context, userID, sessionID string) {
+// recordRevoke adds a non-free revoke to the tracking set. A free revoke
+// is already represented by the reservation made before its database effect.
+func (h *Handler) recordRevoke(ctx context.Context, userID, sessionID string) error {
 	key := revokeTrackingKey(userID)
-	h.redis.ZAdd(ctx, key, redis.Z{
-		Score:  float64(time.Now().Unix()),
-		Member: sessionID,
+	_, err := h.redis.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.ZAdd(ctx, key, redis.Z{
+			Score:  float64(time.Now().Unix()),
+			Member: sessionID,
+		})
+		pipe.Expire(ctx, key, revokeTrackingTTL)
+		return nil
 	})
-	h.redis.Expire(ctx, key, revokeTrackingTTL)
+	return err
 }
 
 // hasSimpleAuthWindow checks if the user has an active 5-minute authentication window (Simple mode).
@@ -215,16 +227,6 @@ func (h *Handler) getUserRevocationMode(ctx context.Context, userID string) stri
 		return "secure"
 	}
 	return mode
-}
-
-// passwordRequired determines if authentication is needed for this revoke attempt.
-// With fewer than 3 active sessions, password is always required.
-// With 3+ active sessions, one free revoke per 24h rolling window is allowed.
-func passwordRequired(activeCount int, revokesInWindow int64) bool {
-	if activeCount < freeRevokeSessionThreshold {
-		return true
-	}
-	return revokesInWindow >= 1
 }
 
 // verifyUserPassword fetches the stored Argon2id hash and verifies the provided
@@ -400,7 +402,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		return
 	}
 
-	needsPassword, mode := h.determineAuthRequired(ctx, uid)
+	needsPassword, mode, freeRevokeReservationScore := h.determineAuthRequired(ctx, uid, sessionID)
 
 	// Parse optional password from request body
 	var req struct {
@@ -420,7 +422,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		}
 	}
 
-	h.executeRevocation(ctx, c, uid, sessionID)
+	h.executeRevocation(ctx, c, uid, sessionID, freeRevokeReservationScore)
 }
 
 // verifySessionOwnership checks immutable SID ownership, including terminal families.
@@ -448,25 +450,38 @@ func (h *Handler) verifySessionOwnership(ctx context.Context, c *gin.Context, se
 }
 
 // determineAuthRequired uses server-authoritative policy checks to decide if password is needed.
-func (h *Handler) determineAuthRequired(ctx context.Context, uid string) (needsPassword bool, mode string) {
+// A non-empty reservation score means this request atomically consumed the one
+// free revoke and must either retain or conclusively release that exact entry.
+func (h *Handler) determineAuthRequired(ctx context.Context, uid, sessionID string) (needsPassword bool, mode, reservationScore string) {
 	activeCount, err := h.countActiveSessions(ctx, uid)
 	if err != nil {
 		h.log.Error("Failed to count active sessions", "error", err)
-		return true, "secure" // Fail secure
-	}
-
-	revokesInWindow, err := h.countRevokesInWindow(ctx, uid)
-	if err != nil {
-		h.log.Error("Redis error checking revoke window, requiring password", "error", err)
-		revokesInWindow = 999
+		return true, "secure", "" // Fail secure
 	}
 
 	mode = h.getUserRevocationMode(ctx, uid)
 
 	if mode == "simple" && h.hasSimpleAuthWindow(ctx, uid) {
-		return false, mode
+		return false, mode, ""
 	}
-	return passwordRequired(activeCount, revokesInWindow), mode
+	if activeCount < freeRevokeSessionThreshold {
+		return true, mode, ""
+	}
+
+	now := time.Now()
+	// Non-free revokes use integer Unix scores. The half-second score gives this
+	// reservation an exact cleanup range that cannot remove a concurrent record.
+	reservationScore = fmt.Sprintf("%d.5", now.Unix())
+	claimed, err := reserveFreeRevokeScript.Run(ctx, h.redis, []string{revokeTrackingKey(uid)},
+		now.Add(-revokeWindowDuration).Unix(), reservationScore, "free:"+sessionID, int64(revokeTrackingTTL/time.Second)).Int()
+	if err != nil {
+		h.log.Error("Redis error reserving free revoke, requiring password", "error", err)
+		return true, mode, ""
+	}
+	if claimed != 1 {
+		return true, mode, ""
+	}
+	return false, mode, reservationScore
 }
 
 // authenticateForRevoke verifies the user's identity via MFA or password for session revocation.
@@ -535,9 +550,20 @@ func (h *Handler) authenticateForRevoke(ctx context.Context, c *gin.Context, uid
 }
 
 // executeRevocation performs the actual session revocation, tracking, and disconnect.
-func (h *Handler) executeRevocation(ctx context.Context, c *gin.Context, uid, sessionID string) {
+func (h *Handler) executeRevocation(ctx context.Context, c *gin.Context, uid, sessionID, freeRevokeReservationScore string) {
 	result, err := auth.RevokeRefreshSession(ctx, h.db, uid, sessionID, middleware.TokenCredentialEpoch(c))
 	if err != nil {
+		var familyErr *loginfamily.Error
+		commitUnknown := errors.As(err, &familyErr) && familyErr.Reason() == loginfamily.ReasonCommitUnknown
+		if freeRevokeReservationScore != "" && !commitUnknown {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), revokeReservationCleanupTimeout)
+			releaseErr := h.redis.ZRemRangeByScore(cleanupCtx, revokeTrackingKey(uid),
+				freeRevokeReservationScore, freeRevokeReservationScore).Err()
+			cancelCleanup()
+			if releaseErr != nil {
+				h.log.Error("Failed to release unused free revoke reservation", "error", releaseErr)
+			}
+		}
 		// An unknown commit may have terminalized the family: fence what committed.
 		h.closeCommittedFamilies(ctx, result)
 		switch {
@@ -553,7 +579,11 @@ func (h *Handler) executeRevocation(ctx context.Context, c *gin.Context, uid, se
 		}
 		return
 	}
-	h.recordRevoke(ctx, uid, sessionID)
+	if freeRevokeReservationScore == "" {
+		if err := h.recordRevoke(ctx, uid, sessionID); err != nil {
+			h.log.Error("Failed to record non-free session revoke", "error", err)
+		}
+	}
 	h.closeCommittedFamilies(ctx, result)
 	h.log.Info("Session revoked", "user_id", uid)
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonSessionRevoked, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionDelete})
