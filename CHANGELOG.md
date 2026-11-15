@@ -71,7 +71,7 @@ later storage migration.
 
 ### Security
 
-- **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window.
+- **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed
