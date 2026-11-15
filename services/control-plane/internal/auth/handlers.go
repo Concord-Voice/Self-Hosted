@@ -3035,6 +3035,7 @@ const recoveryFailureKeyPrefix = "recovery_fail:"
 type recoveryRecord struct {
 	CodeHash string `json:"code_hash"`
 	UserID   string `json:"user_id"`
+	SendID   string `json:"send_id,omitempty"`
 	Attempts int    `json:"attempts"`
 }
 
@@ -3100,9 +3101,16 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 	}
 
 	// Store SHA-256 hash in Redis
+	var sendID [16]byte
+	if _, err := rand.Read(sendID[:]); err != nil {
+		h.log.Error("Failed to generate recovery send identity", "error", err)
+		c.JSON(http.StatusOK, successMsg)
+		return
+	}
 	record := recoveryRecord{
 		CodeHash: hashRecoveryCode(code),
 		UserID:   userID,
+		SendID:   hex.EncodeToString(sendID[:]),
 		Attempts: 0,
 	}
 	data, err := json.Marshal(record)
@@ -3131,7 +3139,7 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 		h.log.Error("Failed to send recovery code email", "error", err)
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		if delErr := h.deleteRecoveryRecordIfUnchanged(cleanupCtx, recoveryRedisKey(email), string(data)); delErr != nil {
+		if delErr := h.deleteRecoveryRecordIfSameSend(cleanupCtx, recoveryRedisKey(email), string(data)); delErr != nil {
 			h.log.Warn("Failed to clear unsent recovery code", "error", delErr)
 		}
 		c.JSON(http.StatusOK, successMsg)
@@ -3142,15 +3150,22 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 	c.JSON(http.StatusOK, successMsg)
 }
 
-var deleteRecoveryRecordIfUnchangedLua = redis.NewScript(`
-if redis.call("GET", KEYS[1]) == ARGV[1] then
+var deleteRecoveryRecordIfSameSendLua = redis.NewScript(`
+local raw = redis.call("GET", KEYS[1])
+if not raw then return 0 end
+local current = cjson.decode(raw)
+local installed = cjson.decode(ARGV[1])
+if type(installed.send_id) == "string" and installed.send_id ~= ""
+  and current.send_id == installed.send_id
+  and current.user_id == installed.user_id
+  and current.code_hash == installed.code_hash then
   return redis.call("DEL", KEYS[1])
 end
 return 0
 `)
 
-func (h *Handler) deleteRecoveryRecordIfUnchanged(ctx context.Context, key, value string) error {
-	_, err := deleteRecoveryRecordIfUnchangedLua.Run(ctx, h.redis, []string{key}, value).Result()
+func (h *Handler) deleteRecoveryRecordIfSameSend(ctx context.Context, key, value string) error {
+	_, err := deleteRecoveryRecordIfSameSendLua.Run(ctx, h.redis, []string{key}, value).Result()
 	return err
 }
 
