@@ -191,8 +191,10 @@ type Handler struct {
 	recoveryQueueMu           sync.RWMutex
 	recoveryWorkers           sync.WaitGroup
 	recoveryDeliveries        sync.WaitGroup
-	recoveryCtx               context.Context
-	recoveryCancel            context.CancelFunc
+	recoveryAbort             chan struct{}
+	recoveryAbortOnce         sync.Once
+	recoveryInflightMu        sync.Mutex
+	recoveryInflight          map[*recoveryDelivery]struct{}
 	recoveryDrainTimeout      time.Duration
 	recoveryWorkersOnce       sync.Once
 	recoveryQueueClosed       bool
@@ -360,7 +362,8 @@ func NewHandlerForInstance(db *sql.DB, redisClient *redis.Client, log *logger.Lo
 		recoveryQueue:  make(chan string, recoveryQueueCapacity),
 	}
 	h.recoveryProcess = h.processRecoveryBegin
-	h.recoveryCtx, h.recoveryCancel = context.WithCancel(context.Background())
+	h.recoveryAbort = make(chan struct{})
+	h.recoveryInflight = make(map[*recoveryDelivery]struct{})
 	h.recoveryDrainTimeout = recoveryDrainTimeout
 	return h
 }
@@ -3327,7 +3330,7 @@ func (h *Handler) startRecoveryWorkers() {
 			go func() {
 				defer h.recoveryWorkers.Done()
 				for addr := range h.recoveryQueue {
-					if h.recoveryContext().Err() != nil {
+					if h.recoveryAborted() {
 						continue // drain abandoned: skip what is still queued
 					}
 					h.recoveryProcess(addr)
@@ -3339,7 +3342,9 @@ func (h *Handler) startRecoveryWorkers() {
 
 // CloseRecoveryJobs stops new recovery dispatches and drains accepted jobs
 // and their deliveries for up to recoveryDrainTimeout. After that it cancels
-// in-flight lookups, skips jobs still queued, and returns; a delivery already
+// in-flight lookups, skips jobs still queued, and clears the stored code of
+// every delivery still in flight while Redis is open, so a send that fails
+// after shutdown cannot leave a code that was never sent. A delivery already
 // talking to SMTP ends at its own connection deadline.
 // Call it after HTTP drain and before closing the handler's database or Redis.
 func (h *Handler) CloseRecoveryJobs() {
@@ -3359,23 +3364,73 @@ func (h *Handler) CloseRecoveryJobs() {
 	case <-drained:
 	case <-time.After(h.recoveryDrainTimeout):
 		h.log.Warn("Recovery drain abandoned", "failure_class", "recovery_drain_abandoned")
-	}
-	if h.recoveryCancel != nil {
-		h.recoveryCancel()
+		h.abortRecoveryJobs()
+		h.clearInflightRecoveryCodes()
 	}
 }
 
-// recoveryContext is the parent of every recovery job. CloseRecoveryJobs
-// cancels it when the drain gives up.
-func (h *Handler) recoveryContext() context.Context {
-	if h.recoveryCtx == nil {
-		return context.Background()
+// recoveryDelivery is one stored code whose email is not yet confirmed sent.
+type recoveryDelivery struct {
+	addr string
+	data []byte
+}
+
+func (h *Handler) abortRecoveryJobs() {
+	if h.recoveryAbort != nil {
+		h.recoveryAbortOnce.Do(func() { close(h.recoveryAbort) })
 	}
-	return h.recoveryCtx
+}
+
+// recoveryAborted reports whether CloseRecoveryJobs gave up on the drain.
+func (h *Handler) recoveryAborted() bool {
+	select {
+	case <-h.recoveryAbort:
+		return true
+	default:
+		return false
+	}
+}
+
+// recoveryJobContext bounds one recovery job and ends it early when the drain
+// is abandoned.
+func (h *Handler) recoveryJobContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), recoveryStoreTimeout)
+	if h.recoveryAbort != nil {
+		go func() {
+			select {
+			case <-h.recoveryAbort:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, cancel
+}
+
+func (h *Handler) clearInflightRecoveryCodes() {
+	h.recoveryInflightMu.Lock()
+	pending := make([]*recoveryDelivery, 0, len(h.recoveryInflight))
+	for d := range h.recoveryInflight {
+		pending = append(pending, d)
+	}
+	h.recoveryInflightMu.Unlock()
+	for _, d := range pending {
+		h.clearUnsentRecoveryCode(d.addr, d.data)
+	}
+}
+
+// clearUnsentRecoveryCode deletes a stored code only if it is still the one
+// this delivery installed.
+func (h *Handler) clearUnsentRecoveryCode(addr string, data []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.deleteRecoveryRecordIfSameSend(ctx, recoveryRedisKey(addr), string(data)); err != nil {
+		h.log.Warn("Failed to clear unsent recovery code", "failure_class", "recovery_unsent_code_cleanup")
+	}
 }
 
 func (h *Handler) processRecoveryBegin(addr string) {
-	ctx, cancel := context.WithTimeout(h.recoveryContext(), recoveryStoreTimeout)
+	ctx, cancel := h.recoveryJobContext()
 	defer cancel()
 
 	// Look up user by email
@@ -3388,21 +3443,21 @@ func (h *Handler) processRecoveryBegin(addr string) {
 			return
 		}
 		// The caller already received the generic response.
-		h.log.Error("Failed to look up user for recovery", "error", err)
+		h.log.Error("Failed to look up user for recovery", "failure_class", "recovery_account_lookup")
 		return
 	}
 
 	// Generate 6-digit code
 	code, err := generateRecoveryCode()
 	if err != nil {
-		h.log.Error("Failed to generate recovery code", "error", err)
+		h.log.Error("Failed to generate recovery code", "failure_class", "recovery_code_generation")
 		return
 	}
 
 	// Store SHA-256 hash in Redis
 	var sendID [16]byte
 	if _, err := rand.Read(sendID[:]); err != nil {
-		h.log.Error("Failed to generate recovery send identity", "error", err)
+		h.log.Error("Failed to generate recovery send identity", "failure_class", "recovery_send_identity")
 		return
 	}
 	record := recoveryRecord{
@@ -3413,13 +3468,13 @@ func (h *Handler) processRecoveryBegin(addr string) {
 	}
 	data, err := json.Marshal(record)
 	if err != nil {
-		h.log.Error("Failed to marshal recovery record", "error", err)
+		h.log.Error("Failed to marshal recovery record", "failure_class", "recovery_record_encoding")
 		return
 	}
 
 	installed, err := h.redis.SetNX(ctx, recoveryRedisKey(addr), data, recoveryCodeTTL).Result()
 	if err != nil {
-		h.log.Error("Failed to store recovery code in Redis", "error", err)
+		h.log.Error("Failed to store recovery code in Redis", "failure_class", "recovery_code_store")
 		return
 	}
 	if !installed {
@@ -3433,9 +3488,22 @@ func (h *Handler) processRecoveryBegin(addr string) {
 	// so a worker held through delivery would delay the next queued address
 	// only when an earlier one has an account. The SMTP dial timeout and
 	// connection deadline bound each delivery, and CloseRecoveryJobs drains it.
+	//
+	// Delivery count is not capped: a cap would again make one address's
+	// outcome depend on how many other addresses have accounts. SetNX keeps
+	// it to one delivery per address per code lifetime.
+	d := &recoveryDelivery{addr: addr, data: data}
+	h.recoveryInflightMu.Lock()
+	h.recoveryInflight[d] = struct{}{}
+	h.recoveryInflightMu.Unlock()
 	h.recoveryDeliveries.Add(1)
 	go func() {
 		defer h.recoveryDeliveries.Done()
+		defer func() {
+			h.recoveryInflightMu.Lock()
+			delete(h.recoveryInflight, d)
+			h.recoveryInflightMu.Unlock()
+		}()
 		h.deliverRecoveryCode(addr, code, data)
 	}()
 }
@@ -3443,6 +3511,11 @@ func (h *Handler) processRecoveryBegin(addr string) {
 // deliverRecoveryCode emails a stored recovery code and clears the code if the
 // send fails.
 func (h *Handler) deliverRecoveryCode(addr, code string, data []byte) {
+	if h.recoveryAborted() {
+		// Shutdown gave up on the drain: send nothing and leave no unsent code.
+		h.clearUnsentRecoveryCode(addr, data)
+		return
+	}
 	var sendErr error
 	if h.emailSvc == nil {
 		sendErr = email.ErrDeliveryNotConfigured
@@ -3451,11 +3524,7 @@ func (h *Handler) deliverRecoveryCode(addr, code string, data []byte) {
 	}
 	if sendErr != nil {
 		h.log.Error("Failed to send recovery code email", "failure_class", "recovery_email_delivery")
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cleanupCancel()
-		if delErr := h.deleteRecoveryRecordIfSameSend(cleanupCtx, recoveryRedisKey(addr), string(data)); delErr != nil {
-			h.log.Warn("Failed to clear unsent recovery code", "error", delErr)
-		}
+		h.clearUnsentRecoveryCode(addr, data)
 		return
 	}
 
