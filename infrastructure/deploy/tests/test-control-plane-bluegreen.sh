@@ -298,7 +298,8 @@ char_nginx_render_hash() {
     export NGINX_SRC="$ROOT/infrastructure/deploy/nginx/concordvoice.conf"
     export NGINX_RENDER_DIR="$TMP/render"
     export NGINX_RENDER="$TMP/render/concordvoice.conf"
-    export CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA"
+    export CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA" \
+      NGINX_CLIENT_IP_MODE=cloudflare-aop
     eval "$fns"
     render_nginx_config "$HSTS_DEFAULT_VALUE" || exit 1
     if command -v sha256sum >/dev/null 2>&1; then
@@ -427,7 +428,7 @@ render_with() {
   # Variables read by the extracted render_nginx_config (dynamic scope).
   # shellcheck disable=SC2034
   local NGINX_SRC="$2" NGINX_RENDER_DIR="$3" NGINX_RENDER="$3/concordvoice.conf" CONTROL_PLANE_BLUEGREEN="$1"
-  local CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA"
+  local CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA" NGINX_CLIENT_IP_MODE=cloudflare-aop
   shift 3
   fns="$(extract_fn encode_hsts_for_nginx; extract_fn validate_aop_fragment; extract_fn aop_ca_safe; extract_fn render_nginx_config)"
   [[ -n "$fns" ]] || return 125
