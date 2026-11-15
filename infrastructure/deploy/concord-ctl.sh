@@ -7395,6 +7395,8 @@ else:
     ADMIN_BACKUP="/etc/nginx/conf.d/.concord-admin.backup"
     ADMIN_ORIGIN_CERT="${ADMIN_ORIGIN_CERT:-/etc/nginx/cloudflare/origin.pem}"
     ADMIN_ORIGIN_KEY="${ADMIN_ORIGIN_KEY:-/etc/nginx/cloudflare/origin.key}"
+    CLOUDFLARE_AOP_CA=/etc/concord/nginx/cloudflare-aop-ca.pem
+    CLOUDFLARE_AOP_FRAGMENT="${DEPLOY_DIR}/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
     CONCORD_ENV_FILE="${CONCORD_ENV_FILE:-/opt/concord/.env}"
     HSTS_DEFAULT='max-age=63072000; includeSubDomains; preload'
     if [[ ! -f "$NGINX_SRC" ]]; then
@@ -7651,9 +7653,29 @@ else:
       printf '%s' "$encoded"
     }
 
+    validate_aop_fragment() {
+      local expected actual
+      expected=$'ssl_client_certificate /etc/concord/nginx/cloudflare-aop-ca.pem;\nssl_verify_client on;\nssl_verify_depth 2;\nset_real_ip_from 0.0.0.0/0;\nset_real_ip_from ::/0;\nreal_ip_header CF-Connecting-IP;\nreal_ip_recursive off;'
+      actual="$(grep -Ev '^(#|[[:space:]]*$)' "$CLOUDFLARE_AOP_FRAGMENT")" || return 1
+      [[ "$actual" == "$expected" ]]
+    }
+
+    aop_ca_safe() {
+      local path="$CLOUDFLARE_AOP_CA" mode owner entry
+      [[ "$path" == /etc/concord/nginx/cloudflare-aop-ca.pem && -f "$path" && ! -L "$path" ]] || return 1
+      for entry in /etc /etc/concord /etc/concord/nginx "$path"; do
+        [[ -e "$entry" && ! -L "$entry" ]] || return 1
+        owner="$(stat -Lc %u -- "$entry" 2>/dev/null || stat -f %u "$entry" 2>/dev/null)" || return 1
+        mode="$(stat -Lc %a -- "$entry" 2>/dev/null || stat -f %Lp "$entry" 2>/dev/null)" || return 1
+        [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+        (( (8#$mode & 022) == 0 )) || return 1
+      done
+      openssl x509 -in "$path" -noout -checkend 0 >/dev/null 2>&1
+    }
+
     render_nginx_config() {
       local policy="$1" cp_port="${2:-}" encoded line tmp
-      local in_api=0 scoped_replacements=0 owner_markers=0
+      local in_api=0 scoped_replacements=0 owner_markers=0 provenance_markers=0 provenance_bad=0
       # Rail only: the control_plane upstream block, parsed with the rules of
       # control_plane_bluegreen_live_port, gets its one server line rewritten
       # to cp_port. With the rail off the port is ignored and nothing changes.
@@ -7663,6 +7685,8 @@ else:
         [[ "$cp_port" == 8080 || "$cp_port" == 8081 ]] || return 1
       fi
       encoded="$(encode_hsts_for_nginx "$policy")" || return 1
+      [[ -f "$CLOUDFLARE_AOP_FRAGMENT" && ! -L "$CLOUDFLARE_AOP_FRAGMENT" ]] || return 1
+      validate_aop_fragment && aop_ca_safe || return 1
       mkdir -p "$NGINX_RENDER_DIR" || return 1
       tmp="$(mktemp "${NGINX_RENDER}.tmp.XXXXXX")" || return 1
       if while IFS= read -r line || [[ -n "$line" ]]; do
@@ -7688,6 +7712,13 @@ else:
           printf '    proxy_hide_header Strict-Transport-Security;\n'
           printf '    add_header Strict-Transport-Security "%s" always;\n' "$encoded"
           owner_markers=$((owner_markers + 1))
+        elif [[ "$line" == '    # CONCORD_CLIENT_IP_PROVENANCE' ]]; then
+          if (( ! in_api )); then
+            provenance_bad=1
+          else
+            sed 's/^/    /' "$CLOUDFLARE_AOP_FRAGMENT" || { rm -f "$tmp"; return 1; }
+            provenance_markers=$((provenance_markers + 1))
+          fi
         elif (( in_api )) && [[ "$line" == "        add_header Strict-Transport-Security "* ]]; then
           printf '        add_header Strict-Transport-Security "%s" always;\n' "$encoded"
           scoped_replacements=$((scoped_replacements + 1))
@@ -7700,7 +7731,7 @@ else:
         rm -f "$tmp"
         return 1
       fi
-      if (( owner_markers != 1 || scoped_replacements != 3 )); then
+      if (( owner_markers != 1 || scoped_replacements != 3 || provenance_markers != 1 || provenance_bad )); then
         rm -f "$tmp"
         return 1
       fi

@@ -1883,6 +1883,16 @@ The self-hosted CLI runs the selected stack on a single server using repo-root `
 
 For proxy provenance, the installer writes only placeholders for `TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES`. Under the deploy lock, `concord-selfhost up` measures the selected services-bridge gateway, persists its exact canonical IPv4 `/32` or IPv6 `/128` route for both services, and refuses an ambiguous or changed topology. IPv4-mapped IPv6 trust entries are rejected. Both application services set `gw_priority: 1` for that bridge, which requires Compose 2.33.1 or newer. `restart` proceeds only when the existing running topology matches the measured trust. See the quickstart's [trusted proxy gateway provenance](runbooks/selfhost-quickstart.md#trusted-proxy-gateway-provenance) for the operator procedure.
 
+For Cloudflare-proxied API/apex traffic, nginx restores `CF-Connecting-IP` only
+in explicit `cloudflare-aop` mode after it verifies a deployment-specific
+Authenticated Origin Pull client certificate against a fixed root-owned public
+CA bundle. The self-host `direct` default and the direct media vhost do not
+restore that header. The managed nginx renderer requires the same provenance
+fragment and fails closed when its CA prerequisite is absent or unsafe. Source
+merge does not configure Cloudflare or prove that the custom certificate,
+Worker/Transform-Rule inventory, direct-origin TLS rejection, or separate
+client limiter buckets are live.
+
 The direct self-host nginx installer domain-renders the committed strong HSTS default for nginx-generated/scoped responses. A self-host `HSTS_HEADER_VALUE` override affects Go-proxied responses. To change the scoped nginx responses, customize nginx explicitly rather than using the managed renderer.
 
 **Requirements:** basic single-host build-from-source installation needs at least 2 vCPU, 2 GiB RAM and 10 GiB free disk, plus capacity for cold builds and the intended workload. Use the quickstart's [current software and network requirements](runbooks/selfhost-quickstart.md#requirements) and [external exposure checks](runbooks/selfhost-quickstart.md#verify-your-exposure). The `coturn` service runs STUN and TURN with TLS. The selected certificate provisioning mode delivers its certificate; Let's Encrypt uses the renewal copy hook.

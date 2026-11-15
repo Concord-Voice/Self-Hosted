@@ -51,8 +51,32 @@ leaves exact under-trust in place. `concord-selfhost health` also refuses a
 running gateway or application trust mismatch; `health --json` reports the
 `proxy_provenance` check with `ok: false` (see [machine-readable
 output](selfhost-machine-output.md)). Verify host-nginx attribution at the edge
-for the selected release. Generic Cloudflare traffic remains attributed to
-the edge until authenticated origin provenance is supplied by #80.
+for the selected release.
+
+#### Cloudflare-proxied API attribution
+
+`direct` is the default nginx provenance mode. It ignores
+`CF-Connecting-IP`, so a Cloudflare-proxied API request is safely attributed to
+the Cloudflare edge address. Select `cloudflare-aop` only after creating a
+custom zone-level or hostname-level Cloudflare Authenticated Origin Pull
+certificate for both the API and apex hostnames. The shared Cloudflare AOP
+certificate is not sufficient for client-IP restoration.
+
+Before the first AOP-enabled reload, install the matching **public CA bundle**
+as the root-owned regular file at the fixed nginx path documented by the
+selected release. Do not place the CA private key or the Cloudflare client
+private key in this checkout or `.env`. Enable Cloudflare's client certificate,
+verify proxied API traffic, then enable nginx client-certificate verification.
+Test that direct HTTPS to the origin fails without the client certificate and
+that two external clients receive separate rate-limit and login-ban buckets.
+
+Keep `media.<domain>` direct/DNS-only; it does not use AOP or
+`CF-Connecting-IP`. Before acceptance, inventory Worker and Transform Rules
+for API and apex. They must be absent or proven to overwrite client identity
+from Cloudflare request context. Do not use Pseudo IPv4 header-overwrite mode.
+During certificate rotation, trust the old and new public CA bundles together,
+switch Cloudflare to the new client certificate, verify the probes, then remove
+the old CA.
 
 ### WebSocket event-budget preparation
 

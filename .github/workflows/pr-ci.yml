@@ -326,6 +326,12 @@ jobs:
         if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.selfhost) }}
         run: bash scripts/ci/install-docker-engine.sh
 
+      # The AOP regression fixture uses a random loopback port; installing nginx
+      # provides the live TLS SNI/Host proof without touching a deployment host.
+      - name: Install nginx for deployment proxy tests
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.selfhost) }}
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y nginx
+
       # Both the license-workflow guard and provision-secrets drift-lock parse
       # YAML. Provision their pinned dependency before either guard runs.
       - name: Ensure PyYAML for static guards

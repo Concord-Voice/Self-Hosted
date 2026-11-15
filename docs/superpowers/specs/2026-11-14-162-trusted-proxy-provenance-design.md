@@ -1,10 +1,11 @@
-# Security #162: Exact Trusted Proxy Provenance
+# Exact Trusted Proxy Provenance
 
-**Status:** Final design for Security #162
-**Scope:** Concord-Voice/Self-Hosted source change, followed by a separately
-reviewed Concord-Voice/Hosted mirror and deployment qualification
-**Dependency order:** #162 lands before #163; Security #80 remains the owner of
-the outer Cloudflare/origin and published-port contract.
+**Status:** Final design
+**Scope:** Self-hosted source change, followed by separately reviewed managed
+deployment configuration and qualification.
+**Dependency order:** Exact-peer trust precedes the separate IPv6 aggregation
+and Redis-failure work. Authenticated Cloudflare origin provenance is part of
+this edge contract.
 
 ## 1. Problem
 
@@ -41,19 +42,19 @@ out of scope.
   address range as proof that `CF-Connecting-IP` belongs to this deployment.
 - Existing legitimate direct and proxied traffic continues to reach the same
   routes; only address attribution authority changes.
-- Self-Hosted lands first. Hosted receives a reviewed mirror only after its
-  backend-visible peers are measured independently.
+- Self-hosted source lands first. Managed deployment receives a reviewed mirror
+  only after its backend-visible peers are measured independently.
 
 ## 3. Non-goals
 
 - Do not change thresholds, windows, Redis keys, or ban semantics.
 - Do not add a signed client-IP header, proxy secret, dependency, or second
   address parser.
-- Do not change the order or behavior of #163's IPv6 `/64` aggregation and
-  Redis fail-closed work.
+- Do not change the order or behavior of the separate IPv6 `/64` aggregation
+  and Redis fail-closed work.
 - Do not claim that Cloudflare source CIDRs authenticate the deployment's own
-  edge path. Security #80 owns the authenticated origin/published-port
-  contract.
+  edge path. Only deployment-specific authenticated origin proof permits
+  restoration of `CF-Connecting-IP`.
 - Do not backfill historical session IPs.
 
 ## 4. Governing constraints
@@ -87,12 +88,35 @@ Reference:
 TCP peer is in that shared range; it does not prove the request traversed this
 deployment's authenticated Cloudflare path.
 
-The generic Self-Hosted vhost therefore removes the unconditional
-`set_real_ip_from ...`, `real_ip_header CF-Connecting-IP`, and
-`real_ip_recursive on` block. A self-hosted deployment behind Cloudflare is
-attributed to the Cloudflare edge until Security #80 supplies and tests an
-authenticated origin path. This is a safe loss of address granularity, not a
-reason to keep an unauthenticated identity claim.
+The generic self-hosted vhost has two explicit modes. `direct`, the default,
+does not restore `CF-Connecting-IP`; Cloudflare-proxied requests are attributed
+to the edge address. `cloudflare-aop` restores that header only in the API/apex
+TLS server after nginx verifies a custom zone-level or hostname-level
+Cloudflare Authenticated Origin Pull client certificate against an
+operator-provided public CA. The direct media vhost never enables this path.
+The shared global AOP certificate is insufficient because it proves only that
+traffic came from Cloudflare, rather than from this deployment's zone.
+
+In `cloudflare-aop` mode, the API/apex fragment deliberately uses
+`set_real_ip_from 0.0.0.0/0` and `set_real_ip_from ::/0`. Required
+deployment-specific mTLS authenticates the TLS peer before nginx considers
+`CF-Connecting-IP`; the all-address setting must never appear without that
+client-certificate requirement. Static tests enforce this complete group and
+its API/apex-only placement.
+
+The AOP CA is a root-owned regular file at the fixed nginx path. It is public
+CA material only: neither the Cloudflare client private key nor a CA private
+key belongs in the repository or root `.env`. Both the self-host and managed
+renderers consume the same API-server marker and fail before publishing nginx
+configuration if that marker or the selected provenance fragment is missing.
+The managed renderer requires AOP; it must not silently select `direct` for a
+Cloudflare-proxied managed API.
+
+Cloudflare Workers and Transform Rules for the API/apex hostname are part of
+the deployment acceptance inventory. A Worker can alter request headers, so
+the operator must either disable such routes or prove that the Worker replaces
+client identity from Cloudflare request context. Pseudo IPv4 must not use an
+overwrite mode that destroys the canonical visitor address.
 
 Reference:
 <https://nginx.org/en/docs/http/ngx_http_realip_module.html>.
@@ -255,7 +279,8 @@ These are one contract and change together:
 | Media config | Production validation accepts exact peers only |
 | Media admission gate | Continues matching the compiled list; untrusted peers use their socket peer |
 | nginx user/API/media/admin locations | Both client-address headers overwrite with `$remote_addr` |
-| Generic self-host Cloudflare block | Removed until authenticated origin provenance exists |
+| API/apex Cloudflare provenance | `direct` removes the marker; `cloudflare-aop` injects custom-AOP mTLS before real-IP restoration |
+| Managed API renderer | Requires the same custom-AOP fragment and validated public CA; never defaults to edge-IP restoration |
 | Examples and operator docs | Exact-route semantics and migration behavior |
 
 The callers of `c.ClientIP()` do not change. Tests at login, recovery,
@@ -345,12 +370,15 @@ fixed source, with retained positive tests proving correct attribution.
    addresses in PR logs, and run the through-nginx attribution probe before
    accepting the release.
 3. Re-run after network recreation and during update/rollback drills.
-4. Prepare a reviewed Hosted mirror. Measure the backend-visible control-plane
+4. Prepare a reviewed managed-deployment mirror. Measure the backend-visible control-plane
    and media-plane peers independently; do not copy Self-Hosted gateway values.
-5. Deploy Hosted only after its own config, CI, and live canary prove the exact
+5. Deploy the managed environment only after its own config, CI, and live canary prove the exact
    peer and end-client attribution.
-6. Continue #80 for authenticated Cloudflare/origin provenance and #163 for
-   IPv6 aggregation plus Redis failure posture.
+6. Before enabling `cloudflare-aop`, configure the custom AOP client
+   certificate for both API and apex at Cloudflare, install the public CA at
+   the fixed root-owned path, and prove ordinary Cloudflare traffic still
+   succeeds while direct-origin TLS without the client certificate fails.
+7. Keep the separate IPv6 aggregation and Redis failure posture work separate.
 
 Rollback restores the previous release and its backed-up `.env`. A rollback
 may re-enable broad trust, so it is an emergency availability action and must
@@ -369,11 +397,13 @@ be followed by the same through-nginx spoof probe. Forward repair is preferred.
 | Direct restart perpetuates legacy broad container env | Medium during upgrade | Pre-restart equality proof; refuse without mutation and direct the operator to the `up` migration path |
 | Header overwrite missed in one location | Medium | Template census test rejects every append/pass-through form |
 | Broad entry survives beside an exact one | Medium | Production validation rejects the whole list on any non-host prefix |
-| Cloudflare users are bucketed by edge IP | Expected until #80 | Remove unauthenticated identity restoration; document the availability/granularity tradeoff |
+| AOP is enabled before Cloudflare presents the matching client certificate | High | Enable the Cloudflare certificate first, verify ordinary proxied traffic, then publish nginx enforcement; rollback restores the prior verified nginx artifact |
+| A Worker or Pseudo IPv4 setting changes visitor identity | Medium | Inventory API/apex Worker and Transform Rules; reject header-overwrite Pseudo IPv4; prove two distinct client addresses retain separate limiter buckets |
+| AOP certificate expiry blocks API traffic | Medium | Monitor certificate lifetime; stage an old-and-new CA bundle during rotation and remove the old CA only after a live probe |
 | Exact trust breaks a custom second proxy | Low | The second proxy must be the backend-visible exact peer; measure it and configure its host route |
 | Media gate becomes inactive from empty config | Low after fix | Production config exits before Socket.IO listens |
 | Upgrade edits secrets in `.env` | Low, high impact | Atomic targeted replacement, same owner/mode, byte-preservation tests, backup before update |
-| Hosted copies Self-Hosted topology | Medium | Separate mirror PR and mandatory per-target peer evidence |
+| Managed deployment copies self-host topology | Medium | Separate mirror and mandatory per-target peer evidence |
 
 No addresses, headers, or secret-bearing environment content are added to
 application logs.
@@ -400,7 +430,9 @@ application logs.
   recreation, ambiguous/foreign network refusal, atomic rewrite failure,
   ownership/mode preservation, and update/rollback.
 - Real nginx fixture: forged incoming headers are overwritten for HTTP and
-  WebSocket locations; `nginx -t` passes.
+  WebSocket locations; direct mode does not restore `CF-Connecting-IP`; AOP
+  mode rejects missing and wrong client certificates and forwards a verified
+  visitor address; `nginx -t` passes.
 - Original VULN-008 and VULN-017 overlays fail.
 - Full scoped Go race tests, media Vitest/typecheck/lint, deployment fixtures,
   and repository quality gate run before PR creation.
@@ -421,8 +453,8 @@ No test targets the shared `concord` database.
 | Unknown broad custom values are not guessed narrower | Refusal fixture and operator message |
 | Media neighbor spoof is blocked | Admission test from non-nginx RFC1918 peer |
 | VULN-008 and VULN-017 exploit tests fail | Security overlay results recorded on the exact PR head |
-| Cloudflare identity is not accepted without authenticated provenance | Generic block absent; #80 recorded as residual owner |
-| Hosted mirror is topology-qualified independently | Separate PR, exact-peer evidence, independent CI and deployment canary |
+| Cloudflare identity is accepted only after authenticated provenance | AOP mTLS fixture, static API-only marker check, and live direct-origin TLS rejection |
+| Managed deployment is topology-qualified independently | Separate mirror, exact-peer evidence, AOP prerequisite record, independent CI and deployment canary |
 | Docs ship with code | Changelog, architecture, service env docs, and self-host runbooks updated |
 | 0 new blocker/critical issues | Exact-head SAST/review evidence |
 | 0 new high-confidence security hotspots | Exact-head security review and scanner evidence |

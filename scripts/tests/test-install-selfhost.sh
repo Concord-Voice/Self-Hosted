@@ -69,6 +69,7 @@ FIX="$STUB/concordfixture"
 STATE="$STUB/state"
 mkdir -p "$FIX/infrastructure/deploy/nginx" "$STATE" "$STUB/bin"
 cp -- "$SOURCE_TARGET" "$FIX/infrastructure/deploy/install-selfhost.sh"
+cp -- "$ROOT/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf" "$FIX/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
 if [[ -f "$ROOT/infrastructure/deploy/selfhost-storage.sh" ]]; then
   cp -- "$ROOT/infrastructure/deploy/selfhost-storage.sh" "$FIX/infrastructure/deploy/selfhost-storage.sh"
 fi
@@ -79,12 +80,13 @@ fixture_repo() {
   cp -- "$SOURCE_TARGET" "$destination/infrastructure/deploy/install-selfhost.sh"
   cp -- "$ROOT/infrastructure/deploy/selfhost-storage.sh" "$destination/infrastructure/deploy/selfhost-storage.sh"
   cp -- "$ROOT/infrastructure/deploy/nginx/concordvoice.conf" "$destination/infrastructure/deploy/nginx/concordvoice.conf"
+  cp -- "$ROOT/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf" "$destination/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
   for model in docker-compose.yml docker-compose.production.yml docker-compose.selfhost.yml docker-compose.byo-s3.yml; do
     cp -- "$ROOT/$model" "$destination/$model"
   done
   cp -- "$ROOT/.gitignore" "$destination/.gitignore"
 }
-printf 'server_name concordvoice.chat;\n' >"$FIX/infrastructure/deploy/nginx/concordvoice.conf"
+printf '%s\n' '# HTTPS — API + WebSocket Hub' 'server_name concordvoice.chat;' '    # CONCORD_CLIENT_IP_PROVENANCE' '# HTTPS — Media Plane' >"$FIX/infrastructure/deploy/nginx/concordvoice.conf"
 for model in docker-compose.yml docker-compose.production.yml docker-compose.selfhost.yml docker-compose.byo-s3.yml; do
   cp -- "$ROOT/$model" "$FIX/$model"
 done
@@ -1647,8 +1649,11 @@ mode="$(python3 -c "import os; print(oct(os.stat('$out_env').st_mode)[-3:])" 2>/
 
 fake_src="$STUB/concordvoice.conf"
 cat >"$fake_src" <<'EOF'
+# HTTPS — API + WebSocket Hub
 server_name concordvoice.chat api.concordvoice.chat;
 ssl_certificate /etc/letsencrypt/live/concordvoice.chat/fullchain.pem;
+    # CONCORD_CLIENT_IP_PROVENANCE
+# HTTPS — Media Plane
 EOF
 
 rendered="$STUB/rendered.conf"
@@ -1669,6 +1674,47 @@ grep -q 'server_name example.com api.example.com;' "$rendered" \
 grep -q '/etc/letsencrypt/live/example.com/fullchain.pem' "$rendered" \
   && pass "cert path templated" \
   || fail "cert path not templated"
+
+if grep -q 'CONCORD_CLIENT_IP_PROVENANCE' "$rendered"; then
+  fail "direct render retained client-IP marker"
+elif grep -q 'real_ip_header\|set_real_ip_from\|ssl_verify_client' "$rendered"; then
+  fail "direct render emitted client-IP provenance directives"
+else
+  pass "direct render removes client-IP marker"
+fi
+
+aop_ca="$STUB/aop-ca.pem"
+if command -v openssl >/dev/null 2>&1 && openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=fixture-aop-ca -days 1 -keyout "$STUB/aop-ca.key" -out "$aop_ca" >/dev/null 2>&1; then
+  ( source "$TARGET"
+    NGINX_SRC="$fake_src"
+    NGINX_OUT="$STUB/rendered-aop.conf"
+    CFG_DOMAIN=example.com
+    CFG_CLIENT_IP_MODE=cloudflare-aop
+    CFG_CLOUDFLARE_AOP_CA="$aop_ca"
+    render_nginx )
+  if grep -q 'ssl_verify_client on;' "$STUB/rendered-aop.conf" && grep -q 'set_real_ip_from 0.0.0.0/0;' "$STUB/rendered-aop.conf" && ! grep -q 'CONCORD_CLIENT_IP_PROVENANCE' "$STUB/rendered-aop.conf"; then
+    pass "AOP render installs complete provenance boundary"
+  else
+    fail "AOP render omitted provenance boundary"
+  fi
+else
+  fail "openssl unavailable for AOP render fixture"
+fi
+printf '%s\n' 'ssl_client_certificate /etc/concord/nginx/cloudflare-aop-ca.pem;' 'ssl_verify_client off;' >"$FIX/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
+printf '%s\n' previous >"$STUB/rendered-aop-unsafe.conf"
+if ( source "$TARGET"
+  NGINX_SRC="$fake_src"
+  NGINX_OUT="$STUB/rendered-aop-unsafe.conf"
+  CFG_DOMAIN=example.com
+  CFG_CLIENT_IP_MODE=cloudflare-aop
+  CFG_CLOUDFLARE_AOP_CA="$aop_ca"
+  render_nginx ) >/dev/null 2>&1; then
+  fail "AOP render accepted weakened fragment"
+elif [[ "$(cat "$STUB/rendered-aop-unsafe.conf")" == previous ]]; then
+  pass "AOP render rejects a weakened fragment atomically"
+else
+  fail "AOP render changed output after weakened fragment refusal"
+fi
 
 # ── Task 7: preflight-before-mutation ordering ────────────────────────────────
 

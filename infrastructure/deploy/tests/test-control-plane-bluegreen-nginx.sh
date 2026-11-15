@@ -28,6 +28,8 @@ VHOST_SRC="$ROOT/infrastructure/deploy/nginx/concordvoice.conf"
 PY="$ROOT/infrastructure/deploy/tests/control_plane_bluegreen_upstream.py"
 LISTEN_PORT=18088
 HSTS_DEFAULT_VALUE='max-age=63072000; includeSubDomains; preload'
+AOP_FRAGMENT="$ROOT/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
+AOP_CA=/etc/concord/nginx/cloudflare-aop-ca.pem
 
 command -v nginx >/dev/null 2>&1 || skip_or_fail "nginx is not on PATH"
 command -v python3 >/dev/null 2>&1 || skip_or_fail "python3 is not on PATH"
@@ -122,19 +124,46 @@ cut_block() {
 # render_port <port>: the real render_nginx_config with the rail on, writing
 # $TMP/render/concordvoice.conf with the control_plane server on <port>.
 render_port() {
-  local enc rnd
+  local enc fragment ca rnd
   enc="$(extract_fn encode_hsts_for_nginx)"
+  fragment="$(extract_fn validate_aop_fragment)"
+  ca="$(extract_fn aop_ca_safe)"
   rnd="$(extract_fn render_nginx_config)"
-  [[ -n "$enc" && -n "$rnd" ]] || return 1
+  [[ -n "$enc" && -n "$fragment" && -n "$ca" && -n "$rnd" ]] || return 1
   (
     # Variables read by the extracted render_nginx_config.
     export NGINX_SRC="$VHOST_SRC" NGINX_RENDER_DIR="$TMP/render" \
-      NGINX_RENDER="$TMP/render/concordvoice.conf" CONTROL_PLANE_BLUEGREEN=1
+      NGINX_RENDER="$TMP/render/concordvoice.conf" CONTROL_PLANE_BLUEGREEN=1 \
+      CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA"
     eval "$enc"
+    eval "$fragment"
+    eval "$ca"
     eval "$rnd"
     render_nginx_config "$HSTS_DEFAULT_VALUE" "$1"
   )
 }
+
+managed_aop_missing_ca_refuses_atomically() {
+  local r=0 left
+  printf 'previous render\n' >"$TMP/render/concordvoice.conf"
+  render_port 8080 >/dev/null 2>&1 || r=$?
+  left="$(find "$TMP/render" -name 'concordvoice.conf.tmp.*' | wc -l | tr -d ' ')"
+  if [[ $r -eq 1 && "$left" == 0 && "$(cat "$TMP/render/concordvoice.conf")" == 'previous render' ]]; then
+    pass "managed AOP missing CA refuses atomically"
+  else
+    die "managed AOP missing CA must preserve prior render (rc=$r temp-files=$left)"
+  fi
+}
+
+if [[ ! -f "$AOP_FRAGMENT" || -L "$AOP_FRAGMENT" ]]; then
+  die "managed AOP fragment is absent or symlinked: $AOP_FRAGMENT"
+fi
+if [[ ! -f "$AOP_CA" || -L "$AOP_CA" ]]; then
+  managed_aop_missing_ca_refuses_atomically
+  printf 'SKIP: test-control-plane-bluegreen-nginx: managed AOP CA is not provisioned at %s\n' "$AOP_CA"
+  finished=1
+  exit 0
+fi
 
 # Cut once from the shipped vhost: the two Upgrade-validation maps the
 # WebSocket location depends on, and the /health and WebSocket locations.

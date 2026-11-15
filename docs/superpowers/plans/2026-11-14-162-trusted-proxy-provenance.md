@@ -1,4 +1,4 @@
-# Security #162 Exact Trusted Proxy Provenance Implementation Plan
+# Exact Trusted Proxy Provenance Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -20,8 +20,8 @@ the running endpoints match.
 
 ## Global Constraints
 
-- Self-Hosted source lands first; Hosted is a later reviewed mirror with its
-  own measured peer addresses and gates.
+- Self-hosted source lands first; managed deployment is a later reviewed mirror
+  with its own measured peer addresses, custom AOP certificate, and gates.
 - Production trust entries are exact host routes only: IPv4 `/32`, IPv6
   `/128`.
 - Never echo configured proxy entries, observed addresses, headers, or
@@ -31,8 +31,8 @@ the running endpoints match.
 - Preserve current rate windows, ban keys, status codes, and thresholds.
 - Use isolated PostgreSQL/Redis for handler integration tests; never the shared
   `concord` database. Use shared Go caches.
-- #162 precedes #163. Do not fold IPv6 `/64` aggregation or Redis degradation
-  policy into this branch.
+- Do not fold IPv6 `/64` aggregation or Redis degradation policy into this
+  branch.
 
 ## Review Focus
 
@@ -56,9 +56,9 @@ the running endpoints match.
   restart never performs migration.
 - An `.env` rewrite failure must preserve the old file byte-for-byte and
   start no service.
-- Removing generic Cloudflare real-IP restoration must leave direct-origin
-  client attribution correct and document edge-IP attribution for
-  Cloudflare-proxied self-host traffic.
+- Cloudflare `CF-Connecting-IP` restoration requires a custom zone-level or
+  hostname-level Authenticated Origin Pull client certificate at the API/apex
+  TLS boundary. Direct mode keeps edge-IP attribution; media remains direct.
 
 ---
 
@@ -116,10 +116,14 @@ the running endpoints match.
 - [ ] **Step 1: Replace every application proxy location's XFF value.** Change
   only `$proxy_add_x_forwarded_for` to `$remote_addr`; retain existing
   WebSocket, Host, scheme, timeout, and body-size behavior.
-- [ ] **Step 2: Remove the generic Cloudflare real-IP block.** Remove the
-  shared `set_real_ip_from` list, `real_ip_header`, and
-  `real_ip_recursive` from the generic Self-Hosted vhost. Do not add an
-  unauthenticated replacement.
+- [ ] **Step 2: Replace the generic Cloudflare real-IP block with an explicit
+  provenance marker.** `direct` removes it. `cloudflare-aop` injects a shared
+  API/apex-only fragment containing the fixed public-CA path,
+  `ssl_verify_client on`, bounded verification depth, the all-address
+  `set_real_ip_from` pair (`0.0.0.0/0` and `::/0`) guarded by that required
+  deployment-specific mTLS, and `real_ip_header CF-Connecting-IP`. Both the self-host installer and the
+  managed nginx renderer consume the marker and fail on missing or duplicate
+  marker/fragment contracts. Media receives no AOP directives.
 - [ ] **Step 3: Extend the fixture to an echo upstream.** Send forged incoming
   XFF and X-Real-IP through HTTP and WebSocket locations. Assert the upstream
   sees one address in each header, both equal to nginx's observed peer.
@@ -353,10 +357,11 @@ the running endpoints match.
   the Compose 2.33.1 floor, explicit default-gateway selection, writer
   ownership, and rollback. State that the installer owns the Self-Hosted env
   schema and fresh publication while the deploy-lock helper migrates only its
-  two derived trust keys. Keep both keys in service examples. State that generic
-  Cloudflare self-host traffic is attributed to the edge until #80 supplies
-  authenticated origin provenance.
-- [ ] **Step 2: Write the Hosted handoff.** List every mirrored source/config
+  two derived trust keys. Keep both keys in service examples. Document `direct`
+  and `cloudflare-aop`, the fixed public-CA path, custom AOP certificate
+  prerequisite, API/apex-only enforcement, Worker and Pseudo IPv4 constraints,
+  rotation, and the direct-origin TLS probe.
+- [ ] **Step 2: Write the managed-deployment handoff.** List every mirrored source/config
   file, require independent control/media peer measurement, and prohibit
   copying the Self-Hosted gateway. Keep merge, deployment, and live canary
   evidence separate.
@@ -376,14 +381,14 @@ the running endpoints match.
   Resolve every concrete finding and repeat required security cycles.
 - [ ] **Step 6: Commit.** `docs: define exact client IP provenance and rollout`
 - [ ] **Step 7: Open the Self-Hosted PR.** Include the VULN overlay evidence,
-  Cloudflare #80 residual, exact topology proof, quality criteria, and
-  independent Hosted mirror requirement. Do not merge without the lifecycle's
+  exact topology and AOP proof, quality criteria, and independent managed
+  mirror requirement. Do not merge without the lifecycle's
   Phase-9 approval.
 
 ## Self-review
 
 - Spec coverage: edge, control, media, lifecycle migration, six consumers,
-  original overlays, docs, Hosted mirror, #80 residual, and quality criteria
+  custom-AOP provenance, docs, managed mirror, and quality criteria
   each map to a task.
 - Type consistency: the media parser is the single parser for compile and
   production validation; the shell resolver exports the two names Compose
@@ -391,4 +396,5 @@ the running endpoints match.
 - Proportion: the plan names interfaces and assertions without transcribing
   their bodies.
 - Excluded work: no threshold changes, signed header, API route, migration,
-  historical backfill, #163 aggregation, or #80 edge implementation.
+  historical backfill, or IPv6 aggregation. The edge implementation is limited
+  to nginx AOP provenance; it does not activate any live Cloudflare setting.
