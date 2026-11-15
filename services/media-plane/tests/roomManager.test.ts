@@ -66,6 +66,8 @@ import {
   CAMERA_GATE_OFF_DEBOUNCE_MS,
   FREE_MEDIA_ENTITLEMENT,
   MAX_RECV_TRANSPORTS_PER_PARTICIPANT,
+  MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT,
+  MAX_CONSUMERS_PER_PARTICIPANT,
   KEYFRAME_REQUEST_DELAY_MS,
   MAX_SERVER_VOICE_PARTICIPANTS,
 } from '../src/lib/roomManager.js';
@@ -5861,7 +5863,13 @@ describe('RoomManager', () => {
       // Propagate appData exactly as mediasoup does — the closeConsumer release
       // path rebuilds the dedupe key from the server-set consumer.appData.
       transport.consume.mockImplementation((options: any) =>
-        Promise.resolve(createMockConsumer({ producerId, kind: 'audio', appData: options.appData }))
+        Promise.resolve(
+          createMockConsumer({
+            producerId: options.producerId,
+            kind: 'audio',
+            appData: options.appData,
+          })
+        )
       );
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
       await manager.createTransport('room-1', 'u-2', 'recv');
@@ -5899,15 +5907,155 @@ describe('RoomManager', () => {
     // on the main window's socket, :250 consumes the same producer, and :351-373
     // PAUSES — does not close — the main window's matching consumers. A two-part
     // key would hand PiP that paused consumer and its video would never start.
-    it('PiP: allows a second consumer for the same producer on a DIFFERENT transport', async () => {
-      const main = await addRecvTransport();
-      const pip = await addRecvTransport();
+    it('PiP: allows one duplicate on every secondary receive transport', async () => {
+      const transports = [];
+      for (let i = 0; i < MAX_RECV_TRANSPORTS_PER_PARTICIPANT; i += 1) {
+        transports.push(await addRecvTransport());
+      }
 
-      const mainConsumer = await manager.consume('room-1', 'u-2', producerId, main.id);
-      const pipConsumer = await manager.consume('room-1', 'u-2', producerId, pip.id);
+      const consumers = [];
+      for (const transport of transports) {
+        consumers.push(await manager.consume('room-1', 'u-2', producerId, transport.id));
+      }
 
-      expect(pipConsumer!.id).not.toBe(mainConsumer!.id);
-      expect(manager.getParticipant('room-1', 'u-2')!.consumers.size).toBe(2);
+      expect(new Set(consumers.map((consumer) => consumer!.id)).size).toBe(
+        MAX_RECV_TRANSPORTS_PER_PARTICIPANT
+      );
+      expect(manager.getParticipant('room-1', 'u-2')!.consumers.size).toBe(
+        1 + MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT
+      );
+    });
+
+    it('prevents duplicating every producer across receive transports', async () => {
+      const transports = [];
+      for (let i = 0; i < MAX_RECV_TRANSPORTS_PER_PARTICIPANT; i += 1) {
+        transports.push(await addRecvTransport());
+      }
+      for (const transport of transports) {
+        await manager.consume('room-1', 'u-2', producerId, transport.id);
+      }
+
+      const cameraProducerId = 'camera-producer';
+      manager.getParticipant('room-1', 'u-1')!.producers.set(cameraProducerId, {
+        producer: createMockProducer({ id: cameraProducerId, kind: 'video' }) as any,
+        source: 'camera',
+        kind: 'video',
+        policed: false,
+        createdAtMs: 0,
+      });
+
+      await expect(
+        manager.consume('room-1', 'u-2', cameraProducerId, transports[0].id)
+      ).resolves.not.toBeNull();
+      const primaryCallCount = transports[0].consume.mock.calls.length;
+      await expect(
+        manager.consume('room-1', 'u-2', cameraProducerId, transports[0].id)
+      ).resolves.not.toBeNull();
+      expect(transports[0].consume).toHaveBeenCalledTimes(primaryCallCount);
+      await expect(
+        manager.consume('room-1', 'u-2', cameraProducerId, transports[1].id)
+      ).rejects.toThrow(
+        `Secondary consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
+      );
+      expect(transports[1].consume).toHaveBeenCalledTimes(1);
+    });
+
+    it('reserves duplicate capacity before asynchronous consumer creation', async () => {
+      const transports = [];
+      for (let i = 0; i < MAX_RECV_TRANSPORTS_PER_PARTICIPANT; i += 1) {
+        transports.push(await addRecvTransport());
+      }
+      for (const transport of transports.slice(0, 3)) {
+        await manager.consume('room-1', 'u-2', producerId, transport.id);
+      }
+
+      const cameraProducerId = 'camera-producer';
+      manager.getParticipant('room-1', 'u-1')!.producers.set(cameraProducerId, {
+        producer: createMockProducer({ id: cameraProducerId, kind: 'video' }) as any,
+        source: 'camera',
+        kind: 'video',
+        policed: false,
+        createdAtMs: 0,
+      });
+      await manager.consume('room-1', 'u-2', cameraProducerId, transports[0].id);
+
+      let releaseFirst: (() => void) | undefined;
+      transports[3].consume.mockImplementationOnce(
+        (options: any) =>
+          new Promise((resolve) => {
+            releaseFirst = () =>
+              resolve(
+                createMockConsumer({
+                  producerId: options.producerId,
+                  kind: 'audio',
+                  appData: options.appData,
+                })
+              );
+          })
+      );
+      const finalAllowedDuplicate = manager.consume(
+        'room-1',
+        'u-2',
+        producerId,
+        transports[3].id
+      );
+
+      await expect(
+        manager.consume('room-1', 'u-2', cameraProducerId, transports[1].id)
+      ).rejects.toThrow(
+        `Secondary consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
+      );
+      releaseFirst!();
+      await expect(finalAllowedDuplicate).resolves.not.toBeNull();
+    });
+
+    it('enforces the absolute consumer ceiling and releases closed capacity', async () => {
+      const transport = await addRecvTransport();
+      const participant = manager.getParticipant('room-1', 'u-2')!;
+      for (let i = 0; i < MAX_CONSUMERS_PER_PARTICIPANT - 1; i += 1) {
+        const seeded = createMockConsumer({
+          id: `seeded-consumer-${i}`,
+          appData: { producerId: `seeded-producer-${i}` },
+        });
+        participant.consumers.set(seeded.id, seeded as any);
+      }
+
+      const atLimit = await manager.consume('room-1', 'u-2', producerId, transport.id);
+      expect(participant.consumers.size).toBe(MAX_CONSUMERS_PER_PARTICIPANT);
+      const repeatedAtLimit = await manager.consume('room-1', 'u-2', producerId, transport.id);
+      expect(repeatedAtLimit!.id).toBe(atLimit!.id);
+      expect(transport.consume).toHaveBeenCalledTimes(1);
+
+      const cameraProducerId = 'camera-producer';
+      manager.getParticipant('room-1', 'u-1')!.producers.set(cameraProducerId, {
+        producer: createMockProducer({ id: cameraProducerId, kind: 'video' }) as any,
+        source: 'camera',
+        kind: 'video',
+        policed: false,
+        createdAtMs: 0,
+      });
+      await expect(
+        manager.consume('room-1', 'u-2', cameraProducerId, transport.id)
+      ).rejects.toThrow(`Consumer limit reached (max ${MAX_CONSUMERS_PER_PARTICIPANT})`);
+      expect(transport.consume).toHaveBeenCalledTimes(1);
+
+      expect(manager.closeConsumer('room-1', 'u-2', atLimit!.id)).toBe(true);
+      await expect(
+        manager.consume('room-1', 'u-2', cameraProducerId, transport.id)
+      ).resolves.not.toBeNull();
+    });
+
+    it('fails closed when live consumer accounting lacks a producer identity', async () => {
+      const transport = await addRecvTransport();
+      const malformed = createMockConsumer({ id: 'malformed-consumer', appData: {} });
+      manager
+        .getParticipant('room-1', 'u-2')!
+        .consumers.set(malformed.id, malformed as any);
+
+      await expect(
+        manager.consume('room-1', 'u-2', producerId, transport.id)
+      ).rejects.toThrow('Consumer accounting state invalid');
+      expect(transport.consume).not.toHaveBeenCalled();
     });
 
     it('rejects a concurrent duplicate with consume_in_progress', async () => {
@@ -5934,18 +6082,19 @@ describe('RoomManager', () => {
       expect(second!.id).not.toBe(first!.id);
     });
 
-    it('releases the in-flight key when the consume fails', async () => {
+    it('releases the in-flight quota reservation when the consume fails', async () => {
       const transport = await addRecvTransport();
       transport.consume.mockRejectedValueOnce(new Error('worker error'));
 
       await expect(manager.consume('room-1', 'u-2', producerId, transport.id)).rejects.toThrow(
         'worker error'
       );
+      expect(manager.getParticipant('room-1', 'u-2')!.pendingConsumeKeys.size).toBe(0);
 
-      // A failed attempt must not seal the pair off behind consume_in_progress.
+      // A failed attempt must not retain dedupe or participant-wide quota capacity.
       await expect(
         manager.consume('room-1', 'u-2', producerId, transport.id)
-      ).resolves.toBeDefined();
+      ).resolves.not.toBeNull();
     });
 
     describe('consumer index release paths', () => {
@@ -5970,6 +6119,7 @@ describe('RoomManager', () => {
           }
 
           expect(participant.consumersByKey.size).toBe(0);
+          expect(participant.consumers.size).toBe(0);
         }
       );
     });
