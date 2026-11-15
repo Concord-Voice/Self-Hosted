@@ -60,16 +60,14 @@ done
 lock() { # $1 = name, $2 = version of node_modules/dep
   printf '{"name":"%s","lockfileVersion":3,"packages":{"":{"name":"%s"},"node_modules/dep":{"version":"%s"}}}\n' "$1" "$1" "$2"
 }
-make_repo() { # [$1 = extra base entry "path:version"]; prints the repo path
-  local dir="$WORK/repo-$RANDOM$RANDOM" extra="${1:-}"
+make_repo() { # [$1 = extra base entries "path:version", space separated]; prints the repo path
+  local dir="$WORK/repo-$RANDOM$RANDOM" e out
   mkdir -p "$dir/client/admin" "$dir/services/media-plane"
   for root in . client/admin services/media-plane; do
     printf '{"name":"r","devDependencies":{"dep":"^1.0.0"}}\n' > "$dir/$root/package.json"
-    if [ -n "$extra" ]; then
-      lock r 1.0.0 | jq -c --arg k "${extra%%:*}" --arg v "${extra#*:}" '.packages[$k] = {version: $v}' > "$dir/$root/package-lock.json"
-    else
-      lock r 1.0.0 > "$dir/$root/package-lock.json"
-    fi
+    out=$(lock r 1.0.0)
+    for e in ${1:-}; do out=$(jq -c --arg k "${e%%:*}" --arg v "${e#*:}" '.packages[$k] = {version: $v}' <<<"$out"); done
+    echo "$out" > "$dir/$root/package-lock.json"
   done
   ( cd "$dir" && git init -q . && git config user.email t@t.t && git config user.name t \
       && git add -A && git commit -qm base )
@@ -94,9 +92,15 @@ case "$NPM_STUB_MODE" in
               printf '{"name":"r","devDependencies":{"dep":"^1.2.0"}}\n' > package.json ;;
   stray)    [ "$PWD" = "$NPM_STUB_ROOT" ] && touch stray.txt ;;
   downgrade) [ "$PWD" = "$NPM_STUB_ROOT/services/media-plane" ] && \
-              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"0.9.0"}}}\n' > package-lock.json ;;
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"}}}\n' > package-lock.json ;;
   hoist)    [ "$PWD" = "$NPM_STUB_ROOT/client/admin" ] && \
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.1.0"}}}\n' > package-lock.json ;;
+  rehoist)  [ "$PWD" = "$NPM_STUB_ROOT/client/admin" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.0.0"},"node_modules/b/node_modules/x":{"version":"3.1.0"}}}\n' > package-lock.json ;;
+  zero)     [ "$PWD" = "$NPM_STUB_ROOT" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/s":{"version":"0.27.0"}}}\n' > package-lock.json ;;
+  zeropatch) [ "$PWD" = "$NPM_STUB_ROOT" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/s":{"version":"0.28.0"}}}\n' > package-lock.json ;;
   rc)       [ "$PWD" = "$NPM_STUB_ROOT" ] && \
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"3.0.0-rc.9"}}}\n' > package-lock.json ;;
   none)     ;;
@@ -147,8 +151,8 @@ run_refresh stray
   && ok "any other new file fails the run" \
   || bad "an untracked file must fail the run" "rc=$RC"$'\n'"$OUT"
 
-run_refresh downgrade
-[ "$RC" -ne 0 ] && [ -z "$OUTPUTS" ] && grep -q 'services/media-plane/package-lock.json: node_modules/dep 1.0.0 -> 0.9.0' <<<"$OUT" \
+run_refresh downgrade "" 'node_modules/dep:1.0.5'
+[ "$RC" -ne 0 ] && [ -z "$OUTPUTS" ] && grep -q 'services/media-plane/package-lock.json: dep@1 1.0.5 -> 1.0.0' <<<"$OUT" \
   && ok "a downgrade fails the run and names the lockfile, package and versions" \
   || bad "a downgrade must fail the run" "rc=$RC outputs=$OUTPUTS"$'\n'"$OUT"
 
@@ -159,9 +163,26 @@ run_refresh hoist "" 'node_modules/dep/node_modules/x:2.1.1'
   || bad "a hoisted downgrade must fail the run" "rc=$RC"$'\n'"$OUT"
 
 run_refresh rc "" 'node_modules/x:3.0.0-rc.10'
-[ "$RC" -ne 0 ] && grep -q 'node_modules/x 3.0.0-rc.10 -> 3.0.0-rc.9' <<<"$OUT" \
+[ "$RC" -ne 0 ] && grep -q 'x@3 3.0.0-rc.10 -> 3.0.0-rc.9' <<<"$OUT" \
   && ok "prerelease numbers compare as numbers (rc.10 -> rc.9 is a downgrade)" \
   || bad "rc.10 -> rc.9 must fail the run" "rc=$RC"$'\n'"$OUT"
+
+# A re-hoist, as real npm does: the top-level copy moves to an older major and
+# the newer copy stays, nested. Nothing went down, so it must pass.
+run_refresh rehoist "" 'node_modules/x:3.1.0 node_modules/a/node_modules/x:2.0.0'
+[ "$RC" -eq 0 ] && [ "$OUTPUTS" = "has_changes=true" ] \
+  && ok "a re-hoist that leaves the newer copy at a nested path passes" \
+  || bad "a pure re-hoist must not count as a downgrade" "rc=$RC outputs=$OUTPUTS"$'\n'"$OUT"
+
+# 0.x: a minor is a major under ^, so 0.28 -> 0.27 is a line change, not a
+# downgrade within a line. A patch inside one 0.x line still is.
+run_refresh zero "" 'node_modules/s:0.28.0'
+[ "$RC" -eq 0 ] && ok "a 0.x minor counts as its own line" \
+  || bad "0.28 -> 0.27 must compare as two lines" "rc=$RC"$'\n'"$OUT"
+run_refresh zeropatch "" 'node_modules/s:0.28.1'
+[ "$RC" -ne 0 ] && grep -q 'package-lock.json: s@0.28 0.28.1 -> 0.28.0' <<<"$OUT" \
+  && ok "a patch downgrade inside one 0.x line fails the run" \
+  || bad "0.28.1 -> 0.28.0 must fail the run" "rc=$RC"$'\n'"$OUT"
 
 run_refresh bump 0
 [ "$RC" -ne 0 ] && [ ! -s "$WORK/npm.log" ] && grep -q 'no min-release-age' <<<"$OUT" \
@@ -180,7 +201,16 @@ case "$1" in
       exit 1
     fi
     [ "$2" = comment ] && echo "comment $3" >> "$GH_STUB_LOG" ;;
-  api) echo 0 ;;
+  api) # Each fixture page is a JSON array of comments. --jq runs once per
+       # page, as real gh does; without --paginate only the first page is read.
+    paginate=0; filter=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --paginate) paginate=1 ;; --jq) filter="$2"; shift ;; esac; shift
+    done
+    for page in ${GH_STUB_PAGES:-}; do
+      jq -r "$filter" "$page" || exit 1
+      [ "$paginate" = 1 ] || break
+    done ;;
 esac
 STUB
 chmod +x "$WORK/bin/gh"
@@ -200,6 +230,16 @@ run_guard "[{\"number\":1,\"headRefName\":\"dependabot/npm_and_yarn/vite-1\",$DE
 [ "$RC" -eq 0 ] && [ "$OUTPUTS" = "deferred=true" ] && [ "$(cat "$WORK/gh.log")" = "comment 1" ] \
   && ok "the guard defers on a same-repo Dependabot npm PR and comments on that PR only" \
   || bad "the guard must count only PR 1 (not license-checker, fork, other author or Go)" "rc=$RC outputs=$OUTPUTS log=$(cat "$WORK/gh.log")"$'\n'"$OUT"
+# A recent deferral comment on the second page of comments (after 30 others)
+# must still suppress a second one.
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+jq -n --arg t "$NOW" '[range(30) | {id: ., body: "unrelated", created_at: $t}]' > "$WORK/page1.json"
+jq -n --arg t "$NOW" '[{id: 99, body: "<!-- npm-lockfile-flush-deferral-x -->", created_at: $t}]' > "$WORK/page2.json"
+GH_STUB_PAGES="$WORK/page1.json $WORK/page2.json" \
+  run_guard "[{\"number\":1,\"headRefName\":\"dependabot/npm_and_yarn/vite-1\",$DEP}]"
+[ "$RC" -eq 0 ] && [ "$OUTPUTS" = "deferred=true" ] && [ ! -s "$WORK/gh.log" ] && grep -q 'already has a recent deferral comment' <<<"$OUT" \
+  && ok "a recent deferral comment past the first page of comments suppresses another" \
+  || bad "the deferral lookup must read every page of comments" "rc=$RC log=$(cat "$WORK/gh.log")"$'\n'"$OUT"
 run_guard "[{\"number\":3,\"headRefName\":\"dependabot/npm_and_yarn/evil\",\"author\":{\"login\":\"mallory\"},\"isCrossRepository\":true}]"
 [ "$RC" -eq 0 ] && [ "$OUTPUTS" = "deferred=false" ] && [ ! -s "$WORK/gh.log" ] \
   && ok "a spoofed dependabot/... branch does not defer the run" \
