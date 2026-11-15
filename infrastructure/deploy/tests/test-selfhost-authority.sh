@@ -77,6 +77,11 @@ if [[ " $* " == *" go build "* ]]; then
   cp "$TOOL" "$vol/authority-ceremony"
 else
   if [[ "${LINK%%:*}" == "$name" ]]; then ln -s "${LINK#*:}" "$vol/$name"
+  elif [[ "$name" == tls-key ]]; then
+    # A real P-384 key in PKCS#8 DER, as the authority writes it: renew reads the live TLS key's point from the file.
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -outform DER -out "$vol/$name" 2>/dev/null
+    printf 'point=%s\npin=%s\n' "$(openssl pkey -inform DER -in "$vol/$name" -pubout -outform DER | tail -c 97 | od -An -v -tx1 | tr -d ' \n')" "$(hex384 "$name.pin")"
+    exit 0
   else printf 'key %s%s' "$name" "${SALT:-}" >"$vol/$name"; fi
   printf 'point=04%s%s\npin=%s\n' "$(hex384 "$name${SALT:-}")" "$(hex384 "$name.y")" "$(hex384 "$name.pin")"
 fi
@@ -337,14 +342,79 @@ if RECORD_FAIL=1 VERB=renew run_init ''; then
 else
   fail "renew failed after installing because the expiry record failed: $(cat "$ROOT/out")"
 fi
+# --rotate-tls: the old and new TLS keys are listed together, the authority
+# moves to the new one, and the next renew lists only that one.
+tls_keys() { python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['authority_tls_keys']))" "$1"; }
+tls4="$(tls_keys "$AUTH/ceremony/delegation-4.json")"; tls_key4="$(cat "$AUTH/secrets/tls-key")"
+# A swap that fails on the TLS key puts every old file back.
+: >"$CALLS"; docker_set SALT=z; trust4="$(cat "$AUTH/public/trust")"; rsk4="$(cat "$AUTH/secrets/rsk")"; cak4="$(cat "$AUTH/cp/cak")"
+if SWAP_FAIL="$AUTH/secrets/tls-key" VERB=renew run_init '' --rotate-tls; then
+  fail "renew accepted a failed TLS key swap"
+elif [[ "$(cat "$AUTH/public/trust")" == "$trust4" && "$(cat "$AUTH/secrets/tls-key")" == "$tls_key4" && ! -e "$AUTH/ceremony/delegation-5.json" \
+        && "$(cat "$AUTH/secrets/rsk")" == "$rsk4" && "$(cat "$AUTH/cp/cak")" == "$cak4" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]]; then
+  pass "a TLS key swap that fails puts the old trust and keys back"
+else
+  fail "a failed TLS key swap: $(cat "$ROOT/out")"
+fi
+rm -f "$ROOT/swap-failed"
+# A TLS key left in the stage as a symlink: renew refuses and changes nothing.
+: >"$CALLS"; docker_set "LINK=tls-key:$ROOT/outside"
+if VERB=renew run_init '' --rotate-tls; then
+  fail "renew installed a symlinked TLS key"
+elif grep -qF 'is not a regular file' "$ROOT/out" && [[ "$(cat "$AUTH/secrets/tls-key")" == "$tls_key4" && "$(cat "$AUTH/public/trust")" == "$trust4" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]]; then
+  pass "renew --rotate-tls refuses a TLS key left in the stage as a symlink"
+else
+  fail "symlinked TLS key: $(cat "$ROOT/out")"
+fi
+docker_set LINK=
+: >"$CALLS"; docker_set SALT=5
+if VERB=renew run_init '' --rotate-tls; then
+  new_tls="$(tls_keys "$AUTH/ceremony/delegation-5.json")"
+  if [[ "$new_tls" == "$tls4 "* && "$(wc -w <<<"$new_tls")" == 2 && "$(cat "$AUTH/secrets/tls-key")" != "$tls_key4" \
+        && "$(mode "$AUTH/secrets/tls-key")" == 400 && -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]] \
+     && grep -qF 'now uses a new TLS key' "$ROOT/out" && grep -qF 'force-recreate authority' "$CALLS"; then
+    pass "renew --rotate-tls lists the old and new TLS keys and installs the new key"
+  else
+    fail "rotate: $new_tls $(cat "$ROOT/out")"
+  fi
+else
+  fail "renew --rotate-tls failed: $(cat "$ROOT/out")"
+fi
+: >"$CALLS"; docker_set SALT=6; tls_key5="$(cat "$AUTH/secrets/tls-key")"
+if VERB=renew run_init ''; then
+  [[ "$(tls_keys "$AUTH/ceremony/delegation-6.json")" == "${new_tls#* }" && "$(cat "$AUTH/secrets/tls-key")" == "$tls_key5" ]] \
+    && ! grep -qF 'new TLS key' "$ROOT/out" \
+    && pass "the next renew drops the outgoing TLS key and keeps the live one" || fail "after rotate: $(cat "$AUTH/ceremony/delegation-6.json")"
+else
+  fail "renew after a rotation failed: $(cat "$ROOT/out")"
+fi
 mkdir "$AUTH/stage"
 VERB=renew run_init '' && fail "renew ran over a stage left behind" \
   || { grep -qF 'a renew is running' "$ROOT/out" && pass "renew refuses a stage left behind" || fail "stage refusal: $(cat "$ROOT/out")"; }
 rmdir "$AUTH/stage"
 NOT_ROOT=1 VERB=renew run_init '' && fail "renew ran as non-root" \
   || { grep -qF 'must run as root' "$ROOT/out" && pass "renew refuses non-root" || fail "root refusal: $(cat "$ROOT/out")"; }
+# Renew refuses when the key in use is not the last one listed, when a
+# FILE.prev is left from a failed rollback, when a TLS key was staged without
+# the flag, and an empty argument.
+: >"$CALLS"; saved_tls="$(cat "$AUTH/secrets/tls-key")"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -outform DER -out "$ROOT/other-tls-key" 2>/dev/null
+cp "$AUTH/secrets/tls-key" "$ROOT/live-tls-key"; chmod u+w "$AUTH/secrets/tls-key"; cat "$ROOT/other-tls-key" >"$AUTH/secrets/tls-key"
+VERB=renew run_init '' && fail "renew ran with a TLS key the delegation does not list" \
+  || { grep -qF 'is not the last TLS key' "$ROOT/out" && [[ ! -e "$AUTH/stage" && ! -e "$AUTH/ceremony/delegation-7.json" ]] \
+       && pass "renew refuses when the live TLS key is not the last one listed" || fail "tls drift: $(cat "$ROOT/out")"; }
+cat "$ROOT/live-tls-key" >"$AUTH/secrets/tls-key"
+printf x >"$AUTH/secrets/rsk.prev"
+VERB=renew run_init '' && fail "renew ran over a .prev left behind" \
+  || { grep -qF 'rsk.prev exists' "$ROOT/out" && [[ "$(cat "$AUTH/secrets/rsk.prev")" == x ]] \
+       && pass "renew refuses over a FILE.prev left behind and keeps it" || fail "prev refusal: $(cat "$ROOT/out")"; }
+rm -f "$AUTH/secrets/rsk.prev"
+VERB=renew run_init '' '' && fail "renew took an empty argument" \
+  || { grep -qF 'usage: concord-selfhost authority renew [--rotate-tls]' "$ROOT/out" && pass "renew refuses an empty argument" || fail "empty argument: $(cat "$ROOT/out")"; }
 VERB=renew run_init '' --now && fail "renew took an argument" \
-  || { grep -qF 'usage: concord-selfhost authority renew' "$ROOT/out" && pass "renew refuses arguments" || fail "usage: $(cat "$ROOT/out")"; }
+  || { grep -qF 'usage: concord-selfhost authority renew [--rotate-tls]' "$ROOT/out" && pass "renew refuses arguments" || fail "usage: $(cat "$ROOT/out")"; }
 saved_root="$ROOT"
 saved_auth="$AUTH"
 fixture; VERB=renew run_init '' && fail "renew ran without an authority" \
@@ -372,7 +442,7 @@ in30=$(( now_ms + 30 * 86400000 )) in20=$(( now_ms + 20 * 86400000 )) past=$(( n
 [[ "$(health_rc "$past")" == 1 ]] && grep -qF 'has expired' "$ROOT/out" && pass "health fails once expired" || fail "expired: $(cat "$ROOT/out")"
 # With the tool there, health rewrites a missing record (an authority set up
 # before it existed); without it, a missing or unreadable record fails.
-[[ "$(health_rc none)" == 0 && "$(cat "$AUTH/public/delegation-not-after-ms")" == "$(jget "$AUTH/ceremony/delegation-4.json" not_after_ms)" ]] \
+[[ "$(health_rc none)" == 0 && "$(cat "$AUTH/public/delegation-not-after-ms")" == "$(jget "$AUTH/ceremony/delegation-6.json" not_after_ms)" ]] \
   && pass "health backfills a missing expiry record from the trust" || fail "backfill: $(cat "$ROOT/out")"
 chmod 0600 "$AUTH/tools/authority-ceremony"
 [[ "$(health_rc garbage)" == 1 && "$(health_rc none)" == 1 ]] && pass "health fails on a missing or unreadable record" || fail "bad record: $(cat "$ROOT/out")"

@@ -278,11 +278,9 @@ func TestGenerateBackupCodes(t *testing.T) {
 			t.Errorf("code[%d] length = %d, want %d", i, len(code), backupLen)
 		}
 
-		// Verify hash matches
 		h := sha256.Sum256([]byte(code))
-		expected := hex.EncodeToString(h[:])
-		if hashes[i] != expected {
-			t.Errorf("hash[%d] mismatch", i)
+		if hashes[i] != hex.EncodeToString(h[:]) {
+			t.Errorf("hash[%d] changed before the reader rollout", i)
 		}
 	}
 
@@ -305,26 +303,38 @@ func TestVerifyBackupCode(t *testing.T) {
 	used := make([]bool, len(codes))
 
 	// Valid code matches
-	idx, ok := VerifyBackupCode(codes[0], hashes, used)
+	idx, ok, err := VerifyBackupCode(codes[0], hashes, used)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || idx != 0 {
 		t.Errorf("valid code: idx=%d, ok=%v, want idx=0, ok=true", idx, ok)
 	}
 
 	// Case insensitive
-	idx, ok = VerifyBackupCode("  "+codes[1]+"  ", hashes, used)
+	idx, ok, err = VerifyBackupCode("  "+codes[1]+"  ", hashes, used)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || idx != 1 {
 		t.Errorf("trimmed code: idx=%d, ok=%v, want idx=1, ok=true", idx, ok)
 	}
 
 	// Used code is skipped
 	used[2] = true
-	_, ok = VerifyBackupCode(codes[2], hashes, used)
+	_, ok, err = VerifyBackupCode(codes[2], hashes, used)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ok {
 		t.Error("used code should not match")
 	}
 
 	// Invalid code
-	idx, ok = VerifyBackupCode("XXXXXXXX", hashes, used)
+	idx, ok, err = VerifyBackupCode("XXXXXXXX", hashes, used)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ok {
 		t.Errorf("invalid code matched at index %d", idx)
 	}
@@ -340,13 +350,13 @@ func TestVerifyBackupCodeShortUsedArrayFailsClosed(t *testing.T) {
 	}
 	used := make([]bool, 2)
 
-	if idx, ok := VerifyBackupCode(codes[0], hashes, used); !ok || idx != 0 {
+	if idx, ok, err := VerifyBackupCode(codes[0], hashes, used); err != nil || !ok || idx != 0 {
 		t.Fatalf("code with a used flag: idx=%d, ok=%v, want idx=0, ok=true", idx, ok)
 	}
-	if idx, ok := VerifyBackupCode(codes[5], hashes, used); ok {
+	if idx, ok, err := VerifyBackupCode(codes[5], hashes, used); err != nil || ok {
 		t.Errorf("code %d has no used flag but matched", idx)
 	}
-	if idx, ok := VerifyBackupCode(codes[0], hashes, nil); ok {
+	if idx, ok, err := VerifyBackupCode(codes[0], hashes, nil); err != nil || ok {
 		t.Errorf("nil used array: code %d matched", idx)
 	}
 }

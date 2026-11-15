@@ -14,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
+	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -148,7 +150,8 @@ func ParseEncryptionKey(hexKey string) ([]byte, error) {
 }
 
 // GenerateBackupCodes creates 8 random backup codes.
-// Returns the plaintext codes (to show the user once) and their SHA-256 hashes (to store).
+// Returns the plaintext codes (to show the user once) and legacy SHA-256 hashes.
+// The writer changes only after every serving replica can read both formats.
 func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 	codes = make([]string, backupCount)
 	hashes = make([]string, backupCount)
@@ -172,22 +175,39 @@ func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 }
 
 // VerifyBackupCode checks a code against stored hashes using timing-safe comparison.
-// Returns the index of the matched code and whether it matched.
-// The caller must check that the code hasn't already been used (via the parallel used array).
-func VerifyBackupCode(code string, hashes []string, used []bool) (index int, matched bool) {
-	codeHash := sha256.Sum256([]byte(strings.ToUpper(strings.TrimSpace(code))))
-	codeHex := hex.EncodeToString(codeHash[:])
+// Returns the index of the matched code, whether it matched, and a storage error.
+// The caller marks a match used through its conditional database update.
+func VerifyBackupCode(code string, hashes []string, used []bool) (index int, matched bool, err error) {
+	type parsedHash struct{ salt, digest []byte }
+	parsed := make([]parsedHash, len(hashes))
+	for i, stored := range hashes {
+		parsed[i].salt, parsed[i].digest, err = backuphash.Parse(stored)
+		if err != nil {
+			return -1, false, err
+		}
+	}
+	normalized := strings.TrimSpace(code)
+	if len(normalized) != backupLen {
+		return -1, false, nil
+	}
+	normalized = strings.ToUpper(normalized)
+	codeHash := sha256.Sum256([]byte(normalized))
 
-	for i, storedHash := range hashes {
+	for i := 0; i < len(parsed) && i < len(used); i++ {
 		// A code with no used flag is treated as used: the arrays are written
 		// together, so a short one is a damaged row, and the caller indexes
 		// used[i] to mark the match.
-		if i >= len(used) || used[i] {
+		if used[i] {
 			continue
 		}
-		if subtle.ConstantTimeCompare([]byte(codeHex), []byte(storedHash)) == 1 {
-			return i, true
+		stored := parsed[i]
+		candidate := codeHash[:]
+		if stored.salt != nil {
+			candidate = argon2.IDKey([]byte(normalized), stored.salt, 2, 19456, 1, 32)
+		}
+		if subtle.ConstantTimeCompare(candidate, stored.digest) == 1 {
+			return i, true, nil
 		}
 	}
-	return -1, false
+	return -1, false, nil
 }

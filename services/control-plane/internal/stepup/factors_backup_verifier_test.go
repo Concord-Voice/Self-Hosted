@@ -94,7 +94,7 @@ func TestInlineMFAFactors_BackupAvailabilityAgreesWithVerifier(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spendable := false
 			for _, code := range codes {
-				if _, ok := mfa.VerifyBackupCode(code, tc.hashes, tc.used); ok {
+				if _, ok, err := mfa.VerifyBackupCode(code, tc.hashes, tc.used); err == nil && ok {
 					spendable = true
 				}
 			}
@@ -108,4 +108,17 @@ func TestInlineMFAFactors_BackupAvailabilityAgreesWithVerifier(t *testing.T) {
 			require.Equal(t, spendable, f.BackupCodeAvailable)
 		})
 	}
+}
+
+func TestInlineMFAFactors_MalformedBackupHashFailsClosed(t *testing.T) {
+	db := stepup.SubjectTestDB(t)
+	userID := stepup.SubjectTestUser(t, db)
+	stepup.SubjectTestTOTP(t, db, userID, true, true)
+	_, hashes, err := mfa.GenerateBackupCodes()
+	require.NoError(t, err)
+	stepup.FactorsSetTOTP(t, db, userID, nil, []string{hashes[0], "v2$argon2id$v=19$m=999999999,t=1,p=1$AA$AA"}, []bool{false, false})
+
+	f, e := stepup.InlineMFAFactors(context.Background(), db, userID)
+	require.NotNil(t, e, "a malformed later entry makes every backup code unspendable")
+	require.False(t, f.BackupCodeAvailable)
 }
