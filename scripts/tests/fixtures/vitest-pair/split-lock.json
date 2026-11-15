@@ -1,0 +1,25 @@
+{
+  "name": "vitest-pair-split",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "vitest-pair-split",
+      "devDependencies": {
+        "@vitest/coverage-istanbul": "^5.1.0",
+        "vitest": "^5.0.5"
+      }
+    },
+    "node_modules/@vitest/coverage-istanbul": {
+      "version": "5.1.0",
+      "dev": true,
+      "peerDependencies": {
+        "vitest": "5.1.0"
+      }
+    },
+    "node_modules/vitest": {
+      "version": "5.0.5",
+      "dev": true
+    }
+  }
+}

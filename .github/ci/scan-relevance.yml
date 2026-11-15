@@ -510,6 +510,17 @@ workflow_lint:
   - 'scripts/security/audit-dependabot-coverage.sh'
   - 'scripts/security/test-audit-dependabot-coverage.sh'
   - 'scripts/security/check-pin-exceptions.mjs'
+  # vitest pair guard (#270, runs in workflow-lint): the three npm roots whose
+  # lockfiles it reads, the check, its regression test and fixtures.
+  - 'package.json'
+  - 'package-lock.json'
+  - 'client/admin/package.json'
+  - 'client/admin/package-lock.json'
+  - 'services/media-plane/package.json'
+  - 'services/media-plane/package-lock.json'
+  - 'scripts/ci/check-vitest-pair.sh'
+  - 'scripts/tests/test-check-vitest-pair.sh'
+  - 'scripts/tests/fixtures/vitest-pair/**'
   - '**/*[Dd][Oo][Cc][Kk][Ee][Rr][Ff][Ii][Ll][Ee]*'
   - '**/*[Dd][Oo][Cc][Kk][Ee][Rr][Ff][Ii][Ll][Ee]*/**'
   - '.github/ci/docker-engine-packages.lock'
@@ -546,10 +557,24 @@ workflow_lint:
   - 'scripts/release/**'
   - 'scripts/tests/test-check-release-tag.sh'
   - 'scripts/tests/test-selfhost-bundle.py'
+  - 'scripts/tests/test-check-selfhost-sbom.py'
   - 'scripts/ci/require-docker-engine.sh'
   - 'scripts/ci/require-remote-buildkit.py'
   - 'scripts/test-check-*.sh'
   - '.github/base-images.json'
+  # Lockfile registry guard (#271, runs in workflow-lint): every npm lockfile,
+  # package.json, .npmrc, go.mod and go.work it reads, its approved-source list, the check,
+  # its test and fixtures.
+  - '**/package.json'
+  - '**/package-lock.json'
+  - '**/npm-shrinkwrap.json'
+  - '**/go.mod'
+  - '**/go.work'
+  - '**/.npmrc'
+  - '.github/ci/approved-registries.json'
+  - 'scripts/ci/check-lockfile-registries.py'
+  - 'scripts/tests/test-check-lockfile-registries.sh'
+  - 'scripts/tests/fixtures/registries/**'
   # npm lockfile flush test (#272, runs in workflow-lint).
   - 'scripts/tests/test-npm-lockfile-flush.sh'
 worker_apple:

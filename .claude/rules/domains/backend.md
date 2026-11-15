@@ -81,6 +81,25 @@ newer snapshot than the active or staged session state, with equal duplicates
 inert. Promotion preserves a stored snapshot when it is at least as new as the
 A2 revision, preserving newer successors. The retained reservation plus the `voice.joined` timeout backstop
 closes landing races. Never treat A2 or prepare as promotion.
+On the full-lifecycle join path (`moveServerVoiceParticipant`), a join always
+tries to consume its reservation first. When none is left and the participant
+row already holds the join's exact admission and socket
+(`voice_participants.admission_id` and `admission_socket_id`, migration 000195,
+written only in the transaction that consumed them), it is a replay of the committed join, not an admission mismatch that would eject the
+peer who just joined. Two control planes running at once (blue-green cutover,
+#253) both apply every `voice.joined`, so this is where the replay comes from.
+Key it on the (admission, socket) pair the consume matched. Not on the stamp: each control plane clamps a
+forward-skewed stamp to its own receipt time (`parseVoiceEventTime`), so two
+deliveries of one join can carry different stamps, and a heartbeat can share a
+join's stamp. Not on the Redis claim's duplicate status: a claim can outlive a
+rolled-back first attempt that still owes the consume. A heartbeat upsert keeps
+the stored pair, and a row with no admission (a heartbeat insert, or one written
+before 000195) keeps the fail-closed eject. A replay whose clamped stamp is
+later than the row's still advances `lifecycle_event_at` and so renews the
+lease, exactly as a heartbeat does; that is accepted. The rule
+depends on every `voice_participants` deleter holding the per-user lifecycle
+lock. It does not cover the refresh-only path (`refreshOnlyJoined`), which
+still consumes and still ejects a duplicate.
 
 `voice_participants.lifecycle_event_at` is producer ordering evidence. The
 PostgreSQL-assigned `lifecycle_observed_at` is lease evidence for reconciliation.

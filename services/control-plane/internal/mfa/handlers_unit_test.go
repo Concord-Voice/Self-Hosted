@@ -258,6 +258,32 @@ func TestVerifyCodeRejectsBackupCodeCASConflict(t *testing.T) {
 	require.False(t, verified, "the stale consumer must not redeem a backup code consumed by its competitor")
 }
 
+func TestVerifyCodeFailsClosedOnMalformedStoredBackupHash(t *testing.T) {
+	db, cleanup := dbtest.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	userID := dbtest.CreateUser(t, db)
+	keyring, err := ParseKeyring(strings.Repeat("00", 32), 1, "")
+	require.NoError(t, err)
+	secretEnc, nonce, version, err := keyring.Seal([]byte("invalid-totp-seed"))
+	require.NoError(t, err)
+	const backupCode = "RECOV123" //nolint:gosec // one-time test fixture
+	digest := sha256.Sum256([]byte(backupCode))
+	_, err = db.Exec(`INSERT INTO user_mfa_totp
+		(user_id, totp_secret_enc, totp_secret_nonce, key_version, enabled, confirmed, backup_codes_hash, backup_codes_used)
+		VALUES ($1, $2, $3, $4, TRUE, TRUE, $5, $6)`,
+		userID, secretEnc, nonce, version,
+		pq.Array([]string{"v1$" + fmt.Sprintf("%x", digest), "v2$argon2id$v=19$m=999999999,t=1,p=1$AA$AA"}),
+		pq.Array([]bool{false, false}))
+	require.NoError(t, err)
+	handler := NewHandler(db, nil, logger.New("test"), keyring, "test", nil, "test")
+	verified, err := handler.verifyCode(context.Background(), db, userID.String(), stepup.PurposeTOTPSetup, backupCode)
+	require.False(t, verified)
+	require.ErrorContains(t, err, "invalid stored backup hash")
+	var used []bool
+	require.NoError(t, db.QueryRow(`SELECT backup_codes_used FROM user_mfa_totp WHERE user_id = $1`, userID).Scan(pq.Array(&used)))
+	require.Equal(t, []bool{false, false}, used)
+}
+
 // --- socialRecoveryRequestInfo ---
 
 func TestSocialRecoveryRequestInfoStruct(t *testing.T) {
