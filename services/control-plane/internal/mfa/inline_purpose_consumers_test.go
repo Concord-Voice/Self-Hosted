@@ -243,15 +243,158 @@ func TestInlinePurpose_TablesCoverTheClosedSet(t *testing.T) {
 
 // TestInlinePurpose_ProductionVerifierCallerCensus makes a new verifier caller
 // an explicit review decision. Direct calls are the only places an inline MFA
-// token can be spent, so silently adding one can bypass the shared attempt
-// budget even when its purpose binding is correct.
+// token or code can be spent, so silently adding one can bypass the shared
+// attempt budget even when its purpose binding is correct.
+//
+// The census covers the raw verifiers AND the shared seams that wrap them
+// (stepup.VerifyOwnRuleTx, mfaenforce.ConfirmTx, RequireConfirmationTx and
+// Require): an earlier census matched only the raw names, so a caller of a
+// wrapper was invisible, and DM clear history verified codes with no budget
+// at all. Every entry names either the functions that own its admission or,
+// for a shared seam, why it owns none.
 func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 	wd, err := os.Getwd()
 	require.NoError(t, err)
 	internal := filepath.Dir(wd)
+	sites, packages := censusVerifierCallers(t, internal)
 
-	var got []string
-	err = filepath.WalkDir(internal, func(path string, entry os.DirEntry, walkErr error) error {
+	// owners: each must reach, through its own package's call graph, both the
+	// verifier call's function and a budget charge (stepup.Charge or a
+	// Budget's Consume). That is "a charge in the same function or in its
+	// handler", checked per function rather than per file. seam: a shared
+	// verifier whose own callers are census entries, so the charge belongs to
+	// them.
+	type entry struct {
+		owners []string
+		seam   string
+	}
+	want := map[string]entry{
+		"dm/message_delete_softlock.go:confirmDMDeleteTx:VerifyOwnRuleTx":    {owners: []string{"confirmDMMessageDelete"}},
+		"dm/purge.go:verifyPurgeStepUpWithMFA:VerifyMFAFactor":               {owners: []string{"verifyPurgeStepUpWithMFA"}},
+		"dm/visibility.go:verifyClearStepUp:VerifyOwnRuleTx":                 {owners: []string{"ClearConversation"}},
+		"messages/softlock.go:confirmServerRuleTx:ConfirmTx":                 {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
+		"messages/softlock.go:verifyOwnRuleTx:VerifyOwnRuleTx":               {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
+		"mfa/handlers.go:verifyAndDeleteTOTPTx:VerifyCodeTx":                 {owners: []string{"TOTPDisable"}},
+		"mfa/settings_stepup.go:requirePasswordAndMFA:VerifyMFAFactor":       {owners: []string{"requirePasswordAndMFA"}},
+		"mfa/settings_stepup.go:verifyMFASettingsStepUpTx:VerifyMFAFactorTx": {owners: []string{"EmailSmsDisable", "SetBackupEmail", "StoreRecoveryKey", "DeleteRecoveryKey"}},
+		"mfaenforce/dangerous.go:Require:ConfirmTx":                          {seam: "the dangerous-action gate; each mfaenforce.Require caller is censused and charges before its gate"},
+		"mfaenforce/mfaenforce.go:ConfirmTx:VerifyMFAFactorTx":               {seam: "the server-rule confirmation; each ConfirmTx caller is censused"},
+		"mfaenforce/mfaenforce.go:RequireConfirmationTx:ConfirmTx":           {seam: "a ConfirmTx wrapper; it has no production caller today, and any added one is censused"},
+		"ownership/handlers.go:verifyMFA:VerifyCode":                         {owners: []string{"verifyMFA"}},
+		"rbac/role_gates.go:requireRoleGate:Require":                         {owners: []string{"CreateRole", "UpdateRole", "DeleteRole", "UpsertChannelOverride", "UpsertCategoryOverride"}},
+		"members/moderation_gate.go:requireModerationGate:Require":           {owners: []string{"RemoveMember", "BanMember"}},
+		"servers/dangerous_gates.go:updateServerGated:Require":               {owners: []string{"updateServerGated"}},
+		"servers/dangerous_gates.go:gateServerDeleteTx:Require":              {owners: []string{"DeleteServer"}},
+		"servers/mfa_enforcement.go:confirmMFAEnforcementRequest:ConfirmTx":  {owners: []string{"PutMFAEnforcement"}},
+		"channels/dangerous_gates.go:requireChannelGate:Require":             {owners: []string{"DeleteChannel", "UpdateExpiration"}},
+		"media/dangerous_gates.go:admitAndStoreServerImage:Require":          {owners: []string{"storeServerImageGated"}},
+		"sessions/handlers.go:authenticateForRevokeWithMFA:VerifyCode":       {owners: []string{"authenticateForRevokeWithMFA"}},
+		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx":                {seam: "the own-rule seam; each VerifyOwnRuleTx caller is censused"},
+		"stepup/stepup.go:VerifyMFAFactor:VerifyCode":                        {seam: "the pool-side factor seam; each VerifyMFAFactor caller is censused"},
+		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx":                    {seam: "the in-transaction factor seam; each VerifyMFAFactorTx caller is censused"},
+		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx":          {owners: []string{"UpdatePrivacySettings"}},
+		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx":             {owners: []string{"ChangePassword", "ReplaceMyKeys"}},
+	}
+
+	gotSites := make([]string, 0, len(sites))
+	for site := range sites {
+		gotSites = append(gotSites, site)
+	}
+	wantSites := make([]string, 0, len(want))
+	for site := range want {
+		wantSites = append(wantSites, site)
+	}
+	sort.Strings(gotSites)
+	sort.Strings(wantSites)
+	require.Equal(t, wantSites, gotSites, "a verifier caller was added or removed: classify it in want")
+
+	for site, e := range want {
+		s := sites[site]
+		pkg := packages[s.dir]
+		if e.seam != "" {
+			require.Empty(t, e.owners, "%s: a seam names no owners", site)
+			assert.True(t, censusVerifierNames[s.fn], "%s: a seam must itself be a censused verifier name, or its callers are invisible", site)
+			continue
+		}
+		require.NotEmpty(t, e.owners, "%s: name the functions that charge the budget before it", site)
+		for _, owner := range e.owners {
+			_, ok := pkg[owner]
+			if !assert.True(t, ok, "%s: owner %s is not a function in %s", site, owner, s.dir) {
+				continue
+			}
+			assert.True(t, pkg.reaches(owner, func(name string) bool { return name == s.fn }),
+				"%s: owner %s does not reach %s", site, owner, s.fn)
+			assert.True(t, pkg.reaches(owner, func(name string) bool { return pkg[name].charges }),
+				"%s: owner %s reaches no stepup.Charge or Budget.Consume (candidates reaching %s and a charge: %v)",
+				site, owner, s.fn, pkg.chargingReachers(s.fn))
+		}
+	}
+}
+
+// censusVerifierNames are the verifier entry points the census tracks: the raw
+// verifiers and the shared seams over them. Require is counted only as
+// mfaenforce.Require (or unqualified inside that package), since the name is
+// common.
+var censusVerifierNames = map[string]bool{
+	"VerifyCode": true, "VerifyCodeTx": true, "VerifyMFAFactor": true, "VerifyMFAFactorTx": true,
+	"VerifyOwnRuleTx": true, "ConfirmTx": true, "RequireConfirmationTx": true, "Require": true,
+}
+
+type censusSite struct{ dir, fn string }
+
+// censusFunc is one production function's view for the census: the
+// same-package names it references (calls, method values and closures alike)
+// and whether it directly charges a budget. Methods that share a name within a
+// package are merged, which can only add edges.
+type censusFunc struct {
+	refs    map[string]bool
+	charges bool
+}
+
+type censusPackage map[string]*censusFunc
+
+// reaches reports whether from, or any function it transitively references
+// within the package, satisfies match.
+func (p censusPackage) reaches(from string, match func(string) bool) bool {
+	seen := map[string]bool{}
+	queue := []string{from}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		fn, ok := p[name]
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if match(name) {
+			return true
+		}
+		for ref := range fn.refs {
+			queue = append(queue, ref)
+		}
+	}
+	return false
+}
+
+// chargingReachers lists the package functions that reach both target and a
+// charge: the diagnostic for a missing or misnamed owner.
+func (p censusPackage) chargingReachers(target string) []string {
+	var out []string
+	for name := range p {
+		if p.reaches(name, func(n string) bool { return n == target }) &&
+			p.reaches(name, func(n string) bool { return p[n].charges }) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func censusVerifierCallers(t *testing.T, internal string) (map[string]censusSite, map[string]censusPackage) {
+	t.Helper()
+	sites := map[string]censusSite{}
+	packages := map[string]censusPackage{}
+	err := filepath.WalkDir(internal, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -266,26 +409,35 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 		if relErr != nil {
 			return relErr
 		}
+		rel = filepath.ToSlash(rel)
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		if packages[dir] == nil {
+			packages[dir] = censusPackage{}
+		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				continue
 			}
+			cf := packages[dir][fn.Name.Name]
+			if cf == nil {
+				cf = &censusFunc{refs: map[string]bool{}}
+				packages[dir][fn.Name.Name] = cf
+			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				name := ""
-				switch target := call.Fun.(type) {
-				case *ast.SelectorExpr:
-					name = target.Sel.Name
+				switch n := node.(type) {
 				case *ast.Ident:
-					name = target.Name
-				}
-				switch name {
-				case "VerifyCode", "VerifyCodeTx", "VerifyMFAFactor", "VerifyMFAFactorTx":
-					got = append(got, filepath.ToSlash(rel)+":"+fn.Name.Name+":"+name)
+					cf.refs[n.Name] = true
+				case *ast.SelectorExpr:
+					cf.refs[n.Sel.Name] = true
+				case *ast.CallExpr:
+					name, qualifier := censusCallee(n)
+					if (qualifier == "stepup" && name == "Charge") || name == "Consume" {
+						cf.charges = true
+					}
+					if censusVerifierNames[name] && (name != "Require" || qualifier == "mfaenforce" || (qualifier == "" && dir == "mfaenforce")) {
+						sites[rel+":"+fn.Name.Name+":"+name] = censusSite{dir: dir, fn: fn.Name.Name}
+					}
 				}
 				return true
 			})
@@ -293,40 +445,22 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	sort.Strings(got)
+	return sites, packages
+}
 
-	want := []string{
-		"dm/purge.go:verifyPurgeStepUpWithMFA:VerifyMFAFactor",
-		"mfa/handlers.go:verifyAndDeleteTOTPTx:VerifyCodeTx",
-		"mfa/settings_stepup.go:requirePasswordAndMFA:VerifyMFAFactor",
-		"mfa/settings_stepup.go:verifyMFASettingsStepUpTx:VerifyMFAFactorTx",
-		"mfaenforce/mfaenforce.go:ConfirmTx:VerifyMFAFactorTx",
-		"ownership/handlers.go:verifyMFA:VerifyCode",
-		"sessions/handlers.go:authenticateForRevokeWithMFA:VerifyCode",
-		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx",
-		"stepup/stepup.go:VerifyMFAFactor:VerifyCode",
-		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx",
-		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx",
-		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx",
+// censusCallee names a call's target and, for pkg.Func or recv.Method, the
+// identifier before the dot.
+func censusCallee(call *ast.CallExpr) (name, qualifier string) {
+	switch target := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		if x, ok := target.X.(*ast.Ident); ok {
+			qualifier = x.Name
+		}
+		return target.Sel.Name, qualifier
+	case *ast.Ident:
+		return target.Name, ""
 	}
-	sort.Strings(want)
-	require.Equal(t, want, got)
-
-	// These are the five admission owners that were missing from the original
-	// census. The handler-level checks keep the fixed sink list above from
-	// becoming a label-only inventory: a refactor that removes the admission
-	// before its verifier call fails this test until it is reclassified.
-	for path, admission := range map[string]string{
-		"dm/purge.go":           "stepup.Charge",
-		"mfa/handlers.go":       "chargeMFASettingsCode",
-		"ownership/handlers.go": "stepup.Charge",
-		"sessions/handlers.go":  "stepup.Charge",
-		"users/handlers.go":     "chargeDangerousMFA",
-	} {
-		source, readErr := os.ReadFile(filepath.Join(internal, filepath.FromSlash(path))) //nolint:gosec // path is a fixed test map, not input
-		require.NoError(t, readErr)
-		require.Contains(t, string(source), admission, "%s must retain its MFA-budget admission owner", path)
-	}
+	return "", ""
 }
 
 func TestInlinePurpose_VerifyCodeRefusesAnInvalidPurpose(t *testing.T) {
