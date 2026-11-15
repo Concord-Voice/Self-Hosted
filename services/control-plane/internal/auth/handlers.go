@@ -600,7 +600,8 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	if !h.allowRegistrationIssuance(c.Request.Context(), c, normalizedEmail) {
+	refundIssuance, ok := h.allowRegistrationIssuance(c.Request.Context(), c, normalizedEmail)
+	if !ok {
 		return
 	}
 
@@ -618,6 +619,7 @@ func (h *Handler) Register(c *gin.Context) {
 		req.Password,
 	)
 	if err != nil {
+		refundIssuance()
 		h.respondPendingError(c, err)
 		return
 	}
@@ -631,6 +633,7 @@ func (h *Handler) Register(c *gin.Context) {
 			if _, delErr := h.pending.Delete(c.Request.Context(), pendingID); delErr != nil {
 				h.log.Error("Failed to roll back pending after attempt carry error", "error", delErr)
 			}
+			refundIssuance()
 			writeRegistrationAttemptsUnavailable(c)
 			return
 		}
@@ -899,20 +902,46 @@ const registrationIssuanceLimit = MaxResends + 1
 // bounds the total guesses an address can draw. It gates issuance only: a
 // confirm of a code already sent is never refused because of it. Accepted
 // trade-off (ADR-0046): anyone who knows an address can spend this limit and
-// delay its registration for up to the pending TTL. It fails closed: a Redis
-// error is a 503.
-func (h *Handler) allowRegistrationIssuance(ctx context.Context, c *gin.Context, email string) bool {
-	allowed, err := middleware.AllowUserAction(ctx, h.redis, registrationIssuanceKey(email), registrationIssuanceLimit, PendingRegistrationTTL)
+// delay its registration for up to the pending TTL, but only by causing codes
+// to be issued. It fails closed: a Redis error is a 503.
+//
+// The limit counts codes issued, so the caller must call refund on every exit
+// that ends before a code is minted (no pending row, a cooldown, a conflict).
+// A failed send keeps its charge: the code may already be stored or delivered.
+func (h *Handler) allowRegistrationIssuance(ctx context.Context, c *gin.Context, email string) (refund func(), ok bool) {
+	key := registrationIssuanceKey(email)
+	allowed, err := middleware.AllowUserAction(ctx, h.redis, key, registrationIssuanceLimit, PendingRegistrationTTL)
 	if err != nil {
 		h.log.Error("register: code issuance limit unavailable", "error", err)
 		writeRegistrationAttemptsUnavailable(c)
-		return false
+		return nil, false
 	}
 	if !allowed {
 		c.JSON(http.StatusTooManyRequests, gin.H{"code": "registration_codes_exhausted"})
-		return false
+		return nil, false
 	}
-	return true
+	return func() { h.refundRegistrationIssuance(key) }, true
+}
+
+// refundRegistrationIssuanceLua returns one issuance to an address, never
+// below zero and never creating the key.
+const refundRegistrationIssuanceLua = `
+local n = tonumber(redis.call("GET", KEYS[1]) or "0")
+if n > 0 then
+  return redis.call("DECR", KEYS[1])
+end
+return 0
+`
+
+// refundRegistrationIssuance gives back an issuance charged for a request that
+// minted no code. It runs detached from the request, since a client that
+// disconnects must not keep the charge. A failed refund only over-counts.
+func (h *Handler) refundRegistrationIssuance(key string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.redis.Eval(ctx, refundRegistrationIssuanceLua, []string{key}).Err(); err != nil {
+		h.log.Warn("register: code issuance refund failed", "error", err)
+	}
 }
 
 // carryVerificationAttemptsLua copies a taken-over pending row's attempt
@@ -1147,11 +1176,13 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 		return
 	}
 
-	if !h.allowRegistrationIssuance(ctx, c, pending.Email) {
+	refundIssuance, ok := h.allowRegistrationIssuance(ctx, c, pending.Email)
+	if !ok {
 		return
 	}
 	newCount, reservedAt, err := h.pending.IncrementResend(ctx, pending.ID)
 	if err != nil {
+		refundIssuance()
 		switch {
 		case errors.Is(err, ErrResendsExhausted):
 			c.JSON(http.StatusTooManyRequests, gin.H{"code": "resends_exhausted"})
@@ -1205,12 +1236,14 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	if !h.allowRegistrationIssuance(ctx, c, req.NewEmail) {
+	refundIssuance, ok := h.allowRegistrationIssuance(ctx, c, req.NewEmail)
+	if !ok {
 		return
 	}
 
 	reservedCount, reservedAt, err := h.pending.updateEmail(ctx, req.PendingID, req.NewEmail)
 	if err != nil {
+		refundIssuance()
 		switch {
 		case errors.Is(err, ErrPendingNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})

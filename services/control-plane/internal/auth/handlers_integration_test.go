@@ -1744,3 +1744,41 @@ func TestConfirmSucceedsAfterIssuanceLimitIsSpent(t *testing.T) {
 	w := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{"pending_id": id, "code": code}, nil)
 	require.Less(t, w.Code, 300, w.Body.String())
 }
+
+func issuedCount(t *testing.T, ts *testhelpers.TestServer, email string) int {
+	t.Helper()
+	n, err := ts.Redis.Get(context.Background(), "email_verify_attempts:issued:"+email).Int()
+	if errors.Is(err, redis.Nil) {
+		return 0
+	}
+	require.NoError(t, err)
+	return n
+}
+
+// A change-email that mints no code (no such pending row) must not spend the
+// new address's issuance limit, or anyone could block an address for free.
+func TestChangeEmailWithoutPendingDoesNotSpendIssuance(t *testing.T) {
+	ts := setupTS(t)
+	for i := 0; i < auth.MaxResends+2; i++ {
+		w := ts.DoRequest("POST", "/api/v1/auth/register/change-email",
+			map[string]string{"pending_id": "6f1c1d1e-0000-4000-8000-000000000001", "new_email": testEmail}, nil)
+		require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	}
+	assert.Equal(t, 0, issuedCount(t, ts, testEmail))
+	registerPendingID(t, ts)
+}
+
+// A resend refused by its cooldown sends nothing, so it gives the charge back.
+func TestResendRefusedByCooldownRefundsIssuance(t *testing.T) {
+	ts := setupTS(t)
+	id := registerPendingID(t, ts)
+	w := ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": id}, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, 2, issuedCount(t, ts, testEmail))
+
+	// The cooldown starts at the first resend, so the second is refused.
+	w = ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": id}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "cooldown_active")
+	assert.Equal(t, 2, issuedCount(t, ts, testEmail))
+}
