@@ -532,7 +532,8 @@ func (h *Handler) replaceMyKeysCoordinated(
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
-	if !h.chargeDangerousMFA(c, senderID.String(), req.MFACode) {
+	mfaCharged, ok := h.chargeDangerousMFA(c, senderID.String(), req.MFACode)
+	if !ok {
 		return
 	}
 	// Credential-epoch fence (#2201): publish the blocked marker before the
@@ -561,7 +562,7 @@ func (h *Handler) replaceMyKeysCoordinated(
 	}
 	// Factor consumption is a users-serialized prerequisite to family capture.
 	mfaVerified, err := h.verifyStepUpWithLockedUser(
-		c.Request.Context(), tx, senderID, stepup.PurposeE2EEKeyReset, req.CurrentPassword, req.MFACode,
+		c.Request.Context(), tx, senderID, stepup.PurposeE2EEKeyReset, req.CurrentPassword, req.MFACode, mfaCharged,
 	)
 	if err != nil {
 		fenceOp.Rollback(c.Request.Context())
@@ -1498,6 +1499,9 @@ func mfaRequiredMessage(purpose stepup.Purpose) string {
 
 // verifyMFAWithLockedUser checks the locked user's MFA state and verifies a
 // code on the same transaction connection, for the one route named by purpose.
+// mfaCharged reports whether chargeDangerousMFA charged this code: a code it
+// did not charge (its probe found no inline factor) is refused for a retry if
+// an inline factor is present under the lock, rather than judged for free.
 // Returns an HTTP status + body on failure.
 func (h *Handler) verifyMFAWithLockedUser(
 	ctx context.Context,
@@ -1505,6 +1509,7 @@ func (h *Handler) verifyMFAWithLockedUser(
 	uid string,
 	purpose stepup.Purpose,
 	mfaCode string,
+	mfaCharged bool,
 ) (bool, int, gin.H) {
 	var enabled bool
 	var methods []string
@@ -1525,6 +1530,11 @@ func (h *Handler) verifyMFAWithLockedUser(
 			"methods": methods,
 		}
 	}
+	if !mfaCharged {
+		if status, body := h.refuseUnchargedInlineFactorTx(ctx, tx, uid); status != 0 {
+			return false, status, body
+		}
+	}
 	if h.mfaVerifier == nil {
 		h.log.Error("MFA verifier is not configured for MFA-enabled user")
 		return false, http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed}
@@ -1538,6 +1548,28 @@ func (h *Handler) verifyMFAWithLockedUser(
 		return false, http.StatusForbidden, gin.H{"error": "Invalid MFA code"}
 	}
 	return true, 0, nil
+}
+
+// errMsgMFAEnrollmentChanged is the 409 for a code whose pre-transaction
+// probe found no inline factor, when one is present under the lock.
+const errMsgMFAEnrollmentChanged = "MFA enrollment changed; retry"
+
+// refuseUnchargedInlineFactorTx re-reads the inline factor set under the
+// caller's users-row lock. A factor committed after chargeDangerousMFA's probe
+// was never charged, so judging the code would be a free guess; charging now
+// would put a Redis round trip inside the lock. It answers 409 for a retry,
+// which the probe then charges. With no inline factor no code can verify, so
+// the uncharged code is judged as before.
+func (h *Handler) refuseUnchargedInlineFactorTx(ctx context.Context, tx *sql.Tx, uid string) (int, gin.H) {
+	methods, err := stepup.InlineMFAMethods(ctx, tx, uid)
+	if err != nil {
+		h.log.Error("Inline MFA factor recheck failed during reauthentication", "error", err)
+		return http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed}
+	}
+	if len(methods) > 0 {
+		return http.StatusConflict, gin.H{"error": errMsgMFAEnrollmentChanged}
+	}
+	return 0, nil
 }
 
 type stepUpReauthenticationError struct {
@@ -1564,6 +1596,7 @@ func (h *Handler) verifyStepUpWithLockedUser(
 	userID uuid.UUID,
 	purpose stepup.Purpose,
 	currentPassword, mfaCode string,
+	mfaCharged bool,
 ) (bool, error) {
 	var passwordHash string
 	err := tx.QueryRowContext(ctx,
@@ -1592,7 +1625,7 @@ func (h *Handler) verifyStepUpWithLockedUser(
 		}
 	}
 
-	mfaVerified, status, body := h.verifyMFAWithLockedUser(ctx, tx, userID.String(), purpose, mfaCode)
+	mfaVerified, status, body := h.verifyMFAWithLockedUser(ctx, tx, userID.String(), purpose, mfaCode, mfaCharged)
 	if status != 0 {
 		return false, &stepUpReauthenticationError{status: status, body: body}
 	}
@@ -1753,6 +1786,7 @@ type passwordChangeExecution struct {
 	userID          uuid.UUID
 	currentPassword string
 	mfaCode         string
+	mfaCharged      bool
 	newHash         string
 	wrappedKey      []byte
 	salt            []byte
@@ -1850,7 +1884,7 @@ func (h *Handler) executePasswordChange(ctx context.Context, change passwordChan
 	}
 	// Keep transactional factor consumption ahead of family capture.
 	mfaVerified, err := h.verifyStepUpWithLockedUser(
-		ctx, tx, change.userID, stepup.PurposePasswordChange, change.currentPassword, change.mfaCode,
+		ctx, tx, change.userID, stepup.PurposePasswordChange, change.currentPassword, change.mfaCode, change.mfaCharged,
 	)
 	if err != nil {
 		return outcome, err
@@ -1987,7 +2021,8 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
-	if !h.chargeDangerousMFA(c, parsedUID.String(), req.MFACode) {
+	mfaCharged, ok := h.chargeDangerousMFA(c, parsedUID.String(), req.MFACode)
+	if !ok {
 		return
 	}
 
@@ -2012,6 +2047,7 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		userID:          parsedUID,
 		currentPassword: req.CurrentPassword,
 		mfaCode:         req.MFACode,
+		mfaCharged:      mfaCharged,
 		newHash:         newHash,
 		wrappedKey:      wrappedKeyBytes,
 		salt:            saltBytes,
@@ -2051,16 +2087,36 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-func (h *Handler) chargeDangerousMFA(c *gin.Context, userID, mfaCode string) bool {
-	e := stepup.Charge(c.Request.Context(), stepup.DangerousActionBudget(h.redis), userID, mfaCode)
-	if e == nil {
-		return true
+// chargeDangerousMFA charges the shared dangerous-action budget for a code
+// sent to the password change or the E2EE key replacement, before either
+// opens its transaction. It charges only when the account has an inline MFA
+// factor (the P1 probe the session, ownership and purge routes use): without
+// one no code can verify, so a code guesses nothing, and charging it would let
+// a no-MFA request spend the budget. A factor committed after the probe is
+// refused under the lock (refuseUnchargedInlineFactorTx). It returns whether
+// it charged, and ok=false once it has written a refusal.
+func (h *Handler) chargeDangerousMFA(c *gin.Context, userID, mfaCode string) (charged, ok bool) {
+	if mfaCode == "" {
+		return false, true
 	}
-	if e.Cause != nil {
-		h.log.Error("MFA budget unavailable", "error", e.Cause)
+	ctx := c.Request.Context()
+	methods, err := stepup.InlineMFAMethods(ctx, h.db, userID)
+	if err != nil {
+		h.log.Error("Failed to read MFA factors before the step-up budget", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+		return false, false
 	}
-	e.Write(c)
-	return false
+	if len(methods) == 0 {
+		return false, true
+	}
+	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+		if e.Cause != nil {
+			h.log.Error("MFA budget unavailable", "error", e.Cause)
+		}
+		e.Write(c)
+		return false, false
+	}
+	return true, true
 }
 
 // clearDangerousMFA resets the budget after a committed change. It runs on a
