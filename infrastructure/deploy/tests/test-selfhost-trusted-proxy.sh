@@ -203,6 +203,7 @@ pid {temp}/nginx.pid;
 error_log {temp}/error.log;
 events {{ worker_connections 128; }}
 http {{
+    access_log {temp}/access.log;
     map $host $validated_host {{ default ""; api.example.test api.example.test; }}
     map \"$ssl_server_name:$validated_host\" $api_tls_name_match {{
         default 0;
