@@ -71,7 +71,7 @@ later storage migration.
 
 ### Security
 
-- **Voice:** A participant can no longer multiply media consumers across receive transports to exhaust shared voice capacity ([Hosted #4433](https://github.com/Concord-Voice/Hosted/pull/4433)).
+- **Voice:** A participant can no longer multiply media consumers across receive transports to exhaust shared voice capacity ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303), [Hosted #4433](https://github.com/Concord-Voice/Hosted/pull/4433)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed
