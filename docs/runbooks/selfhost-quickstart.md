@@ -61,6 +61,9 @@ the Cloudflare edge address. Select `cloudflare-aop` only after creating a
 custom zone-level or hostname-level Cloudflare Authenticated Origin Pull
 certificate for both the API and apex hostnames. The shared Cloudflare AOP
 certificate is not sufficient for client-IP restoration.
+The installer records the selection as `NGINX_CLIENT_IP_MODE` in the root `.env`;
+later `concord-ctl nginx-reload` uses that value. Existing files without it
+remain in `direct` mode.
 
 Before the first AOP-enabled reload, install the matching **public CA bundle**
 as the root-owned regular file at the fixed nginx path documented by the

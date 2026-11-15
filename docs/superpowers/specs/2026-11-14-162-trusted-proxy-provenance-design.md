@@ -97,6 +97,11 @@ operator-provided public CA. The direct media vhost never enables this path.
 The shared global AOP certificate is insufficient because it proves only that
 traffic came from Cloudflare, rather than from this deployment's zone.
 
+The installer persists `NGINX_CLIENT_IP_MODE` in the self-host root `.env`.
+The locked controller reads it on later nginx reloads; a missing legacy value
+means `direct`, while an unknown value is refused. Managed reloads always
+require `cloudflare-aop` and cannot select `direct`.
+
 In `cloudflare-aop` mode, the API/apex fragment deliberately uses
 `set_real_ip_from 0.0.0.0/0` and `set_real_ip_from ::/0`. Required
 deployment-specific mTLS authenticates the TLS peer before nginx considers

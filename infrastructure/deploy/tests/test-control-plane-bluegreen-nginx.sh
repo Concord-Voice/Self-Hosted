@@ -124,7 +124,7 @@ cut_block() {
 # render_port <port>: the real render_nginx_config with the rail on, writing
 # $TMP/render/concordvoice.conf with the control_plane server on <port>.
 render_port() {
-  local enc fragment ca rnd
+  local enc fragment ca rnd mode="${2:-cloudflare-aop}"
   enc="$(extract_fn encode_hsts_for_nginx)"
   fragment="$(extract_fn validate_aop_fragment)"
   ca="$(extract_fn aop_ca_safe)"
@@ -134,7 +134,8 @@ render_port() {
     # Variables read by the extracted render_nginx_config.
     export NGINX_SRC="$VHOST_SRC" NGINX_RENDER_DIR="$TMP/render" \
       NGINX_RENDER="$TMP/render/concordvoice.conf" CONTROL_PLANE_BLUEGREEN=1 \
-      CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA"
+      CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA" \
+      NGINX_CLIENT_IP_MODE="$mode"
     eval "$enc"
     eval "$fragment"
     eval "$ca"
@@ -142,6 +143,12 @@ render_port() {
     render_nginx_config "$HSTS_DEFAULT_VALUE" "$1"
   )
 }
+
+render_port 8080 direct || die "self-host direct mode should render without the AOP CA"
+if grep -Eq 'CONCORD_CLIENT_IP_PROVENANCE|ssl_verify_client|set_real_ip_from|real_ip_header' "$TMP/render/concordvoice.conf"; then
+  die "self-host direct render restored untrusted client IP"
+fi
+pass "self-host direct render omits AOP without a CA"
 
 managed_aop_missing_ca_refuses_atomically() {
   local r=0 left

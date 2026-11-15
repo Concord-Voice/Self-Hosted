@@ -436,6 +436,7 @@ for line in lines:
     if line and not line.startswith('#'):
         k,v=line.split('=',1); assert k not in fields; fields[k]=v
 assert fields['SELFHOST_STORAGE_MODE']==sys.argv[2]
+assert fields['NGINX_CLIENT_IP_MODE']=='direct'
 def decode(v):
     if not v.startswith('"'): return v
     assert v.endswith('"'); out=''; i=1

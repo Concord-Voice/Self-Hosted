@@ -914,6 +914,7 @@ write_env_file() (
     "JWT_SECRET=$jwt_secret" "MFA_ENCRYPTION_KEY=$mfa_key" "TURN_SECRET=$turn_secret"
     "TURN_REALM=$realm" MINIO_ROOT_USER=concord "MINIO_ROOT_PASSWORD=$minio_password"
     MINIO_BUCKET=concord-media "TRUSTED_PROXY_CIDRS=$cidrs" "TRUSTED_PROXIES=$cidrs"
+    "NGINX_CLIENT_IP_MODE=${CFG_CLIENT_IP_MODE:-direct}"
     "SMTP_HOST=$smtp_host" "SMTP_PORT=$smtp_port" "SMTP_USERNAME=$smtp_user"
     "SMTP_PASSWORD=$smtp_pass" "SMTP_FROM=$smtp_from"
     "FEEDBACK_REPO=$quoted_repo" "FEEDBACK_PAT=$quoted_pat"

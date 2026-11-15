@@ -25,6 +25,9 @@ vhost = (root / "infrastructure/deploy/nginx/concordvoice.conf").read_text()
 aop = (root / "infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf").read_text()
 admin = (root / "infrastructure/deploy/nginx/admin-console.conf.template").read_text()
 ctl = (root / "infrastructure/deploy/concord-ctl.sh").read_text()
+assert 'NGINX_CLIENT_IP_MODE="$(CONCORD_ENV_FILE="${CONFIG_ROOT}/.env" read_concord_env_value NGINX_CLIENT_IP_MODE)"' in ctl, "self-host reload must read the installer-owned mode"
+assert 'NGINX_CLIENT_IP_MODE="${NGINX_CLIENT_IP_MODE:-direct}"' in ctl, "legacy self-host installs must remain direct"
+assert 'direct|cloudflare-aop) ;;' in ctl, "unknown client-IP modes must be refused"
 
 
 def check_headers(source, name):
@@ -304,8 +307,10 @@ http {{
             ("apex.example.test", "apex.example.test"),
         ):
             response = tls_request(sni, host)
-            assert response.startswith(b"HTTP/1.1 204"), \
-                f"same-policy API SNI/Host pair {sni}/{host} rejected: {response[:120]!r}"
+            expected = (b"HTTP/1.1 204",) if sni == host else (b"HTTP/1.1 204", b"HTTP/1.1 421")
+            # nginx may ask a cross-name client to retry with the request Host as SNI.
+            assert response.startswith(expected), \
+                f"same-policy API SNI/Host pair {sni}/{host} rejected unexpectedly: {response[:120]!r}"
 
         for label, sni in (
             ("media", "media.example.test"),

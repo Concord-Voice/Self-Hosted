@@ -7580,6 +7580,17 @@ else:
       decode_concord_env_value "$raw"
     }
 
+    NGINX_CLIENT_IP_MODE=cloudflare-aop
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      NGINX_CLIENT_IP_MODE="$(CONCORD_ENV_FILE="${CONFIG_ROOT}/.env" read_concord_env_value NGINX_CLIENT_IP_MODE)" \
+        || { echo 'nginx-reload: could not read self-host client IP mode' >&2; exit 1; }
+      NGINX_CLIENT_IP_MODE="${NGINX_CLIENT_IP_MODE:-direct}"
+      case "$NGINX_CLIENT_IP_MODE" in
+        direct|cloudflare-aop) ;;
+        *) echo 'nginx-reload: invalid self-host client IP mode' >&2; exit 1 ;;
+      esac
+    fi
+
     # Keep this in lockstep with config.invalidHSTSHeaderValue: printable ASCII
     # plus TAB, semicolon-separated unique directives, exactly one decimal
     # max-age, valueless includeSubDomains/preload, and token/quoted values.
@@ -7675,8 +7686,10 @@ else:
     render_admin_config() {
       local admin_domain="$1" line expanded tmp provenance_markers=0 server_blocks=0 provenance_bad=0
       [[ -f "$ADMIN_TMPL" && ! -L "$ADMIN_TMPL" ]] || return 1
-      [[ -f "$CLOUDFLARE_AOP_FRAGMENT" && ! -L "$CLOUDFLARE_AOP_FRAGMENT" ]] || return 1
-      validate_aop_fragment && aop_ca_safe || return 1
+      if [[ "$NGINX_CLIENT_IP_MODE" == cloudflare-aop ]]; then
+        [[ -f "$CLOUDFLARE_AOP_FRAGMENT" && ! -L "$CLOUDFLARE_AOP_FRAGMENT" ]] || return 1
+        validate_aop_fragment && aop_ca_safe || return 1
+      fi
       mkdir -p "$NGINX_RENDER_DIR" || return 1
       expanded="$(mktemp "${ADMIN_RENDER}.expanded.XXXXXX")" || return 1
       tmp="$(mktemp "${ADMIN_RENDER}.tmp.XXXXXX")" || { rm -f "$expanded"; return 1; }
@@ -7691,10 +7704,10 @@ else:
         elif [[ "$line" == '    # CONCORD_ADMIN_CLIENT_IP_PROVENANCE' ]]; then
           if (( server_blocks != 1 )); then
             provenance_bad=1
-          else
+          elif [[ "$NGINX_CLIENT_IP_MODE" == cloudflare-aop ]]; then
             sed 's/^/    /' "$CLOUDFLARE_AOP_FRAGMENT" || { rm -f "$expanded" "$tmp"; return 1; }
-            provenance_markers=$((provenance_markers + 1))
           fi
+          provenance_markers=$((provenance_markers + 1))
         else
           printf '%s\n' "$line"
         fi
@@ -7727,8 +7740,10 @@ else:
         [[ "$cp_port" == 8080 || "$cp_port" == 8081 ]] || return 1
       fi
       encoded="$(encode_hsts_for_nginx "$policy")" || return 1
-      [[ -f "$CLOUDFLARE_AOP_FRAGMENT" && ! -L "$CLOUDFLARE_AOP_FRAGMENT" ]] || return 1
-      validate_aop_fragment && aop_ca_safe || return 1
+      if [[ "$NGINX_CLIENT_IP_MODE" == cloudflare-aop ]]; then
+        [[ -f "$CLOUDFLARE_AOP_FRAGMENT" && ! -L "$CLOUDFLARE_AOP_FRAGMENT" ]] || return 1
+        validate_aop_fragment && aop_ca_safe || return 1
+      fi
       mkdir -p "$NGINX_RENDER_DIR" || return 1
       tmp="$(mktemp "${NGINX_RENDER}.tmp.XXXXXX")" || return 1
       if while IFS= read -r line || [[ -n "$line" ]]; do
@@ -7757,10 +7772,10 @@ else:
         elif [[ "$line" == '    # CONCORD_CLIENT_IP_PROVENANCE' ]]; then
           if (( ! in_api )); then
             provenance_bad=1
-          else
+          elif [[ "$NGINX_CLIENT_IP_MODE" == cloudflare-aop ]]; then
             sed 's/^/    /' "$CLOUDFLARE_AOP_FRAGMENT" || { rm -f "$tmp"; return 1; }
-            provenance_markers=$((provenance_markers + 1))
           fi
+          provenance_markers=$((provenance_markers + 1))
         elif (( in_api )) && [[ "$line" == "        add_header Strict-Transport-Security "* ]]; then
           printf '        add_header Strict-Transport-Security "%s" always;\n' "$encoded"
           scoped_replacements=$((scoped_replacements + 1))
