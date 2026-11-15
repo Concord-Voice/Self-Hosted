@@ -578,7 +578,8 @@ else
     envline FEEDBACK_REPO a/b
     envline SMTP_HOST smtp.t.test
     envline SMTP_FROM fixture@t.test
-    envline TRUSTED_PROXY_CIDRS 10.0.0.0/8
+    envline TRUSTED_PROXY_CIDRS 127.0.0.1/32
+    envline TRUSTED_PROXIES 127.0.0.1/32
     envline WS_EVENT_BUDGET_ENABLED true
     envline WS_EVENT_BUDGET_SCALE_PERCENT 100
     for k in "POSTGRES_PASS""WORD" "REDIS_PASS""WORD" "JWT_SEC""RET" "TURN_SEC""RET" \
@@ -587,7 +588,7 @@ else
     done
   } > "$WORK/dummy.env"
   HAVE_COMPOSE="$(env -i PATH="$PATH" HOME="$HOME" docker compose version --short 2>/dev/null | tr -d 'v')"
-  if [[ "$(printf '%s\n%s\n' 2.24.5 "$HAVE_COMPOSE" | sort -V | head -1)" == "2.24.5" ]]; then
+  if [[ "$(printf '%s\n%s\n' 2.33.1 "$HAVE_COMPOSE" | sort -V | head -1)" == "2.33.1" ]]; then
     WANT_WITH_OVERLAY=0
   else
     WANT_WITH_OVERLAY=1
@@ -650,6 +651,19 @@ PY
     fi
   }
   if render "$WORK/real-with-overlay.json" -f docker-compose.selfhost.yml; then
+    if python3 - "$WORK/real-with-overlay.json" <<'PY'; then
+import json, sys
+model = json.load(open(sys.argv[1], encoding='utf-8'))
+for service, key in (('control-plane', 'TRUSTED_PROXY_CIDRS'), ('media-plane', 'TRUSTED_PROXIES')):
+    settings = model['services'][service]
+    assert settings['environment'][key] == '127.0.0.1/32'
+    assert settings['networks']['concordvoice-services']['gw_priority'] == 1
+    assert settings['networks']['concordvoice-data'].get('gw_priority', 0) == 0
+PY
+      ok "real selfhost render preserves exact trust and selected services gateway"
+    else
+      bad "real selfhost render lost exact trust or gateway priority"
+    fi
     expect_rc "real render with overlay (Compose $HAVE_COMPOSE) exits $WANT_WITH_OVERLAY" \
       --rendered "$WANT_WITH_OVERLAY" "$WORK/real-with-overlay.json"
     expect_media_capacity "$WORK/real-with-overlay.json" 2 \

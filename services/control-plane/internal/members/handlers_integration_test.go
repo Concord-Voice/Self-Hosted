@@ -899,6 +899,40 @@ func TestListMembersWithLastSeen(t *testing.T) {
 	assert.GreaterOrEqual(t, len(members), 2)
 }
 
+func TestSecurity171_ListMembersLastSeenStableAcrossInvisibleAndOffline(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "privacylastowner")
+	invisible := ts.CreateTestUser(t, "privacylastinvisible")
+	serverID := ts.CreateTestServer(t, owner.ID, "Privacy Last Seen Server")
+	ts.AddMemberToServer(t, serverID, invisible.ID, "member")
+
+	ctx := context.Background()
+	require.NoError(t, ts.Redis.Set(ctx, fmt.Sprintf("last_seen:%s", invisible.ID), "1711000000", 0).Err())
+	readLastSeen := func(token string) interface{} {
+		view := ts.DoRequest("GET", membersPath(serverID), nil, testhelpers.AuthHeaders(token))
+		require.Equal(t, http.StatusOK, view.Code, view.Body.String())
+		var body map[string]interface{}
+		testhelpers.ParseJSON(t, view, &body)
+		for _, value := range body["members"].([]interface{}) {
+			member := value.(map[string]interface{})
+			if member["user_id"] == invisible.ID {
+				return member["last_seen"]
+			}
+		}
+		t.Fatalf("member %s missing from member list", invisible.ID)
+		return nil
+	}
+
+	require.NoError(t, ts.Redis.Set(ctx, fmt.Sprintf("presence:%s", invisible.ID), "offline", 0).Err())
+	offlineLastSeen := readLastSeen(owner.AccessToken)
+	require.Nil(t, offlineLastSeen)
+	require.NoError(t, ts.Redis.Set(ctx, fmt.Sprintf("presence:%s", invisible.ID), "invisible", 0).Err())
+	assert.Equal(t, offlineLastSeen, readLastSeen(owner.AccessToken), "invisible must match offline")
+	assert.Equal(t, float64(1711000000), readLastSeen(invisible.AccessToken), "the user retains their own timestamp")
+	require.NoError(t, ts.Redis.Set(ctx, fmt.Sprintf("presence:%s", invisible.ID), "offline", 0).Err())
+	assert.Equal(t, offlineLastSeen, readLastSeen(owner.AccessToken), "disconnect must not reveal the invisible session")
+}
+
 // ── RemoveMember cleans up read states ───────────────────────────────────────
 
 func TestRemoveMemberCleansUpReadStates(t *testing.T) {
