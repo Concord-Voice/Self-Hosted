@@ -20,7 +20,6 @@ import (
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
 	"github.com/lib/pq"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
@@ -1085,7 +1084,7 @@ func TestHandleUnregisterRemovesClient(t *testing.T) {
 	assert.True(t, hub.userClients[userID][otherClient.ID], "other client should remain")
 }
 
-func TestSecurity171_HandleUnregisterInvisibleUserDoesNotWriteLastSeen(t *testing.T) {
+func TestSecurity171_HandleUnregisterInvisibleUserWritesPrivateLastSeen(t *testing.T) {
 	redisClient := setupHubTestRedis(t)
 	hub := NewHub(nil, redisClient)
 	userID := uuid.New()
@@ -1094,10 +1093,23 @@ func TestSecurity171_HandleUnregisterInvisibleUserDoesNotWriteLastSeen(t *testin
 	hub.userClients[userID] = map[uuid.UUID]bool{client.ID: true}
 	hub.hiddenPresence[userID] = statusInvisible
 
+	before := time.Now().Unix()
 	hub.handleUnregister(client)
 
-	_, err := redisClient.Get(context.Background(), "last_seen:"+userID.String()).Result()
-	assert.ErrorIs(t, err, redis.Nil, "an invisible user's final disconnect must not create a last_seen signal")
+	lastSeen, err := redisClient.Get(context.Background(), "last_seen:"+userID.String()).Int64()
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, lastSeen, before, "invisible activity must advance the private inactivity clock")
+	assert.LessOrEqual(t, lastSeen, time.Now().Unix())
+}
+
+func TestSecurity171_HandleUnregisterWithoutRedis(t *testing.T) {
+	hub := newMinimalHub()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.userClients[userID] = map[uuid.UUID]bool{client.ID: true}
+
+	assert.NotPanics(t, func() { hub.handleUnregister(client) })
 }
 
 func TestHandleUnregisterMultiDeviceKeepsOtherClients(t *testing.T) {

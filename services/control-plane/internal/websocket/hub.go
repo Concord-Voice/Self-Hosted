@@ -1911,9 +1911,9 @@ func (h *Hub) handleUnregister(client *Client) {
 			ctx, cancel = context.WithTimeout(ctx, presenceAudienceTimeout)
 			defer cancel()
 		}
-		wasInvisible := h.isInvisiblePresence(client.UserID)
 		h.transitionUserOffline(ctx, client.UserID, false)
-		if !wasInvisible {
+		if h.redis != nil {
+			// Auth inactivity needs this even for invisible users; member reads are owner-only.
 			if err := h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0).Err(); err != nil {
 				log.Printf("[hub] failed to persist last_seen for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
 			}
