@@ -1666,9 +1666,13 @@ func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpos
 	return true, nil
 }
 
+// clearOwnershipMFABudget resets the budget after a committed change, on a
+// context detached from the request so a client hang-up cannot cancel it.
 func (h *Handler) clearOwnershipMFABudget(c *gin.Context, userID string) {
-	if err := stepup.DangerousActionBudget(h.redis).Clear(c.Request.Context(), userID); err != nil {
-		h.log.Warn("Could not reset ownership MFA budget after a successful change", "error", err)
+	ctx, cancel := stepup.SettleContext(c.Request.Context())
+	defer cancel()
+	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, userID); err != nil {
+		h.log.Warn("Could not reset ownership MFA budget after a successful change", "user_id", userID, "error", err)
 	}
 }
 

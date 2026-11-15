@@ -549,9 +549,13 @@ func (h *Handler) authenticateForRevokeWithMFA(ctx context.Context, c *gin.Conte
 	return false, mfaVerified
 }
 
+// clearRevokeMFABudget resets the budget after a committed revocation, on a
+// context detached from the request so a client hang-up cannot cancel it.
 func (h *Handler) clearRevokeMFABudget(ctx context.Context, uid string) {
+	ctx, cancel := stepup.SettleContext(ctx)
+	defer cancel()
 	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, uid); err != nil {
-		h.log.Warn("Could not reset session-revoke MFA budget after a successful change", "error", err)
+		h.log.Warn("Could not reset session-revoke MFA budget after a successful change", "user_id", uid, "error", err)
 	}
 }
 

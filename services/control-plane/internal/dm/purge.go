@@ -393,9 +393,13 @@ func (h *Handler) verifyPurgeStepUpWithMFA(ctx context.Context, c *gin.Context, 
 	return true, mfaVerified
 }
 
+// clearPurgeMFABudget resets the budget after a committed purge, on a context
+// detached from the request so a client hang-up cannot cancel it.
 func (h *Handler) clearPurgeMFABudget(ctx context.Context, userID string) {
+	ctx, cancel := stepup.SettleContext(ctx)
+	defer cancel()
 	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, userID); err != nil {
-		h.log.Warn("Could not reset DM-purge MFA budget after a successful purge", "error", err)
+		h.log.Warn("Could not reset DM-purge MFA budget after a successful purge", "user_id", userID, "error", err)
 	}
 }
 

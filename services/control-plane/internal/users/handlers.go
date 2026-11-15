@@ -2063,9 +2063,14 @@ func (h *Handler) chargeDangerousMFA(c *gin.Context, userID, mfaCode string) boo
 	return false
 }
 
+// clearDangerousMFA resets the budget after a committed change. It runs on a
+// context detached from the request, so a client that hangs up after the
+// commit cannot cancel the reset and leave its own budget charged.
 func (h *Handler) clearDangerousMFA(c *gin.Context, userID string) {
-	if err := stepup.DangerousActionBudget(h.redis).Clear(c.Request.Context(), userID); err != nil {
-		h.log.Warn("Could not reset MFA budget after a successful change", "error", err)
+	ctx, cancel := stepup.SettleContext(c.Request.Context())
+	defer cancel()
+	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, userID); err != nil {
+		h.log.Warn("Could not reset MFA budget after a successful change", "user_id", userID, "error", err)
 	}
 }
 
@@ -2752,11 +2757,14 @@ func (h *Handler) reservePurgeFencePassword(
 //
 // Deliberately best-effort: a failure leaves the counter high, which fails
 // toward MORE limiting, never less. It runs post-commit because only a
-// committed disable is a success.
+// committed disable is a success, and on a context detached from the request
+// so a client that hangs up after the commit cannot cancel it.
 func (h *Handler) clearPurgeFenceStepUpAttempts(ctx context.Context, userID string) {
+	ctx, cancel := stepup.SettleContext(ctx)
+	defer cancel()
 	if err := h.purgeFenceStepUpBudget().Clear(ctx, userID); err != nil {
 		h.log.Warn("Could not reset the purge-fence step-up budget after a successful disable",
-			"error", err)
+			"user_id", userID, "error", err)
 	}
 }
 
