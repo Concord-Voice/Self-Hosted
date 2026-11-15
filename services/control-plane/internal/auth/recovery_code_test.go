@@ -239,3 +239,31 @@ func TestRecoveryFailureBudgetBackendFailureIs503(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	require.Contains(t, w.Body.String(), "step_up_budget_unavailable")
 }
+
+// The wrong guess that spends the last attempt deletes the record, so the next
+// RecoveryBegin (which installs with SETNX) can send a new code at once rather
+// than leaving the account with a dead code for the rest of its TTL.
+func TestConsumeRecoveryCodeLastWrongGuessDeletesTheRecord(t *testing.T) {
+	ctx := context.Background()
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	h := &Handler{redis: rdb}
+	key := recoveryRedisKey("last-guess@test.local")
+	raw, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456")})
+	require.NoError(t, err)
+	require.NoError(t, rdb.Set(ctx, key, raw, recoveryCodeTTL).Err())
+
+	for i := 1; i < recoveryMaxAttempts; i++ {
+		_, err := h.consumeRecoveryCode(ctx, key, "000000")
+		require.ErrorIs(t, err, redis.Nil)
+		require.True(t, mini.Exists(key), "wrong guess %d leaves attempts, so the record stays", i)
+	}
+	_, err = h.consumeRecoveryCode(ctx, key, "000000")
+	require.ErrorIs(t, err, redis.Nil)
+	require.False(t, mini.Exists(key), "the guess that spends the last attempt must delete the record")
+
+	installed, err := rdb.SetNX(ctx, key, "fresh", recoveryCodeTTL).Result()
+	require.NoError(t, err)
+	require.True(t, installed, "a new recovery begin must be able to install its code")
+}

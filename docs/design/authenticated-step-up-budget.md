@@ -34,8 +34,9 @@ returns 429 with `Retry-After` and
 
 Email recovery has a separate ten-attempt, twenty-four-hour failure budget keyed
 by normalized account email. A new recovery request retains a live code record
-and its attempt count; only a successfully consumed email code clears that
-email's failure budget. Registration uses the pending-registration ID as its
+and its attempt count; the wrong guess that spends a code's fifth attempt
+deletes that record, so the next request can send a new code. Only a
+successfully consumed email code clears that email's failure budget. Registration uses the pending-registration ID as its
 attempt subject through resend and change-email, with attempt state lasting
 until the pending row expires. Resend and change-email share the existing
 two-minute cooldown and four-resend cap. These code budgets do not use the

@@ -3224,11 +3224,16 @@ func commitRecoveryCodeAttempt(ctx context.Context, tx *redis.Tx, redisKey, code
 	}
 	matched := record.Attempts < recoveryMaxAttempts &&
 		subtle.ConstantTimeCompare([]byte(hashRecoveryCode(code)), []byte(record.CodeHash)) == 1
+	if !matched {
+		record.Attempts++
+	}
 	_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		// The guess that spends the last attempt deletes the record rather
+		// than keeping a dead one: RecoveryBegin installs with SETNX, so a kept
+		// record would stop it sending a new code for the rest of its TTL.
 		if matched || record.Attempts >= recoveryMaxAttempts {
 			return pipe.Del(ctx, redisKey).Err()
 		}
-		record.Attempts++
 		updated, err := json.Marshal(record)
 		if err != nil {
 			return err
