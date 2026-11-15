@@ -33,7 +33,8 @@ belongs in it, and write it if the section has none. Do not edit the
 WebSocket event budgets are ready for self-hosted operators and stay off
 until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
-Android.
+Android. Backup-code readers now accept the versioned formats needed for a
+later storage migration.
 
 **22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
 
@@ -102,6 +103,7 @@ Android.
 ### Security
 
 - **Privacy:** Invisible presence now stays indistinguishable from offline in server counts, member activity, and group-DM calls. Profile and transfer details reach only people allowed to see them, and blocking a stranger no longer notifies them.
+- **Authentication:** Backup-code verification and status reads now accept only exact bare SHA-256, `v1$` SHA-256, or bounded `v2$` Argon2id hashes, and fail closed on malformed stored values. New codes still use the bare format until all serving replicas have this reader; the v2 writer and database migration follow in a separate rollout ([#290](https://github.com/Concord-Voice/Self-Hosted/pull/290)).
 - **Registration:** New account requests now reject bodies over 64 KiB and oversized decoded key material before password hashing, and check existing email and username conflicts before expensive work ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **WebSocket:** When client attestation is required, JWT fallback upgrades now validate the session's attestation proof before admitting the socket; the single-use ticket path remains unchanged ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
