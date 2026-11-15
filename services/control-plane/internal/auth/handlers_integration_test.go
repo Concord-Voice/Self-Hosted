@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +34,13 @@ const (
 
 func setupTS(t *testing.T) *testhelpers.TestServer {
 	t.Helper()
-	return testhelpers.SetupTestServer(t)
+	ts := testhelpers.SetupTestServer(t)
+	// Pending rows outlive TruncateAllTables here, and a registration of the
+	// shared test address would otherwise take over a previous test's row and
+	// inherit its resend and attempt state.
+	_, err := ts.DB.Exec(`DELETE FROM pending_registrations`)
+	require.NoError(t, err)
+	return ts
 }
 
 func registerPayload() map[string]interface{} {
@@ -957,6 +965,84 @@ func TestResendCooldown(t *testing.T) {
 	require.Equal(t, "cooldown_active", body.Code)
 }
 
+func TestRegistrationAttemptsSurviveCodeRotation(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	wrong := map[string]string{"pending_id": reg.PendingID, "code": "000000"} //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	var body struct {
+		AttemptsRemaining int `json:"attempts_remaining"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, 2, body.AttemptsRemaining)
+}
+
+func TestRegistrationAttemptsSurviveChangeEmail(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	wrong := map[string]string{"pending_id": reg.PendingID, "code": "000000"} //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{
+		"pending_id": reg.PendingID,
+		"new_email":  "attempts-survive-change@example.com",
+	}, nil).Code)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	var body struct {
+		AttemptsRemaining int `json:"attempts_remaining"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, 2, body.AttemptsRemaining)
+}
+
+func TestRegistrationAttemptKeyOutlivesOriginalCode(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	wrong := map[string]string{"pending_id": reg.PendingID, "code": "000000"} //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+
+	ttl, err := ts.Redis.TTL(context.Background(), "email_verify_attempts:"+reg.PendingID).Result()
+	require.NoError(t, err)
+	assert.Greater(t, ttl, 10*time.Minute, "attempt key must live through the pending row, not the original code")
+	require.NoError(t, ts.Redis.Del(context.Background(), "email_verify:"+reg.PendingID, "test_only:"+reg.PendingID).Err())
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil)
+	require.Equal(t, http.StatusGone, w.Code)
+	exists, err := ts.Redis.Exists(context.Background(), "email_verify_attempts:"+reg.PendingID).Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), exists, "expired-code handling must not reset a live pending registration budget")
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	var body struct {
+		AttemptsRemaining int `json:"attempts_remaining"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, 2, body.AttemptsRemaining)
+}
+
 // --- Change Email Tests ---
 
 func TestChangeEmailMidRegistration(t *testing.T) {
@@ -986,7 +1072,70 @@ func TestChangeEmailMidRegistration(t *testing.T) {
 		`SELECT resend_count FROM pending_registrations WHERE id = $1`,
 		reg.PendingID).Scan(&count)
 	require.NoError(t, err)
-	require.Equal(t, 0, count)
+	require.Equal(t, 1, count)
+}
+
+func TestChangeEmailSharesResendCooldown(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{
+		"pending_id": reg.PendingID,
+		"new_email":  "cooldown-shared@example.com",
+	}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "cooldown_active", body.Code)
+}
+
+func TestChangeEmailAndResendShareMaxResends(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	change := func(email string) {
+		require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{
+			"pending_id": reg.PendingID,
+			"new_email":  email,
+		}, nil).Code)
+	}
+	allowNext := func() {
+		_, err := ts.DB.Exec(`UPDATE pending_registrations SET last_resend_at = NOW() - INTERVAL '3 minutes' WHERE id = $1`, reg.PendingID)
+		require.NoError(t, err)
+	}
+
+	change("shared-cap-one@example.com")
+	allowNext()
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+	allowNext()
+	change("shared-cap-two@example.com")
+	allowNext()
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": reg.PendingID}, nil).Code)
+	allowNext()
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{
+		"pending_id": reg.PendingID,
+		"new_email":  "shared-cap-three@example.com",
+	}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "resends_exhausted", body.Code)
 }
 
 func TestChangeRegistrationEmailRefusesFreshCodeInsideAdvertisedWindow(t *testing.T) {
@@ -1507,4 +1656,170 @@ func TestLogin_PasswordDisabled_NoIdentities_Returns500(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), exists,
 		"sso_account_misconfigured path must not engage per-email lockout — it's a server fault, not a credential failure")
+}
+
+// A re-registration of the same address mints a new pending ID. A password
+// takeover carries the replaced row's attempt count and resend state, so it
+// draws no fresh guesses and no fresh cooldown. Change-email is bounded by the
+// same row's resend cap (TestChangeEmailAndResendShareMaxResends), and a fresh
+// registration still confirms (TestConfirmRegistration_*).
+func TestRegistrationTakeoverCarriesAttemptsAndResendState(t *testing.T) {
+	ts := setupTS(t)
+	register := func() string {
+		w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		var reg struct {
+			PendingID string `json:"pending_id"`
+		}
+		testhelpers.ParseJSON(t, w, &reg)
+		return reg.PendingID
+	}
+	first := register()
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": first}, nil).Code)
+	wrong := map[string]string{"pending_id": first, "code": "000000"} //nolint:gosec // test value, not a credential
+	for i := 0; i < auth.MaxCodeAttempts; i++ {
+		require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+	}
+
+	second := register()
+	require.NotEqual(t, first, second)
+	w := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": second, "code": "000000"}, nil) //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "too_many_attempts", "a takeover must not mint fresh guesses")
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": second}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "cooldown_active", "a takeover must not reset the resend cooldown")
+}
+
+type confirmEvalFaultHook struct{}
+
+func (confirmEvalFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (confirmEvalFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "eval" || cmd.Name() == "evalsha" {
+			err := errors.New("forced attempt reservation failure")
+			cmd.SetErr(err)
+			return err
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (confirmEvalFaultHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// An attempt that cannot be counted is not judged, and the answer says the
+// server is at fault: the budget's 503, not a 500 or a wrong-code 401.
+func TestConfirmRegistrationAttemptReservationFailureIs503(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	ts.Redis.AddHook(confirmEvalFaultHook{})
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": "000000"}, nil) //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "step_up_budget_unavailable")
+}
+
+func registerPendingID(t *testing.T, ts *testhelpers.TestServer) string {
+	t.Helper()
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	return reg.PendingID
+}
+
+// A cancel then register leaves no row to carry state from, so the address's
+// issuance limit is what bounds the codes, and with them the guesses.
+func TestRegistrationIssuanceBoundsCancelThenRegister(t *testing.T) {
+	ts := setupTS(t)
+	for i := 0; i < auth.MaxResends+1; i++ {
+		id := registerPendingID(t, ts)
+		require.Less(t, ts.DoRequest("DELETE", pathRegister+"/"+id, nil, nil).Code, 300)
+	}
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "registration_codes_exhausted")
+}
+
+// Change-email issues a code to the NEW address, so it is charged there.
+func TestChangeEmailChargesTheNewAddressIssuance(t *testing.T) {
+	ts := setupTS(t)
+	id := registerPendingID(t, ts)
+	fresh := "issuance-fresh@example.com"
+	require.NoError(t, ts.Redis.Set(context.Background(), "email_verify_attempts:issued:"+fresh, auth.MaxResends+1, 0).Err())
+
+	w := ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{"pending_id": id, "new_email": fresh}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "registration_codes_exhausted")
+}
+
+// The limit gates issuance only: a correct code already sent still confirms.
+func TestConfirmSucceedsAfterIssuanceLimitIsSpent(t *testing.T) {
+	ts := setupTS(t)
+	id := registerPendingID(t, ts)
+	code := testhelpers.FetchVerificationCode(t, ts, id)
+	require.NoError(t, ts.Redis.Set(context.Background(), "email_verify_attempts:issued:"+testEmail, auth.MaxResends+1, 0).Err())
+
+	w := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{"pending_id": id, "code": code}, nil)
+	require.Less(t, w.Code, 300, w.Body.String())
+}
+
+func issuedCount(t *testing.T, ts *testhelpers.TestServer, email string) int {
+	t.Helper()
+	n, err := ts.Redis.Get(context.Background(), "email_verify_attempts:issued:"+email).Int()
+	if errors.Is(err, redis.Nil) {
+		return 0
+	}
+	require.NoError(t, err)
+	return n
+}
+
+// A change-email that mints no code (no such pending row) must not spend the
+// new address's issuance limit, or anyone could block an address for free.
+func TestChangeEmailWithoutPendingDoesNotSpendIssuance(t *testing.T) {
+	ts := setupTS(t)
+	for i := 0; i < auth.MaxResends+2; i++ {
+		w := ts.DoRequest("POST", "/api/v1/auth/register/change-email",
+			map[string]string{"pending_id": "6f1c1d1e-0000-4000-8000-000000000001", "new_email": testEmail}, nil)
+		require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	}
+	assert.Equal(t, 0, issuedCount(t, ts, testEmail))
+	registerPendingID(t, ts)
+}
+
+// A resend refused by its cooldown sends nothing, so it gives the charge back.
+func TestResendRefusedByCooldownRefundsIssuance(t *testing.T) {
+	ts := setupTS(t)
+	id := registerPendingID(t, ts)
+	w := ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": id}, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, 2, issuedCount(t, ts, testEmail))
+
+	// The cooldown starts at the first resend, so the second is refused.
+	w = ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": id}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "cooldown_active")
+	assert.Equal(t, 2, issuedCount(t, ts, testEmail))
+}
+
+// A failed initial send deletes the pending row and its code, so nothing
+// issued survives it and the charge is returned.
+func TestRegisterSendFailureRefundsIssuance(t *testing.T) {
+	ts := setupRecoverySMTPFailureTS(t, 0)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Equal(t, 0, issuedCount(t, ts, testEmail))
 }
