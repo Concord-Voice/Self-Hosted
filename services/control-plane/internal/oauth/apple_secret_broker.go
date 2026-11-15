@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -62,7 +63,15 @@ func (h *Handler) SignAppleClientSecret(c *gin.Context) {
 	}
 
 	var req signClientSecretRequest
-	if err := c.ShouldBindJSON(&req); err != nil || req.State == "" || len(req.State) > maxStateLength {
+	if err := bindSSORequest(c, &req); err != nil {
+		if errors.Is(err, errSSORequestTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error_code": "request_too_large"})
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_state"})
+		return
+	}
+	if req.State == "" || len(req.State) > maxStateLength {
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_state"})
 		return
 	}

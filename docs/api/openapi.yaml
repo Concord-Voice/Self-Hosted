@@ -1879,7 +1879,8 @@ paths:
         challenge and the identity/session are written only after /auth/mfa/verify. Otherwise the final
         locked transaction rechecks policy and atomically attaches the identity and issues a session.
         The password proof is bound to its credential epoch. JSON and same-site Origin/Fetch Metadata
-        rules apply. Rate limit: 5 requests per 15 minutes (IP-based).
+        rules apply. Request body maximum: 128 KiB; a larger body returns 413
+        (`request_too_large`). Rate limit: 5 requests per 15 minutes (IP-based).
 
         '
       operationId: ssoCompleteLink
@@ -1960,6 +1961,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '413':
+          description: Request body exceeds 128 KiB (`request_too_large`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
         '401':
           description: Invalid sso_token (`sso_token_invalid`) or wrong password (`invalid_credentials`)
           content:
@@ -1996,7 +2003,8 @@ paths:
       description: 'Create the user account (username + passphrase + E2EE key material) from a single-use
         new-user sso_token.
 
-        Rate limit: 5 requests per 15 minutes (IP-based).
+        Request body maximum: 128 KiB; a larger body returns 413
+        (`request_too_large`). Rate limit: 5 requests per 15 minutes (IP-based).
 
         '
       operationId: ssoCompleteRegistration
@@ -2058,6 +2066,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '413':
+          description: Request body exceeds 128 KiB (`request_too_large`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
         '401':
           description: Invalid, expired, or already-used sso_token (`sso_token_invalid`)
           content:
@@ -2093,7 +2107,8 @@ paths:
         provider. The X-Concord-SSO-Client-Binding header must exactly match the value sent at
         initiation; missing, malformed, or mismatched values consume state and return the same
         opaque `invalid_state` error before provider-token work. Rate limit: 10 requests per 15
-        minutes (IP-based).
+        minutes (IP-based). Request body maximum: 128 KiB; a larger body returns
+        413 (`request_too_large`).
 
         '
       operationId: ssoProviderSession
@@ -2224,6 +2239,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '413':
+          description: Request body exceeds 128 KiB (`request_too_large`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
         '401':
           description: State validation failed (`invalid_state` — restart the flow) or id_token verification
             failed (`invalid_id_token` — never retry this token)
@@ -2258,7 +2279,8 @@ paths:
 
         Authorized by a valid, unconsumed sso_state (one-shot); only provider=apple is accepted.
 
-        Rate limit: 5 requests per minute (IP-based).
+        Request body maximum: 128 KiB; a larger body returns 413
+        (`request_too_large`). Rate limit: 5 requests per minute (IP-based).
 
         '
       operationId: ssoSignAppleClientSecret
@@ -2299,6 +2321,12 @@ paths:
                     description: Seconds until the minted client_secret expires
         '401':
           description: Uniform rejection for any invalid/expired/replayed state (`invalid_state`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '413':
+          description: Request body exceeds 128 KiB (`request_too_large`)
           content:
             application/json:
               schema:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -61,7 +62,15 @@ func (h *Handler) ProviderSession(c *gin.Context) {
 	}
 
 	var req appleSessionRequest
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.State) > maxStateLength {
+	if err := bindSSORequest(c, &req); err != nil {
+		if errors.Is(err, errSSORequestTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error_code": "request_too_large"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
+	if len(req.State) > maxStateLength {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
 		return
 	}

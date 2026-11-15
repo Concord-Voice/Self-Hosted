@@ -941,7 +941,11 @@ type completeRegistrationRequest struct {
 // leak to the response body.
 func (h *Handler) CompleteRegistration(c *gin.Context) {
 	var req completeRegistrationRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindSSORequest(c, &req); err != nil {
+		if errors.Is(err, errSSORequestTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error_code": "request_too_large"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
 		return
 	}
@@ -1101,7 +1105,11 @@ type completeLinkRequest struct {
 // one transaction, so a reset that advances the epoch leaves neither behind.
 func (h *Handler) CompleteLink(c *gin.Context) {
 	var req completeLinkRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindSSORequest(c, &req); err != nil {
+		if errors.Is(err, errSSORequestTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error_code": "request_too_large"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
 		return
 	}
