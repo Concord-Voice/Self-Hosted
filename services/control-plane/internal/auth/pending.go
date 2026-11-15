@@ -355,11 +355,14 @@ func (r *PendingRepo) RevertResend(ctx context.Context, id string) error {
 }
 
 // RevertResendIfCurrent reverses only the reservation identified by its count
-// and timestamp, so a delayed email failure cannot undo a later resend.
+// and timestamp, so a delayed email failure cannot undo a later resend. It
+// returns the count and keeps last_resend_at: a send that failed, or timed out
+// after it was delivered, still starts the cooldown, so a failing mail path
+// cannot be driven at full speed by retrying.
 func (r *PendingRepo) RevertResendIfCurrent(ctx context.Context, id string, count int, reservedAt time.Time) (bool, error) {
 	result, err := r.db.ExecContext(ctx,
 		`UPDATE pending_registrations
-		    SET resend_count = GREATEST(resend_count - 1, 0), last_resend_at = NULL
+		    SET resend_count = GREATEST(resend_count - 1, 0)
 		  WHERE id = $1 AND resend_count = $2 AND last_resend_at = $3`,
 		id, count, reservedAt,
 	)

@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -224,6 +225,37 @@ func TestRevertResendIfCurrentPreservesLaterReservation(t *testing.T) {
 	).Scan(&storedCount, &storedAt))
 	assert.Equal(t, count+1, storedCount)
 	assert.True(t, storedAt.After(reservedAt))
+}
+
+// A reverted reservation returns its count but keeps last_resend_at, so the
+// cooldown still runs after a failed send.
+func TestRevertResendIfCurrentRestoresCountAndKeepsCooldown(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	repo := auth.NewPendingRepo(ts.DB)
+	ctx := context.Background()
+	id, _, _, err := repo.InsertOrTakeover(ctx,
+		insertPendingParams(t, "revert-success@test.concord.chat", "revertsuccess", "TestPassword123!"),
+		"TestPassword123!",
+	)
+	require.NoError(t, err)
+	count, reservedAt, err := repo.IncrementResend(ctx, id)
+	require.NoError(t, err)
+
+	reverted, err := repo.RevertResendIfCurrent(ctx, id, count, reservedAt)
+	require.NoError(t, err)
+	require.True(t, reverted)
+
+	var storedCount int
+	var storedAt sql.NullTime
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT resend_count, last_resend_at FROM pending_registrations WHERE id = $1`, id,
+	).Scan(&storedCount, &storedAt))
+	assert.Equal(t, count-1, storedCount, "the failed send's reservation is returned")
+	require.True(t, storedAt.Valid, "the cooldown timestamp is kept")
+	assert.True(t, storedAt.Time.Equal(reservedAt))
+
+	_, _, err = repo.IncrementResend(ctx, id)
+	assert.ErrorIs(t, err, auth.ErrResendCooldown, "a retry right after a failed send still waits out the cooldown")
 }
 
 // TestInsertOrTakeover_UsesPolicyTTL regresses Copilot comment 3104406713:
