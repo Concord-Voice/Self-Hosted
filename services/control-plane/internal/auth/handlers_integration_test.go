@@ -91,6 +91,37 @@ func TestRegisterCreatesPendingNotUser(t *testing.T) {
 	assert.Equal(t, 1, pendingCount)
 }
 
+func TestRegisterDoesNotLogPendingID(t *testing.T) {
+	ts := setupTS(t)
+	logs := ts.CaptureLogs(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var body struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, logs.String(), "Pending registration created")
+	assert.NotContains(t, logs.String(), body.PendingID)
+}
+
+func TestConfirmRegistrationCanonicalizesPendingID(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var body struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	code := testhelpers.FetchVerificationCode(t, ts, strings.ToUpper(body.PendingID))
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": strings.ToUpper(body.PendingID),
+		"code":       code,
+	}, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
 // TestRegisterTakeoverByEmailMatch verifies that a second registration with
 // the SAME email+password replaces the earlier pending row (takeover flow).
 func TestRegisterTakeoverByEmailMatch(t *testing.T) {
@@ -826,6 +857,37 @@ func TestResendRegistrationCode(t *testing.T) {
 
 	secondCode := testhelpers.FetchVerificationCode(t, ts, reg.PendingID)
 	require.NotEqual(t, firstCode, secondCode)
+
+	w3 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": secondCode}, nil)
+	require.Equal(t, http.StatusOK, w3.Code)
+}
+
+func TestConfirmRegistrationAcceptsLegacyRecordAfterResend(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	code := testhelpers.FetchVerificationCode(t, ts, reg.PendingID)
+	raw, err := ts.Redis.Get(context.Background(), "email_verify:"+reg.PendingID).Result()
+	require.NoError(t, err)
+	require.NotContains(t, raw, "resend_count")
+
+	// Older binaries stored no generation in Redis. Model an in-flight resend
+	// from that binary: its verification record is current while the SQL count is 1.
+	_, err = ts.DB.ExecContext(context.Background(),
+		`UPDATE pending_registrations
+		    SET resend_count = 1, last_resend_at = NOW()
+		  WHERE id = $1`, reg.PendingID,
+	)
+	require.NoError(t, err)
+
+	confirmed := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": code}, nil)
+	require.Equal(t, http.StatusOK, confirmed.Code)
 }
 
 func TestResendRegistrationCodeExtendsPendingExpiryToCodeExpiry(t *testing.T) {
