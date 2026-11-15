@@ -3205,6 +3205,9 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 		return
 	}
 	if !installed {
+		// A live code already exists for this address: send nothing new, and
+		// answer exactly as a send would (anti-enumeration). No PII is logged.
+		h.log.Info("Recovery code already pending; no new code sent")
 		c.JSON(http.StatusOK, successMsg)
 		return
 	}
