@@ -103,7 +103,7 @@ deployment-specific mTLS authenticates the TLS peer before nginx considers
 `CF-Connecting-IP`; the all-address setting must never appear without that
 client-certificate requirement. Static tests enforce this complete group and
 its placement in the API/apex and managed admin TLS servers. The admin vhost
-also binds TLS SNI to its HTTP Host so a direct-media connection cannot route
+also binds TLS SNI to its configured server name so a direct-media connection cannot route
 into an admin request without the admin client-certificate policy.
 
 The AOP CA is a root-owned regular file at the fixed nginx path. It is public
@@ -283,7 +283,7 @@ These are one contract and change together:
 | Media admission gate | Continues matching the compiled list; untrusted peers use their socket peer |
 | nginx user/API/media/admin locations | Both client-address headers overwrite with `$remote_addr` |
 | API/apex Cloudflare provenance | `direct` removes the marker; `cloudflare-aop` injects custom-AOP mTLS before real-IP restoration |
-| Managed API/admin renderers | Require the same custom-AOP fragment and validated public CA; admin binds SNI to Host |
+| Managed API/admin renderers | Require the same custom-AOP fragment and validated public CA; admin binds SNI to its configured name |
 | Examples and operator docs | Exact-route semantics and migration behavior |
 
 The callers of `c.ClientIP()` do not change. Tests at login, recovery,

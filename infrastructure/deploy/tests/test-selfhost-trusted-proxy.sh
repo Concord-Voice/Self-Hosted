@@ -41,7 +41,7 @@ check_headers(admin, "admin vhost")
 assert vhost.count("    # CONCORD_CLIENT_IP_PROVENANCE") == 1, "client-IP provenance marker must be API-only and unique"
 assert "# HTTPS — Media Plane" in vhost and vhost.index("CONCORD_CLIENT_IP_PROVENANCE") < vhost.index("# HTTPS — Media Plane"), "media must not receive AOP"
 assert admin.count("    # CONCORD_ADMIN_CLIENT_IP_PROVENANCE") == 1, "admin client-IP provenance marker must be unique"
-assert "if ($ssl_server_name != $host) { return 444; }" in admin, "admin must bind TLS SNI to HTTP Host before AOP real-IP restoration"
+assert "if ($ssl_server_name != $server_name) { return 444; }" in admin, "admin must bind TLS SNI to its configured server name before AOP real-IP restoration"
 admin_renderer = re.search(r"(?ms)^    render_admin_config\(\) \{(.*?)^    \}", ctl)
 assert admin_renderer, "managed admin renderer missing"
 assert 'validate_aop_fragment && aop_ca_safe || return 1' in admin_renderer.group(1), "admin renderer must fail closed unless the complete AOP fragment and fixed CA validate"
@@ -268,7 +268,7 @@ http {{
         set_real_ip_from ::/0;
         real_ip_header CF-Connecting-IP;
         real_ip_recursive off;
-        if ($ssl_server_name != $host) {{ return 444; }}
+        if ($ssl_server_name != $server_name) {{ return 444; }}
         location / {{ return 204; }}
     }}
 }}

@@ -1886,7 +1886,7 @@ For proxy provenance, the installer writes only placeholders for `TRUSTED_PROXY_
 For Cloudflare-proxied API/apex and managed admin traffic, nginx restores `CF-Connecting-IP` only
 in explicit `cloudflare-aop` mode after it verifies a deployment-specific
 Authenticated Origin Pull client certificate against a fixed root-owned public
-CA bundle. The admin vhost also binds TLS SNI to HTTP Host. The self-host `direct` default and the direct media vhost do not
+CA bundle. The admin vhost also binds TLS SNI to its configured server name. The self-host `direct` default and the direct media vhost do not
 restore that header. The managed nginx renderer requires the same provenance
 fragment and fails closed when its CA prerequisite is absent or unsafe. Source
 merge does not configure Cloudflare or prove that the custom certificate,
