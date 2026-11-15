@@ -1697,3 +1697,50 @@ func TestConfirmRegistrationAttemptReservationFailureIs503(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
 	assert.Contains(t, w.Body.String(), "step_up_budget_unavailable")
 }
+
+func registerPendingID(t *testing.T, ts *testhelpers.TestServer) string {
+	t.Helper()
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+	return reg.PendingID
+}
+
+// A cancel then register leaves no row to carry state from, so the address's
+// issuance limit is what bounds the codes, and with them the guesses.
+func TestRegistrationIssuanceBoundsCancelThenRegister(t *testing.T) {
+	ts := setupTS(t)
+	for i := 0; i < auth.MaxResends+1; i++ {
+		id := registerPendingID(t, ts)
+		require.Less(t, ts.DoRequest("DELETE", pathRegister+"/"+id, nil, nil).Code, 300)
+	}
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "registration_codes_exhausted")
+}
+
+// Change-email issues a code to the NEW address, so it is charged there.
+func TestChangeEmailChargesTheNewAddressIssuance(t *testing.T) {
+	ts := setupTS(t)
+	id := registerPendingID(t, ts)
+	fresh := "issuance-fresh@example.com"
+	require.NoError(t, ts.Redis.Set(context.Background(), "email_verify_attempts:issued:"+fresh, auth.MaxResends+1, 0).Err())
+
+	w := ts.DoRequest("POST", "/api/v1/auth/register/change-email", map[string]string{"pending_id": id, "new_email": fresh}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "registration_codes_exhausted")
+}
+
+// The limit gates issuance only: a correct code already sent still confirms.
+func TestConfirmSucceedsAfterIssuanceLimitIsSpent(t *testing.T) {
+	ts := setupTS(t)
+	id := registerPendingID(t, ts)
+	code := testhelpers.FetchVerificationCode(t, ts, id)
+	require.NoError(t, ts.Redis.Set(context.Background(), "email_verify_attempts:issued:"+testEmail, auth.MaxResends+1, 0).Err())
+
+	w := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{"pending_id": id, "code": code}, nil)
+	require.Less(t, w.Code, 300, w.Body.String())
+}

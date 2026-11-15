@@ -25,6 +25,19 @@ hours. Keying the budget to a live challenge, or resetting it on recovery begin,
 would let a caller reissue challenges and restart guessing, so the account-wide
 bound stays. The per-IP limit is a separate bound, not this defense.
 
+**Registration code issuance:** each registration code admits four guesses, and
+a password takeover of a pending registration carries the replaced row's
+attempt count and resend state into the new row. A cancel then register leaves
+no row to carry from, so every code-issuing path (register, resend, and
+change-email for the new address) charges a per-address issuance limit of the
+initial code plus the resend cap per pending lifetime, keyed by normalized
+email. It gates issuance only: a confirm of a code already sent is never
+refused because of it. An unavailable store fails closed with 503. Accepted
+trade-off: anyone who knows an address can spend this limit and delay that
+address's registration for up to the pending TTL. The account-wide bound stays
+for the same reason as recovery's: a limit tied to a pending row would let a
+caller cancel, re-register and restart guessing.
+
 #2553 assumes CP user authentication is sound (ADR-0045 decision-table row D21, `0045:672`) and freezes its protocol-v1 contract at #3587 PR-A, so any factor this design needs must be named first.
 
 Two hard constraints pull against each other. An attacker who changed the password or email must not lock the owner out or stop the owner's recovery. And an intimate-partner abuser who knows the old password or shares the mailbox must be cut off quickly, with no delay that shields the abuser. When owner and attacker hold the same credentials, no rule over credentials alone can separate them: the two cases are mirror images.

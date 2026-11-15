@@ -547,6 +547,9 @@ func (h *Handler) Register(c *gin.Context) {
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
 	normalizedUsername := NormalizeUsername(req.Username)
+	if !h.allowRegistrationIssuance(c.Request.Context(), c, normalizedEmail) {
+		return
+	}
 
 	pendingID, expiresAt, takenOverID, err := h.pending.InsertOrTakeover(
 		c.Request.Context(),
@@ -824,6 +827,41 @@ func (h *Handler) validateConfirmRequest(c *gin.Context) (*ConfirmRegistrationRe
 	return &req, sanitized, true
 }
 
+// registrationIssuanceKey keys the per-address count of registration codes
+// issued. It sits under the email_verify_attempts: prefix the Redis ACL
+// already grants, and "issued:" can never collide with a pending UUID.
+func registrationIssuanceKey(email string) string {
+	return "email_verify_attempts:issued:" + strings.ToLower(strings.TrimSpace(email))
+}
+
+// registrationIssuanceLimit is how many codes one address may be issued in a
+// pending row's lifetime: the initial code plus MaxResends, the most one
+// pending row can issue.
+const registrationIssuanceLimit = MaxResends + 1
+
+// allowRegistrationIssuance charges one code issuance to an address, on every
+// code-issuing path (register, resend, change-email to the new address),
+// before the code is minted. Guesses are bounded per code, and a cancel then
+// register leaves no row to carry state from; bounding issuance per address
+// bounds the total guesses an address can draw. It gates issuance only: a
+// confirm of a code already sent is never refused because of it. Accepted
+// trade-off (ADR-0046): anyone who knows an address can spend this limit and
+// delay its registration for up to the pending TTL. It fails closed: a Redis
+// error is a 503.
+func (h *Handler) allowRegistrationIssuance(ctx context.Context, c *gin.Context, email string) bool {
+	allowed, err := middleware.AllowUserAction(ctx, h.redis, registrationIssuanceKey(email), registrationIssuanceLimit, PendingRegistrationTTL)
+	if err != nil {
+		h.log.Error("register: code issuance limit unavailable", "error", err)
+		writeRegistrationAttemptsUnavailable(c)
+		return false
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": "registration_codes_exhausted"})
+		return false
+	}
+	return true
+}
+
 // carryVerificationAttemptsLua copies a taken-over pending row's attempt
 // count, with its remaining lifetime, to the row that replaced it.
 const carryVerificationAttemptsLua = `
@@ -1056,6 +1094,9 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 		return
 	}
 
+	if !h.allowRegistrationIssuance(ctx, c, pending.Email) {
+		return
+	}
 	newCount, reservedAt, err := h.pending.IncrementResend(ctx, pending.ID)
 	if err != nil {
 		switch {
@@ -1111,6 +1152,9 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
+	if !h.allowRegistrationIssuance(ctx, c, req.NewEmail) {
+		return
+	}
 
 	reservedCount, reservedAt, err := h.pending.updateEmail(ctx, req.PendingID, req.NewEmail)
 	if err != nil {
