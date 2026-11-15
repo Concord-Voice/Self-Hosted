@@ -12,6 +12,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -110,4 +111,63 @@ func TestBudget_ClearResetsAndReportsFailure(t *testing.T) {
 
 func TestBudget_KeyIsPrefixPlusUser(t *testing.T) {
 	require.Equal(t, "stepup:mfa_settings:abc", NewBudget(nil, "stepup:mfa_settings:").Key("abc"))
+}
+
+// pttlHook rewrites the spent-budget PTTL read: an error, or a non-positive
+// value (the key expired, or lost its expiry, between the INCR and the read).
+type pttlHook struct {
+	err error
+	val time.Duration
+}
+
+func (pttlHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h pttlHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() != "pttl" {
+			return next(ctx, cmd)
+		}
+		if h.err != nil {
+			cmd.SetErr(h.err)
+			return h.err
+		}
+		if d, ok := cmd.(*redis.DurationCmd); ok {
+			d.SetVal(h.val)
+		}
+		return nil
+	}
+}
+
+func (pttlHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// A spent budget whose remaining window cannot be read is a server fault: a
+// 503 with Cause and no Retry-After, never a 429 with a made-up delay.
+func TestBudget_SpentWithUnreadableWindowIs503(t *testing.T) {
+	for name, hook := range map[string]pttlHook{
+		"PTTL error":        {err: errors.New("pttl unavailable")},
+		"key without TTL":   {val: -1},
+		"key already gone":  {val: -2},
+		"zero remaining ms": {val: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rdb, _ := newBudgetRedis(t)
+			b := NewBudget(rdb, "stepup:test_pttl:")
+			ctx := context.Background()
+			require.NoError(t, rdb.Set(ctx, b.Key("u1"), BudgetLimit, BudgetWindow).Err())
+			rdb.AddHook(hook)
+
+			e := b.Consume(ctx, "u1")
+			require.NotNil(t, e)
+			assert.Equal(t, http.StatusServiceUnavailable, e.Status)
+			assert.Equal(t, true, e.Body["step_up_budget_unavailable"])
+			require.Error(t, e.Cause)
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			e.Write(c)
+			assert.Empty(t, w.Header().Get("Retry-After"))
+		})
+	}
 }
