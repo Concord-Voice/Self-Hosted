@@ -7831,8 +7831,8 @@ else:
       # value first is still required: nginx metacharacters must never reach a
       # generated directive. Accept only an ordinary DNS hostname here.
       if [[ -z "$admin_domain" \
-         || ! "$admin_domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]; then
-        echo "  ✗ nginx-reload: ADMIN_WEBAUTHN_RP_ID must be a valid FQDN — REFUSING to stage nginx" >&2
+         || ! "$admin_domain" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]]; then
+        echo "  ✗ nginx-reload: ADMIN_WEBAUTHN_RP_ID must be a lowercase FQDN — REFUSING to stage nginx" >&2
         exit 1
       fi
       if [[ ! -e "$ADMIN_ORIGIN_CERT" || ! -e "$ADMIN_ORIGIN_KEY" ]]; then
