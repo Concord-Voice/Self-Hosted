@@ -441,8 +441,7 @@ func (h *Hub) completeClientPresenceBootstrap(
 		client,
 		func(publish func([]byte) error) error {
 			return h.finalizeClientActivitySnapshot(
-				ctx, client.UserID, seed, base, activity, publish,
-				client.setPresenceSnapshotCoverage, client.setRichPresenceSnapshot,
+				ctx, client, seed, base, activity, publish,
 			)
 		},
 		func() error { return h.sendCustomTextSnapshot(ctx, client) },
@@ -451,23 +450,22 @@ func (h *Hub) completeClientPresenceBootstrap(
 
 func (h *Hub) finalizeClientActivitySnapshot(
 	ctx context.Context,
-	viewerID uuid.UUID,
+	client *Client,
 	seed presenceSnapshotSeed,
 	base map[uuid.UUID]string,
 	activity presence.ActivitySnapshot,
 	publish func([]byte) error,
-	coverage func(omitted, covered map[uuid.UUID]struct{}),
-	richPresenceCoverage func(map[richPresenceDeliveryKey]struct{}),
 ) error {
 	publishActivity := func(finalized presence.ActivitySnapshot) error {
 		return h.publishClientPresenceSnapshot(
-			ctx, seed, base, finalized, publish, coverage, richPresenceCoverage,
+			ctx, seed, base, finalized, publish,
+			client.setPresenceSnapshotCoverage, client.setRichPresenceSnapshot,
 		)
 	}
 	if h.activitySnapshotFinalize == nil {
 		return publishActivity(activity)
 	}
-	return h.activitySnapshotFinalize(ctx, viewerID, activity, publishActivity)
+	return h.activitySnapshotFinalize(ctx, client.UserID, activity, publishActivity)
 }
 
 func (h *Hub) publishClientPresenceSnapshot(
