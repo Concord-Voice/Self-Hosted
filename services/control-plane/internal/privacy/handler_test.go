@@ -116,6 +116,15 @@ func TestNewHandler_ToleratesNilLogger(t *testing.T) {
 	})
 }
 
+func TestOwnedServerPreviewFailsClosedWithoutReader(t *testing.T) {
+	h := privacy.NewHandler(&stubAccountDeleter{}, nil, logger.New("test"))
+	c, w := newTestContext(t, "", "preview-user")
+	c.Request.Method = http.MethodGet
+	h.ListOwnedServers(c)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.JSONEq(t, `{"error":"owned_server_list_unavailable"}`, w.Body.String())
+}
+
 func TestEraseAccount_Returns401WhenUserIDMissing(t *testing.T) {
 	stub := &stubAccountDeleter{}
 	h := privacy.NewHandler(stub, nil, logger.New("test"))

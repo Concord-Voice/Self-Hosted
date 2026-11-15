@@ -22,6 +22,31 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
 )
 
+func TestErasureOwnedServersPreviewAllowsPendingEmailAndLimitsDisclosure(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	owner := ts.CreateTestUserUnverified(t, "erasepreviewowner")
+	other := ts.CreateTestUser(t, "erasepreviewother")
+	protectedID := ts.CreateTestServer(t, owner.ID, "protected")
+	ts.AddMemberToServer(t, protectedID, other.ID, "member")
+	ts.CreateTestServer(t, owner.ID, "solo")
+	foreignID := ts.CreateTestServer(t, other.ID, "foreign")
+	ts.AddMemberToServer(t, foreignID, owner.ID, "member")
+
+	path := "/api/v1/privacy/erase-account/owned-servers"
+	w := ts.DoRequest(http.MethodGet, path, nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.JSONEq(t, `{"servers":[{"id":"`+protectedID+`","name":"protected","member_count":2}]}`, w.Body.String())
+
+	w = ts.DoRequest(http.MethodGet, "/api/v1/servers", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusForbidden, w.Code, "the general server list remains verified-only")
+	w = ts.DoRequest(http.MethodGet, path, nil, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	empty := ts.CreateTestUserUnverified(t, "erasepreviewempty")
+	w = ts.DoRequest(http.MethodGet, path, nil, testhelpers.AuthHeaders(empty.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"servers":[]}`, w.Body.String())
+}
+
 // TestEraseAccount_Integration_HappyPath performs a full end-to-end erasure:
 // creates a test user via the testhelpers, sends POST /api/v1/privacy/erase-account
 // through the full router stack, then asserts that the user row is gone and

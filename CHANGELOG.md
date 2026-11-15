@@ -39,6 +39,8 @@ Android.
 
 ### Added
 
+- **Privacy:** The account-erasure screen can preview owned servers with other members before email verification, so users can review the servers they must acknowledge before deletion.
+
 - **Operations:** Added a default-off control-plane blue-green rail to `concord-ctl.sh` (`CONTROL_PLANE_DEPLOY_PROFILE=control-plane-bluegreen`, managed production and staging only, never self-host) that rebuilds the control plane without 502s when no migration is pending, plus a read-only `control-plane migrations status` subcommand and a `MIGRATIONS_MODE=verify` startup setting that refuses to start on a schema that is not current. Do not turn the rail on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 ship.
 - **Authentication:** Added `authority-ceremony`, an operator tool that signs account-key authority delegations and successions with two hardware keys, or with two key files on a self-hosted install (`--key-file`, `--yes`). It also writes a realm's anchors file (`make-anchors`) and prints a trust file's current delegation window (`show-trust`). Nothing runs it yet.
 - **Authentication:** Added dormant checks to the account-key authority contract that refuse a delegation or succession before it is signed when clients would ignore it, halt on it, or see its cutover or supersession move backward. Nothing calls them yet.

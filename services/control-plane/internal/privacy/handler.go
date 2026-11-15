@@ -3,6 +3,7 @@ package privacy
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 // Handler exposes the privacy erasure endpoints.
 type Handler struct {
 	account            users.AccountDeleter
+	ownedServersDB     *sql.DB
 	redis              *redis.Client
 	log                *logger.Logger
 	erasureEmailSender ErasureEmailSender
@@ -58,6 +60,55 @@ func NewHandler(account users.AccountDeleter, redisClient *redis.Client, log *lo
 
 // SetErasureEmailSender wires delivery for unverified-email erasure intents.
 func (h *Handler) SetErasureEmailSender(sender ErasureEmailSender) { h.erasureEmailSender = sender }
+
+// SetOwnedServersDB wires the read-only erasure acknowledgement preview.
+func (h *Handler) SetOwnedServersDB(db *sql.DB) { h.ownedServersDB = db }
+
+type ownedServerPreview struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	MemberCount int64  `json:"member_count"`
+}
+
+// ListOwnedServers previews only the owned servers that erasure requires the
+// user to acknowledge. Erasure rechecks and locks this set before deletion.
+func (h *Handler) ListOwnedServers(c *gin.Context) {
+	actorID, err := uuid.Parse(c.GetString("user_id"))
+	if err != nil || h.ownedServersDB == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "owned_server_list_unavailable"})
+		return
+	}
+	rows, err := h.ownedServersDB.QueryContext(c.Request.Context(), `
+		SELECT s.id, s.name,
+			(SELECT COUNT(*) FROM server_members m WHERE m.server_id = s.id)
+		FROM servers s
+		WHERE s.owner_id = $1
+			AND EXISTS (SELECT 1 FROM server_members m WHERE m.server_id = s.id AND m.user_id <> $1)
+		ORDER BY s.id`, actorID)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "owned_server_list_unavailable"})
+		return
+	}
+	servers := make([]ownedServerPreview, 0)
+	for rows.Next() {
+		var server ownedServerPreview
+		if err = rows.Scan(&server.ID, &server.Name, &server.MemberCount); err != nil {
+			break
+		}
+		servers = append(servers, server)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	if closeErr := rows.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "owned_server_list_unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"servers": servers})
+}
 
 const maxEraseAccountRequestBytes int64 = 8192
 
