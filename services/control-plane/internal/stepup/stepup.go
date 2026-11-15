@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
@@ -145,6 +146,10 @@ type Error struct {
 	// reason tags a refusal a caller must tell apart for telemetry without
 	// reading the body text. Never serialized.
 	reason refusalReason
+
+	// retryAfterSeconds is emitted only for temporary budget exhaustion. It is
+	// intentionally not part of the JSON response body.
+	retryAfterSeconds int
 }
 
 // refusalReason is the closed set of refusals a caller may need to classify.
@@ -170,7 +175,12 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.Cause }
 
 // Write emits the error onto a gin context.
-func (e *Error) Write(c *gin.Context) { c.JSON(e.Status, e.Body) }
+func (e *Error) Write(c *gin.Context) {
+	if e.retryAfterSeconds > 0 {
+		c.Header("Retry-After", strconv.Itoa(e.retryAfterSeconds))
+	}
+	c.JSON(e.Status, e.Body)
+}
 
 // Subject is the account state a step-up decision is made against. Build it
 // with LoadSubject (no transaction) or LockSubjectTx (inside the write

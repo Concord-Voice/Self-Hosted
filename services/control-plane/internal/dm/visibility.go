@@ -124,7 +124,7 @@ func (h *Handler) ClearConversation(c *gin.Context) {
 		return
 	}
 	userID, convID := actorID.String(), conversationID.String()
-	req, ok := bindClearRequest(c)
+	req, ok := h.admitClearRequest(c, userID)
 	if !ok {
 		return
 	}
@@ -179,11 +179,52 @@ func (h *Handler) ClearConversation(c *gin.Context) {
 			return
 		}
 	}
+	h.settleClearBudget(c, userID, requireAuth, subject)
 	if h.afterDMVisibilityCommitHook != nil {
 		h.afterDMVisibilityCommitHook()
 	}
 	h.emitDMVisibility(userID, "dm_conversation_cleared", convID, "cleared_at", &cutoff)
 	c.JSON(http.StatusOK, gin.H{"conversation_id": convID, "cleared_at": cutoff})
+}
+
+// admitClearRequest binds the body and charges the shared dangerous-action
+// MFA budget for a request that carries an MFA code. The charge runs here,
+// before the publication lock and BeginTx, so no Redis round trip happens
+// while a transaction is open, and whatever the actor's
+// require_auth_before_purge setting says: that setting is read under the
+// transaction's lock, and deciding from an unlocked read would fail open.
+// Only the MFA code is a guess against this budget: a password step-up token
+// carries a password that was guessed at its mint, under the account lockout.
+// On refusal it has written the response.
+func (h *Handler) admitClearRequest(c *gin.Context, userID string) (clearConversationRequest, bool) {
+	req, ok := bindClearRequest(c)
+	if !ok {
+		return req, false
+	}
+	if e := stepup.Charge(c.Request.Context(), stepup.DangerousActionBudget(h.redis), userID, req.MFACode); e != nil {
+		h.logClearStepUpFailure(e)
+		e.Write(c)
+		return req, false
+	}
+	return req, true
+}
+
+// settleClearBudget resets the dangerous-action MFA budget after a committed
+// Clear in which an MFA code was actually verified: the setting required
+// step-up and the locked subject has inline MFA, which is the only arm of
+// VerifyOwnRuleTx that spends a code. It runs on a context detached from the
+// request, so a client that hangs up after the commit cannot cancel it.
+// Best-effort: a failure leaves the counter high, which fails toward more
+// limiting.
+func (h *Handler) settleClearBudget(c *gin.Context, userID string, requireAuth bool, subject stepup.Subject) {
+	if !requireAuth || !subject.MFAEnabled {
+		return
+	}
+	ctx, cancel := stepup.SettleContext(c.Request.Context())
+	defer cancel()
+	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, userID); err != nil {
+		h.log.Warn("Could not reset the DM-clear MFA budget after a successful clear", "user_id", userID, "error", err)
+	}
 }
 
 // bindClearRequest applies the bounded strict-JSON body rule (backend.md § Gin

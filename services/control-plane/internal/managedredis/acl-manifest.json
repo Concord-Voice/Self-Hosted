@@ -93,6 +93,7 @@
         "login_lockout_count:*",
         "recovery_code:*",
         "recovery_token_used:*",
+        "recovery_fail:*",
         "ws_ticket:*",
         "mfa_upgrade_bypass:*",
         "mfa_challenge:*:remember_me",

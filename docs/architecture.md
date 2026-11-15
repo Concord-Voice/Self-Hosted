@@ -54,6 +54,7 @@ Concord Voice is a distributed real-time communications platform with three serv
 - WebSocket hub for real-time messaging and presence
 - DM system (8 tables, E2EE with key-epoch enforcement)
 - MFA (TOTP, WebAuthn), email verification, ownership transfer
+- Redis-backed per-account MFA step-up attempt budget shared by session, account-security, ownership, and DM-purge actions; exhaustion returns 429 and unavailable checks fail closed
 - API route registrations across 20+ route groups. Generated counts are checked by `scripts/update-claude-md-counts.sh`
 
 #### Media Plane (Node.js + mediasoup, port 3000)
