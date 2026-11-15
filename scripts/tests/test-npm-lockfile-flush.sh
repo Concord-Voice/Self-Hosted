@@ -430,7 +430,10 @@ grep -qF -- '--author app/dependabot' <<<"$GUARD_JOB" \
   || bad "the contention guard must ignore PRs not opened by Dependabot from this repository"
 
 for job in guard refresh open-pr; do
-  if job_block "$job" | grep -qE '^    permissions:$' && job_block "$job" | grep -qxF '      contents: read'; then
+  # Capture first: `job_block | grep -q` exits on the first match, awk takes
+  # SIGPIPE, and pipefail turns a match into a failure.
+  BLOCK=$(job_block "$job")
+  if grep -qE '^    permissions:$' <<<"$BLOCK" && grep -qxF '      contents: read' <<<"$BLOCK"; then
     ok "the $job job declares contents: read"
   else
     bad "the $job job must declare its own permissions with contents: read"
