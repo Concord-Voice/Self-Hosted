@@ -841,8 +841,9 @@ go test -race -p 1 ./internal/oauth ./internal/auth ./internal/mfa -run 'Test.*(
 
 SSO initiation keeps the per-IP 10/15-minute cap and adds a fail-closed
 600/minute budget per provider before state or Apple bridge allocation.
-Registration rejects encoded wrapped keys above 16,384 characters or salts
-above 1,024 characters, and decoded values above 12,288 or 768 bytes.
+Password and SSO registration reject encoded wrapped keys above 43,692 characters
+or salts above 88 characters, and decoded values above 32 KiB or 64 bytes,
+respectively.
 Provider JWKS snapshots replace withdrawn keys; an unknown key ID gets at most
 one refresh opportunity per provider per minute, including failed fetches.
 That bound may delay use of a newly rotated key for up to a minute.

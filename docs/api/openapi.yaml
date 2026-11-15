@@ -783,7 +783,7 @@ paths:
                       format: uuid
           headers:
             Set-Cookie:
-              description: HttpOnly refresh token cookie (login purpose only)
+              description: HttpOnly refresh token cookie for login or SSO account-link MFA completion
               schema:
                 type: string
             X-Concord-Session-Issued:
@@ -793,7 +793,7 @@ paths:
                 enum:
                 - 'true'
             X-Concord-Session-ID:
-              description: Refresh-session UUID for login-purpose MFA completion only
+              description: Refresh-session UUID for login or SSO account-link MFA completion
               schema:
                 type: string
                 format: uuid
