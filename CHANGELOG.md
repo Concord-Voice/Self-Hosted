@@ -71,6 +71,7 @@ later storage migration.
 
 ### Security
 
+- **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include recovery email addresses, client IP addresses, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
@@ -103,10 +104,13 @@ later storage migration.
 
 ### Security
 
+- **Privacy:** Invisible presence now stays indistinguishable from offline in server counts, member timestamps, and group-DM calls. Member `last_seen` is available only on your own row. Profile and transfer details reach only people allowed to see them, and blocking a stranger no longer notifies them.
 - **Authentication:** Backup-code verification and status reads now accept only exact bare SHA-256, `v1$` SHA-256, or bounded `v2$` Argon2id hashes, and fail closed on malformed stored values. New codes still use the bare format until all serving replicas have this reader; the v2 writer and database migration follow in a separate rollout ([#290](https://github.com/Concord-Voice/Self-Hosted/pull/290)).
 - **Registration:** New account requests now reject bodies over 64 KiB and oversized decoded key material before password hashing, and check existing email and username conflicts before expensive work ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **WebSocket:** When client attestation is required, JWT fallback upgrades now validate the session's attestation proof before admitting the socket; the single-use ticket path remains unchanged ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
+- **Self-hosted setup:** Client IP limits and bans use the address nginx has authenticated: forwarding headers are overwritten, and both services trust only the measured exact proxy address. Cloudflare client addresses are restored only after a deployment-specific Authenticated Origin Pull check; direct media remains separate ([#291](https://github.com/Concord-Voice/Self-Hosted/pull/291)).
+- **Accounts:** **BREAKING** MFA step-up attempts now share one per-account limit of five codes in fifteen minutes across session, security, ownership, DM purge and clear-history actions and turning off purge verification; recovery and registration code guesses keep their limits across new codes, email changes and re-registration. Exhausted budgets return 429 with a retry delay, and unavailable budget checks fail closed. API: `POST /sessions/revoke-all`, `DELETE /sessions/{id}` and `PUT /sessions/revocation-mode` now require `password` and, if MFA is enrolled, `mfa_code`; an exhausted budget is 429 with `step_up_budget_exhausted`, an unavailable one 503 with `step_up_budget_unavailable` ([#285](https://github.com/Concord-Voice/Self-Hosted/pull/285)).
 - **Accounts:** WebAuthn sign-in and inline confirmation now atomically advance authenticator counters and reject clone warnings before granting access, while credential registration enforces the ten-key limit again when the final write commits ([#288](https://github.com/Concord-Voice/Self-Hosted/pull/288)).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.

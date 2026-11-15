@@ -1,6 +1,6 @@
 # Authenticated step-up budget
 
-Design contract for Hosted issue 2271, within Hosted epic 696.
+Design contract for the authenticated step-up budget.
 
 **Implementation status:** the opaque actor adapter, private SQL accounting core
 and process-local proof-work tracker are implemented as dormant groundwork in
@@ -10,8 +10,44 @@ numbered production migration, lifecycle admission or consumer integration ships
 with it. The tracker has no production opener, router/runtime binding or process
 observation. Retirement integration and lifecycle controls below remain planned
 requirements. Source availability is not validation, active enforcement or
-deployment evidence. Existing Redis budgets and authentication defenses remain
-unchanged.
+deployment evidence. The active Redis defenses below are separate from this
+dormant SQL proposal; neither activates its receipt or lifecycle machinery.
+
+## Active code-guess budgets
+
+The existing Redis `stepup.Budget` counts up to five submitted MFA proofs per
+user in fifteen minutes, across these protected actions: session revoke,
+revoke-all, and revocation-mode; TOTP disable and backup-code regeneration;
+password change and E2EE key replacement; ownership transfer and reversal;
+DM/group bulk purge and DM clear history; and turning off the purge
+authentication requirement, which charges the shared budget only for a code
+on an account with an inline factor and keeps its own route budget for
+password guesses. Each route charges before factor verification. TOTP
+disable probes enrollment before its SQL transaction and charges only when a
+factor is present; the locked recheck refuses a newly enrolled factor before
+verification so there is no free guess. DM clear charges whenever the request
+carries an MFA code, before its transaction opens, because the setting that
+decides whether it verifies one is read under that transaction's lock. Other
+routes charge before their protected transaction. A
+correct password alone does not clear the MFA counter. An exhausted budget
+returns 429 with `Retry-After` and
+`step_up_budget_exhausted`; a budget-store failure returns 503 with
+`step_up_budget_unavailable`. Routes already using this budget charge once.
+
+Email recovery has a separate ten-attempt, twenty-four-hour failure budget keyed
+by normalized account email. A new recovery request retains a live code record
+and its attempt count; the wrong guess that spends a code's fifth attempt
+deletes that record, so the next request can send a new code. Only a
+completed recovery, email-only or through the MFA challenge, clears that
+email's failure budget. Registration uses the pending-registration ID as its
+attempt subject through resend and change-email, with attempt state lasting
+until the pending row expires. A password takeover carries the replaced row's
+attempt count and resend state into the new row, and every code-issuing path
+charges a per-address issuance limit (the initial code plus the resend cap per
+pending lifetime) that never refuses a confirm of a code already sent and counts
+only codes minted: a request that sends none is refunded. Resend and change-email share the existing
+two-minute cooldown and four-resend cap. These code budgets do not use the
+proposed login-family SQL receipt design below.
 
 ## Actor provenance
 
@@ -288,7 +324,7 @@ Existing target refusal, preservation, count and recovery envelopes remain intac
 
 ## Delivery limits
 
-Self-Hosted owns canonical source; Hosted delivery needs a verified canonical
+Self-Hosted owns canonical source; downstream delivery needs a verified canonical
 image-consumption lane or tracked source port with commit provenance. Actual
 Desktop/Mobile response consumers need compatibility evidence before activation.
 Passing adapter tests establishes neither consumer adoption nor budget enforcement.
@@ -296,6 +332,6 @@ Passing adapter tests establishes neither consumer adoption nor budget enforceme
 **A7b remains unfulfilled:** SQL accounting may survive accounting-only Redis
 degradation after authentication authority exists. It cannot bypass `AuthRequired`
 blacklist/theft/epoch vetoes during a full outage. A bounded auth 503 proves refusal,
-not containment availability. This groundwork references Hosted issue 2271; it
-does not close it. No rollout, deployment or repair of Hosted issue 4201 is included.
+not containment availability. This groundwork includes no rollout, deployment
+or repair.
 See the [implementation and evidence plan](authenticated-step-up-budget-plan.md).

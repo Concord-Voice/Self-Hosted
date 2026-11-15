@@ -54,6 +54,7 @@ Concord Voice is a distributed real-time communications platform with three serv
 - WebSocket hub for real-time messaging and presence
 - DM system (8 tables, E2EE with key-epoch enforcement)
 - MFA (TOTP, WebAuthn), email verification, ownership transfer
+- Redis-backed per-account MFA step-up attempt budget shared by session, account-security, ownership, and DM-purge actions; exhaustion returns 429 and unavailable checks fail closed
 - API route registrations across 20+ route groups. Generated counts are checked by `scripts/update-claude-md-counts.sh`
 
 #### Media Plane (Node.js + mediasoup, port 3000)
@@ -335,6 +336,8 @@ On the WebSocket path, the hub validates the envelope (`validateEnvelope` — `k
 **Outbound SSRF egress guard:** the Klipy media proxy (`internal/klipy/handlers.go`) is the reference SSRF-hardened outbound surface. A cloned transport installs `net.Dialer.Control` running `isDeniedEgressIP` (post-DNS, pre-connect). It defends redirect-SSRF and DNS-rebinding with no TOCTOU window, and denies loopback / private / ULA / link-local / multicast / CGNAT / deprecated site-local, after `Unmap()`), and `http.Client.CheckRedirect` re-validates scheme + host against `allowedMediaHosts` on every hop.
 
 **WebSocket hub** (`internal/websocket/hub.go`): a single `Run()` goroutine owns the subscription maps (`clients`, `userClients`, `channelSubscriptions`, `serverSubscriptions`, `dmSubscriptions`) and drains buffered broadcast channels. `handleIncoming` dispatches inbound frames by `type` (subscribe, message, typing, presence, DM variants, …). Outbound fan-out is `BroadcastToChannel` / `BroadcastToServer` / `BroadcastToUser` / `BroadcastToDM` / `BroadcastToAll`; channel delivery applies channel authorization, including Server Voice visibility, while DM delivery queues visibility-gated frames in order.
+
+**Presence and relationship privacy:** server-list counts, member activity, and group-DM ringing treat `hiddenPresence`, missing or unknown presence, and Redis-read failure as offline. Member `last_seen` is the last disconnect and appears only in that member's own row; other viewers see no timestamp whether the member is invisible or offline. Invisible activity still advances the private timestamp used by the inactivity policy. Direct profile lookup uses username-search eligibility and symmetric block exclusion, returning the same not-found result for an absent or excluded target. `ownership_transfer_initiated` reaches only the current owner and transfer target. A block target receives `friend_removed` only for a prior accepted friendship; the blocker's own key-revocation delivery remains unconditional.
 
 #### Database Schema
 
@@ -1879,7 +1882,19 @@ The environment variables are listed in [development.md](development.md#environm
 
 ### Self-Hosted (Docker Compose)
 
-The self-hosted CLI runs the selected stack on a single server using repo-root `.env` and its persisted `SELFHOST_STORAGE_MODE=bundled|byo-s3`. The ordered files are `docker-compose.yml` → `docker-compose.production.yml` → `docker-compose.selfhost.yml`; BYO appends `docker-compose.byo-s3.yml` fourth, after the port overlay, and leaves bundled MinIO inactive. The installer supports fresh bundled or BYO installations only, with no existing-object migration or automatic bundled fallback. See the quickstart's [storage selection](runbooks/selfhost-quickstart.md#object-storage-bundled-or-byo-s3) and [updating procedure](runbooks/selfhost-quickstart.md#updating) for the persisted-mode and lifecycle contract. Production-required variables use fail-loud `${VAR:?msg}` interpolation. A misconfiguration therefore fails at `docker compose config` time, not at runtime.
+The self-hosted CLI runs the selected stack on a single server using repo-root `.env` and its persisted `SELFHOST_STORAGE_MODE=bundled|byo-s3`. The ordered files are `docker-compose.yml` → `docker-compose.production.yml` → `docker-compose.selfhost.yml`; BYO appends `docker-compose.byo-s3.yml` fourth, after the port overlay, and leaves bundled MinIO inactive. The installer supports fresh bundled or BYO installations only, with no existing-object migration or automatic bundled fallback. See the quickstart's [storage selection](runbooks/selfhost-quickstart.md#object-storage-bundled-or-byo-s3) and [updating procedure](runbooks/selfhost-quickstart.md#updating) for the persisted-mode and lifecycle contract. Production-required variables use fail-loud `${VAR:?msg}` interpolation; when `TRUSTED_PROXIES` is unset, Compose inherits `TRUSTED_PROXY_CIDRS`. The self-host lifecycle persists both exact values, and both services reject broad proxy trust at startup.
+
+For proxy provenance, the installer writes only placeholders for `TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES`. Under the deploy lock, `concord-selfhost up` measures the selected services-bridge gateway, persists its exact canonical IPv4 `/32` or IPv6 `/128` route for both services, and refuses an ambiguous or changed topology. IPv4-mapped IPv6 trust entries are rejected. Both application services set `gw_priority: 1` for that bridge, which requires Compose 2.33.1 or newer. `restart` proceeds only when the existing running topology matches the measured trust. See the quickstart's [trusted proxy gateway provenance](runbooks/selfhost-quickstart.md#trusted-proxy-gateway-provenance) for the operator procedure.
+
+For Cloudflare-proxied API/apex and managed admin traffic, nginx restores `CF-Connecting-IP` only
+in explicit `cloudflare-aop` mode after it verifies a deployment-specific
+Authenticated Origin Pull client certificate against a fixed root-owned public
+CA bundle. The admin vhost also binds TLS SNI to its configured server name. The self-host `direct` default and the direct media vhost do not
+restore that header. The managed nginx renderer requires the same provenance
+fragment and fails closed when its CA prerequisite is absent or unsafe. Source
+merge does not configure Cloudflare or prove that the custom certificate,
+Worker/Transform-Rule inventory, direct-origin TLS rejection, or separate
+client limiter buckets are live.
 
 The direct self-host nginx installer domain-renders the committed strong HSTS default for nginx-generated/scoped responses. A self-host `HSTS_HEADER_VALUE` override affects Go-proxied responses. To change the scoped nginx responses, customize nginx explicitly rather than using the managed renderer.
 

@@ -483,9 +483,11 @@ func TestChangePasswordMFAReauthenticationUsesLockedTransactionConnection(t *tes
 	requestLogger := logger.NewWithWriter(&requestLogs)
 	mfaRing, err := mfa.ParseKeyring(strings.Repeat("00", 32), 1, "")
 	require.NoError(t, err)
+	rdb, redisCleanup := testhelpers.SetupTestRedis(t)
+	defer redisCleanup()
 	mfaHandler := mfa.NewHandler(
 		db,
-		nil,
+		rdb,
 		requestLogger,
 		mfaRing,
 		"test-secret",
@@ -494,6 +496,7 @@ func TestChangePasswordMFAReauthenticationUsesLockedTransactionConnection(t *tes
 	)
 	handler := users.NewHandler(db, requestLogger, nil, mfaHandler, nil, testCredFence(t, db), nil)
 	handler.SetPasswordVerifier(testhelpers.HashVerifier{DB: db})
+	handler.SetRedis(rdb)
 
 	// A password/key rotation already owns one transaction connection while it
 	// re-checks MFA under the locked users row. Constraining the pool to one

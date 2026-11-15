@@ -27,9 +27,9 @@ source "$SCRIPT_DIR/selfhost-storage.sh" || {
   return 1 2>/dev/null || exit 1
 }
 readonly INSTALLER_ANSWER_KEYS=(
-  CFG_DOMAIN CFG_TLS_MODE CFG_TURN_REALM CFG_PUBLIC_IP
+  CFG_DOMAIN CFG_TLS_MODE CFG_TURN_REALM CFG_PUBLIC_IP CFG_CLIENT_IP_MODE CFG_CLOUDFLARE_AOP_CA
   CFG_SMTP_HOST CFG_SMTP_PORT CFG_SMTP_USER CFG_SMTP_PASS CFG_SMTP_FROM
-  CFG_TRUSTED_CIDRS CFG_ACTIVITY_HISTORY_OPERATOR_NAME CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL
+  CFG_ACTIVITY_HISTORY_OPERATOR_NAME CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL
   CFG_FEEDBACK_ENABLED CFG_FEEDBACK_REPO CFG_FEEDBACK_PAT
   CFG_STORAGE_MODE CFG_STORAGE_BACKEND CFG_STORAGE_ENDPOINT CFG_STORAGE_REGION
   CFG_STORAGE_ACCESS_KEY CFG_STORAGE_SECRET_KEY CFG_STORAGE_USE_SSL CFG_STORAGE_BUCKET
@@ -190,12 +190,12 @@ preflight_os() {
 # responses can disclose registry credentials (CVE-2026-92543). Before 28.0.0,
 # LAN neighbours can reach ports
 # published on 127.0.0.1, and from 28.2.0 to 28.3.2 a firewalld reload drops the
-# rule that blocks them (CVE-2025-54388). Compose: 2.24.5 is the oldest release
-# measured honouring `!override` in docker-compose.selfhost.yml (2.20 and 2.21
-# ignore it and merge the lists back to 0.0.0.0). MIN_ENGINE must equal
+# rule that blocks them (CVE-2025-54388). Compose >= 2.33.1 is required for
+# gw_priority; older releases also mishandle `!override` in the self-host layer.
+# MIN_ENGINE must equal
 # SELFHOST_MIN_ENGINE in concord-ctl.sh (pinned by test-selfhost-port-posture.sh).
 readonly MIN_ENGINE=29.8.2
-readonly MIN_COMPOSE=2.24.5
+readonly MIN_COMPOSE=2.33.1
 
 # version_at_least HAVE NEED — dotted-version comparison via sort -V.
 version_at_least() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]]; }
@@ -622,7 +622,20 @@ except (ValueError, UnicodeError):
   esac
   validate_domain "${CFG_DOMAIN:-}" || return 1
   validate_tls_mode "${CFG_TLS_MODE:-letsencrypt}" || return 1
-  validate_cidrs "${CFG_TRUSTED_CIDRS:-}" || return 1
+  : "${CFG_CLIENT_IP_MODE:=direct}"
+  case "$CFG_CLIENT_IP_MODE" in
+    direct)
+      [[ -z "${CFG_CLOUDFLARE_AOP_CA:-}" ]] || { printf '%s\n' 'installer: Cloudflare AOP CA requires cloudflare-aop mode' >&2; return 1; }
+      ;;
+    cloudflare-aop)
+      [[ -n "${CFG_CLOUDFLARE_AOP_CA:-}" && -f "$CFG_CLOUDFLARE_AOP_CA" && ! -L "$CFG_CLOUDFLARE_AOP_CA" ]] || { printf '%s\n' 'installer: Cloudflare AOP CA must be a regular readable file' >&2; return 1; }
+      openssl x509 -in "$CFG_CLOUDFLARE_AOP_CA" -noout >/dev/null 2>&1 || { printf '%s\n' 'installer: Cloudflare AOP CA is not a readable PEM certificate' >&2; return 1; }
+      ;;
+    *) printf '%s\n' 'installer: client IP mode must be direct or cloudflare-aop' >&2; return 1 ;;
+  esac
+  # Initial trust is a loopback placeholder. The locked controller replaces it
+  # with the measured published-port gateway before starting app containers.
+  CFG_TRUSTED_CIDRS=127.0.0.1/32
   validate_smtp_port "${CFG_SMTP_PORT:-}" || return 1
   validate_activity_history_disclosure "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}" \
     "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}" || return 1
@@ -716,7 +729,7 @@ except (OSError, ValueError, UnicodeError):
     printf -v "$key" '%s' "$val" || return 1
   done <"$f"
   : "${CFG_FEEDBACK_ENABLED=no}" "${CFG_TURN_REALM:=${CFG_DOMAIN:-}}" \
-    "${CFG_TLS_MODE:=letsencrypt}" "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:=}" \
+    "${CFG_TLS_MODE:=letsencrypt}" "${CFG_CLIENT_IP_MODE:=direct}" "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:=}" \
     "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:=}" "${CFG_STORAGE_MODE=bundled}"
   if [[ "$CFG_STORAGE_MODE" == byo-s3 ]]; then
     : "${CFG_STORAGE_BACKEND=s3}" "${CFG_STORAGE_REGION=}" \
@@ -752,6 +765,10 @@ collect_config() {
   if [[ "$CFG_TLS_MODE" == local ]]; then
     echo -e "${YELLOW}⚠ 'local' self-signed has NO MITM protection on untrusted networks — trusted LAN/homelab only. Use 'letsencrypt' for any internet-reachable host.${NC}" >&2
   fi
+  CFG_CLIENT_IP_MODE="$(ask 'Client IP provenance (direct / cloudflare-aop)' direct)" || return $?
+  if [[ "$CFG_CLIENT_IP_MODE" == cloudflare-aop ]]; then
+    CFG_CLOUDFLARE_AOP_CA="$(ask 'Custom Cloudflare AOP CA PEM path')" || return $?
+  fi
   CFG_TURN_REALM="$(ask 'TURN realm' "$CFG_DOMAIN")" || return $?
   detected_ip="$(detect_public_ip)" || return $?
   CFG_PUBLIC_IP="$(ask 'Public IPv4 address (blank = auto-detect)' "$detected_ip")" || return $?
@@ -782,7 +799,7 @@ collect_config() {
   CFG_SMTP_USER="$(ask 'SMTP username')" || return $?
   CFG_SMTP_PASS="$(ask_secret 'SMTP password')" || return $?
   CFG_SMTP_FROM="$(ask 'SMTP from address' "noreply@$CFG_DOMAIN")" || return $?
-  CFG_TRUSTED_CIDRS="$(ask 'Trusted proxy CIDRs' '172.16.0.0/12,10.0.0.0/8')" || return $?
+  CFG_TRUSTED_CIDRS=127.0.0.1/32
   CFG_ACTIVITY_HISTORY_OPERATOR_NAME="$(ask 'Activity History operator name (optional)')" || return $?
   CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL="$(ask 'Activity History privacy policy URL (optional, HTTPS)')" || return $?
   CFG_FEEDBACK_ENABLED="$(ask 'Enable in-app feedback (posts to a GitHub repo)? yes/no' no)" || return $?
@@ -865,7 +882,7 @@ write_env_file() (
   domain="$(compose_dotenv_quote "$CFG_DOMAIN")" || return 1
   public_ip="$(compose_dotenv_quote "${CFG_PUBLIC_IP:-}")" || return 1
   realm="$(compose_dotenv_quote "${CFG_TURN_REALM:-$CFG_DOMAIN}")" || return 1
-  cidrs="$(compose_dotenv_quote "${CFG_TRUSTED_CIDRS:-172.16.0.0/12,10.0.0.0/8}")" || return 1
+  cidrs="$(compose_dotenv_quote '127.0.0.1/32')" || return 1
   smtp_host="$(compose_dotenv_quote "${CFG_SMTP_HOST:-}")" || return 1
   smtp_port="$(compose_dotenv_quote "${CFG_SMTP_PORT:-587}")" || return 1
   smtp_user="$(compose_dotenv_quote "${CFG_SMTP_USER:-}")" || return 1
@@ -896,7 +913,8 @@ write_env_file() (
     "POSTGRES_PASSWORD=$postgres_password" "REDIS_PASSWORD=$redis_password"
     "JWT_SECRET=$jwt_secret" "MFA_ENCRYPTION_KEY=$mfa_key" "TURN_SECRET=$turn_secret"
     "TURN_REALM=$realm" MINIO_ROOT_USER=concord "MINIO_ROOT_PASSWORD=$minio_password"
-    MINIO_BUCKET=concord-media "TRUSTED_PROXY_CIDRS=$cidrs"
+    MINIO_BUCKET=concord-media "TRUSTED_PROXY_CIDRS=$cidrs" "TRUSTED_PROXIES=$cidrs"
+    "NGINX_CLIENT_IP_MODE=${CFG_CLIENT_IP_MODE:-direct}"
     "SMTP_HOST=$smtp_host" "SMTP_PORT=$smtp_port" "SMTP_USERNAME=$smtp_user"
     "SMTP_PASSWORD=$smtp_pass" "SMTP_FROM=$smtp_from"
     "FEEDBACK_REPO=$quoted_repo" "FEEDBACK_PAT=$quoted_pat"
@@ -951,13 +969,47 @@ print_storage_review() {
 # vhost (single source of truth; managed deploy path untouched). The domain charset
 # is restricted by validate_domain, so the sed substitution is injection-safe.
 # nginx -t is a manual/integration step (needs cert files present), per the runbook.
+validate_cloudflare_aop_fragment() {
+  local expected actual
+  expected=$'ssl_client_certificate /etc/concord/nginx/cloudflare-aop-ca.pem;\nssl_verify_client on;\nssl_verify_depth 2;\nset_real_ip_from 0.0.0.0/0;\nset_real_ip_from ::/0;\nreal_ip_header CF-Connecting-IP;\nreal_ip_recursive off;'
+  actual="$(grep -Ev '^(#|[[:space:]]*$)' "$1")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
 render_nginx() {
+  local fragment line marker_count=0 marker_outside_api=0 in_api=0 tmp
   [[ -f "$NGINX_SRC" ]] || {
     echo -e "${RED}nginx source not found: $NGINX_SRC${NC}" >&2
     return 1
   }
-  sed "s/concordvoice\.chat/${CFG_DOMAIN}/g" "$NGINX_SRC" >"$NGINX_OUT" || return 1
+  fragment="$SCRIPT_DIR/nginx/cloudflare-aop-client-ip.conf"
+  if [[ "${CFG_CLIENT_IP_MODE:-direct}" == cloudflare-aop ]]; then
+    [[ -r "$fragment" ]] || { printf '%s\n' 'installer: Cloudflare AOP nginx fragment unavailable' >&2; return 1; }
+    validate_cloudflare_aop_fragment "$fragment" || { printf '%s\n' 'installer: Cloudflare AOP nginx fragment is unsafe' >&2; return 1; }
+  fi
+  tmp="$(mktemp "${NGINX_OUT}.tmp.XXXXXX")" || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      '# HTTPS — API + WebSocket Hub'*) in_api=1 ;;
+      '# HTTPS — Media Plane'*) in_api=0 ;;
+    esac
+    if [[ "$line" == '    # CONCORD_CLIENT_IP_PROVENANCE' ]]; then
+      marker_count=$((marker_count + 1))
+      if (( ! in_api )); then
+        marker_outside_api=1
+      elif [[ "${CFG_CLIENT_IP_MODE:-direct}" == cloudflare-aop ]]; then
+        sed "s/concordvoice\.chat/${CFG_DOMAIN}/g" "$fragment" || { rm -f "$tmp"; return 1; }
+      fi
+    else
+      printf '%s\n' "$line" | sed "s/concordvoice\.chat/${CFG_DOMAIN}/g" || { rm -f "$tmp"; return 1; }
+    fi
+  done < "$NGINX_SRC" >"$tmp" || { rm -f "$tmp"; return 1; }
+  [[ $marker_count -eq 1 && $marker_outside_api -eq 0 ]] || { rm -f "$tmp"; printf '%s\n' 'installer: nginx client-IP marker missing, duplicated, or outside API' >&2; return 1; }
+  mv -f "$tmp" "$NGINX_OUT" || { rm -f "$tmp"; return 1; }
   echo -e "${GREEN}✓ rendered nginx vhost -> $NGINX_OUT${NC} (run: sudo cp it into /etc/nginx/... then nginx -t)"
+  if [[ "${CFG_CLIENT_IP_MODE:-direct}" == cloudflare-aop ]]; then
+    say_root_cmd "sudo install -d -o root -g root -m 0755 /etc/concord/nginx && sudo install -o root -g root -m 0644 $(shq "$CFG_CLOUDFLARE_AOP_CA") /etc/concord/nginx/cloudflare-aop-ca.pem"
+  fi
 }
 
 # ── TLS cert provisioning (#1617) ────────────────────────────────────────────
