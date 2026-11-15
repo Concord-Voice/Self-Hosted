@@ -65,7 +65,7 @@ func TestAdminMetricsRoutesRejectMissingSessionAndUserJWT(t *testing.T) {
 
 func TestAdminMetricsRoutesAllowGETAndDenyMutatingMethods(t *testing.T) {
 	engine, sessions := registerAdminEngineAndSessions(t)
-	sid, err := sessions.Mint(context.Background(), "admin-route-test")
+	sid, err := sessions.Mint(context.Background(), "admin-route-test", 0)
 	require.NoError(t, err)
 
 	for path, target := range adminMetricsRouteTargets {
@@ -88,7 +88,7 @@ func TestAdminMetricsRoutesAllowGETAndDenyMutatingMethods(t *testing.T) {
 
 func TestAdminMetricsRouteRateLimitUsesClosed429Response(t *testing.T) {
 	engine, sessions := registerAdminEngineAndSessions(t)
-	sid, err := sessions.Mint(context.Background(), "admin-rate-test")
+	sid, err := sessions.Mint(context.Background(), "admin-rate-test", 0)
 	require.NoError(t, err)
 	target := adminMetricsRouteTargets["/admin/api/v1/metrics/current"]
 
@@ -111,7 +111,7 @@ func TestAdminMetricsRouteRateLimitUsesClosed429Response(t *testing.T) {
 
 func TestAdminServerRoutesAreRateLimited(t *testing.T) {
 	engine, sessions := registerAdminEngineAndSessions(t)
-	sid, err := sessions.Mint(context.Background(), "admin-server-rate-test")
+	sid, err := sessions.Mint(context.Background(), "admin-server-rate-test", 0)
 	require.NoError(t, err)
 	// A refused query never reaches the agent, so no socket is needed.
 	target := "/admin/api/v1/server/logs?service=unknown"
@@ -132,7 +132,7 @@ func TestAdminServerRouteRateLimitFailsClosed(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = limiterRedis.Close() })
 	engine, sessions := registerAdminEngineAndSessionsWithLimiter(t, limiterRedis)
-	sid, err := sessions.Mint(context.Background(), "admin-server-rate-backend-test")
+	sid, err := sessions.Mint(context.Background(), "admin-server-rate-backend-test", 0)
 	require.NoError(t, err)
 	response := serveAdminMetricsRoute(engine, sid, http.MethodGet, "/admin/api/v1/server/status")
 	assert.Equal(t, http.StatusInternalServerError, response.Code)
@@ -148,7 +148,7 @@ func TestAdminMetricsRouteRateLimitFailsClosedWithFixed503Response(t *testing.T)
 	t.Cleanup(func() { _ = limiterRedis.Close() })
 
 	engine, sessions := registerAdminEngineAndSessionsWithLimiter(t, limiterRedis)
-	sid, err := sessions.Mint(context.Background(), "admin-rate-backend-test")
+	sid, err := sessions.Mint(context.Background(), "admin-rate-backend-test", 0)
 	require.NoError(t, err)
 
 	response := serveAdminMetricsRoute(

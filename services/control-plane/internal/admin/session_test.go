@@ -31,7 +31,7 @@ func TestSessionStore_MintThenGet(t *testing.T) {
 	store := admin.NewSessionStore(rdb, fixedClock(&now))
 
 	adminID := uniqueAdminUsername("admin-id")
-	sid, err := store.Mint(ctx, adminID)
+	sid, err := store.Mint(ctx, adminID, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, sid)
 	// 256-bit sid -> 64 hex chars.
@@ -50,9 +50,9 @@ func TestSessionStore_MintIsRandom(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	store := admin.NewSessionStore(rdb, fixedClock(&now))
 
-	sid1, err := store.Mint(ctx, "a")
+	sid1, err := store.Mint(ctx, "a", 0)
 	require.NoError(t, err)
-	sid2, err := store.Mint(ctx, "a")
+	sid2, err := store.Mint(ctx, "a", 0)
 	require.NoError(t, err)
 	assert.NotEqual(t, sid1, sid2, "session ids must be unpredictable/unique")
 }
@@ -82,7 +82,7 @@ func TestSessionStore_IdleExpiry(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	store := admin.NewSessionStore(rdb, fixedClock(&now))
 
-	sid, err := store.Mint(ctx, "admin-id")
+	sid, err := store.Mint(ctx, "admin-id", 0)
 	require.NoError(t, err)
 
 	// 29 minutes later: still inside the 30m idle window.
@@ -106,7 +106,7 @@ func TestSessionStore_IdleSlides(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	store := admin.NewSessionStore(rdb, fixedClock(&now))
 
-	sid, err := store.Mint(ctx, "admin-id")
+	sid, err := store.Mint(ctx, "admin-id", 0)
 	require.NoError(t, err)
 
 	// Touch every 20 minutes for 2 hours: each Get slides the idle window, so the
@@ -126,7 +126,7 @@ func TestSessionStore_AbsoluteCap(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	store := admin.NewSessionStore(rdb, fixedClock(&now))
 
-	sid, err := store.Mint(ctx, "admin-id")
+	sid, err := store.Mint(ctx, "admin-id", 0)
 	require.NoError(t, err)
 
 	// Keep the session active (Get every 20m) but push past the 8h absolute cap.
@@ -152,7 +152,7 @@ func TestSessionStore_Rotate(t *testing.T) {
 	store := admin.NewSessionStore(rdb, fixedClock(&now))
 
 	adminID := uniqueAdminUsername("admin-id")
-	oldSID, err := store.Mint(ctx, adminID)
+	oldSID, err := store.Mint(ctx, adminID, 0)
 	require.NoError(t, err)
 
 	newSID, err := store.Rotate(ctx, oldSID)
@@ -176,7 +176,7 @@ func TestSessionStore_Revoke(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	store := admin.NewSessionStore(rdb, fixedClock(&now))
 
-	sid, err := store.Mint(ctx, "admin-id")
+	sid, err := store.Mint(ctx, "admin-id", 0)
 	require.NoError(t, err)
 
 	require.NoError(t, store.Revoke(ctx, sid))

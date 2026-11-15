@@ -31,13 +31,15 @@ const (
 //
 //nolint:revive // Admin* prefix is the #1688 cross-task naming contract (see file header).
 type AdminUser struct {
-	ID           string
-	Username     string
-	PasswordHash string
-	Status       AdminStatus
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	DisabledAt   *time.Time
+	ID                   string
+	Username             string
+	PasswordHash         string
+	Status               AdminStatus
+	CredentialGeneration int64
+	SessionGeneration    int64
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	DisabledAt           *time.Time
 }
 
 // AdminCredential is a registered WebAuthn/FIDO2 authenticator bound to an admin.

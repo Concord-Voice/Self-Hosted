@@ -27,6 +27,8 @@ const enrollTokenBytes = 32
 // a Redis dump cannot be replayed into an enrollment (#1688 §5).
 const enrollKeyPrefix = "admin_enroll:"
 
+const enrollChallengeIndexPrefix = "admin_enroll_challenges:"
+
 // ErrEnrollTokenInvalid is returned when a token is unknown, already consumed,
 // or expired. A single sentinel keeps the failure uniform (no oracle telling an
 // attacker whether a token ever existed vs. expired).
@@ -50,6 +52,10 @@ func NewEnrollmentStore(rdb *redis.Client) *EnrollmentStore {
 func hashToken(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])
+}
+
+func enrollChallengeIndexKey(adminID string, generation int64) string {
+	return fmt.Sprintf("%s%s:%d", enrollChallengeIndexPrefix, adminID, generation)
 }
 
 // MintEnrollmentToken generates a fresh CSPRNG token bound to adminID, stores
@@ -95,4 +101,24 @@ func (s *EnrollmentStore) ConsumeEnrollmentToken(ctx context.Context, plaintext 
 		return "", fmt.Errorf("consume enrollment token: %w", err)
 	}
 	return adminID, nil
+}
+
+// DeleteEnrollmentChallenges removes handles bound to a revoked credential generation.
+func (s *EnrollmentStore) DeleteEnrollmentChallenges(ctx context.Context, adminID string, generation int64) error {
+	indexKey := enrollChallengeIndexKey(adminID, generation)
+	challengeKeys, err := s.redis.SMembers(ctx, indexKey).Result()
+	if err != nil {
+		return fmt.Errorf("list enrollment challenges: %w", err)
+	}
+	_, err = s.redis.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		if len(challengeKeys) > 0 {
+			pipe.Del(ctx, challengeKeys...)
+		}
+		pipe.Del(ctx, indexKey)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("delete enrollment challenges: %w", err)
+	}
+	return nil
 }

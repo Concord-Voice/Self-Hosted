@@ -574,3 +574,42 @@ func TestFinishAdminRegistration_RejectsNonAllowListedBeforePersist(t *testing.T
 	require.NoError(t, err)
 	assert.Empty(t, list)
 }
+
+func TestFinishAdminRegistration_RejectsRevokedGenerationBeforePersist(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	svc, err := admin.NewAdminWebAuthn(testAdminConfig())
+	require.NoError(t, err)
+	repo := admin.NewAdminRepo(db)
+	adminUser, err := repo.CreatePending(ctx, uniqueAdminUsername("stale-enrollment"), "hash")
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, adminUser.ID)
+
+	va := newVirtualAuthenticator(t, uuid.MustParse(testAllowedAAGID))
+	user := adminWebAuthnUser()
+	creation, session := beginAdminRegistration(t, svc, user)
+	regBody := va.attestationResponse(t, testAdminRPID, creation.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV)
+
+	_, previousGeneration, newGeneration, err := repo.ResetEnrollment(ctx, adminUser.ID)
+	require.NoError(t, err)
+	require.Equal(t, adminUser.CredentialGeneration, previousGeneration)
+	require.Greater(t, newGeneration, previousGeneration)
+
+	stored, err := admin.FinishAdminRegistration(ctx, svc, repo, admin.AdminRegistrationInput{
+		User: user, Session: *session, Request: httpReq(regBody),
+		AdminID: adminUser.ID, CredentialGeneration: previousGeneration,
+		AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "revoked-generation",
+	})
+	require.ErrorIs(t, err, admin.ErrEnrollmentStateChanged)
+	assert.Empty(t, stored.ID)
+
+	list, err := repo.ListCredentials(ctx, adminUser.ID)
+	require.NoError(t, err)
+	assert.Empty(t, list)
+	current, err := repo.GetByUsername(ctx, adminUser.Username)
+	require.NoError(t, err)
+	assert.Equal(t, admin.StatusPending, current.Status)
+	assert.Equal(t, newGeneration, current.CredentialGeneration)
+}

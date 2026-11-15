@@ -67,7 +67,7 @@ func TestSessionStore_Mint_RedisError(t *testing.T) {
 	// Close Redis before Mint so the Set call errors.
 	require.NoError(t, rdb.Close())
 
-	_, err := store.Mint(ctx, "admin-id")
+	_, err := store.Mint(ctx, "admin-id", 0)
 	require.Error(t, err, "Mint against a closed client must return an error")
 }
 
@@ -78,7 +78,7 @@ func TestSessionStore_Revoke_RedisError(t *testing.T) {
 
 	store := admin.NewSessionStore(rdb, nil)
 	// Mint a valid sid while Redis is open, then close it.
-	sid, err := store.Mint(ctx, "admin-id")
+	sid, err := store.Mint(ctx, "admin-id", 0)
 	require.NoError(t, err)
 
 	require.NoError(t, rdb.Close())
@@ -105,7 +105,7 @@ func TestSessionStore_Rotate_RedisErrorOnPersist(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	store := admin.NewSessionStore(rdb, func() time.Time { return now })
 
-	sid, err := store.Mint(ctx, "admin-id")
+	sid, err := store.Mint(ctx, "admin-id", 0)
 	require.NoError(t, err)
 
 	// Close Redis after mint so Rotate's internal persist (Set) errors.
@@ -138,7 +138,7 @@ func TestSessionStore_Get_RedisIOError_PropagatesError(t *testing.T) {
 	ctx := context.Background()
 
 	store := admin.NewSessionStore(rdb, nil)
-	sid, err := store.Mint(ctx, "admin-id")
+	sid, err := store.Mint(ctx, "admin-id", 0)
 	require.NoError(t, err)
 
 	require.NoError(t, rdb.Close())
@@ -580,9 +580,9 @@ func TestAdminCtl_Bootstrap_InteractivePrompt(t *testing.T) {
 }
 
 // TestAdminCtl_ResetEnrollment_AdminWithNoCredentials exercises the
-// `if len(creds) > 0` false branch in runResetEnrollment. When the admin has
-// no credentials the delete + credential-revoke audit steps are skipped, but
-// status is still reset to pending and a fresh enrollment token is minted.
+// zero-revocation branch in runResetEnrollment. When the admin has no
+// credentials the credential-revoke audit step is skipped, both authority
+// generations advance, status remains pending, and a fresh token is minted.
 func TestAdminCtl_ResetEnrollment_AdminWithNoCredentials(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
@@ -606,6 +606,8 @@ func TestAdminCtl_ResetEnrollment_AdminWithNoCredentials(t *testing.T) {
 	got, err := repo.GetByUsername(ctx, username)
 	require.NoError(t, err)
 	assert.Equal(t, admin.StatusPending, got.Status)
+	assert.Equal(t, created.SessionGeneration+1, got.SessionGeneration)
+	assert.Greater(t, got.CredentialGeneration, created.CredentialGeneration)
 
 	token := extractToken(t, stdout.String())
 	require.NotEmpty(t, token)

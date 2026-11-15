@@ -19,12 +19,18 @@ import (
 // route that records whether c.Next() was reached and what admin_id (if any) was
 // set on the context, so the middleware's behavior is observable from the
 // response.
+type staticSessionAuthority struct{ generation int64 }
+
+func (a staticSessionAuthority) ActiveSessionGeneration(context.Context, string) (int64, error) {
+	return a.generation, nil
+}
+
 func adminAuthTestEngine(sessions *admin.SessionStore) (*gin.Engine, *bool, *string) {
 	gin.SetMode(gin.TestMode)
 	reached := false
 	gotAdminID := ""
 	r := gin.New()
-	r.GET("/admin/api/v1/protected", admin.AdminAuthRequired(sessions), func(c *gin.Context) {
+	r.GET("/admin/api/v1/protected", admin.AdminAuthRequired(sessions, staticSessionAuthority{}), func(c *gin.Context) {
 		reached = true
 		if v, ok := c.Get("admin_id"); ok {
 			if s, ok := v.(string); ok {
@@ -88,7 +94,7 @@ func TestAdminAuthRequired_ExpiredSid_401(t *testing.T) {
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return clock })
 	engine, reached, _ := adminAuthTestEngine(sessions)
 
-	sid, err := sessions.Mint(ctx, "admin-xyz")
+	sid, err := sessions.Mint(ctx, "admin-xyz", 0)
 	require.NoError(t, err)
 
 	// Advance past the absolute cap so the session is dead.
@@ -112,7 +118,7 @@ func TestAdminAuthRequired_ValidSid_SetsAdminIDAndCallsNext(t *testing.T) {
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
 	engine, reached, gotAdminID := adminAuthTestEngine(sessions)
 
-	sid, err := sessions.Mint(ctx, "admin-xyz")
+	sid, err := sessions.Mint(ctx, "admin-xyz", 0)
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()

@@ -89,12 +89,13 @@ func checkAAGUID(aaguid []byte, allowed []string) error {
 //
 //nolint:revive // Admin* prefix is the #1688 cross-task naming contract (see types.go header).
 type AdminRegistrationInput struct {
-	User           *mfa.WebAuthnUser
-	Session        webauthn.SessionData
-	Request        *http.Request
-	AdminID        string
-	AllowedAAGUIDs []string // resolved ADMIN_WEBAUTHN_ALLOWED_AAGUIDS
-	CredentialName string   // operator-supplied label (may be empty)
+	User                 *mfa.WebAuthnUser
+	Session              webauthn.SessionData
+	Request              *http.Request
+	AdminID              string
+	CredentialGeneration int64
+	AllowedAAGUIDs       []string // resolved ADMIN_WEBAUTHN_ALLOWED_AAGUIDS
+	CredentialName       string   // operator-supplied label (may be empty)
 }
 
 // FinishAdminRegistration completes the admin WebAuthn registration ceremony,
@@ -125,7 +126,7 @@ func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo
 		transports = append(transports, string(tr))
 	}
 
-	stored, err := repo.AddCredential(ctx, AdminCredential{
+	stored, err := repo.CompleteEnrollment(ctx, in.CredentialGeneration, AdminCredential{
 		AdminID:        in.AdminID,
 		CredentialID:   cred.ID,
 		PublicKey:      cred.PublicKey,
@@ -135,9 +136,8 @@ func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo
 		Transports:     transports,
 	})
 	if err != nil {
-		// A reused credential ID is the client's input: it is rejected like any other
-		// bad attestation, not reported as a storage fault.
-		if errors.Is(err, ErrDuplicateCredential) {
+		// A reused credential ID is the client's input, not a storage fault.
+		if errors.Is(err, ErrDuplicateCredential) || errors.Is(err, ErrEnrollmentStateChanged) {
 			return AdminCredential{}, err
 		}
 		return AdminCredential{}, fmt.Errorf("%w: %w", ErrCredentialPersist, err)

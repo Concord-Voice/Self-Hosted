@@ -130,9 +130,70 @@ func TestAdminRepo_SetStatusAndDisable(t *testing.T) {
 	})
 }
 
+func TestAdminRepo_ResetEnrollmentAdvancesAuthorityGenerations(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	repo := admin.NewAdminRepo(db)
+
+	u, err := repo.CreatePending(ctx, uniqueAdminUsername("reset-authority"), "h")
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, u.ID)
+	require.NoError(t, repo.SetStatus(ctx, u.ID, admin.StatusActive))
+
+	credentialID := []byte(uniqueAdminUsername("reset-authority-cred"))
+	_, err = repo.AddCredential(ctx, admin.AdminCredential{ // #nosec G101 -- test fixture WebAuthn credential, not a secret
+		AdminID: u.ID, CredentialID: credentialID, PublicKey: []byte{0x01}, AAGUID: []byte{0x02},
+	})
+	require.NoError(t, err)
+
+	activeGeneration, err := repo.ActiveSessionGeneration(ctx, u.ID)
+	require.NoError(t, err)
+	assert.Equal(t, u.SessionGeneration, activeGeneration)
+
+	revoked, previousCredentialGeneration, newCredentialGeneration, err := repo.ResetEnrollment(ctx, u.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), revoked)
+	assert.Equal(t, u.CredentialGeneration, previousCredentialGeneration)
+	assert.Equal(t, previousCredentialGeneration+1, newCredentialGeneration)
+
+	_, err = repo.ActiveSessionGeneration(ctx, u.ID)
+	assert.ErrorIs(t, err, admin.ErrAdminNotFound, "pending administrators must have no active session authority")
+
+	got, err := repo.GetByUsername(ctx, u.Username)
+	require.NoError(t, err)
+	assert.Equal(t, admin.StatusPending, got.Status)
+	assert.Equal(t, activeGeneration+1, got.SessionGeneration)
+	assert.Equal(t, newCredentialGeneration, got.CredentialGeneration)
+	count, err := repo.CountActiveCredentials(ctx, u.ID)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+
+	require.NoError(t, repo.SetStatus(ctx, u.ID, admin.StatusActive))
+	activeGeneration, err = repo.ActiveSessionGeneration(ctx, u.ID)
+	require.NoError(t, err)
+	assert.Equal(t, got.SessionGeneration, activeGeneration, "re-enrollment must preserve the advanced generation")
+}
+
+func TestAdminRepo_ResetEnrollmentRejectsUnknownAdmin(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	repo := admin.NewAdminRepo(db)
+	unknownID := "00000000-0000-0000-0000-000000000000"
+
+	_, err := repo.ActiveSessionGeneration(ctx, unknownID)
+	assert.ErrorIs(t, err, admin.ErrAdminNotFound)
+
+	_, _, _, err = repo.ResetEnrollment(ctx, unknownID)
+	assert.ErrorIs(t, err, admin.ErrAdminNotFound)
+}
+
 func TestAdminRepo_Credentials(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(cleanup)
+	rdb, redisCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(redisCleanup)
 	ctx := context.Background()
 	repo := admin.NewAdminRepo(db)
 
@@ -192,4 +253,41 @@ func TestAdminRepo_Credentials(t *testing.T) {
 		_, err := repo.AddCredential(ctx, cred)
 		require.Error(t, err)
 	})
+
+	t.Run("FinalizeWebAuthnLogin mints for the active exact credential", func(t *testing.T) {
+		require.NoError(t, repo.SetStatus(ctx, u.ID, admin.StatusActive))
+		_, err := db.ExecContext(ctx,
+			`UPDATE admin_users SET session_generation = session_generation + 7 WHERE id = $1`, u.ID)
+		require.NoError(t, err)
+		current, err := repo.GetByUsername(ctx, u.Username)
+		require.NoError(t, err)
+
+		sid, err := repo.FinalizeWebAuthnLogin(ctx, admin.NewSessionStore(rdb, nil), u.ID, credID, 43)
+		require.NoError(t, err)
+		require.NotEmpty(t, sid)
+
+		sess, err := admin.NewSessionStore(rdb, nil).Get(ctx, sid)
+		require.NoError(t, err)
+		assert.Equal(t, u.ID, sess.AdminID)
+		assert.Equal(t, current.SessionGeneration, sess.SessionGeneration,
+			"finalization must mint with the generation read under the admin lock")
+
+		var got int64
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT sign_count FROM admin_webauthn_credentials WHERE credential_id = $1`, credID).Scan(&got))
+		assert.Equal(t, int64(43), got)
+	})
+
+	t.Run("FinalizeWebAuthnLogin rejects a revoked credential before mint", func(t *testing.T) {
+		require.NoError(t, repo.DeleteCredentials(ctx, u.ID))
+		before, err := rdb.DBSize(ctx).Result()
+		require.NoError(t, err)
+		sid, err := repo.FinalizeWebAuthnLogin(ctx, admin.NewSessionStore(rdb, nil), u.ID, credID, 44)
+		require.ErrorIs(t, err, admin.ErrAdminAuthenticationStateChanged)
+		assert.Empty(t, sid)
+		after, sizeErr := rdb.DBSize(ctx).Result()
+		require.NoError(t, sizeErr)
+		assert.Equal(t, before, after, "failed credential persistence must not create a Redis session")
+	})
+
 }
