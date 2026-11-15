@@ -382,38 +382,25 @@ func (h *Handler) queryServerMembers(serverID string) ([]MemberWithUser, error) 
 	return members, nil
 }
 
-// populateLastSeen batch-fetches last_seen timestamps and presence state. An
-// invisible member's timestamp is visible only to that member.
+// populateLastSeen exposes the saved timestamp only to its owner. Showing it
+// for another member in one presence state would reveal invisible transitions.
 func (h *Handler) populateLastSeen(viewerID string, members []MemberWithUser) {
 	if len(members) == 0 || h.redis == nil {
 		return
 	}
-	keys := make([]string, 0, len(members)*2)
-	for _, m := range members {
-		keys = append(keys, fmt.Sprintf("last_seen:%s", m.UserID), fmt.Sprintf("presence:%s", m.UserID))
-	}
-	ctx := context.Background()
-	vals, err := h.redis.MGet(ctx, keys...).Result()
-	if err != nil {
-		return
-	}
-	for i, member := range members {
-		lastSeen := vals[i*2]
-		status := vals[i*2+1]
-		if member.UserID != viewerID && status == presence.StatusInvisible {
+	for i := range members {
+		if members[i].UserID != viewerID {
 			continue
 		}
-		if lastSeen == nil {
-			continue
-		}
-		tsStr, ok := lastSeen.(string)
-		if !ok {
-			continue
+		tsStr, err := h.redis.Get(context.Background(), fmt.Sprintf("last_seen:%s", viewerID)).Result()
+		if err != nil {
+			return
 		}
 		ts, parseErr := strconv.ParseInt(tsStr, 10, 64)
 		if parseErr == nil {
 			members[i].LastSeen = &ts
 		}
+		return
 	}
 }
 

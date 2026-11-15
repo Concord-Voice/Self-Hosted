@@ -23543,7 +23543,7 @@ components:
           type: integer
           format: int64
           nullable: true
-          description: Unix timestamp of last activity. Omitted for an invisible member when viewed by another user; callers may see their own timestamp.
+          description: Unix timestamp of the last visible-session disconnect, when recorded. Only a member's own row includes it; other viewers see the field omitted for both invisible and offline members.
         timed_out_until:
           type: string
           format: date-time
