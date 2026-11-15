@@ -386,6 +386,8 @@ if [[ "$redis_ready" == true ]]; then
     "${redis_cli[@]}" SET "${prefix}:sentinel" target >/dev/null
   done
   "${redis_cli[@]}" SET defensive:keep keep >/dev/null
+  # 9000 keys in one SCAN page: a single unpack() over them exceeds Lua's limit.
+  "${redis_cli[@]}" EVAL 'for i=1,9000 do redis.call("SET","ws_ticket:bulk"..i,"x") end' 0 >/dev/null
   "${redis_cli[@]}" SET admin_sessionX:keep keep >/dev/null
   (
     source "$DEPLOY/selfhost-backup.sh"
@@ -400,9 +402,10 @@ if [[ "$redis_ready" == true ]]; then
   for prefix in "${redis_targets[@]}"; do
     [[ "$("${redis_cli[@]}" EXISTS "${prefix}:sentinel")" == 0 ]] || purged=false
   done
+  [[ "$("${redis_cli[@]}" EVAL 'return #redis.call("KEYS","ws_ticket:bulk*")' 0)" == 0 ]] || purged=false
   if [[ $rc -eq 0 && "$purged" == true && "$("${redis_cli[@]}" GET defensive:keep)" == keep \
     && "$("${redis_cli[@]}" GET admin_sessionX:keep)" == keep ]]; then
-    pass "isolated Redis Lua purge removes only the ten restored authorization key families"
+    pass "isolated Redis Lua purge removes only the ten restored authorization key families, 9000 in one page"
   else
     fail "isolated Redis Lua purge rc=$rc purged=$purged"
   fi

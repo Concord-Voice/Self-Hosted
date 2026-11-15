@@ -262,8 +262,8 @@ _restore_start_redis() {
 # _restore_purge_redis_authority — remove only opaque authorization state that
 # can survive a same-host Redis volume across a database restore, plus the
 # credential-epoch cache, whose newer values would refuse the restored epochs.
-# Each Redis script processes one bounded SCAN page; unrelated keys are never
-# deleted.
+# Each Redis script processes one bounded SCAN page and unlinks at most 500
+# keys per call, below Lua's unpack limit; unrelated keys are never deleted.
 _restore_purge_redis_authority() {
   local cursor=0 reply scans=0 found=0
   local prefixes=(
@@ -278,7 +278,7 @@ _restore_purge_redis_authority() {
     'sso_token:'
     'cred_epoch:'
   )
-  local purge_script='local r=redis.call("SCAN",ARGV[1],"COUNT",10000); local del={}; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then table.insert(del,k); break end end end; if #del>0 then redis.call("UNLINK",unpack(del)) end; return r[1]'
+  local purge_script='local r=redis.call("SCAN",ARGV[1],"COUNT",10000); local del={}; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then table.insert(del,k); break end end end; for j=1,#del,500 do redis.call("UNLINK",unpack(del,j,math.min(j+499,#del))) end; return r[1]'
   local verify_script='local r=redis.call("SCAN",ARGV[1],"COUNT",10000); local found=0; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then found=found+1; break end end end; return r[1]..":"..found'
 
   echo 'Purging restored Redis authorization state...'
