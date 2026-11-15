@@ -1834,6 +1834,10 @@ func NewRouter(
 			// even before email verification completes.
 			privacyRoutes := authRequired.Group("/privacy")
 			{
+				privacyRoutes.GET("/erase-account/owned-servers",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					privacyHandler.ListOwnedServers,
+				)
 				privacyRoutes.POST("/erase-account",
 					middleware.RateLimitByUser(redis, 3, 24*time.Hour),
 					privacyHandler.EraseAccount,

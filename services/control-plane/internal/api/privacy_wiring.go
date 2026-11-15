@@ -7,8 +7,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/email"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/privacy"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
@@ -29,7 +29,7 @@ type erasureClearWiring struct {
 
 // buildPrivacyHandler constructs the privacy handler wired to the
 // account-deletion service. Telemetry-related wiring was removed in #758 (sub-epic G);
-// the handler now exposes only POST /api/v1/privacy/erase-account.
+// the handler now exposes only the account-erasure POST and its owned-server preview.
 //
 // It also returns the AccountService itself (#2447). The service is constructed
 // here rather than in NewRouter, so returning it is what lets the boot guard
@@ -77,5 +77,6 @@ func buildPrivacyHandler(
 	}
 	handler := privacy.NewHandler(account, redisClient, log)
 	handler.SetErasureEmailSender(erasureEmailSender)
+	handler.SetOwnedServersDB(db)
 	return handler, account
 }

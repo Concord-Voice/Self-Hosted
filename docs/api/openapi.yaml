@@ -13489,6 +13489,55 @@ paths:
           $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '503':
           $ref: '#/components/responses/StepUpBudgetUnavailable'
+  /privacy/erase-account/owned-servers:
+    get:
+      tags:
+      - Privacy
+      summary: Preview owned servers requiring erasure acknowledgement
+      operationId: listErasureOwnedServers
+      description: >-
+        Available to authenticated users before email verification. Returns only
+        servers owned by the caller that have another member, sorted by ID.
+        This is an advisory preview; erasure locks and rechecks the exact set.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+      - BearerAuth: []
+      responses:
+        '200':
+          description: Protected owned servers (empty array when none)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [servers]
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, member_count]
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        name:
+                          type: string
+                        member_count:
+                          type: integer
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Owned-server preview temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /privacy/erase-account:
     post:
       tags:
@@ -13500,22 +13549,81 @@ paths:
         Any pending Rich Presence cleanup is resumed and active activity is
         suppressed under the sender gate first. The subsequent user cascade and
         privacy-safe audit insertion execute atomically in one database transaction.
-        Available before email verification. Rate limit: 3 requests per 24 hours
-        (user-based).
+        Requires fresh password proof, the current MFA factor when enrolled, and
+        acknowledgement of the exact protected owned-server IDs. Before email
+        verification, a successful first request emails a one-use confirmation
+        link valid for 15 minutes and returns 202; retry with its request ID
+        and token to erase.
+        The confirmation is bound to the login family, credential epoch, and
+        owned-server set. Rate limit: 3 requests per 24 hours (user-based).
       security:
       - BearerAuth: []
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
               type: object
-              description: Optional empty object; unknown fields are ignored
+              additionalProperties: false
+              description: >-
+                Proof-bearing requests must include confirmed_owned_server_ids,
+                even when empty. IDs must be canonical lowercase UUIDs in
+                strictly increasing order. An empty object receives a
+                step_up_required refusal without deleting the account.
+              properties:
+                password:
+                  type: string
+                  format: password
+                mfa_code:
+                  type: string
+                  description: Current enrolled MFA factor proof, when required.
+                confirmed_owned_server_ids:
+                  type: array
+                  uniqueItems: true
+                  items:
+                    type: string
+                    format: uuid
+                email_confirmation:
+                  type: object
+                  additionalProperties: false
+                  required: [request_id, token]
+                  description: >-
+                    Only for unverified-email accounts after the first 202.
+                    The token arrives in the emailed deep link, never in the
+                    first API response.
+                  properties:
+                    request_id:
+                      type: string
+                      format: uuid
+                    token:
+                      type: string
+                clientId:
+                  type: string
+                  deprecated: true
+                  description: Accepted temporarily for compatibility; grants no authority.
       responses:
         '204':
           description: Account erased
+        '202':
+          description: Email confirmation sent; account remains present
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status, request_id, expires_in]
+                properties:
+                  status:
+                    type: string
+                    enum: [email_confirmation_required]
+                  request_id:
+                    type: string
+                    format: uuid
+                  expires_in:
+                    type: integer
+                    description: Confirmation lifetime in seconds.
         '400':
-          description: Malformed JSON body
+          description: Malformed body, unsupported field, or invalid owned-server acknowledgement
           content:
             application/json:
               schema:
@@ -13532,14 +13640,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Fresh password or enrolled MFA proof required or refused
+          content:
+            application/json:
+              schema:
+                type: object
+                description: A step-up refusal with error_code and applicable proof hints.
         '409':
-          description: Account state changed while the erasure was prepared; retry the deletion
+          description: Account state, protected owned-server set, or email confirmation changed or expired; refresh and retry
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Authentication temporarily unavailable
+          description: Authentication or email confirmation unavailable, or erasure committed but presence delivery remains unsettled
           content:
             application/json:
               schema:
@@ -13551,7 +13666,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          description: Erasure request or fresh-proof attempt budget exhausted
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Rate-limit or step-up budget refusal; Retry-After may be set.
   /servers:
     get:
       tags:

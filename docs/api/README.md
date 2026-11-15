@@ -130,7 +130,7 @@ in `admin-metrics.openapi.yaml`: 291 supported operations across both surfaces.
 | Friends | 6 | `/friends`, `/friends/request`, `/friends/request/{id}` | Bearer |
 | FriendCodes | 7 | `/friends/codes`, `/friends/codes/{code}`, `/friends/codes/{code}/{avatar,preview,claim}` | Mixed — preview/avatar public, the rest Bearer |
 | Presence | 8 | `/users/me/presence-history`, `/users/me/presence-history/settings` (Activity History), `/users/me/presence-overrides/{category}` (Custom Status) | Bearer; authenticated subject only |
-| Privacy | 3 | `/users/me/privacy`, `/privacy/erase-account` | Bearer |
+| Privacy | 4 | `/users/me/privacy`, `/privacy/erase-account`, `/privacy/erase-account/owned-servers` | Bearer |
 | Notifications | 2 | `/notifications/{mute,preferences}` | Bearer |
 | GIFs | 11 | `/klipy/gifs/{items,categories,trending}`, `/klipy/customer-id` | Bearer |
 | Age Verification | 2 | `/age/claim`, `/age/status` | Bearer + verified email |
