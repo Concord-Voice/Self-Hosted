@@ -4,19 +4,22 @@
 # Coverage is SHA-bound evidence from a trusted reviewer. One of:
 #   - a submitted PR review (APPROVED / CHANGES_REQUESTED / COMMENTED) whose commit_id is the
 #     head SHA, by someone other than the PR author who is EITHER a human repo insider
-#     (author_association OWNER, MEMBER or COLLABORATOR) OR an allowlisted review bot — a bot
+#     (author_association OWNER or MEMBER; COLLABORATOR also covers read and triage access,
+#     so it does not count) OR an allowlisted review bot — a bot
 #     must be allowlisted even when it carries an insider association:
 #     copilot-pull-request-reviewer[bot] plus any login in the base branch's
 #     .claude/repo-config.json `.review_coverage.reviewer_bots`. Other bots do not count —
 #     a code-scanning bot's review is an alert, not a review — and neither does a drive-by
-#     account's review on a public repo;
+#     account's review on a public repo. A COMMENTED review counts only with a body or a
+#     top-level inline comment: GitHub files every thread reply as its own empty COMMENTED
+#     review at the head of that moment, and a reply is not a review;
 #   - a first-party coverage record: a PR conversation comment with, on a line of its own,
 #       <!-- cv-review-coverage: sha=<40-hex head SHA> reviewer=<login> suite=<skill> -->
-#     posted BY <login> (the reviewer's identity is the poster's GitHub identity) with
-#     author_association OWNER, MEMBER or COLLABORATOR, and who is not the PR author — the
-#     same trust rule as reviews, so a bot poster must also be allowlisted.
+#     posted BY <login> (the reviewer's identity is the poster's GitHub identity), a human
+#     with author_association OWNER or MEMBER who is not the PR author. A bot, even an
+#     allowlisted one, counts only through a submitted review.
 # author_association is GitHub's relationship field, not a permission check: MEMBER is any
-# org member and COLLABORATOR includes read-only collaborators. Insiders who can edit others'
+# org member. Insiders who can edit others'
 # comments can already push to the branch, so they are inside this check's trust boundary.
 # A review or record on an older SHA is reported as stale and does NOT count. Comments,
 # check-runs and verdict posts that name no SHA do not count either.
@@ -31,8 +34,10 @@
 # Read-only: makes GET requests and nothing else.
 #
 # Test seam: CV_COVERAGE_FIXTURE=<file> holding {"pr":{...},"reviews":[...],"comments":[...],
-# "config":{...}?} in the REST shapes of pulls/<n>, pulls/<n>/reviews and issues/<n>/comments.
-# Output then carries a "(fixture)" suffix, so a stray variable can never pass silently.
+# "review_comments":[...]?,"config":{...}?} in the REST shapes of pulls/<n>, pulls/<n>/reviews,
+# issues/<n>/comments and pulls/<n>/comments. Fixture mode accepts only PR number 0, which no
+# real PR has, and its output carries a "(fixture)" suffix, so a stray variable can never make
+# a real PR read as covered.
 set -uo pipefail
 
 unknown() { echo "UNKNOWN: $*" >&2; exit 2; }
@@ -45,6 +50,7 @@ command -v jq >/dev/null 2>&1 || unknown "jq required"
 
 suffix=""
 if [[ -n "${CV_COVERAGE_FIXTURE:-}" ]]; then
+  [[ "$PR" == 0 ]] || unknown "CV_COVERAGE_FIXTURE is set; fixture mode checks only PR 0"
   data=$(cat "$CV_COVERAGE_FIXTURE" 2>/dev/null) || unknown "fixture unreadable: $CV_COVERAGE_FIXTURE"
   suffix=" (fixture)"
 else
@@ -57,29 +63,39 @@ else
   if cfg=$(gh api -X GET "repos/$repo/contents/.claude/repo-config.json" -f ref="$base" --jq .content 2>"$errf"); then
     config=$(printf '%s' "$cfg" | tr -d '\n' | base64 -d 2>/dev/null | jq -c . 2>/dev/null) \
       || unknown "base-branch repo-config.json is not valid JSON"
-    # An empty body (e.g. a file too large for the contents API) is not "no config".
-    [[ -n "$config" ]] || unknown "base-branch repo-config.json is empty or unreadable"
-  elif grep -q "HTTP 404" "$errf"; then
+    # Empty content (an empty file, or one over the API's 1 MB inline limit) is unreadable, not absent.
+    [[ "$(jq -r type <<<"$config" 2>/dev/null)" == object ]] \
+      || unknown "base-branch repo-config.json is empty, too large or not a JSON object"
+  elif grep -q "Not Found (HTTP 404)" "$errf"; then
     config='{}'
   else
     unknown "cannot read base-branch repo-config.json"
   fi
   reviews=$(gh api --paginate --slurp "repos/$repo/pulls/$PR/reviews") || unknown "cannot read reviews"
   comments=$(gh api --paginate --slurp "repos/$repo/issues/$PR/comments") || unknown "cannot read comments"
-  data=$(printf '%s\n%s\n%s\n%s\n' "$pr" "$reviews" "$comments" "$config" \
-    | jq -s '{pr: .[0], reviews: (.[1] | add // []), comments: (.[2] | add // []), config: .[3]}') \
+  rcomments=$(gh api --paginate --slurp "repos/$repo/pulls/$PR/comments") || unknown "cannot read review comments"
+  data=$(printf '%s\n%s\n%s\n%s\n%s\n' "$pr" "$reviews" "$comments" "$config" "$rcomments" \
+    | jq -s '{pr: .[0], reviews: (.[1] | add // []), comments: (.[2] | add // []), config: .[3],
+             review_comments: (.[4] | add // [])}') \
     || unknown "cannot assemble API responses"
 fi
 
 out=$(printf '%s' "$data" | jq -r --arg n "$PR" --arg sfx "$suffix" '
   (.pr.head.sha // "") as $h | (.pr.user.login // "") as $author |
   (["copilot-pull-request-reviewer[bot]"] + [(.config.review_coverage.reviewer_bots // [])[] | strings]) as $bots |
-  def insider: (.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR");
+  def insider: (.author_association // "") | IN("OWNER", "MEMBER");
   def trusted: (.user.login // "") as $l
     | $l != "" and $l != $author
       and (if (.user.type // "") == "Bot" then ($bots | index($l)) != null else insider end);
-  if ($h | test("^[0-9a-f]{40}$") | not) then "BADSHA" else
-  [ .reviews[]? | select(trusted and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED"))) ] as $trev
+  # A thread reply is filed as an empty COMMENTED review; it counts only with a body or a
+  # top-level (not in-reply-to) inline comment of its own.
+  [ .review_comments[]? | select(.in_reply_to_id == null) | .pull_request_review_id ] as $roots |
+  def substantive: .state != "COMMENTED" or ((.body // "") | test("\\S"))
+    or (.id as $i | $i != null and any($roots[]; . == $i));
+  if ((.reviews | type) != "array" or (.comments | type) != "array"
+      or ((.review_comments // []) | type) != "array") then "BADDATA"
+  elif ($h | test("^[0-9a-f]{40}$") | not) then "BADSHA" else
+  [ .reviews[]? | select(trusted and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")) and substantive) ] as $trev
   | [ $trev[] | select(.commit_id == $h) | "\(.user.login) (\(.state))" ] as $rev
   # Records count from human posters only: an allowlisted bot covers a PR by
   # submitting a review, never by echoing a marker into a comment.
@@ -98,8 +114,13 @@ out=$(printf '%s' "$data" | jq -r --arg n "$PR" --arg sfx "$suffix" '
     + $sfx
   end') || unknown "cannot evaluate coverage for #$PR"
 
+nl='
+'
 case "$out" in
+  *"$nl"*|'') unknown "unexpected output for #$PR" ;;
   BADSHA) unknown "PR #$PR has no readable head SHA" ;;
-  *" covered: "*) echo "$out"; exit 0 ;;
-  *) echo "$out"; exit 1 ;;
+  BADDATA) unknown "reviews or comments for #$PR are not arrays" ;;
+  "#$PR @"*" covered: "*) echo "$out"; exit 0 ;;
+  "#$PR @"*" ZERO coverage"*) echo "$out"; exit 1 ;;
+  *) unknown "unexpected output for #$PR: $out" ;;
 esac
