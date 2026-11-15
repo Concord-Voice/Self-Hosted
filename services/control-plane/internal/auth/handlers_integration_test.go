@@ -31,7 +31,13 @@ const (
 
 func setupTS(t *testing.T) *testhelpers.TestServer {
 	t.Helper()
-	return testhelpers.SetupTestServer(t)
+	ts := testhelpers.SetupTestServer(t)
+	// Pending rows outlive TruncateAllTables here, and a registration of the
+	// shared test address would otherwise take over a previous test's row and
+	// inherit its resend and attempt state.
+	_, err := ts.DB.Exec(`DELETE FROM pending_registrations`)
+	require.NoError(t, err)
+	return ts
 }
 
 func registerPayload() map[string]interface{} {
@@ -1618,39 +1624,52 @@ func TestLogin_PasswordDisabled_NoIdentities_Returns500(t *testing.T) {
 		"sso_account_misconfigured path must not engage per-email lockout — it's a server fault, not a credential failure")
 }
 
-// A re-registration of the same address mints a new pending ID, whose own
-// attempt count starts at zero. The per-address budget must keep confirm
-// refused after the first row's guesses were spent, both on a password
-// takeover and on cancel-then-register.
-func TestRegistrationAttemptsSurviveReRegistration(t *testing.T) {
-	for _, path := range []string{"takeover", "cancel then register"} {
-		t.Run(path, func(t *testing.T) {
-			ts := setupTS(t)
-			register := func() string {
-				w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-				require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-				var reg struct {
-					PendingID string `json:"pending_id"`
-				}
-				testhelpers.ParseJSON(t, w, &reg)
-				return reg.PendingID
-			}
-			first := register()
-			wrong := map[string]string{"pending_id": first, "code": "000000"} //nolint:gosec // test value, not a credential
-			for i := 0; i < auth.MaxCodeAttempts; i++ {
-				require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
-			}
-			if path == "cancel then register" {
-				w := ts.DoRequest("DELETE", pathRegister+"/"+first, nil, nil)
-				require.Less(t, w.Code, 300, w.Body.String())
-			}
-			second := register()
-			require.NotEqual(t, first, second)
-
-			w := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
-				map[string]string{"pending_id": second, "code": "000000"}, nil) //nolint:gosec // test value, not a credential
-			require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
-			assert.Contains(t, w.Body.String(), "too_many_attempts")
-		})
+// A re-registration of the same address mints a new pending ID. A password
+// takeover carries the replaced row's attempt count and resend state, so it
+// draws no fresh guesses and no fresh cooldown; a cancel then register gets a
+// fresh code, and code issuance per address bounds how often that can happen.
+func TestRegistrationTakeoverCarriesAttemptsAndResendState(t *testing.T) {
+	ts := setupTS(t)
+	register := func() string {
+		w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		var reg struct {
+			PendingID string `json:"pending_id"`
+		}
+		testhelpers.ParseJSON(t, w, &reg)
+		return reg.PendingID
 	}
+	first := register()
+	require.Equal(t, http.StatusOK, ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": first}, nil).Code)
+	wrong := map[string]string{"pending_id": first, "code": "000000"} //nolint:gosec // test value, not a credential
+	for i := 0; i < auth.MaxCodeAttempts; i++ {
+		require.Equal(t, http.StatusUnauthorized, ts.DoRequest("POST", "/api/v1/auth/register/confirm", wrong, nil).Code)
+	}
+
+	second := register()
+	require.NotEqual(t, first, second)
+	w := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": second, "code": "000000"}, nil) //nolint:gosec // test value, not a credential
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "too_many_attempts", "a takeover must not mint fresh guesses")
+
+	w = ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": second}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "cooldown_active", "a takeover must not reset the resend cooldown")
+}
+
+func TestRegistrationIssuanceIsBoundedPerAddress(t *testing.T) {
+	ts := setupTS(t)
+	for i := 0; i < auth.MaxResends+1; i++ {
+		w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+		require.Equal(t, http.StatusCreated, w.Code, "registration %d: %s", i+1, w.Body.String())
+		var reg struct {
+			PendingID string `json:"pending_id"`
+		}
+		testhelpers.ParseJSON(t, w, &reg)
+		require.Less(t, ts.DoRequest("DELETE", pathRegister+"/"+reg.PendingID, nil, nil).Code, 300)
+	}
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "registration_codes_exhausted")
 }

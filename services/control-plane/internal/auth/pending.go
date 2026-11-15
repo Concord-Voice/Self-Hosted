@@ -231,10 +231,14 @@ func (r *PendingRepo) InsertOrTakeover(
 	}
 
 	// --- Phase 3: commit — delete the old row (if any) then insert the new one ---
+	// A takeover carries the old row's resend state into the new one, so
+	// re-registering cannot refund the resend cap or the cooldown.
+	resendCount := 0
+	var lastResendAt sql.NullTime
 	if takeoverID != "" {
-		if _, err = tx.ExecContext(ctx,
-			`DELETE FROM pending_registrations WHERE id = $1`, takeoverID,
-		); err != nil {
+		if err = tx.QueryRowContext(ctx,
+			`DELETE FROM pending_registrations WHERE id = $1 RETURNING resend_count, last_resend_at`, takeoverID,
+		).Scan(&resendCount, &lastResendAt); err != nil {
 			return "", time.Time{}, "", err
 		}
 	}
@@ -248,8 +252,8 @@ func (r *PendingRepo) InsertOrTakeover(
 	if err = tx.QueryRowContext(ctx,
 		`INSERT INTO pending_registrations
 			(id, email, username, password_hash, wrapped_private_key, key_derivation_salt,
-			 key_derivation_alg, public_key, age_verified, resend_count, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, 0, $9)
+			 key_derivation_alg, public_key, age_verified, resend_count, last_resend_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10, $11)
 		RETURNING expires_at`,
 		newID,
 		params.Email,
@@ -259,6 +263,8 @@ func (r *PendingRepo) InsertOrTakeover(
 		params.KeyDerivationSalt,
 		kdAlg,
 		params.PublicKey,
+		resendCount,
+		lastResendAt,
 		time.Now().Add(PendingRegistrationTTL),
 	).Scan(&expiresAt); err != nil {
 		return "", time.Time{}, "", err

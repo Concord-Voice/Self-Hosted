@@ -40,9 +40,11 @@ and its attempt count; the wrong guess that spends a code's fifth attempt
 deletes that record, so the next request can send a new code. Only a
 successfully consumed email code clears that email's failure budget. Registration uses the pending-registration ID as its
 attempt subject through resend and change-email, with attempt state lasting
-until the pending row expires; because re-registering the same address mints a
-new pending ID, confirm also charges a per-address count over the same
-lifetime. Resend and change-email share the existing
+until the pending row expires. A password takeover carries the replaced row's
+attempt count and resend state into the new row; a cancel then register gets a
+fresh code, so registration bounds code issuance per address (the initial code
+plus the resend cap per pending lifetime) rather than refusing guesses per
+address, which would let anyone refuse a correct code. Resend and change-email share the existing
 two-minute cooldown and four-resend cap. These code budgets do not use the
 proposed login-family SQL receipt design below.
 

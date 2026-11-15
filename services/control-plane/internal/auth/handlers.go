@@ -547,8 +547,11 @@ func (h *Handler) Register(c *gin.Context) {
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
 	normalizedUsername := NormalizeUsername(req.Username)
+	if !h.allowRegistrationIssuance(c.Request.Context(), c, normalizedEmail) {
+		return
+	}
 
-	pendingID, expiresAt, _, err := h.pending.InsertOrTakeover(
+	pendingID, expiresAt, takenOverID, err := h.pending.InsertOrTakeover(
 		c.Request.Context(),
 		InsertParams{
 			Email:             normalizedEmail,
@@ -564,6 +567,20 @@ func (h *Handler) Register(c *gin.Context) {
 	if err != nil {
 		h.respondPendingError(c, err)
 		return
+	}
+
+	// A takeover carries the replaced row's attempt count (its resend state
+	// rode the INSERT). Without it the new row would be a fresh code with
+	// fresh guesses, so a failed carry refuses the registration.
+	if takenOverID != "" {
+		if err := h.carryVerificationAttempts(c.Request.Context(), takenOverID, pendingID); err != nil {
+			h.log.Error("register: attempt carry failed", "error", err)
+			if _, delErr := h.pending.Delete(c.Request.Context(), pendingID); delErr != nil {
+				h.log.Error("Failed to roll back pending after attempt carry error", "error", delErr)
+			}
+			writeRegistrationAttemptsUnavailable(c)
+			return
+		}
 	}
 
 	// Generate + send code synchronously. On failure, roll back the pending
@@ -752,9 +769,6 @@ func (h *Handler) ConfirmRegistration(c *gin.Context) {
 		return
 	}
 
-	if !h.allowRegistrationEmailAttempt(ctx, c, pending.Email) {
-		return
-	}
 	if !h.attemptsGuard(ctx, c, req.PendingID, sanitized, time.Until(pending.ExpiresAt)) {
 		return
 	}
@@ -813,31 +827,61 @@ func (h *Handler) validateConfirmRequest(c *gin.Context) (*ConfirmRegistrationRe
 	return &req, sanitized, true
 }
 
-// registrationEmailAttemptsKey keys the per-address count of registration
-// code guesses. It sits under the email_verify_attempts: prefix the Redis ACL
-// already grants, and "email:" can never collide with a pending UUID.
-func registrationEmailAttemptsKey(email string) string {
-	return "email_verify_attempts:email:" + strings.ToLower(strings.TrimSpace(email))
+// registrationIssuanceKey keys the per-address count of registrations
+// started, each of which issues a code. It sits under the
+// email_verify_attempts: prefix the Redis ACL already grants, and "issued:"
+// can never collide with a pending UUID.
+func registrationIssuanceKey(email string) string {
+	return "email_verify_attempts:issued:" + email
 }
 
-// allowRegistrationEmailAttempt charges one code guess against the address,
-// before the per-pending reservation. The per-pending count lives with a
-// pending ID, and a re-registration of the same address (a takeover, or a
-// cancel and register) mints a new ID with a fresh count; this one bounds the
-// guesses an address gets in a pending row's lifetime however many rows it
-// has. It fails closed: a Redis error is a 503, never an unbounded guess.
-func (h *Handler) allowRegistrationEmailAttempt(ctx context.Context, c *gin.Context, email string) bool {
-	allowed, err := middleware.AllowUserAction(ctx, h.redis, registrationEmailAttemptsKey(email), MaxCodeAttempts, PendingRegistrationTTL)
+// registrationIssuanceLimit is how many registrations, and so codes, one
+// address may start in a pending row's lifetime: the initial code plus
+// MaxResends, the most one pending row can issue.
+const registrationIssuanceLimit = MaxResends + 1
+
+// allowRegistrationIssuance bounds the codes an address is issued across
+// re-registrations. Guesses are bounded per code, and a cancel then register
+// mints a new pending row with a fresh code; bounding issuance bounds the
+// total guesses an address can draw without ever refusing a correct code
+// already sent to it. It fails closed: a Redis error is a 503.
+func (h *Handler) allowRegistrationIssuance(ctx context.Context, c *gin.Context, email string) bool {
+	allowed, err := middleware.AllowUserAction(ctx, h.redis, registrationIssuanceKey(email), registrationIssuanceLimit, PendingRegistrationTTL)
 	if err != nil {
-		h.log.Error("confirm: email attempt budget unavailable", "error", err)
+		h.log.Error("register: code issuance budget unavailable", "error", err)
 		writeRegistrationAttemptsUnavailable(c)
 		return false
 	}
 	if !allowed {
-		c.JSON(http.StatusTooManyRequests, gin.H{"code": "too_many_attempts"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": "registration_codes_exhausted"})
 		return false
 	}
 	return true
+}
+
+// carryVerificationAttemptsLua copies a taken-over pending row's attempt
+// count, with its remaining lifetime, to the row that replaced it.
+const carryVerificationAttemptsLua = `
+local attempts = redis.call("GET", KEYS[1])
+if not attempts then
+  return 0
+end
+local ttl = redis.call("PTTL", KEYS[1])
+if ttl > 0 then
+  redis.call("SET", KEYS[2], attempts, "PX", ttl)
+end
+redis.call("DEL", KEYS[1])
+return 1
+`
+
+// carryVerificationAttempts moves a takeover's attempt count onto the new
+// pending ID, so re-registering does not mint a code with fresh guesses.
+func (h *Handler) carryVerificationAttempts(ctx context.Context, oldPendingID, newPendingID string) error {
+	if err := h.redis.Eval(ctx, carryVerificationAttemptsLua,
+		[]string{verificationAttemptsKey(oldPendingID), verificationAttemptsKey(newPendingID)}).Err(); err != nil {
+		return fmt.Errorf("carry verification attempts: %w", err)
+	}
+	return nil
 }
 
 // writeRegistrationAttemptsUnavailable is the confirm route's answer when an
