@@ -44,36 +44,44 @@ func RequireAttestation(enabled bool, rdb *redis.Client, log *logger.Logger) gin
 		return func(c *gin.Context) { c.Next() }
 	}
 	return func(c *gin.Context) {
-		token, sessionID, ok := readAttestationHeaders(c, log, rdb)
-		if !ok {
-			return
+		if ValidateAttestation(c, rdb, log) {
+			c.Next()
 		}
-
-		// Machine ID empty implies a web client; key under the :web suffix
-		// per ADR-0010 D8. Desktop clients always carry X-Machine-Id (validated
-		// upstream by ValidateCustomHeaders middleware).
-		machineID := c.GetHeader("X-Machine-Id")
-		key := tokenKey(sessionID, machineID)
-
-		ctx, cancel := context.WithTimeout(c.Request.Context(), redisOpTimeout)
-		defer cancel()
-
-		rec, ok := loadAndAuthenticateToken(ctx, c, rdb, log, key, token)
-		if !ok {
-			return
-		}
-
-		if !ensureNotRevoked(ctx, c, rdb, log, rec.Version) {
-			return
-		}
-		// Note: ensureNotRevoked rejects on the revoked path with version
-		// attribution via rejectAttForVersion. See finding #24 of #1264 review.
-
-		// Expose the bound version on the context so downstream handlers can
-		// read it for audit logs without re-reading Redis.
-		c.Set("attestation_version", rec.Version)
-		c.Next()
 	}
+}
+
+// ValidateAttestation applies the authenticated HTTP attestation proof to a
+// caller whose verified user_id is already in the Gin context.
+func ValidateAttestation(c *gin.Context, rdb *redis.Client, log *logger.Logger) bool {
+	token, sessionID, ok := readAttestationHeaders(c, log, rdb)
+	if !ok {
+		return false
+	}
+
+	// Machine ID empty implies a web client; key under the :web suffix
+	// per ADR-0010 D8. Desktop clients always carry X-Machine-Id (validated
+	// upstream by ValidateCustomHeaders middleware).
+	machineID := c.GetHeader("X-Machine-Id")
+	key := tokenKey(sessionID, machineID)
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), redisOpTimeout)
+	defer cancel()
+
+	rec, ok := loadAndAuthenticateToken(ctx, c, rdb, log, key, token)
+	if !ok {
+		return false
+	}
+
+	if !ensureNotRevoked(ctx, c, rdb, log, rec.Version) {
+		return false
+	}
+	// Note: ensureNotRevoked rejects on the revoked path with version
+	// attribution via rejectAttForVersion. See finding #24 of #1264 review.
+
+	// Expose the bound version on the context so downstream handlers can
+	// read it for audit logs without re-reading Redis.
+	c.Set("attestation_version", rec.Version)
+	return true
 }
 
 // readAttestationHeaders extracts the attestation token + session ID headers.

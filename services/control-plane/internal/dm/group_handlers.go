@@ -16,6 +16,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -166,15 +167,19 @@ type dmRoleChange struct {
 // UpdateMemberRole changes a group DM participant's role (admin/member).
 func (h *Handler) UpdateMemberRole(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-	targetUserID := c.Param("userId")
-
-	if _, err := uuid.Parse(convID); err != nil {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
-	if _, err := uuid.Parse(targetUserID); err != nil {
+	targetUserID, err := requestid.Param(c, "userId")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+	userID, err = requestid.Canonical(userID)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "dm_unavailable"})
 		return
 	}
 
@@ -198,7 +203,6 @@ func (h *Handler) UpdateMemberRole(c *gin.Context) {
 		return
 	}
 	updated := false
-	var err error
 	for attempt := 0; attempt < 2; attempt++ {
 		err = h.updateDMRoleTx(c.Request.Context(), change, middleware.TokenCredentialEpoch(c))
 		if errors.Is(err, dmblock.ErrMembershipChanged) && attempt == 0 {
@@ -325,7 +329,16 @@ func (h *Handler) updateDMRoleTx(ctx context.Context, change dmRoleChange, crede
 	if !isGroup || actorRole != "admin" || (change.targetID == creatorID && change.role == "member") {
 		return dmblock.ErrUnavailable
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE dm_participants SET role = $1 WHERE conversation_id = $2 AND user_id = $3`, change.role, change.conversationID, change.targetID)
+	result, err := tx.ExecContext(ctx, `
+		UPDATE dm_participants AS dp
+		SET role = $1
+		WHERE dp.conversation_id = $2
+		  AND dp.user_id = $3
+		  AND ($1 <> 'member' OR NOT EXISTS (
+			SELECT 1
+			FROM dm_conversations dc
+			WHERE dc.id = dp.conversation_id AND dc.created_by = dp.user_id
+		  ))`, change.role, change.conversationID, change.targetID)
 	if err != nil {
 		return err
 	}

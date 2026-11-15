@@ -73,6 +73,7 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 | `weekly_deps.deep_review_skill` | string | `/enhanced-pr-review` (fallback: `/review-pr` manual) | weekly-deps |
 | `weekly_deps.cron.{prep,triage,tz_label}` | string | `0 13 * * 3` / `0 15 * * 3` / `ET` | weekly-deps autonomous mode |
 | `weekly_deps.digest_issue_title` | string | `Weekly Dependency Triage — Routine Output` | weekly-deps |
+| `review_coverage.reviewer_bots` | string[] | `[]` → only `copilot-pull-request-reviewer[bot]` counts | `enhanced-pr-review/review-coverage.sh` (read from the PR's **base** branch, so a PR cannot widen it). Bot logins whose reviews count as coverage on a bot-authored PR, e.g. `gitar-bot[bot]`. Do not list scanners or auto-approve workflows. |
 | `skip_commit_patterns` | string[] | `[]` → no extra commits skipped | release-notes |
 | `ai_policy_doc` | string | unset → glob `docs/policies/ai-*.md`, else omit | release-notes |
 | `docs_map.sources[]` | `{glob,docs[]}` | `[]` → docs-reviewer uses heuristics | docs-reviewer, docs-writer, release-notes |

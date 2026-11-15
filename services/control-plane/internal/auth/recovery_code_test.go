@@ -145,7 +145,7 @@ func TestConsumeRecoveryCodeFailsClosedAfterCommit(t *testing.T) {
 	require.False(t, mini.Exists(key))
 }
 
-func TestDeleteRecoveryRecordIfUnchangedPreservesReplacement(t *testing.T) {
+func TestDeleteRecoveryRecordIfSameSendPreservesReplacement(t *testing.T) {
 	ctx := context.Background()
 	mini := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
@@ -153,11 +153,32 @@ func TestDeleteRecoveryRecordIfUnchangedPreservesReplacement(t *testing.T) {
 	h := &Handler{redis: rdb}
 	key := recoveryRedisKey("replace-after-send-failure@test.local")
 
-	require.NoError(t, rdb.Set(ctx, key, "replacement", time.Minute).Err())
-	require.NoError(t, h.deleteRecoveryRecordIfUnchanged(ctx, key, "installed"))
+	installed, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "first"})
+	require.NoError(t, err)
+	replacement, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "second"})
+	require.NoError(t, err)
+	require.NoError(t, rdb.Set(ctx, key, replacement, time.Minute).Err())
+	require.NoError(t, h.deleteRecoveryRecordIfSameSend(ctx, key, string(installed)))
 	stored, err := rdb.Get(ctx, key).Result()
 	require.NoError(t, err)
-	require.Equal(t, "replacement", stored)
+	require.Equal(t, string(replacement), stored)
+}
+
+func TestDeleteRecoveryRecordIfSameSendIgnoresAttemptUpdates(t *testing.T) {
+	ctx := context.Background()
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	h := &Handler{redis: rdb}
+	key := recoveryRedisKey("attempt-during-send-failure@test.local")
+	original, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "installed"})
+	require.NoError(t, err)
+	updated, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "installed", Attempts: 1})
+	require.NoError(t, err)
+	require.NoError(t, rdb.Set(ctx, key, updated, time.Minute).Err())
+
+	require.NoError(t, h.deleteRecoveryRecordIfSameSend(ctx, key, string(original)))
+	require.False(t, mini.Exists(key), "an attempt must not retain an unsent challenge")
 }
 
 func TestRecoveryFailureBudgetRoundsPTTLUp(t *testing.T) {
