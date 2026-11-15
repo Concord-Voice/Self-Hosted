@@ -28,6 +28,59 @@ The selected verified release guide defines its supported storage choices and th
 
 The exact target release guide supplies its verification, backup, compatibility and update procedure.
 
+### Trusted proxy gateway provenance
+
+For a verified release carrying this source contract, the installer owns the
+root `.env` schema and fresh file publication. It writes exact loopback
+placeholders for `TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES`; the deploy-lock
+`up` path then measures the Docker services bridge and atomically replaces only
+those two values with its gateway's canonical IPv4 `/32` or IPv6 `/128` host route before the
+application rebuild. Existing installs with the known legacy broad defaults
+are migrated there. A custom broad value, ambiguous network, or unverified
+gateway stops the start. Direct `restart` requires an already exact, matching
+running stack and otherwise directs the operator to `concord-selfhost up`.
+IPv4-mapped IPv6 trust entries (`::ffff:`) are rejected by both services.
+
+Both application services select `concordvoice-services` as their default
+gateway through Compose `gw_priority: 1`; this requires Compose 2.33.1 or
+newer. `down` can remove that network, so a later `up` measures its new gateway
+instead of reusing the previous route. A stopped container cannot hold a Docker
+network; when needed, the locked path starts only NATS to hold the measured
+bridge before updating trust. A failed live endpoint check reports failure and
+leaves exact under-trust in place. `concord-selfhost health` also refuses a
+running gateway or application trust mismatch; `health --json` reports the
+`proxy_provenance` check with `ok: false` (see [machine-readable
+output](selfhost-machine-output.md)). Verify host-nginx attribution at the edge
+for the selected release.
+
+#### Cloudflare-proxied API attribution
+
+`direct` is the default nginx provenance mode. It ignores
+`CF-Connecting-IP`, so a Cloudflare-proxied API request is safely attributed to
+the Cloudflare edge address. Select `cloudflare-aop` only after creating a
+custom zone-level or hostname-level Cloudflare Authenticated Origin Pull
+certificate for both the API and apex hostnames. The shared Cloudflare AOP
+certificate is not sufficient for client-IP restoration.
+The installer records the selection as `NGINX_CLIENT_IP_MODE` in the root `.env`;
+later `concord-ctl nginx-reload` uses that value. Existing files without it
+remain in `direct` mode.
+
+Before the first AOP-enabled reload, install the matching **public CA bundle**
+as the root-owned regular file at the fixed nginx path documented by the
+selected release. Do not place the CA private key or the Cloudflare client
+private key in this checkout or `.env`. Enable Cloudflare's client certificate,
+verify proxied API traffic, then enable nginx client-certificate verification.
+Test that direct HTTPS to the origin fails without the client certificate and
+that two external clients receive separate rate-limit and login-ban buckets.
+
+Keep `media.<domain>` direct/DNS-only; it does not use AOP or
+`CF-Connecting-IP`. Before acceptance, inventory Worker and Transform Rules
+for API and apex. They must be absent or proven to overwrite client identity
+from Cloudflare request context. Do not use Pseudo IPv4 header-overwrite mode.
+During certificate rotation, trust the old and new public CA bundles together,
+switch Cloudflare to the new client certificate, verify the probes, then remove
+the old CA.
+
 ### WebSocket event-budget preparation
 
 The fresh installer prepares `WS_EVENT_BUDGET_ENABLED=false` and

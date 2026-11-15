@@ -2,11 +2,14 @@ package ownership_test
 
 import (
 	"context"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -125,6 +128,100 @@ func TestInitiateTransferMFAInvalidCode(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Contains(t, body["error"], "Invalid MFA code")
+}
+
+func TestInitiateTransferMFABudgetStopsBeforeTransferWrite(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "mfabudgetown")
+	member := ts.CreateTestUser(t, "mfabudgetmem")
+	serverID := ts.CreateTestServer(t, owner.ID, "MFA Budget Server")
+	ts.AddMemberToServer(t, serverID, member.ID, keyMember)
+	enableMFAForUser(t, ts, owner.ID)
+	require.NoError(t, ts.Redis.Set(context.Background(), stepup.DangerousActionBudget(ts.Redis).Key(owner.ID), stepup.BudgetLimit, 0).Err())
+
+	w := ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
+		keyTargetUserID: member.ID,
+		keyPassword:     testhelpers.TestAuthPlaintext,
+		"mfa_code":      "wrong-code",
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	require.NotEmpty(t, w.Header().Get("Retry-After"))
+	require.Contains(t, w.Body.String(), "step_up_budget_exhausted")
+	var transfers int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM ownership_transfers WHERE server_id = $1`, serverID).Scan(&transfers))
+	require.Zero(t, transfers)
+}
+
+func TestInitiateTransferMFABudgetChargesOncePerWrongSubmission(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "mfabudgetcountown")
+	member := ts.CreateTestUser(t, "mfabudgetcountmem")
+	serverID := ts.CreateTestServer(t, owner.ID, "MFA Budget Count Server")
+	ts.AddMemberToServer(t, serverID, member.ID, keyMember)
+	enableMFAForUser(t, ts, owner.ID)
+	request := func() *httptest.ResponseRecorder {
+		w := ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
+			keyTargetUserID: member.ID, keyPassword: testhelpers.TestAuthPlaintext, "mfa_code": "wrong-code",
+		}, testhelpers.AuthHeaders(owner.AccessToken))
+		// Keep this regression about the MFA budget, not the route's independent
+		// three-per-minute velocity limiter (which fires before the handler).
+		require.NoError(t, ts.Redis.Del(context.Background(), "ratelimit:user:"+owner.ID+":POST:/api/v1/servers/:id/transfer-ownership").Err())
+		return w
+	}
+	for i := 0; i < stepup.BudgetLimit; i++ {
+		require.Equal(t, http.StatusForbidden, request().Code)
+	}
+	require.Equal(t, http.StatusTooManyRequests, request().Code)
+	count, err := ts.Redis.Get(context.Background(), stepup.DangerousActionBudget(ts.Redis).Key(owner.ID)).Int()
+	require.NoError(t, err)
+	require.Equal(t, stepup.BudgetLimit+1, count)
+	var transfers int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM ownership_transfers WHERE server_id = $1`, serverID).Scan(&transfers))
+	require.Zero(t, transfers)
+}
+
+func TestInitiateTransferMFABudgetUnavailableStopsBeforeTransferWrite(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "mfabudgetdownown")
+	member := ts.CreateTestUser(t, "mfabudgetdownmem")
+	serverID := ts.CreateTestServer(t, owner.ID, "MFA Budget Unavailable Server")
+	ts.AddMemberToServer(t, serverID, member.ID, keyMember)
+	enableMFAForUser(t, ts, owner.ID)
+	ts.Redis.AddHook(ownershipBudgetIncrFaultHook{key: stepup.DangerousActionBudget(ts.Redis).Key(owner.ID)})
+
+	w := ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
+		keyTargetUserID: member.ID,
+		keyPassword:     testhelpers.TestAuthPlaintext,
+		"mfa_code":      "wrong-code",
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "step_up_budget_unavailable")
+	var transfers int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM ownership_transfers WHERE server_id = $1`, serverID).Scan(&transfers))
+	require.Zero(t, transfers)
+}
+
+type ownershipBudgetIncrFaultHook struct{ key string }
+
+func (ownershipBudgetIncrFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h ownershipBudgetIncrFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "incr" {
+			if args := cmd.Args(); len(args) >= 2 {
+				if key, ok := args[1].(string); ok && key == h.key {
+					err := errors.New("forced ownership MFA budget failure")
+					cmd.SetErr(err)
+					return err
+				}
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (ownershipBudgetIncrFaultHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 func TestInitiateTransferMFAValidCode(t *testing.T) {
