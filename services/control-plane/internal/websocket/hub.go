@@ -7998,12 +7998,6 @@ func (h *Hub) resolveVisibleOnlineWithContext(ctx context.Context, allMemberIDs 
 	return visibleOnline
 }
 
-func (h *Hub) isInvisiblePresence(userID uuid.UUID) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.hiddenPresence[userID] == statusInvisible
-}
-
 // isVisibleStatus returns true if a Redis presence value explicitly indicates
 // the user should be counted as visibly online. A missing value fails closed
 // because an invisible-status write or TTL refresh may have failed.
