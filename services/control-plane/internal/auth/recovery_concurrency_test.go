@@ -76,12 +76,16 @@ func TestRecoveryVerifyCodeConcurrentWrongAttempts(t *testing.T) {
 	user := ts.CreateTestUser(t, "recoveryattempts")
 	seedRecoveryCode(t, ts, user.Email, testRecoveryCode, user.ID)
 	key := recoveryCodeKeyPrefix + user.Email
-	ts.Redis.AddHook(&recoveryReadBarrier{key: key, readers: 5, release: make(chan struct{})})
+	// Four concurrent wrong guesses, one short of the limit: every one must be
+	// counted, and the record must keep its deadline. The fifth wrong guess
+	// spends the last attempt and deletes the record.
+	const concurrent = 4 // one short of the five-attempt limit
+	ts.Redis.AddHook(&recoveryReadBarrier{key: key, readers: concurrent, release: make(chan struct{})})
 	deadline, err := ts.Redis.PExpireTime(context.Background(), key).Result()
 	require.NoError(t, err)
 
-	statuses := make(chan int, 5)
-	for i := 0; i < 5; i++ {
+	statuses := make(chan int, concurrent)
+	for i := 0; i < concurrent; i++ {
 		go func() {
 			response := ts.DoRequest(http.MethodPost, pathRecoveryVerifyCode, map[string]string{
 				"email": user.Email, "code": "999999",
@@ -89,7 +93,7 @@ func TestRecoveryVerifyCodeConcurrentWrongAttempts(t *testing.T) {
 			statuses <- response.Code
 		}()
 	}
-	for i := 0; i < 5; i++ {
+	for i := 0; i < concurrent; i++ {
 		require.Equal(t, http.StatusUnauthorized, <-statuses)
 	}
 	data, err := ts.Redis.Get(context.Background(), key).Bytes()
@@ -98,8 +102,16 @@ func TestRecoveryVerifyCodeConcurrentWrongAttempts(t *testing.T) {
 		Attempts int `json:"attempts"`
 	}
 	require.NoError(t, json.Unmarshal(data, &record))
-	require.Equal(t, 5, record.Attempts)
+	require.Equal(t, concurrent, record.Attempts)
 	remainingDeadline, err := ts.Redis.PExpireTime(context.Background(), key).Result()
 	require.NoError(t, err)
 	require.Equal(t, deadline, remainingDeadline)
+
+	response := ts.DoRequest(http.MethodPost, pathRecoveryVerifyCode, map[string]string{
+		"email": user.Email, "code": "999999",
+	}, nil)
+	require.Equal(t, http.StatusUnauthorized, response.Code)
+	exists, err := ts.Redis.Exists(context.Background(), key).Result()
+	require.NoError(t, err)
+	require.Zero(t, exists, "the guess that spends the last attempt deletes the record")
 }
