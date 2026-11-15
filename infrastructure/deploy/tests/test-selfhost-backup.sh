@@ -110,10 +110,16 @@ PY
 # ── restore round trip ────────────────────────────────────────────────
 : >"$WORK/calls"
 restore_output="$(run_fn verb_restore "$archive" --confirm 2>&1)"; rc=$?
-if [[ $rc -eq 0 ]] && grep -q '^compose stop$' "$WORK/calls" \
-  && grep -q '^compose up -d postgres$' "$WORK/calls" \
-  && grep -q '^compose exec -T postgres pg_restore ' "$WORK/calls" \
-  && grep -q '^main up$' "$WORK/calls" && grep -q '^main health$' "$WORK/calls"; then
+call_line() { grep -n -m1 -- "$1" "$WORK/calls" | cut -d: -f1; }
+order_ok=true
+prev=0
+for pattern in '^compose stop$' '^compose up -d redis$' '^compose up -d postgres$' \
+  '^compose exec -T postgres pg_restore ' '^docker run ' '^main up$' '^main health$'; do
+  line="$(call_line "$pattern")"
+  [[ -n "$line" && "$line" -gt "$prev" ]] || order_ok=false
+  prev="${line:-0}"
+done
+if [[ $rc -eq 0 && "$order_ok" == true ]]; then
   pass "restore stops, restores postgres then MinIO, then runs up and health"
 else
   fail "restore rc=$rc calls=$(cat "$WORK/calls")"
@@ -172,11 +178,12 @@ else
 fi
 
 # PostgreSQL restore also revives opaque Redis capabilities. The purge clears
-# only the ten auth-related key families, then repeats the Lua readback so a
+# only the ten auth-related key families (nine opaque bearer
+# families plus the credential-epoch cache), then repeats the Lua readback so a
 # restore never starts applications while any selected key remains.
 redis_prefixes=(
-  admin_session admin_enroll admin_login_challenge admin_enroll_challenge admin_enroll_challenges
-  admin_server_stepup ws_ticket recovery_code email_verify sso_token
+  admin_session admin_enroll admin_login_challenge admin_enroll_challenge
+  admin_server_stepup ws_ticket recovery_code email_verify sso_token cred_epoch
 )
 : >"$WORK/calls"
 run_fn verb_restore "$archive" --confirm >/dev/null 2>&1; rc=$?
@@ -230,11 +237,25 @@ else
   fail "opaque Redis purge retry rc=$rc calls=$(cat "$WORK/calls")"
 fi
 
+: >"$WORK/calls"
+env_before="$(cksum <"$ROOT/.env")"
+err="$(STUB_COMPOSE_RC=1 run_fn verb_restore "$archive" --confirm 2>&1 >/dev/null)"; rc=$?
+if [[ $rc -ne 0 && "$err" == *'nothing was restored'* && "$(cksum <"$ROOT/.env")" == "$env_before" ]] \
+  && ! compgen -G "$ROOT/.env.restore.*" >/dev/null && ! grep -q 'pg_restore\|^main up$' "$WORK/calls"; then
+  pass "a stop failure keeps .env, removes the staged copy and restores nothing"
+else
+  fail "stop failure rc=$rc err=$err calls=$(cat "$WORK/calls")"
+fi
+
 # ── restore refusals: nothing is stopped ──────────────────────────────
 refuse_case() { # LABEL ARCHIVE
   : >"$WORK/calls"
+  local env_before
+  env_before="$(cksum <"$ROOT/.env")"
   run_fn verb_restore "$2" --confirm >/dev/null 2>&1; rc=$?
-  if [[ $rc -ne 0 ]] && ! grep -q '^compose stop' "$WORK/calls"; then pass "restore refuses $1 before stopping anything"
+  if [[ $rc -ne 0 ]] && ! grep -q '^compose stop' "$WORK/calls" \
+    && [[ "$(cksum <"$ROOT/.env")" == "$env_before" ]] && ! compgen -G "$ROOT/.env.restore.*" >/dev/null; then
+    pass "restore refuses $1 before stopping anything"
   else fail "restore $1 rc=$rc calls=$(cat "$WORK/calls")"; fi
 }
 repack() { # DIR OUT
@@ -271,6 +292,10 @@ refresh_env_checksum "$WORK/x-jwt-duplicate"; repack "$WORK/x-jwt-duplicate" "$W
 refuse_case "an archive with duplicate JWT_SECRET values" "$WORK/jwt-duplicate.tar.gz"
 printf 'POSTGRES_PASSWORD=x\n' >"$ROOT/.env"
 refuse_case "an install missing JWT_SECRET" "$archive"
+printf 'POSTGRES_PASSWORD=x\nJWT_SECRET=archive-jwt-secret\nexport JWT_SECRET=archive-jwt-secret\n' >"$ROOT/.env"
+refuse_case "an install with a second, exported JWT_SECRET" "$archive"
+printf 'POSTGRES_PASSWORD=x\n  JWT_SECRET=archive-jwt-secret\n' >"$ROOT/.env"
+refuse_case "an install with only an indented JWT_SECRET" "$archive"
 printf 'POSTGRES_PASSWORD=x\nJWT_SECRET=archive-jwt-secret\n' >"$ROOT/.env"
 STUB_MODE=byo-s3 refuse_case "a storage-mode mismatch" "$archive"
 printf 'not a tarball' >"$WORK/junk.tar.gz"
@@ -327,52 +352,67 @@ STUB_COMPOSE_RC=1 run_fn verb_backup --out "$WORK/bk3" >/dev/null 2>&1; rc=$?
   && pass "a failed pg_dump leaves no archive or staging" || fail "failed dump rc=$rc left: $(find "$WORK/bk3" -mindepth 1)"
 
 # Exercise the production Lua through its shell wrapper against an isolated
-# Unix-socket Redis. This is optional on runners without redis-server.
+# Redis: a local redis-server on a short Unix socket, else the pinned compose
+# image with no network. CI must run it; elsewhere a missing Redis is a SKIP.
+redis_cli=()
+redis_cleanup=()
 if command -v redis-server >/dev/null && command -v redis-cli >/dev/null; then
-  redis_socket="$WORK/restore-purge.sock"
-  redis_pidfile="$WORK/restore-purge.pid"
-  redis_server="$(command -v redis-server)"
-  redis_client="$(command -v redis-cli)"
-  "$redis_server" --port 0 --unixsocket "$redis_socket" --unixsocketperm 700 --save '' \
-    --appendonly no --daemonize yes --pidfile "$redis_pidfile" >/dev/null 2>&1
-  for ((i = 0; i < 10; i++)); do
-    "$redis_client" -s "$redis_socket" PING >/dev/null 2>&1 && break
-    sleep 0.1
-  done
-  if [[ -S "$redis_socket" ]] && "$redis_client" -s "$redis_socket" PING 2>/dev/null | grep -qx PONG; then
-    redis_targets=(
-      admin_session admin_enroll admin_login_challenge admin_enroll_challenge admin_enroll_challenges
-      admin_server_stepup ws_ticket recovery_code email_verify sso_token
-    )
-    for prefix in "${redis_targets[@]}"; do
-      "$redis_client" -s "$redis_socket" SET "${prefix}:sentinel" target >/dev/null
-    done
-    "$redis_client" -s "$redis_socket" SET defensive:keep keep >/dev/null
-    (
-      source "$DEPLOY/selfhost-backup.sh"
-      compose() {
-        [[ "$1" == exec && "$2" == -T && "$3" == redis && "$4" == redis-cli && "$5" == --raw ]] || return 1
-        shift 5
-        "$redis_client" -s "$redis_socket" --raw "$@"
-      }
-      _restore_purge_redis_authority
-    ); rc=$?
-    purged=true
-    for prefix in "${redis_targets[@]}"; do
-      [[ "$("$redis_client" -s "$redis_socket" EXISTS "${prefix}:sentinel")" == 0 ]] || purged=false
-    done
-    if [[ $rc -eq 0 && "$purged" == true && "$("$redis_client" -s "$redis_socket" GET defensive:keep)" == keep ]]; then
-      pass "isolated Redis Lua purge removes only the ten restored authorization key families"
-    else
-      fail "isolated Redis Lua purge rc=$rc purged=$purged"
-    fi
-  else
-    pass "isolated Redis Lua probe skipped: redis-server did not become ready"
+  redis_dir="$(mktemp -d /tmp/cvrp.XXXXXX)"
+  redis_socket="$redis_dir/r.sock"
+  redis-server --port 0 --unixsocket "$redis_socket" --unixsocketperm 700 --save '' \
+    --appendonly no --daemonize yes --pidfile "$redis_dir/r.pid" >/dev/null 2>&1
+  redis_cli=(redis-cli -s "$redis_socket")
+  redis_cleanup=(rm -rf -- "$redis_dir")
+elif command -v docker >/dev/null && command docker info >/dev/null 2>&1; then
+  redis_image="$(awk '$1 == "image:" && $2 ~ /^redis:/ { print $2; exit }' "$DEPLOY/../../docker-compose.yml")"
+  if redis_cid="$(command docker run -d --rm --network none "$redis_image" 2>/dev/null)"; then
+    redis_cli=(command docker exec -i "$redis_cid" redis-cli)
+    redis_cleanup=(command docker rm -f "$redis_cid")
   fi
-  "$redis_client" -s "$redis_socket" SHUTDOWN NOSAVE >/dev/null 2>&1 || true
-else
-  pass "isolated Redis Lua probe skipped: redis-server unavailable"
 fi
+redis_ready=false
+if (( ${#redis_cli[@]} )); then
+  for ((i = 0; i < 50; i++)); do
+    [[ "$("${redis_cli[@]}" PING 2>/dev/null)" == PONG ]] && { redis_ready=true; break; }
+    sleep 0.2
+  done
+fi
+if [[ "$redis_ready" == true ]]; then
+  redis_targets=(
+    admin_session admin_enroll admin_login_challenge admin_enroll_challenge
+    admin_server_stepup ws_ticket recovery_code email_verify sso_token cred_epoch
+  )
+  for prefix in "${redis_targets[@]}"; do
+    "${redis_cli[@]}" SET "${prefix}:sentinel" target >/dev/null
+  done
+  "${redis_cli[@]}" SET defensive:keep keep >/dev/null
+  "${redis_cli[@]}" SET admin_sessionX:keep keep >/dev/null
+  (
+    source "$DEPLOY/selfhost-backup.sh"
+    compose() {
+      [[ "$1" == exec && "$2" == -T && "$3" == redis && "$4" == redis-cli && "$5" == --raw ]] || return 1
+      shift 5
+      "${redis_cli[@]}" --raw "$@"
+    }
+    _restore_purge_redis_authority
+  ); rc=$?
+  purged=true
+  for prefix in "${redis_targets[@]}"; do
+    [[ "$("${redis_cli[@]}" EXISTS "${prefix}:sentinel")" == 0 ]] || purged=false
+  done
+  if [[ $rc -eq 0 && "$purged" == true && "$("${redis_cli[@]}" GET defensive:keep)" == keep \
+    && "$("${redis_cli[@]}" GET admin_sessionX:keep)" == keep ]]; then
+    pass "isolated Redis Lua purge removes only the ten restored authorization key families"
+  else
+    fail "isolated Redis Lua purge rc=$rc purged=$purged"
+  fi
+  "${redis_cli[@]}" SHUTDOWN NOSAVE >/dev/null 2>&1 || true
+elif [[ "${CI:-}" == true ]]; then
+  fail "isolated Redis Lua probe could not start Redis in CI"
+else
+  echo "SKIP: isolated Redis Lua probe (no redis-server or Docker)"
+fi
+(( ${#redis_cleanup[@]} )) && "${redis_cleanup[@]}" >/dev/null 2>&1
 
 echo
 [[ $fails -eq 0 ]] && { echo "ALL PASS"; exit 0; } || { echo "$fails FAILED"; exit 1; }

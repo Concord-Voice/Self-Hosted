@@ -36,11 +36,25 @@ When every check passes, the command:
 3. Starts Redis and Postgres alone.
 4. Runs `pg_restore --clean --if-exists --single-transaction`.
 5. Revokes every restored active refresh token with a timestamp one hour in the past, so the 30-second grace-recovery path cannot revive it.
-6. Deletes old opaque admin sessions, enrollment and login challenges, step-up grants, WebSocket tickets, recovery-code markers, email verification tokens, and SSO continuation tokens from Redis, then verifies none remain. Other Redis state is preserved.
+6. Deletes old opaque admin sessions, enrollment and login challenges, step-up grants, WebSocket tickets, recovery-code markers, email verification tokens, and SSO continuation tokens from Redis, plus the cached credential epochs, then verifies none remain. Other Redis state is preserved.
 7. In bundled mode, unpacks the archived MinIO copy into the volume, then replaces the old objects with it.
 8. Runs `concord-selfhost up`, then `concord-selfhost health`.
 
 The new signing secret invalidates every pre-restore signed access, challenge, and recovery token; restored refresh tokens are revoked and old opaque Redis authorization state is cleared too. Sign in again after a successful restore. This prevents a recovery token consumed after the backup was made from becoming valid when the restored system has no Redis replay marker, and prevents an old refresh token or admin session from regaining access. Both application planes start together with the same new secret.
+
+Expect a burst of high-severity refresh-replay security events after startup. Each client's first refresh presents a token that restore revoked, which is the replay path working as intended.
+
+### What a restore rolls back
+
+The database returns to the moment of the backup. Rotating the signing secret and revoking sessions do not undo that. Any of these made after the backup are lost, and the old values work again:
+
+- password changes and password resets;
+- removed passkeys, security keys, and admin WebAuthn credentials;
+- MFA resets and used backup codes;
+- removed trusted recovery devices and replaced recovery keys;
+- revoked server invites and redeemed redemption codes.
+
+After a successful restore, re-apply each such change that you know of, starting with any made in response to a compromise.
 
 ### Restoring onto a new host
 
@@ -53,7 +67,8 @@ The `.env` check exists because the database and its keys must come from the sam
 
 ### When restore fails partway
 
-- **Redis startup, `pg_restore`, refresh-token revocation, or Redis cleanup fails:** The stack stays stopped. Even if `pg_restore --single-transaction` left the database unchanged, authorization invalidation is incomplete. Fix the failure and re-run restore; do not run `concord-selfhost up` first.
+- **The stop or the signing-secret install fails:** nothing was restored and `.env` is unchanged. Fix the failure, then either re-run restore or run `concord-selfhost up` to resume the prior state.
+- **Redis or Postgres startup, `pg_restore`, refresh-token revocation, or Redis cleanup fails:** The stack stays stopped. Even if `pg_restore --single-transaction` left the database unchanged, authorization invalidation is incomplete. Fix the failure and re-run restore; do not run `concord-selfhost up` first.
 - **The MinIO step fails:** the archive is unpacked beside the live objects and swapped in only after it unpacks fully, so a bad stream leaves the old objects in place. The database has already been restored by then. Fix the failure and re-run the same restore before starting the stack.
 
 ## Updating to a release tag

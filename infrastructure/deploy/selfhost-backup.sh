@@ -194,58 +194,54 @@ _restore_run() {
 # a recovery-token use, so preserving its signing secret would revive that token
 # when Redis is empty. Every other .env byte must still match exactly.
 _restore_stage_jwt_secret() {
-  local archived_env="$1" current_env="$2" staged_env="$3" env_dir secret_file=''
+  local archived_env="$1" current_env="$2" staged_env="$3" rc=0
   [[ -f "$archived_env" && -f "$current_env" && ! -L "$current_env" && -f "$staged_env" ]] || {
     _backup_fail 'restore environment refused'
     return 1
   }
-  env_dir="$(dirname "$current_env")" || return 1
-  secret_file="$(umask 077; mktemp "$env_dir/.jwt.restore.XXXXXX")" || {
-    _backup_fail 'cannot generate a new signing secret'
-    return 1
-  }
-  if ! openssl rand -hex 32 >"$secret_file"; then
-    rm -f -- "$secret_file"
-    _backup_fail 'cannot generate a new signing secret'
-    return 1
-  fi
-  if ! python3 - "$archived_env" "$current_env" "$staged_env" "$secret_file" <<'PY'
-import os, sys
-archived_path, current_path, staged_path, secret_path = sys.argv[1:]
-secret = open(secret_path, "rb").read().strip()
-if len(secret) != 64 or any(byte not in b"0123456789abcdef" for byte in secret):
-    raise SystemExit(1)
+  # Exit 2: the files differ outside JWT_SECRET. Exit 3: an I/O error.
+  python3 - "$archived_env" "$current_env" "$staged_env" <<'PY' || rc=$?
+import os, re, secrets, sys
+archived_path, current_path, staged_path = sys.argv[1:]
+# Any assignment form Compose could read counts, so `export JWT_SECRET=` or an
+# indented copy cannot sit beside the canonical line and keep the old secret.
+ANY_JWT = re.compile(rb"^[ \t]*(export[ \t]+)?JWT_SECRET[ \t]*=")
+def replace(text, value):
+    lines = text.splitlines(keepends=True)
+    indexes = [index for index, line in enumerate(lines) if ANY_JWT.match(line)]
+    if len(indexes) != 1 or not lines[indexes[0]].startswith(b"JWT_SECRET="):
+        raise ValueError()
+    index = indexes[0]
+    ending = b"\r\n" if lines[index].endswith(b"\r\n") else b"\n" if lines[index].endswith(b"\n") else b""
+    lines[index] = b"JWT_SECRET=" + value + ending
+    return b"".join(lines)
 try:
     archived = open(archived_path, "rb").read()
     current = open(current_path, "rb").read()
-    def replace(text, value):
-        lines = text.splitlines(keepends=True)
-        indexes = [index for index, line in enumerate(lines) if line.startswith(b"JWT_SECRET=")]
-        if len(indexes) != 1:
-            raise ValueError()
-        index = indexes[0]
-        ending = b"\r\n" if lines[index].endswith(b"\r\n") else b"\n" if lines[index].endswith(b"\n") else b""
-        lines[index] = b"JWT_SECRET=" + value + ending
-        return b"".join(lines)
+except OSError:
+    sys.exit(3)
+try:
     if replace(archived, b"<JWT_SECRET>") != replace(current, b"<JWT_SECRET>"):
-        raise ValueError()
+        sys.exit(2)
+except ValueError:
+    sys.exit(2)
+try:
     with open(staged_path, "wb") as output:
-        output.write(replace(current, secret))
+        output.write(replace(current, secrets.token_hex(32).encode()))
+        output.flush()
         source = os.stat(current_path)
         os.fchown(output.fileno(), source.st_uid, source.st_gid)
         os.fchmod(output.fileno(), 0o600)
-except (OSError, ValueError):
-    raise SystemExit(1)
+        os.fsync(output.fileno())
+except OSError:
+    sys.exit(3)
 PY
-  then
-    rm -f -- "$secret_file"
-    _backup_fail 'the backup .env differs from this install outside JWT_SECRET'
-    return 1
-  fi
-  rm -f -- "$secret_file" || {
-    _backup_fail 'cannot remove the staged signing secret'
-    return 1
-  }
+  case "$rc" in
+    0) return 0 ;;
+    2) _backup_fail 'the backup .env differs from this install outside JWT_SECRET' ;;
+    *) _backup_fail 'cannot write the restored environment with a new signing secret' ;;
+  esac
+  return 1
 }
 
 # _restore_start_redis — start only the legacy Redis service and prove its
@@ -264,8 +260,10 @@ _restore_start_redis() {
 }
 
 # _restore_purge_redis_authority — remove only opaque authorization state that
-# can survive a same-host Redis volume across a database restore. Each Redis
-# script processes one bounded SCAN page; unrelated keys are never deleted.
+# can survive a same-host Redis volume across a database restore, plus the
+# credential-epoch cache, whose newer values would refuse the restored epochs.
+# Each Redis script processes one bounded SCAN page; unrelated keys are never
+# deleted.
 _restore_purge_redis_authority() {
   local cursor=0 reply scans=0 found=0
   local prefixes=(
@@ -273,15 +271,15 @@ _restore_purge_redis_authority() {
     'admin_enroll:'
     'admin_login_challenge:'
     'admin_enroll_challenge:'
-    'admin_enroll_challenges:'
     'admin_server_stepup:'
     'ws_ticket:'
     'recovery_code:'
     'email_verify:'
     'sso_token:'
+    'cred_epoch:'
   )
-  local purge_script='local r=redis.call("SCAN",ARGV[1],"COUNT",256); local del={}; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then table.insert(del,k); break end end end; if #del>0 then redis.call("UNLINK",unpack(del)) end; return r[1]'
-  local verify_script='local r=redis.call("SCAN",ARGV[1],"COUNT",256); local found=0; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then found=found+1; break end end end; return r[1]..":"..found'
+  local purge_script='local r=redis.call("SCAN",ARGV[1],"COUNT",10000); local del={}; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then table.insert(del,k); break end end end; if #del>0 then redis.call("UNLINK",unpack(del)) end; return r[1]'
+  local verify_script='local r=redis.call("SCAN",ARGV[1],"COUNT",10000); local found=0; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then found=found+1; break end end end; return r[1]..":"..found'
 
   echo 'Purging restored Redis authorization state...'
   while (( scans < 100000 )); do
@@ -399,7 +397,8 @@ PY
   fi
   echo 'Starting the stack...'
   main up || return 1
-  main health
+  main health || return 1
+  echo 'Restore complete. Every user must sign in again. Password, MFA, key and invite changes made after this backup were rolled back; re-apply them (see the restore runbook).'
 }
 
 # _restore_stopped MSG — a pre-restore failure left the prior authorization
