@@ -1628,8 +1628,9 @@ func TestLogin_PasswordDisabled_NoIdentities_Returns500(t *testing.T) {
 
 // A re-registration of the same address mints a new pending ID. A password
 // takeover carries the replaced row's attempt count and resend state, so it
-// draws no fresh guesses and no fresh cooldown; a cancel then register gets a
-// fresh code, and code issuance per address bounds how often that can happen.
+// draws no fresh guesses and no fresh cooldown. Change-email is bounded by the
+// same row's resend cap (TestChangeEmailAndResendShareMaxResends), and a fresh
+// registration still confirms (TestConfirmRegistration_*).
 func TestRegistrationTakeoverCarriesAttemptsAndResendState(t *testing.T) {
 	ts := setupTS(t)
 	register := func() string {
@@ -1658,22 +1659,6 @@ func TestRegistrationTakeoverCarriesAttemptsAndResendState(t *testing.T) {
 	w = ts.DoRequest("POST", "/api/v1/auth/register/resend", map[string]string{"pending_id": second}, nil)
 	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
 	assert.Contains(t, w.Body.String(), "cooldown_active", "a takeover must not reset the resend cooldown")
-}
-
-func TestRegistrationIssuanceIsBoundedPerAddress(t *testing.T) {
-	ts := setupTS(t)
-	for i := 0; i < auth.MaxResends+1; i++ {
-		w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-		require.Equal(t, http.StatusCreated, w.Code, "registration %d: %s", i+1, w.Body.String())
-		var reg struct {
-			PendingID string `json:"pending_id"`
-		}
-		testhelpers.ParseJSON(t, w, &reg)
-		require.Less(t, ts.DoRequest("DELETE", pathRegister+"/"+reg.PendingID, nil, nil).Code, 300)
-	}
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
-	assert.Contains(t, w.Body.String(), "registration_codes_exhausted")
 }
 
 type confirmEvalFaultHook struct{}

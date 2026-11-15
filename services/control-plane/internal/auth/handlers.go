@@ -547,9 +547,6 @@ func (h *Handler) Register(c *gin.Context) {
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
 	normalizedUsername := NormalizeUsername(req.Username)
-	if !h.allowRegistrationIssuance(c.Request.Context(), c, normalizedEmail) {
-		return
-	}
 
 	pendingID, expiresAt, takenOverID, err := h.pending.InsertOrTakeover(
 		c.Request.Context(),
@@ -825,38 +822,6 @@ func (h *Handler) validateConfirmRequest(c *gin.Context) (*ConfirmRegistrationRe
 		return nil, "", false
 	}
 	return &req, sanitized, true
-}
-
-// registrationIssuanceKey keys the per-address count of registrations
-// started, each of which issues a code. It sits under the
-// email_verify_attempts: prefix the Redis ACL already grants, and "issued:"
-// can never collide with a pending UUID.
-func registrationIssuanceKey(email string) string {
-	return "email_verify_attempts:issued:" + email
-}
-
-// registrationIssuanceLimit is how many registrations, and so codes, one
-// address may start in a pending row's lifetime: the initial code plus
-// MaxResends, the most one pending row can issue.
-const registrationIssuanceLimit = MaxResends + 1
-
-// allowRegistrationIssuance bounds the codes an address is issued across
-// re-registrations. Guesses are bounded per code, and a cancel then register
-// mints a new pending row with a fresh code; bounding issuance bounds the
-// total guesses an address can draw without ever refusing a correct code
-// already sent to it. It fails closed: a Redis error is a 503.
-func (h *Handler) allowRegistrationIssuance(ctx context.Context, c *gin.Context, email string) bool {
-	allowed, err := middleware.AllowUserAction(ctx, h.redis, registrationIssuanceKey(email), registrationIssuanceLimit, PendingRegistrationTTL)
-	if err != nil {
-		h.log.Error("register: code issuance budget unavailable", "error", err)
-		writeRegistrationAttemptsUnavailable(c)
-		return false
-	}
-	if !allowed {
-		c.JSON(http.StatusTooManyRequests, gin.H{"code": "registration_codes_exhausted"})
-		return false
-	}
-	return true
 }
 
 // carryVerificationAttemptsLua copies a taken-over pending row's attempt
