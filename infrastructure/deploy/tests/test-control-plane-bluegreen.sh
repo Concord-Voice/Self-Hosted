@@ -2719,6 +2719,11 @@ cp_server_in_block() {
 ngx_debris() { find "$TMP/live" -name '.concordvoice.*' | grep -q .; }
 nested_flip_real_nginx_reload() {
   need_flock nested_flip_real_nginx_reload || return 0
+  # The copied controller intentionally keeps the production renderer's fixed
+  # AOP CA admission. Do not synthesize that root-owned file in this harness:
+  # missing-CA rejection is covered above, while this nested success proof
+  # needs a provisioned managed fixture.
+  need_managed_aop_fixture nested_flip_real_nginx_reload || return 0
   local bad=''
   # (a) 8081 is rendered inside the control_plane upstream, activated, reloaded.
   ngx_prepare

@@ -315,7 +315,7 @@ namespace_installer_case() {
       'CFG_FEEDBACK_ENABLED=no' >"$STATE/fresh-answers"
     main --env-file "$STATE/fresh-answers" >"$STATE/fresh-entry-output" 2>&1 || rc=$?
   else
-    printf '%s\n' example.com local example.com 10.0.0.5 bundled relay.lan 587 fixture-user \
+    printf '%s\n' example.com local direct example.com 10.0.0.5 bundled relay.lan 587 fixture-user \
       fixture-password operator@example.invalid '' '' no >"$STATE/fresh-stdin"
     main <"$STATE/fresh-stdin" >"$STATE/fresh-entry-output" 2>&1 || rc=$?
   fi
