@@ -6215,7 +6215,6 @@ export class RoomManager {
     }
 
     let liveAndPending = 0;
-    let duplicates = 0;
     const representedProducers = new Set<string>();
 
     for (const [, existing] of participant.consumers) {
@@ -6225,17 +6224,15 @@ export class RoomManager {
       if (typeof appData?.producerId !== 'string' || appData.producerId.length === 0) {
         throw new Error('Consumer accounting state invalid');
       }
-      const existingProducerId = appData.producerId;
-      if (representedProducers.has(existingProducerId)) duplicates += 1;
-      else representedProducers.add(existingProducerId);
+      representedProducers.add(appData.producerId);
     }
 
     for (const pendingProducerId of participant.pendingConsumeKeys.values()) {
       liveAndPending += 1;
-      if (representedProducers.has(pendingProducerId)) duplicates += 1;
-      else representedProducers.add(pendingProducerId);
+      representedProducers.add(pendingProducerId);
     }
 
+    const duplicates = liveAndPending - representedProducers.size;
     if (liveAndPending >= MAX_CONSUMERS_PER_PARTICIPANT) {
       throw new Error(`Consumer limit reached (max ${MAX_CONSUMERS_PER_PARTICIPANT})`);
     }
