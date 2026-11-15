@@ -52,12 +52,16 @@ func TestSecurity171_ListServersExcludesInvisibleOnlineMember(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "privacycountowner")
 	invisible := ts.CreateTestUser(t, "privacycountinvisible")
+	visible := ts.CreateTestUser(t, "privacycountvisible")
 	serverID := ts.CreateTestServer(t, owner.ID, "Privacy Count Server")
 	ts.AddMemberToServer(t, serverID, invisible.ID, "member")
+	ts.AddMemberToServer(t, serverID, visible.ID, "member")
 
 	invisibleID := uuid.MustParse(invisible.ID)
 	ts.Hub.MarkUserOnlineForTest(invisibleID)
 	require.NoError(t, ts.Redis.Set(context.Background(), "presence:"+invisible.ID, "invisible", 0).Err())
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(visible.ID))
+	require.NoError(t, ts.Redis.Set(context.Background(), "presence:"+visible.ID, "online", 0).Err())
 
 	w := ts.DoRequest("GET", "/api/v1/servers", nil, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -67,7 +71,7 @@ func TestSecurity171_ListServersExcludesInvisibleOnlineMember(t *testing.T) {
 	for _, value := range body["servers"].([]interface{}) {
 		server := value.(map[string]interface{})
 		if server["id"] == serverID {
-			assert.Equal(t, float64(0), server["online_count"], "invisible must be indistinguishable from offline")
+			assert.Equal(t, float64(1), server["online_count"], "only the visible member counts")
 			return
 		}
 	}

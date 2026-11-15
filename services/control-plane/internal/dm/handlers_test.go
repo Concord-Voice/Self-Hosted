@@ -4805,16 +4805,19 @@ func TestRingDMCall_InvalidConvID_Returns400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestRingDMCall_Group_ExcludesOfflineCallees(t *testing.T) {
+func TestRingDMCall_Group_ExcludesOfflineAndInvisibleCallees(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	t.Cleanup(dm.ResetPendingDMCallsForTest)
 
 	caller := ts.CreateTestUser(t, "rg-caller")
 	online := ts.CreateTestUser(t, "rg-online")
 	offline := ts.CreateTestUser(t, "rg-offline")
-	convID := ts.CreateGroupDMConversation(t, caller.ID, online.ID, offline.ID)
+	invisible := ts.CreateTestUser(t, "rg-invisible")
+	convID := ts.CreateGroupDMConversation(t, caller.ID, online.ID, offline.ID, invisible.ID)
 	markDMUserVisible(t, ts, caller.ID)
 	markDMUserVisible(t, ts, online.ID) // offline is NOT marked
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(invisible.ID))
+	require.NoError(t, ts.Redis.Set(context.Background(), "presence:"+invisible.ID, "invisible", 0).Err())
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -4823,8 +4826,7 @@ func TestRingDMCall_Group_ExcludesOfflineCallees(t *testing.T) {
 		RingingUserIDs []string `json:"ringing_user_ids"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-	assert.Contains(t, body.RingingUserIDs, online.ID)
-	assert.NotContains(t, body.RingingUserIDs, offline.ID)
+	assert.Equal(t, []string{online.ID}, body.RingingUserIDs)
 }
 
 func TestRingDMCall_Group_AllOffline_Returns400(t *testing.T) {

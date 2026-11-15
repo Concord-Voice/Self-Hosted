@@ -97,6 +97,17 @@ func connectTransferNotifications(t *testing.T, serverURL, token string) *ws.Con
 	headers := testhelpers.AuthHeaders(token)
 	conn, _, err := ws.DefaultDialer.Dial("ws"+strings.TrimPrefix(serverURL, "http")+"/api/v1/ws", headers)
 	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	for {
+		var frame struct {
+			Type string `json:"type"`
+		}
+		require.NoError(t, conn.ReadJSON(&frame))
+		if frame.Type == "connected" {
+			break
+		}
+	}
+	require.NoError(t, conn.SetReadDeadline(time.Time{}))
 	return conn
 }
 
