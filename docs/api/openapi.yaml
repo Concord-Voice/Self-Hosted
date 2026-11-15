@@ -17627,7 +17627,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Password or MFA verification is required or failed
+          description: Password and (when MFA is enrolled) MFA verification is required or failed
           content:
             application/json:
               schema:
@@ -17739,7 +17739,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Account access is denied, or password or MFA verification is required or failed
+          description: Account access is denied, or password and (when MFA is enrolled) MFA verification is required or failed
           content:
             application/json:
               schema:
@@ -17818,7 +17818,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Password or MFA step-up required or failed.
+          description: Password and (when MFA is enrolled) MFA step-up required or failed.
           content:
             application/json:
               schema:
@@ -20467,23 +20467,39 @@ components:
             step_up_budget_exhausted: true
     RecoveryAttemptsExhausted:
       description: >-
-        Too many recovery-code attempts for this normalized email (10 per 24
-        hours). The recovery failure budget is independent of IP rate limits
-        and of the ten-minute recovery-code record, so beginning recovery again
-        does not reset it. A successfully consumed recovery code clears it.
+        Two different 429s share this status; tell them apart by the body flag,
+        never by the message text. The route's IP limiter (5 per 15 minutes)
+        answers `RateLimitError` (`error: Rate limit exceeded`) with the usual
+        rate-limit headers. The recovery failure budget answers `error: Too many
+        verification attempts` with `step_up_budget_exhausted: true`: too many
+        recovery-code attempts for this normalized email (10 per 24 hours). That
+        budget is independent of IP rate limits and of the ten-minute
+        recovery-code record, so beginning recovery again does not reset it. A
+        consumed recovery code whose recovery completes clears it.
       headers:
         Retry-After:
-          description: Whole seconds until this email's recovery attempt budget resets
+          description: Whole seconds until the IP limiter or this email's recovery attempt budget resets
           schema:
             type: integer
             minimum: 1
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/StepUpBudgetExhaustedError'
-          example:
-            error: Too many verification attempts
-            step_up_budget_exhausted: true
+            anyOf:
+            - $ref: '#/components/schemas/RateLimitError'
+            - $ref: '#/components/schemas/StepUpBudgetExhaustedError'
+          examples:
+            routeLimiter:
+              summary: IP limiter
+              value:
+                error: Rate limit exceeded
+                message: Rate limit reached. Try again in 41 seconds.
+                retry_after: 41
+            budgetExhausted:
+              summary: Recovery attempt budget spent
+              value:
+                error: Too many verification attempts
+                step_up_budget_exhausted: true
     StepUpBudgetUnavailable:
       description: >-
         The step-up attempt budget could not be evaluated (its Redis-backed store
