@@ -101,8 +101,7 @@ trusted_root_path() {
   while :; do
     [[ ! -L "$candidate" ]] || return 1
     read -r owner mode < <(stat -c '%u %a' "$candidate" 2>/dev/null) || return 1
-    [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
-    (( (8#$mode & 8#22) == 0 )) || return 1
+    [[ "$owner" == 0 && "$mode" =~ ^[0-7]{1,2}[0145][0145]$ ]] || return 1
     [[ "$candidate" == / ]] && return 0
     candidate="${candidate%/*}"
     [[ -n "$candidate" ]] || candidate=/
