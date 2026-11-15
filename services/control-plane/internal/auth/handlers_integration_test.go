@@ -1782,3 +1782,12 @@ func TestResendRefusedByCooldownRefundsIssuance(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "cooldown_active")
 	assert.Equal(t, 2, issuedCount(t, ts, testEmail))
 }
+
+// A failed initial send deletes the pending row and its code, so nothing
+// issued survives it and the charge is returned.
+func TestRegisterSendFailureRefundsIssuance(t *testing.T) {
+	ts := setupRecoverySMTPFailureTS(t, 0)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Equal(t, 0, issuedCount(t, ts, testEmail))
+}

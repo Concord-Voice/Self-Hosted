@@ -645,6 +645,10 @@ func (h *Handler) Register(c *gin.Context) {
 	if err != nil {
 		if _, delErr := h.pending.Delete(c.Request.Context(), pendingID); delErr != nil {
 			h.log.Error("Failed to roll back pending after email send error", "error", delErr)
+		} else {
+			// The row, and with it any code it holds, is gone, so nothing
+			// issued survives the failed send.
+			refundIssuance()
 		}
 		h.log.Error("Failed to send verification code", "error", err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -907,7 +911,8 @@ const registrationIssuanceLimit = MaxResends + 1
 //
 // The limit counts codes issued, so the caller must call refund on every exit
 // that ends before a code is minted (no pending row, a cooldown, a conflict).
-// A failed send keeps its charge: the code may already be stored or delivered.
+// A failed resend or change-email send keeps its charge: the pending row and
+// the code may survive it. A failed initial send deletes the row, so it refunds.
 func (h *Handler) allowRegistrationIssuance(ctx context.Context, c *gin.Context, email string) (refund func(), ok bool) {
 	key := registrationIssuanceKey(email)
 	allowed, err := middleware.AllowUserAction(ctx, h.redis, key, registrationIssuanceLimit, PendingRegistrationTTL)
