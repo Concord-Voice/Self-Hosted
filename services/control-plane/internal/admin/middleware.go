@@ -2,6 +2,8 @@ package admin
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -44,6 +46,11 @@ func AdminAuthRequired(sessions *SessionStore, authority SessionAuthority) gin.H
 			return
 		}
 		generation, err := authority.ActiveSessionGeneration(c.Request.Context(), sess.AdminID)
+		if err != nil && !errors.Is(err, ErrAdminNotFound) {
+			// A database fault still fails closed, but it must not look like an
+			// ordinary sign-out.
+			slog.Error("admin session authority check failed", "error", err)
+		}
 		if err != nil || generation != sess.SessionGeneration {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return

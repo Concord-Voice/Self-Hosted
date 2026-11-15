@@ -2,6 +2,7 @@ package admin_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,18 +20,24 @@ import (
 // route that records whether c.Next() was reached and what admin_id (if any) was
 // set on the context, so the middleware's behavior is observable from the
 // response.
-type staticSessionAuthority struct{ generation int64 }
-
-func (a staticSessionAuthority) ActiveSessionGeneration(context.Context, string) (int64, error) {
-	return a.generation, nil
+type staticSessionAuthority struct {
+	generation int64
+	err        error
 }
 
-func adminAuthTestEngine(sessions *admin.SessionStore) (*gin.Engine, *bool, *string) {
+func (a staticSessionAuthority) ActiveSessionGeneration(context.Context, string) (int64, error) {
+	return a.generation, a.err
+}
+
+func adminAuthTestEngine(
+	sessions *admin.SessionStore,
+	authority admin.SessionAuthority,
+) (*gin.Engine, *bool, *string) {
 	gin.SetMode(gin.TestMode)
 	reached := false
 	gotAdminID := ""
 	r := gin.New()
-	r.GET("/admin/api/v1/protected", admin.AdminAuthRequired(sessions, staticSessionAuthority{}), func(c *gin.Context) {
+	r.GET("/admin/api/v1/protected", admin.AdminAuthRequired(sessions, authority), func(c *gin.Context) {
 		reached = true
 		if v, ok := c.Get("admin_id"); ok {
 			if s, ok := v.(string); ok {
@@ -48,7 +55,7 @@ func TestAdminAuthRequired_NoCookie_401(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions)
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
@@ -64,7 +71,7 @@ func TestAdminAuthRequired_InvalidSid_401(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions)
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
@@ -92,7 +99,7 @@ func TestAdminAuthRequired_ExpiredSid_401(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	clock := now
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return clock })
-	engine, reached, _ := adminAuthTestEngine(sessions)
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{})
 
 	sid, err := sessions.Mint(ctx, "admin-xyz", 0)
 	require.NoError(t, err)
@@ -116,9 +123,9 @@ func TestAdminAuthRequired_ValidSid_SetsAdminIDAndCallsNext(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, gotAdminID := adminAuthTestEngine(sessions)
+	engine, reached, gotAdminID := adminAuthTestEngine(sessions, staticSessionAuthority{generation: 7})
 
-	sid, err := sessions.Mint(ctx, "admin-xyz", 0)
+	sid, err := sessions.Mint(ctx, "admin-xyz", 7)
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
@@ -131,6 +138,48 @@ func TestAdminAuthRequired_ValidSid_SetsAdminIDAndCallsNext(t *testing.T) {
 	assert.Equal(t, "admin-xyz", *gotAdminID, "admin_id must be set on the context")
 }
 
+func TestAdminAuthRequired_StaleGeneration_401(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{generation: 8})
+
+	sid, err := sessions.Mint(ctx, "admin-xyz", 7)
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
+	req.AddCookie(&http.Cookie{Name: "__Host-cv_admin_sid", Value: sid, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, *reached, "handler must NOT run after the administrator generation advances")
+}
+
+func TestAdminAuthRequired_InactiveAdmin_401(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{err: admin.ErrAdminNotFound})
+
+	sid, err := sessions.Mint(ctx, "admin-xyz", 7)
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
+	req.AddCookie(&http.Cookie{Name: "__Host-cv_admin_sid", Value: sid, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, *reached, "handler must NOT run for a pending, disabled, or missing administrator")
+}
+
 // TestAdminAuthRequired_IgnoresAuthorizationHeader proves the admin middleware
 // NEVER consults the user-facing Authorization header / JWT — only the opaque
 // admin session cookie. A request carrying a Bearer token but no admin cookie is
@@ -141,7 +190,7 @@ func TestAdminAuthRequired_IgnoresAuthorizationHeader(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions)
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
@@ -150,4 +199,25 @@ func TestAdminAuthRequired_IgnoresAuthorizationHeader(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, *reached, "a user JWT must not grant admin access")
+}
+
+func TestAdminAuthRequired_AuthorityFault_401(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{err: errors.New("database unavailable")})
+
+	sid, err := sessions.Mint(ctx, "admin-xyz", 7)
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
+	req.AddCookie(&http.Cookie{Name: "__Host-cv_admin_sid", Value: sid, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, *reached, "an authority read fault must fail closed")
 }

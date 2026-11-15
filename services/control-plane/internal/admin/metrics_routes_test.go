@@ -24,7 +24,7 @@ var adminMetricsRouteTargets = map[string]string{
 }
 
 func TestAdminMetricsRoutesAreReflectivelyCompleteAndGated(t *testing.T) {
-	engine, _ := registerAdminEngineAndSessions(t)
+	engine, _, _ := registerAdminEngineAndSessions(t)
 	methodsByPath := make(map[string][]string)
 	for _, route := range engine.Routes() {
 		if _, expected := adminMetricsRouteTargets[route.Path]; expected {
@@ -47,7 +47,7 @@ func TestAdminMetricsRoutesAreReflectivelyCompleteAndGated(t *testing.T) {
 }
 
 func TestAdminMetricsRoutesRejectMissingSessionAndUserJWT(t *testing.T) {
-	engine, _ := registerAdminEngineAndSessions(t)
+	engine, _, _ := registerAdminEngineAndSessions(t)
 	for path, target := range adminMetricsRouteTargets {
 		t.Run(path, func(t *testing.T) {
 			for _, authorization := range []string{"", "Bearer user.jwt.only"} {
@@ -64,8 +64,8 @@ func TestAdminMetricsRoutesRejectMissingSessionAndUserJWT(t *testing.T) {
 }
 
 func TestAdminMetricsRoutesAllowGETAndDenyMutatingMethods(t *testing.T) {
-	engine, sessions := registerAdminEngineAndSessions(t)
-	sid, err := sessions.Mint(context.Background(), "admin-route-test", 0)
+	engine, sessions, activeAdmin := registerAdminEngineAndSessions(t)
+	sid, err := sessions.Mint(context.Background(), activeAdmin.ID, activeAdmin.SessionGeneration)
 	require.NoError(t, err)
 
 	for path, target := range adminMetricsRouteTargets {
@@ -87,8 +87,8 @@ func TestAdminMetricsRoutesAllowGETAndDenyMutatingMethods(t *testing.T) {
 }
 
 func TestAdminMetricsRouteRateLimitUsesClosed429Response(t *testing.T) {
-	engine, sessions := registerAdminEngineAndSessions(t)
-	sid, err := sessions.Mint(context.Background(), "admin-rate-test", 0)
+	engine, sessions, activeAdmin := registerAdminEngineAndSessions(t)
+	sid, err := sessions.Mint(context.Background(), activeAdmin.ID, activeAdmin.SessionGeneration)
 	require.NoError(t, err)
 	target := adminMetricsRouteTargets["/admin/api/v1/metrics/current"]
 
@@ -110,8 +110,8 @@ func TestAdminMetricsRouteRateLimitUsesClosed429Response(t *testing.T) {
 }
 
 func TestAdminServerRoutesAreRateLimited(t *testing.T) {
-	engine, sessions := registerAdminEngineAndSessions(t)
-	sid, err := sessions.Mint(context.Background(), "admin-server-rate-test", 0)
+	engine, sessions, activeAdmin := registerAdminEngineAndSessions(t)
+	sid, err := sessions.Mint(context.Background(), activeAdmin.ID, activeAdmin.SessionGeneration)
 	require.NoError(t, err)
 	// A refused query never reaches the agent, so no socket is needed.
 	target := "/admin/api/v1/server/logs?service=unknown"
@@ -131,8 +131,8 @@ func TestAdminServerRouteRateLimitFailsClosed(t *testing.T) {
 		MaxRetries:  -1,
 	})
 	t.Cleanup(func() { _ = limiterRedis.Close() })
-	engine, sessions := registerAdminEngineAndSessionsWithLimiter(t, limiterRedis)
-	sid, err := sessions.Mint(context.Background(), "admin-server-rate-backend-test", 0)
+	engine, sessions, activeAdmin := registerAdminEngineAndSessionsWithLimiter(t, limiterRedis)
+	sid, err := sessions.Mint(context.Background(), activeAdmin.ID, activeAdmin.SessionGeneration)
 	require.NoError(t, err)
 	response := serveAdminMetricsRoute(engine, sid, http.MethodGet, "/admin/api/v1/server/status")
 	assert.Equal(t, http.StatusInternalServerError, response.Code)
@@ -147,8 +147,8 @@ func TestAdminMetricsRouteRateLimitFailsClosedWithFixed503Response(t *testing.T)
 	})
 	t.Cleanup(func() { _ = limiterRedis.Close() })
 
-	engine, sessions := registerAdminEngineAndSessionsWithLimiter(t, limiterRedis)
-	sid, err := sessions.Mint(context.Background(), "admin-rate-backend-test", 0)
+	engine, sessions, activeAdmin := registerAdminEngineAndSessionsWithLimiter(t, limiterRedis)
+	sid, err := sessions.Mint(context.Background(), activeAdmin.ID, activeAdmin.SessionGeneration)
 	require.NoError(t, err)
 
 	response := serveAdminMetricsRoute(
@@ -184,7 +184,7 @@ func serveAdminMetricsRoute(engine http.Handler, sid, method, target string) *ht
 }
 
 func TestAdminMetricsRouteListHasNoUnexpectedPaths(t *testing.T) {
-	engine, _ := registerAdminEngineAndSessions(t)
+	engine, _, _ := registerAdminEngineAndSessions(t)
 	var paths []string
 	for _, route := range engine.Routes() {
 		if strings.HasPrefix(route.Path, "/admin/api/v1/metrics") ||

@@ -314,6 +314,7 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	sid, err := h.repo.FinalizeWebAuthnLogin(ctx, h.sessions, challenge.AdminID, cred.ID, int64(cred.Authenticator.SignCount))
 	if err != nil {
 		if errors.Is(err, ErrAdminAuthenticationStateChanged) {
+			h.log.Warn("admin login state changed during ceremony", "event", EventLoginFailure)
 			h.auditFailure(ctx, challenge.Username, EventLoginFailure)
 			c.JSON(http.StatusUnauthorized, genericAuthError)
 			return
@@ -775,8 +776,11 @@ func (h *Handler) consumeEnrollChallenge(ctx context.Context, handle string) (en
 	if err := json.Unmarshal([]byte(raw), &ch); err != nil {
 		return enrollChallenge{}, fmt.Errorf("decode enroll challenge: %w", err)
 	}
+	// The index only lets reset find live ceremonies; the challenge is already
+	// consumed, so a failed index cleanup must not spend it. A leftover member
+	// names a key that no longer exists and expires with the index.
 	if err := h.redis.SRem(ctx, enrollChallengeIndexKey(ch.AdminID, ch.CredentialGeneration), challengeKey).Err(); err != nil {
-		return enrollChallenge{}, fmt.Errorf("remove enroll challenge index: %w", err)
+		h.log.Warn("admin enroll challenge index cleanup failed", "event", EventEnrollComplete)
 	}
 	return ch, nil
 }

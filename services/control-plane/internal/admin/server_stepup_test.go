@@ -189,6 +189,11 @@ func TestServerStepUpRejectsRepeatedOrLowerCounters(t *testing.T) {
 		return va.assertionResponse(t, testAdminRPID, challenge, testAdminOrigin, flagUP|flagUV, false)
 	}
 
+	// Authenticators that always report zero remain usable. The virtual key
+	// enrolls with counter 1, so model a zero-counter key from enrollment on.
+	va.signCount = 0
+	_, err = db.Exec(`UPDATE admin_webauthn_credentials SET sign_count = 0 WHERE admin_id = $1`, adminID)
+	require.NoError(t, err)
 	handle, challenge := begin()
 	require.Equal(t, http.StatusAccepted, action(handle, sign(challenge)))
 	handle, challenge = begin()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -329,4 +330,30 @@ func TestAdminRepo_Credentials(t *testing.T) {
 		assert.Equal(t, before, after, "failed credential persistence must not create a Redis session")
 	})
 
+}
+
+// TestMigration000197Down_RefusesAfterReset runs the 000197 down migration in a
+// transaction that is always rolled back: once a reset has revoked sessions, the
+// guard must refuse, or a rollback would let those sessions revive.
+func TestMigration000197Down_RefusesAfterReset(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	repo := admin.NewAdminRepo(db)
+
+	created, err := repo.CreatePending(ctx, uniqueAdminUsername("down-guard"), "test-hash")
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, created.ID)
+	assert.Equal(t, int64(1), created.SessionGeneration, "every administrator starts at the shared base")
+	_, _, _, err = repo.ResetEnrollment(ctx, created.ID)
+	require.NoError(t, err)
+
+	down, err := os.ReadFile("../../migrations/000197_add_admin_session_generation.down.sql")
+	require.NoError(t, err)
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, string(down))
+	require.Error(t, err, "down must refuse after a reset revoked sessions")
+	assert.Contains(t, err.Error(), "cannot roll back 000197")
 }

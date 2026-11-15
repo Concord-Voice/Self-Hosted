@@ -304,7 +304,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000194 | add_login_family_authority | Logical login families and immutable SID membership, sealed revocation frontiers, exact media connection/room associations and closure evidence, permanent boot fences and one-way activation receipt; down refuses activation or retained authority/delivery evidence (#2272; 000190 belongs to #4131 and 000191 to #4137). |
 | 000195 | add_voice_participant_admission_id | Adds nullable `voice_participants.admission_id` and `admission_socket_id`: the admission and socket a Server Voice join consumed. A redelivered `voice.joined` whose reservation is gone is a replay when the row holds that exact pair (#253). The down drops only replay evidence. |
 | 000196 | admin_credential_generation | Adds an administrator credential generation that enrollment ceremonies must match; reset increments it atomically with credential removal. Down refuses once a generation has advanced. |
-| 000197 | add_admin_session_generation | Adds a nonnegative durable generation to `admin_users`; reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; down refuses after any generation has advanced. |
+| 000197 | add_admin_session_generation | Adds a nonnegative durable generation to `admin_users`; reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; every administrator starts at 1, so pre-migration sessions stop matching and any value above 1 records a revocation; down refuses once any generation passes 1. |
 
 ### Logical login authority (migration 000194, #2272)
 

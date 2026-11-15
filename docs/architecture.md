@@ -785,6 +785,8 @@ Admin Portal does not expose that operation in its UI.
 | `reset-enrollment --username <handle>` | Revokes the admin's hardware keys and sessions, invalidates in-flight enrollment, returns the admin to pending, and prints a new enrollment token. It does not change the password. |
 | `unlock <username>` | Clears the admin's sign-in lock, failed attempts and escalation level, so the next correct sign-in succeeds. It does not touch the IP lock, which expires within an hour. It writes one audit row. |
 
+After upgrading to the release that adds enrollment and session generations, every admin signs in once again, and enrollment tokens issued before the upgrade fail closed; reissue them with `reset-enrollment`. Do not run `reset-enrollment` or finish an enrollment while containers from an earlier release still serve, because they do not check the generations.
+
 **Auth flow (2FA mandatory):**
 
 1. `POST /admin/api/v1/auth/password` — constant-time password verify. Returns a short-lived challenge handle + WebAuthn `BeginLogin` assertion. **Password alone never yields a session.**

@@ -530,7 +530,8 @@ func TestFinishAdminRegistration_PersistsAllowListedCredential(t *testing.T) {
 
 	stored, err := admin.FinishAdminRegistration(ctx, svc, repo, admin.AdminRegistrationInput{ // #nosec G101 -- test fixture: WebAuthn credential label, not a secret
 		User: user, Session: *session, Request: httpReq(regBody),
-		AdminID: adminUser.ID, AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "yubikey-primary",
+		AdminID: adminUser.ID, CredentialGeneration: adminUser.CredentialGeneration,
+		AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "yubikey-primary",
 	})
 	require.NoError(t, err)
 	assert.NotEmpty(t, stored.ID)
@@ -563,7 +564,8 @@ func TestFinishAdminRegistration_RejectsNonAllowListedBeforePersist(t *testing.T
 
 	stored, err := admin.FinishAdminRegistration(ctx, svc, repo, admin.AdminRegistrationInput{
 		User: user, Session: *session, Request: httpReq(regBody),
-		AdminID: adminUser.ID, AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "rogue-key",
+		AdminID: adminUser.ID, CredentialGeneration: adminUser.CredentialGeneration,
+		AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "rogue-key",
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, admin.ErrAAGUIDNotAllowed)
@@ -603,6 +605,7 @@ func TestFinishAdminRegistration_RejectsRevokedGenerationBeforePersist(t *testin
 		AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "revoked-generation",
 	})
 	require.ErrorIs(t, err, admin.ErrEnrollmentStateChanged)
+	assert.NotErrorIs(t, err, admin.ErrCredentialPersist, "a stale ceremony is a rejection (401), not a storage fault (500)")
 	assert.Empty(t, stored.ID)
 
 	list, err := repo.ListCredentials(ctx, adminUser.ID)

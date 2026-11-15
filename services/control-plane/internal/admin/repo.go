@@ -369,10 +369,9 @@ func (r *AdminRepo) ListCredentials(ctx context.Context, adminID string) ([]Admi
 	return creds, nil
 }
 
-// DeleteCredentials removes ALL WebAuthn credentials bound to an admin. It is
-// the break-glass revocation primitive used by `adminctl reset-enrollment`
-// (#1688 §9): a lost or compromised hardware key set is cleared so the admin
-// must re-enrol a fresh key. Returns the number of rows removed (0 when the
+// DeleteCredentials removes ALL WebAuthn credentials bound to an admin.
+// `adminctl reset-enrollment` does not use it: ResetEnrollment removes the
+// credentials in the same transaction that advances both generations. Returns the number of rows removed (0 when the
 // admin already had no credentials — not an error).
 func (r *AdminRepo) DeleteCredentials(ctx context.Context, adminID string) error {
 	const q = `DELETE FROM admin_webauthn_credentials WHERE admin_id = $1`

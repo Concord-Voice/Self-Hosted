@@ -285,9 +285,6 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 	if err != nil {
 		return fmt.Errorf("reset enrollment authority: %w", err)
 	}
-	if err := deps.enroll.DeleteEnrollmentChallenges(ctx, adminUser.ID, previousGeneration); err != nil {
-		return fmt.Errorf("invalidate enrollment challenges: %w", err)
-	}
 	if revoked > 0 {
 		if auditErr := deps.audit.Write(ctx, AuditEvent{
 			AdminID:   &adminUser.ID,
@@ -298,6 +295,12 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 		}); auditErr != nil {
 			return fmt.Errorf("audit credential revoke: %w", auditErr)
 		}
+	}
+	// The revocation is committed and audited before the Redis cleanup, so a
+	// cleanup fault cannot leave it unaudited. PostgreSQL's generation check is
+	// the fence; the cleanup only rejects stale ceremonies sooner.
+	if err := deps.enroll.DeleteEnrollmentChallenges(ctx, adminUser.ID, previousGeneration); err != nil {
+		return fmt.Errorf("invalidate enrollment challenges: %w", err)
 	}
 
 	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID, newGeneration)

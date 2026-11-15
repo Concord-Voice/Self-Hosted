@@ -99,16 +99,19 @@ type AdminRegistrationInput struct {
 }
 
 // FinishAdminRegistration completes the admin WebAuthn registration ceremony,
-// enforces the AAGUID allow-list, and persists the credential (#1688 §8). It is
-// the single seam where a freshly registered hardware key is admitted: the
-// AAGUID check runs BEFORE AdminRepo.AddCredential, so a non-allow-listed key is
-// never written. `in.AllowedAAGUIDs` is the resolved `ADMIN_WEBAUTHN_ALLOWED_AAGUIDS`
-// list; `in.CredentialName` is an operator-supplied label (may be empty).
+// enforces the AAGUID allow-list, and atomically persists the credential while
+// activating the administrator (#1688 §8). It is the single seam where a
+// freshly registered hardware key is admitted: the AAGUID check runs BEFORE
+// AdminRepo.CompleteEnrollment, so a non-allow-listed key is never written.
+// `in.AllowedAAGUIDs` is the resolved `ADMIN_WEBAUTHN_ALLOWED_AAGUIDS` list;
+// `in.CredentialName` is an operator-supplied label (may be empty).
 //
 // Returns the stored AdminCredential. On AAGUID rejection it returns
 // ErrAAGUIDNotAllowed (or ErrInvalidAAGUID) and writes nothing. A credential ID
-// that is already registered returns ErrDuplicateCredential. Any other fault while
-// saving the credential returns an error wrapping ErrCredentialPersist.
+// that is already registered returns ErrDuplicateCredential. A ceremony that a
+// reset made stale returns ErrEnrollmentStateChanged (or ErrAdminNotFound). Any
+// other fault while saving the credential returns an error wrapping
+// ErrCredentialPersist.
 func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo *AdminRepo, in AdminRegistrationInput) (AdminCredential, error) {
 	cred, err := svc.FinishRegistration(in.User, in.Session, in.Request)
 	if err != nil {
@@ -136,8 +139,11 @@ func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo
 		Transports:     transports,
 	})
 	if err != nil {
-		// A reused credential ID is the client's input, not a storage fault.
-		if errors.Is(err, ErrDuplicateCredential) || errors.Is(err, ErrEnrollmentStateChanged) {
+		// A reused credential ID, or a ceremony that a reset made stale, is
+		// rejected like any other bad attestation, not reported as a storage fault.
+		if errors.Is(err, ErrDuplicateCredential) ||
+			errors.Is(err, ErrEnrollmentStateChanged) ||
+			errors.Is(err, ErrAdminNotFound) {
 			return AdminCredential{}, err
 		}
 		return AdminCredential{}, fmt.Errorf("%w: %w", ErrCredentialPersist, err)

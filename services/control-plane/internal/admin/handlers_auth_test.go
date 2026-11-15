@@ -62,10 +62,10 @@ func enrolledAdmin(t *testing.T, db *sql.DB, _ *redis.Client) (adminID, username
 
 	_, err = admin.FinishAdminRegistration(ctx, svc, repo, admin.AdminRegistrationInput{
 		User: user, Session: *session, Request: httpReq(regBody),
-		AdminID: created.ID, AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "primary",
+		AdminID: created.ID, CredentialGeneration: created.CredentialGeneration,
+		AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "primary",
 	})
 	require.NoError(t, err)
-	require.NoError(t, repo.SetStatus(ctx, created.ID, admin.StatusActive))
 
 	return created.ID, username, va
 }
