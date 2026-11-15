@@ -35,6 +35,18 @@ const REFUSALS: Record<string, string> = {
   write_in_progress: "Another action is still running. Wait for it to finish.",
   stepup_required: "This action needs your security key.",
   stepup_failed: "The security key check failed. Try again.",
+  authorization_denied:
+    "The host agent rejected this admin's security key proof. Start again; if this persists, ask a host-root operator to import this admin's authorizer with concord-agent authorizer import.",
+  authorizer_unavailable:
+    "The host agent cannot load its trusted authorizers. Ask a host-root operator to check the authorizer file and import it with concord-agent authorizer import.",
+  peer_forbidden:
+    "The host agent rejected the control-plane connection. Check the service identity and agent socket permissions on the host.",
+  authorization_busy:
+    "Another host authorization is in progress. Wait for it to finish, then start again.",
+  invalid_authorization:
+    "The host agent did not accept this authorization request. Reload the console and start again.",
+  backup_rate_limited:
+    "Backups are limited to one attempt per hour. Wait until the hour has passed before trying again.",
   stepup_unavailable:
     "Your account has no security key this server can check, so this action is not available.",
   audit_unavailable:

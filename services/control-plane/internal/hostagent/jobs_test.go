@@ -359,6 +359,73 @@ func TestBackupAdmissionPersistsAcrossFailureAndRestart(t *testing.T) {
 	}
 }
 
+func TestBackupAdmissionDoesNotSpendWindowWithoutAJob(t *testing.T) {
+	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	for _, failure := range []string{"audit", "marker"} {
+		t.Run(failure, func(t *testing.T) {
+			s, _ := writeServer(t, &fakeRunner{})
+			s.writes.now = func() time.Time { return now }
+			list, err := s.authorizations.authorizers.List()
+			require.NoError(t, err)
+			require.Len(t, list, 1)
+			marker := s.writes.marker
+			if failure == "audit" {
+				s.audit.syncFile = func(*os.File) error { return errors.New("injected audit failure") }
+			} else {
+				s.writes.marker = filepath.Join(t.TempDir(), "missing", "write-in-progress")
+			}
+			job, err := s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+			require.Error(t, err)
+			require.Nil(t, job)
+			_, err = os.Stat(s.writes.admission)
+			require.ErrorIs(t, err, os.ErrNotExist, "a rejected backup must not consume the hourly slot")
+			require.Empty(t, s.writes.list)
+
+			if failure == "marker" {
+				s.writes.marker = marker
+			} else {
+				replacement, _ := writeServer(t, &fakeRunner{})
+				replacement.writes.admission = s.writes.admission
+				replacement.writes.now = s.writes.now
+				s = replacement
+			}
+			job, err = s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+			require.NoError(t, err)
+			require.NotNil(t, job)
+			waitJob(t, s, job.ID)
+		})
+	}
+}
+
+func TestBackupAdmissionCommitFailureRemovesMarker(t *testing.T) {
+	s, _ := writeServer(t, &fakeRunner{})
+	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	s.writes.now = func() time.Time { return now }
+	list, err := s.authorizations.authorizers.List()
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	s.audit.syncFile = func(f *os.File) error {
+		// The state changes after the eligibility check, at the admitted audit.
+		if err := os.Mkdir(s.writes.admission, 0o700); err != nil {
+			return err
+		}
+		return f.Sync()
+	}
+	job, err := s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+	require.ErrorContains(t, err, "publish backup admission state")
+	require.Nil(t, job)
+	require.Empty(t, s.writes.list)
+	_, err = os.Stat(s.writes.marker)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	require.NoError(t, os.Remove(s.writes.admission))
+	s.audit.syncFile = func(f *os.File) error { return f.Sync() }
+	job, err = s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	waitJob(t, s, job.ID)
+}
+
 func TestBackupAdmissionAuditFailurePreventsLimitResponse(t *testing.T) {
 	s, _ := writeServer(t, &fakeRunner{})
 	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
@@ -379,13 +446,13 @@ func TestBackupAdmissionRejectsInvalidAndUntrustedState(t *testing.T) {
 	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
 	s, _ := writeServer(t, &fakeRunner{})
 	require.NoError(t, os.WriteFile(s.writes.admission, []byte("-1\n"), 0o600))
-	require.Error(t, s.writes.admitBackup(now))
+	require.Error(t, s.writes.checkBackupAdmission(now))
 
 	s, _ = writeServer(t, &fakeRunner{})
 	target := filepath.Join(t.TempDir(), "admission-target")
 	require.NoError(t, os.WriteFile(target, []byte("0\n"), 0o600))
 	require.NoError(t, os.Symlink(target, s.writes.admission))
-	require.Error(t, s.writes.admitBackup(now))
+	require.Error(t, s.writes.checkBackupAdmission(now))
 }
 
 func TestBackupAdmissionRefusesUnsafeDirectoryAndStateType(t *testing.T) {
@@ -393,10 +460,10 @@ func TestBackupAdmissionRefusesUnsafeDirectoryAndStateType(t *testing.T) {
 	s, _ := writeServer(t, &fakeRunner{})
 	dir := filepath.Dir(s.writes.admission)
 	require.NoError(t, os.Chmod(dir, 0o777)) //nolint:gosec // deliberately unsafe fixture
-	require.ErrorContains(t, s.writes.admitBackup(now), "backup admission directory")
+	require.ErrorContains(t, s.writes.checkBackupAdmission(now), "backup admission directory")
 	require.NoError(t, os.Chmod(dir, 0o700)) //nolint:gosec // restore test directory permissions
 	require.NoError(t, os.Mkdir(s.writes.admission, 0o700))
-	require.ErrorContains(t, s.writes.admitBackup(now), "backup admission state is untrusted")
+	require.ErrorContains(t, s.writes.checkBackupAdmission(now), "backup admission state is untrusted")
 }
 
 func TestBackupAdmissionConcurrent(t *testing.T) {

@@ -197,8 +197,10 @@ func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Durati
 	if j.running {
 		return nil, nil
 	}
+	var backupAt time.Time
 	if action == "backup" {
-		if err := j.admitBackup(j.now().UTC()); err != nil {
+		backupAt = j.now().UTC()
+		if err := j.checkBackupAdmission(backupAt); err != nil {
 			return nil, err
 		}
 	}
@@ -207,6 +209,14 @@ func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Durati
 	}
 	if err := os.WriteFile(j.marker, []byte(id+"\n"), 0o600); err != nil {
 		return nil, err
+	}
+	if action == "backup" {
+		if err := j.writeBackupAdmission(filepath.Dir(j.admission), backupAt); err != nil {
+			if removeErr := os.Remove(j.marker); removeErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("remove job marker: %w", removeErr))
+			}
+			return nil, err
+		}
 	}
 	job := &Job{ID: id, Action: action, State: "running", Started: time.Now().UTC(), adminID: adminID}
 	job.out.max = maxJobOutput
@@ -223,9 +233,9 @@ func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Durati
 	return job, nil
 }
 
-// admitBackup persists the admission before a backup job can start. The state
-// survives process restarts and a failed backup still consumes its window.
-func (j *jobs) admitBackup(now time.Time) error {
+// checkBackupAdmission runs under j.mu before the audit, marker and timestamp
+// commit. A failed backup job still consumes its window once admitted.
+func (j *jobs) checkBackupAdmission(now time.Time) error {
 	dir := filepath.Dir(j.admission)
 	if err := trustedEntry(dir); err != nil {
 		return fmt.Errorf("backup admission directory: %w", err)
@@ -237,7 +247,7 @@ func (j *jobs) admitBackup(now time.Time) error {
 	if found && now.Before(time.Unix(0, last).Add(backupWindow)) {
 		return errBackupLimited
 	}
-	return j.writeBackupAdmission(dir, now)
+	return nil
 }
 
 func (j *jobs) backupAdmissionTimestamp() (int64, bool, error) {

@@ -74,7 +74,7 @@ func newAuthorizationFixture(t *testing.T) (*AuthorizationStore, *fakeAgentWebAu
 		credential: &credential,
 		session: webauthn.SessionData{
 			Challenge: "full-session", RelyingPartyID: "admin.example.test", Origin: "https://admin.example.test",
-			UserID: []byte(adminID), AllowedCredentialIDs: [][]byte{credential.ID}, UserVerification: protocol.VerificationRequired,
+			UserID: []byte(adminWebAuthnUserHandle), AllowedCredentialIDs: [][]byte{credential.ID}, UserVerification: protocol.VerificationRequired,
 			Expires: time.Now().Add(5 * time.Minute),
 		},
 	}
@@ -206,7 +206,7 @@ func TestAuthorizationBeginRouteIsPeerGatedAndReturnsNoActionAuthority(t *testin
 }
 
 func TestAuthorizationRealWebAuthnVerifierRejectsWrongTrustClaims(t *testing.T) {
-	for _, scenario := range []string{"wrong origin", "wrong RP", "wrong credential", "missing UV", "valid"} {
+	for _, scenario := range []string{"wrong origin", "wrong RP", "wrong credential", "wrong user handle", "missing UV", "valid"} {
 		t.Run(scenario, func(t *testing.T) {
 			private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 			require.NoError(t, err)
@@ -229,7 +229,7 @@ func TestAuthorizationRealWebAuthnVerifierRejectsWrongTrustClaims(t *testing.T) 
 			handle, options, err := store.Begin(adminID, "start", actionRequest{})
 			require.NoError(t, err)
 
-			rpID, origin, credID, flags := "admin.example.test", "https://admin.example.test", []byte("credential-1"), byte(0x05) //nolint:gosec // public test credential ID, not a secret
+			rpID, origin, credID, userHandle, flags := "admin.example.test", "https://admin.example.test", []byte("credential-1"), adminWebAuthnUserHandle, byte(0x05) //nolint:gosec // public test credential ID, not a secret
 			switch scenario {
 			case "wrong origin":
 				origin = "https://attacker.example.test"
@@ -237,13 +237,16 @@ func TestAuthorizationRealWebAuthnVerifierRejectsWrongTrustClaims(t *testing.T) 
 				rpID = "attacker.example.test"
 			case "wrong credential":
 				credID = []byte("other-credential")
+			case "wrong user handle":
+				userHandle = adminID
 			case "missing UV":
 				flags = 0x01
 			}
-			assertion := signedAgentAssertion(t, private, credID, adminID, options.Response.Challenge.String(), rpID, origin, flags, 5)
-			_, err = store.Consume(handle, "start", assertion)
+			assertion := signedAgentAssertion(t, private, credID, userHandle, options.Response.Challenge.String(), rpID, origin, flags, 5)
+			_, boundAdminID, err := store.consume(handle, "start", assertion)
 			if scenario == "valid" {
 				require.NoError(t, err)
+				require.Equal(t, adminID, boundAdminID)
 				require.Equal(t, uint32(5), authorizers.Credentials(adminID)[0].Authenticator.SignCount)
 			} else {
 				require.Error(t, err)
@@ -253,7 +256,7 @@ func TestAuthorizationRealWebAuthnVerifierRejectsWrongTrustClaims(t *testing.T) 
 	}
 }
 
-func signedAgentAssertion(t *testing.T, private *ecdsa.PrivateKey, credentialID []byte, adminID, challenge, rpID, origin string, flags byte, signCount uint32) []byte {
+func signedAgentAssertion(t *testing.T, private *ecdsa.PrivateKey, credentialID []byte, userHandle, challenge, rpID, origin string, flags byte, signCount uint32) []byte {
 	t.Helper()
 	rpHash := sha256.Sum256([]byte(rpID))
 	authData := append([]byte{}, rpHash[:]...)
@@ -275,7 +278,7 @@ func signedAgentAssertion(t *testing.T, private *ecdsa.PrivateKey, credentialID 
 			"authenticatorData": base64.RawURLEncoding.EncodeToString(authData),
 			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientData),
 			"signature":         base64.RawURLEncoding.EncodeToString(signature),
-			"userHandle":        base64.RawURLEncoding.EncodeToString([]byte(adminID)),
+			"userHandle":        base64.RawURLEncoding.EncodeToString([]byte(userHandle)),
 		},
 	})
 	require.NoError(t, err)

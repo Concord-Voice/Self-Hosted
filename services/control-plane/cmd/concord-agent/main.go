@@ -40,10 +40,15 @@ const (
 	// writeMarkerFile exists while a write action runs; the package scripts
 	// read it so an upgrade does not restart the agent mid-restore.
 	writeMarkerFile = "write-in-progress"
+	// backupAdmissionFile survives agent restarts so backup admission remains
+	// rate limited across processes. It shares the dedicated socket directory.
+	backupAdmissionFile = "backup-last-admitted"
 	// setupMaxConns bounds the TLS connections a LAN client can hold open.
 	setupMaxConns          = 16
 	setupMaxConnsPerSource = 4
-	setupWriteTimeout      = 30 * time.Second
+	// The installer has a ten-minute execution budget; keep its HTTP response
+	// writable for the entire operation plus a small shutdown margin.
+	setupWriteTimeout = 11 * time.Minute
 )
 
 func main() {
@@ -292,7 +297,7 @@ func listen(path string, gid int) (net.Listener, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if e.Name() != filepath.Base(path) && e.Name() != setupTokenFile {
+		if e.Name() != filepath.Base(path) && e.Name() != setupTokenFile && e.Name() != backupAdmissionFile {
 			return nil, fmt.Errorf("socket directory %s is not empty; use a dedicated directory", dir)
 		}
 	}

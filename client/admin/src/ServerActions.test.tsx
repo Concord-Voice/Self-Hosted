@@ -288,6 +288,30 @@ describe("ServerActions", () => {
     expect(onSessionError).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [403, "authorization_denied", "concord-agent authorizer import"],
+    [503, "authorizer_unavailable", "cannot load its trusted authorizers"],
+    [403, "peer_forbidden", "agent socket permissions"],
+    [429, "authorization_busy", "Another host authorization is in progress"],
+    [400, "invalid_authorization", "did not accept this authorization request"],
+    [429, "backup_rate_limited", "one attempt per hour"],
+  ])("explains agent refusal %s %s", async (status, code, guidance) => {
+    lists();
+    server.use(
+      http.post(`${base}/actions/backup`, () =>
+        HttpResponse.json({ error: code }, { status }),
+      ),
+    );
+    const { onSessionError } = renderActions();
+
+    await userEvent
+      .setup()
+      .click(await screen.findByRole("button", { name: "Back up now" }));
+
+    expect(await screen.findByText(new RegExp(guidance))).toBeVisible();
+    expect(onSessionError).not.toHaveBeenCalled();
+  });
+
   it("reports a canceled security key", async () => {
     lists();
     server.use(

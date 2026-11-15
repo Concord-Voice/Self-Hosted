@@ -165,6 +165,19 @@ file. Revoke removes every trusted credential for the named administrator.
 These are host-root recovery and administration operations; the control plane
 only receives a read-only projection.
 
+The agent loads its initial authorizer configuration at startup. After the
+first successful import, the currently running agent remains read-only until
+host root reloads that configuration:
+
+```bash
+sudo systemctl restart concord-agent
+```
+
+Then have the imported administrator begin a host write from the Admin Console.
+It must reach the WebAuthn authorization prompt rather than report
+`authorizer_unavailable`; only complete the action if it is an intended host
+operation.
+
 ### Rollout dependencies
 
 Session-generation reset and indexed handle revocation remain separate work.

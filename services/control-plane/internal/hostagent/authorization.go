@@ -18,6 +18,8 @@ const (
 	authorizationCapacity = 64
 	authorizationTTL      = 2 * time.Minute
 	maxAssertionBytes     = 32 << 10
+	// Admin enrollment registers this stable RP user handle; adminID stays in the pending ceremony.
+	adminWebAuthnUserHandle = "admin-user-handle"
 )
 
 var (
@@ -90,7 +92,7 @@ func (s *AuthorizationStore) Begin(adminID, action string, req actionRequest) (s
 	if len(credentials) == 0 {
 		return "", nil, ErrAuthorizationDenied
 	}
-	user := &mfa.WebAuthnUser{ID: []byte(adminID), Name: adminID, DisplayName: adminID, Credentials: credentials}
+	user := &mfa.WebAuthnUser{ID: []byte(adminWebAuthnUserHandle), Name: adminID, DisplayName: adminID, Credentials: credentials}
 	options, session, err := s.webauthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil || session == nil || options == nil {
 		return "", nil, ErrAuthorizerUnavailable
@@ -134,7 +136,7 @@ func (s *AuthorizationStore) consume(handle, action string, assertion []byte) (a
 	if len(credentials) == 0 {
 		return actionRequest{}, pending.adminID, ErrAuthorizationDenied
 	}
-	user := &mfa.WebAuthnUser{ID: []byte(pending.adminID), Name: pending.adminID, DisplayName: pending.adminID, Credentials: credentials}
+	user := &mfa.WebAuthnUser{ID: []byte(adminWebAuthnUserHandle), Name: pending.adminID, DisplayName: pending.adminID, Credentials: credentials}
 	credential, err := s.webauthn.FinishLoginWithBytes(user, pending.session, assertion)
 	if err != nil || credential == nil || credential.Authenticator.CloneWarning {
 		return actionRequest{}, pending.adminID, ErrAuthorizationDenied

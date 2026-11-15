@@ -157,6 +157,11 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 	}{
 		{http.StatusConflict, `{"error":"write_in_progress"}`, http.StatusConflict, "write_in_progress"},
 		{http.StatusTooManyRequests, `{"error":"backup_rate_limited"}`, http.StatusTooManyRequests, "backup_rate_limited"},
+		{http.StatusForbidden, `{"error":"authorization_denied"}`, http.StatusForbidden, "authorization_denied"},
+		{http.StatusServiceUnavailable, `{"error":"authorizer_unavailable"}`, http.StatusServiceUnavailable, "authorizer_unavailable"},
+		{http.StatusForbidden, `{"error":"peer_forbidden"}`, http.StatusForbidden, "peer_forbidden"},
+		{http.StatusTooManyRequests, `{"error":"authorization_busy"}`, http.StatusTooManyRequests, "authorization_busy"},
+		{http.StatusBadRequest, `{"error":"invalid_authorization"}`, http.StatusBadRequest, "invalid_authorization"},
 		{http.StatusConflict, `{"error":"security_log_boundary_missing"}`, http.StatusConflict, "security_log_boundary_missing"},
 		{http.StatusConflict, `{"appliance":"truenas","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
 		{http.StatusConflict, `{"appliance":"<script>","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},

@@ -129,6 +129,8 @@ func importAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 		subtle.ConstantTimeCompare([]byte(*confirm), []byte(fingerprint)) != 1 {
 		return errors.New("--confirm-sha256 must exactly match the export fingerprint")
 	}
+	_, statErr := os.Lstat(path)
+	firstImport := os.IsNotExist(statErr)
 	store, err := stores.LoadOrCreate(path, doc.RPID, doc.Origins)
 	if err != nil {
 		return err
@@ -137,7 +139,12 @@ func importAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "Imported %d authorizer credentials for admin %s\n", added, doc.AdminID)
+	if _, err := fmt.Fprintf(stdout, "Imported %d authorizer credentials for admin %s\n", added, doc.AdminID); err != nil {
+		return err
+	}
+	if firstImport && added > 0 {
+		_, err = fmt.Fprintln(stdout, "Restart the running agent to enable newly imported authorizers: sudo systemctl restart concord-agent")
+	}
 	return err
 }
 

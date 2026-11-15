@@ -152,21 +152,35 @@ func TestAuthorizerCLIImportsListsAndRevokesRootConfirmedCredential(t *testing.T
 	digest := sha256.Sum256(data)
 	store := &fakeAuthorizerStore{entries: []hostagent.AuthorizerListing{{AdminID: doc.AdminID, Label: "primary key", SignCount: 2, CredentialSHA256: "hash"}}}
 	loader := fakeAuthorizerStoreLoader{store: store}
+	storePath := t.TempDir() + "/authorizers.json"
 
 	var stdout, stderr bytes.Buffer
-	if code := runAuthorizerCLIWith("/authorizers.json", []string{"import", "--file", export, "--confirm-sha256", hex.EncodeToString(digest[:])}, &stdout, &stderr, 0, loader); code != 0 {
+	if code := runAuthorizerCLIWith(storePath, []string{"import", "--file", export, "--confirm-sha256", hex.EncodeToString(digest[:])}, &stdout, &stderr, 0, loader); code != 0 {
 		t.Fatalf("import exit %d: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Imported 1 authorizer credentials") || !strings.Contains(stderr.String(), "Authorizer export SHA-256") {
+	if !strings.Contains(stdout.String(), "Imported 1 authorizer credentials") ||
+		!strings.Contains(stdout.String(), "sudo systemctl restart concord-agent") ||
+		!strings.Contains(stderr.String(), "Authorizer export SHA-256") {
 		t.Fatalf("import stdout %q stderr %q", stdout.String(), stderr.String())
 	}
 	if store.imported.AdminID != doc.AdminID {
 		t.Fatalf("imported document %+v", store.imported)
 	}
+	if err := os.WriteFile(storePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runAuthorizerCLIWith(storePath, []string{"import", "--file", export, "--confirm-sha256", hex.EncodeToString(digest[:])}, &stdout, &stderr, 0, loader); code != 0 {
+		t.Fatalf("repeat import exit %d: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "restart concord-agent") {
+		t.Fatalf("existing store requested a restart: %q", stdout.String())
+	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := runAuthorizerCLIWith("/authorizers.json", []string{"list"}, &stdout, &stderr, 0, loader); code != 0 {
+	if code := runAuthorizerCLIWith(storePath, []string{"list"}, &stdout, &stderr, 0, loader); code != 0 {
 		t.Fatalf("list exit %d: %s", code, stderr.String())
 	}
 	var entries []hostagent.AuthorizerListing
@@ -179,7 +193,7 @@ func TestAuthorizerCLIImportsListsAndRevokesRootConfirmedCredential(t *testing.T
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := runAuthorizerCLIWith("/authorizers.json", []string{"revoke", "--admin-id", doc.AdminID}, &stdout, &stderr, 0, loader); code != 0 {
+	if code := runAuthorizerCLIWith(storePath, []string{"revoke", "--admin-id", doc.AdminID}, &stdout, &stderr, 0, loader); code != 0 {
 		t.Fatalf("revoke exit %d: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Revoked 1 authorizer credentials") {

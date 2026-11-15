@@ -29,8 +29,11 @@ func TestListenPermissions(t *testing.T) {
 
 	for i := range 2 { // second pass replaces the stale socket
 		if i == 1 {
-			// A token file left by a crash must not stop the agent starting.
+			// Files the agent maintains across runs must not stop it starting.
 			if err := os.WriteFile(filepath.Join(filepath.Dir(sock), setupTokenFile), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(filepath.Dir(sock), backupAdmissionFile), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -70,6 +73,7 @@ func TestListenPermissions(t *testing.T) {
 	// A shared directory (like /run) is refused before its mode is touched.
 	_ = os.Remove(sock)
 	_ = os.Remove(filepath.Join(filepath.Dir(sock), setupTokenFile))
+	_ = os.Remove(filepath.Join(filepath.Dir(sock), backupAdmissionFile))
 	other := filepath.Join(filepath.Dir(sock), "other")
 	if err := os.WriteFile(other, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -282,8 +286,8 @@ func TestStartSetupSkipsAnInstalledHost(t *testing.T) {
 
 func TestNewSetupServerSetsWriteTimeout(t *testing.T) {
 	server := newSetupServer(http.NotFoundHandler())
-	if server.WriteTimeout != setupWriteTimeout {
-		t.Fatalf("write timeout %v, want %v", server.WriteTimeout, setupWriteTimeout)
+	if server.WriteTimeout < hostagent.SetupWindow/6 {
+		t.Fatalf("write timeout %v ends before the ten-minute installer budget", server.WriteTimeout)
 	}
 }
 
