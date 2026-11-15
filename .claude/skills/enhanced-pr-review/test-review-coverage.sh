@@ -42,6 +42,9 @@ run "empty COMMENTED with no comments no"          1 "[$(rev alice "$H" COMMENTE
 run "empty COMMENTED with inline comment counts"   0 "[$(rev alice "$H" COMMENTED MEMBER User '' 9)]" '[]' "" "alice (COMMENTED)" "" '[{"pull_request_review_id":9,"in_reply_to_id":null}]'
 run "empty-body APPROVED review counts"            0 "[$(rev alice "$H" APPROVED MEMBER User '' 9)]" '[]'
 run "bot review that could not review no"          1 "[$(rev "$CP" "$H" COMMENTED NONE Bot "Copilot wasn't able to review any files in this pull request." 9)]" '[]'
+run "partial notice with a finding counts"       0 "[$(rev "$CP" "$H" COMMENTED NONE Bot "Generated 2 comments. I was unable to review the binary asset." 9)]" '[]' "" "$CP (COMMENTED)" "" '[{"pull_request_review_id":9,"in_reply_to_id":null}]'
+run "partial notice body-only counts"              0 "[$(rev "$CP" "$H" COMMENTED NONE Bot "Looks fine. I was unable to review the binary asset." 9)]" '[]' "" "$CP (COMMENTED)"
+run "whole-PR notice with a finding counts"        0 "[$(rev "$CP" "$H" COMMENTED NONE Bot "Copilot wasn't able to review any files in this pull request." 9)]" '[]' "" "$CP (COMMENTED)" "" '[{"pull_request_review_id":9,"in_reply_to_id":null}]'
 run "human review quoting that phrase counts"      0 "[$(rev alice "$H" COMMENTED MEMBER User "Copilot wasn't able to review any files; I did." 9)]" '[]'
 run "invisible-only COMMENTED body does not count" 1 "[$(rev alice "$H" COMMENTED MEMBER User '\u200b\u2060' 9)]" '[]'
 # COLLABORATOR also covers read and triage access.
