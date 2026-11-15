@@ -38,12 +38,14 @@ Email recovery has a separate ten-attempt, twenty-four-hour failure budget keyed
 by normalized account email. A new recovery request retains a live code record
 and its attempt count; the wrong guess that spends a code's fifth attempt
 deletes that record, so the next request can send a new code. Only a
-successfully consumed email code clears that email's failure budget. Registration uses the pending-registration ID as its
+completed recovery, email-only or through the MFA challenge, clears that
+email's failure budget. Registration uses the pending-registration ID as its
 attempt subject through resend and change-email, with attempt state lasting
 until the pending row expires. A password takeover carries the replaced row's
 attempt count and resend state into the new row, and every code-issuing path
 charges a per-address issuance limit (the initial code plus the resend cap per
-pending lifetime) that never refuses a confirm of a code already sent. Resend and change-email share the existing
+pending lifetime) that never refuses a confirm of a code already sent and counts
+only codes minted: a request that sends none is refunded. Resend and change-email share the existing
 two-minute cooldown and four-resend cap. These code budgets do not use the
 proposed login-family SQL receipt design below.
 

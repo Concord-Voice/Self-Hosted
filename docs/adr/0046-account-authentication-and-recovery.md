@@ -32,9 +32,11 @@ no row to carry from, so every code-issuing path (register, resend, and
 change-email for the new address) charges a per-address issuance limit of the
 initial code plus the resend cap per pending lifetime, keyed by normalized
 email. It gates issuance only: a confirm of a code already sent is never
-refused because of it. An unavailable store fails closed with 503. Accepted
-trade-off: anyone who knows an address can spend this limit and delay that
-address's registration for up to the pending TTL. The account-wide bound stays
+refused because of it, and it counts only codes minted, so a request that
+sends none is refunded. An unavailable store fails closed with 503. Accepted
+trade-off: anyone who knows an address can spend this limit, by causing codes
+to be sent to it, and delay that address's registration for up to the pending
+TTL. The account-wide bound stays
 for the same reason as recovery's: a limit tied to a pending row would let a
 caller cancel, re-register and restart guessing.
 
