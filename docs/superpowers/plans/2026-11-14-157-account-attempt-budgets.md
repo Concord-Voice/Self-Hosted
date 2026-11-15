@@ -1,10 +1,10 @@
-# Security #157 Account Attempt Budgets Implementation Plan
+# Account Attempt Budgets Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Bound every code guess in Security #157 by a durable account or pending-registration budget without breaking transaction-scoped factor consumption.
+**Goal:** Bound every code guess by a durable account or pending-registration budget without breaking transaction-scoped factor consumption.
 
-**Architecture:** Reuse `stepup.Charge` and `DangerousActionBudget` at each missing MFA step-up caller, backed by a production caller census. Add a separate normalized-email recovery failure counter, preserve live recovery records with `SET NX`, and keep registration attempt and resend state across code/email rotation. Self-Hosted is the source; Hosted imports its shared server changes through a reviewed PR.
+**Architecture:** Reuse `stepup.Charge` and `DangerousActionBudget` at each missing MFA step-up caller, backed by a production caller census. Add a separate normalized-email recovery failure counter, preserve live recovery records with `SET NX`, and keep registration attempt and resend state across code/email rotation.
 
 **Tech Stack:** Go, Gin v1.12.0, go-redis v9.23.0, PostgreSQL, Redis, existing `internal/stepup` and `internal/middleware` helpers.
 
@@ -12,13 +12,12 @@
 
 ## Global Constraints
 
-- Work on `feature/security-157-account-attempt-budgets`; PR references must say `Concord-Voice/Security#157`, never bare `#157` (Self-Hosted #157 is unrelated).
+- Work on `feature/security-157-account-attempt-budgets`.
 - Preserve current request and successful response shapes. `RecoveryBegin` stays generic `200`.
 - Redis budget admission happens before factor verification and `BeginTx`. TOTP disable probes enrollment before the transaction, charges when enrolled, and rechecks under its row lock. Newly appearing enrollment is refused before verification for retry; a no-TOTP request must not spend the budget. Transactional factor consumption stays on the protected SQL transaction. A correct password does not clear the MFA budget.
 - Exhaustion is `429` with `Retry-After`; budget dependency failure is `503`. Never log submitted codes or password/hash material.
 - No dependency, migration, environment variable, configurable limit, or new UI.
 - Every integration command below requires independently provisioned disposable `DATABASE_URL` and `REDIS_URL`. The test helpers' default `concord` database is forbidden. Never set private `GOCACHE`, `GOMODCACHE`, or `GOLANGCI_LINT_CACHE`.
-- Hosted imports `services/**` and `docs/api/**` from Self-Hosted only after the Self-Hosted Phase 9 merge. The two repositories need separate quality gates, reviews, and merge approvals.
 
 ## File map
 
@@ -182,20 +181,19 @@ if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCod
 - [ ] **Step 6: Add a source-aware caller census.** Extend `inline_purpose_consumers_test.go` with an AST walk of non-test production Go files for calls to `VerifyCode`, `VerifyCodeTx`, `VerifyMFAFactor`, and `VerifyMFAFactorTx`. Record a fixed allowlist of login/non-step-up call sites with path and enclosing function; for every other call, assert the owning route's `stepup.Charge` coverage before verification in the table from Step 1. Reject a newly discovered caller until classified and tested.
 - [ ] **Step 7: Run green and commit.** Run all focused route tests and exploit overlays against the fixed code; the exploit-success assertions must fail and retained regression assertions must pass. Commit `fix: share MFA step-up guess budget across routes`.
 
-### Task 6: Ship contract docs and validate both repositories
+### Task 6: Ship contract docs and validate
 
-**Files:** Modify `docs/design/authenticated-step-up-budget.md`, `docs/adr/0046-account-authentication-and-recovery.md`, `docs/api/openapi.yaml`, `CHANGELOG.md`; later Hosted mirror PR modifies only Hosted-owned docs/changelog plus concrete import conflicts.
+**Files:** Modify `docs/design/authenticated-step-up-budget.md`, `docs/adr/0046-account-authentication-and-recovery.md`, `docs/api/openapi.yaml`, `CHANGELOG.md`.
 
 **Interfaces:** No new runtime API. Document the new `429`/`503` response flags and `Retry-After` on every affected operation.
 
 - [ ] **Step 1: Update docs with exact behavior.** Add the route census, shared MFA key and clear rules, recovery 10/24h account budget, ten-minute live-record rule, registration pending-lifetime budget, and Redis degradation policy. Add OpenAPI `429`/`503` entries only for operations whose behavior changed. Add one `## [Unreleased]` changelog entry in Self-Hosted.
 - [ ] **Step 2: Run static and local gates.** From the repository root run `./scripts/update-claude-md-counts.sh` and the repository's `/verify-quality-gate` skill. Use isolated `DATABASE_URL`/`REDIS_URL` for every destructive Go integration test. Run `git diff --check`, inspect the changed-file list against Task 1's caller census, and verify new-code coverage ≥80%, zero new blocker/critical issues, and zero new high-confidence security hotspots. Do not call an environment-only skip a pass.
 - [ ] **Step 3: Commit docs and gate repairs.** Commit `docs: record account verification budgets` and only concrete gate repairs. Preserve hooks and protected-path approval.
-- [ ] **Step 4: Deliver and verify Self-Hosted.** Open a draft PR referencing `Concord-Voice/Security#157` without a bare close keyword, complete the required CI, bot arrival, specialist security and red-team reviews, exact-head disposition, ready step, and the per-PR Phase 9 merge approval. After merge, watch the exact merge commit's post-merge workflows to terminal state.
-- [ ] **Step 5: Verify the Hosted mirror.** Wait for `.github/workflows/upstream-import.yml` to create the Hosted mirror PR; inspect its exact imported `services/**` and `docs/api/**` diffs, resolve concrete Hosted drift, add Hosted's `## [Unreleased]` line, and run Hosted's quality/security/review gates. Obtain separate Phase 9 approval before Hosted merge; verify its post-merge workflows. Do not claim Security #157 complete until both repo results and the four exploit regressions are recorded.
+- [ ] **Step 4: Deliver and verify Self-Hosted.** Open a draft PR without a bare close keyword, complete the required CI, bot arrival, specialist security and red-team reviews, exact-head disposition, ready step, and the per-PR Phase 9 merge approval. After merge, watch the exact merge commit's post-merge workflows to terminal state.
 
 ## Self-review record
 
-- Spec coverage: MFA budget and session factor-AND (Task 5), recovery account budget and live record (Task 3), registration state (Task 4), retry/error contract (Task 2), docs, both repo gates and mirror (Task 6).
+- Spec coverage: MFA budget and session factor-AND (Task 5), recovery account budget and live record (Task 3), registration state (Task 4), retry/error contract (Task 2), docs and quality gates (Task 6).
 - Interface consistency: existing `stepup.Charge`, `DangerousActionBudget`, `VerifyCode`, and `VerifyCodeTx` remain unchanged; the only proposed new response field is inside `stepup.Error`.
-- Scope: no new limiter framework, schema, dependency, code length, notification system, or client UI. Security #82 and #118 remain open until their separate acceptance criteria are reconciled with merged evidence.
+- Scope: no new limiter framework, schema, dependency, code length, notification system, or client UI.

@@ -20447,7 +20447,7 @@ components:
         budget per account with session revoke/revocation-mode, password change,
         key replacement, ownership transfer/reversal, DM purge,
         `PUT /servers/{id}/mfa-enforcement`, and the delete-rate soft-lock's
-        confirmations on the message-delete and purge routes (#3455);
+        confirmations on the message-delete and purge routes;
         `PATCH /users/me/privacy` has its own. Cleared only after a verified,
         committed success on a route that charges it. The body carries
         `step_up_budget_exhausted: true`, which tells it apart from every

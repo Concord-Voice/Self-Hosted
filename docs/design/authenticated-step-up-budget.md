@@ -1,6 +1,6 @@
 # Authenticated step-up budget
 
-Design contract for Hosted issue 2271, within Hosted epic 696.
+Design contract for the authenticated step-up budget.
 
 **Implementation status:** the opaque actor adapter, private SQL accounting core
 and process-local proof-work tracker are implemented as dormant groundwork in
@@ -13,7 +13,7 @@ requirements. Source availability is not validation, active enforcement or
 deployment evidence. The active Redis defenses below are separate from this
 dormant SQL proposal; neither activates its receipt or lifecycle machinery.
 
-## Active code-guess budgets (Security #157)
+## Active code-guess budgets
 
 The existing Redis `stepup.Budget` counts up to five submitted MFA proofs per
 user in fifteen minutes, across these protected actions: session revoke,
@@ -313,7 +313,7 @@ Existing target refusal, preservation, count and recovery envelopes remain intac
 
 ## Delivery limits
 
-Self-Hosted owns canonical source; Hosted delivery needs a verified canonical
+Self-Hosted owns canonical source; downstream delivery needs a verified canonical
 image-consumption lane or tracked source port with commit provenance. Actual
 Desktop/Mobile response consumers need compatibility evidence before activation.
 Passing adapter tests establishes neither consumer adoption nor budget enforcement.
@@ -321,6 +321,6 @@ Passing adapter tests establishes neither consumer adoption nor budget enforceme
 **A7b remains unfulfilled:** SQL accounting may survive accounting-only Redis
 degradation after authentication authority exists. It cannot bypass `AuthRequired`
 blacklist/theft/epoch vetoes during a full outage. A bounded auth 503 proves refusal,
-not containment availability. This groundwork references Hosted issue 2271; it
-does not close it. No rollout, deployment or repair of Hosted issue 4201 is included.
+not containment availability. This groundwork includes no rollout, deployment
+or repair.
 See the [implementation and evidence plan](authenticated-step-up-budget-plan.md).

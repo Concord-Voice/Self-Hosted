@@ -1,12 +1,11 @@
-# Security #157: Account attempt budgets
+# Account attempt budgets
 
 ## Intent
 
-Close the seven findings in [Security #157](https://github.com/Concord-Voice/Security/issues/157). A caller must not gain fresh code guesses by changing IP address, starting recovery again, changing a pending registration's email, or choosing a different MFA step-up route. A legitimate user must still be able to distinguish a temporary service fault from an exhausted budget.
+Close seven account code-guess findings. A caller must not gain fresh code guesses by changing IP address, starting recovery again, changing a pending registration's email, or choosing a different MFA step-up route. A legitimate user must still be able to distinguish a temporary service fault from an exhausted budget.
 
 ## Scope and constraints
 
-- Self-Hosted owns the control-plane implementation. Hosted imports `services/**` and `docs/api/**` from Self-Hosted through its reviewed upstream mirror PR. The two quality gates and merge approvals remain separate.
 - Keep request bodies and successful response shapes. Recovery begin remains an account-enumeration-resistant generic `200`.
 - Charge a submitted MFA code before factor verification and before a protected SQL transaction. TOTP disable first probes enrollment without a lock; if enrolled it charges before `BeginTx`, then rechecks under the user lock. If enrollment appears after preflight, refuse before verification and ask for retry. A no-factor request cannot exhaust the shared budget. Keep transactional factor consumption with the protected mutation. Clear a budget only after the relevant proof and protected mutation have committed; a correct password does not clear the MFA budget.
 - Preserve the existing `stepup.MFASettingsBudgetPrefix` key spelling, the existing registration pending-ID key, and existing Redis/SQL validation and error handling. Do not add a dependency, migration, environment variable, or new client UI.
@@ -37,7 +36,7 @@ Use a separate fixed `recovery_fail:<normalized-email>` budget: 10 failed attemp
 
 ## Pending registration
 
-Keep the attempt key attached to the pending registration ID for the pending record's lifetime. Resend and change-email rotate code material without deleting attempt state. `UpdateEmail` preserves `resend_count` and `last_resend_at`; change-email consumes the same row-locked resend cooldown and cap as ordinary resend. Terminal promotion or abandonment may remove the attempt key. Preserve the existing email/code binding; Security #160 separately hardens the final locked promotion comparison.
+Keep the attempt key attached to the pending registration ID for the pending record's lifetime. Resend and change-email rotate code material without deleting attempt state. `UpdateEmail` preserves `resend_count` and `last_resend_at`; change-email consumes the same row-locked resend cooldown and cap as ordinary resend. Terminal promotion or abandonment may remove the attempt key. Preserve the existing email/code binding; a separate change hardens the final locked promotion comparison.
 
 ## API and client behavior
 
@@ -59,9 +58,9 @@ Desktop and Mobile can keep their existing forms. Their API adapters should pres
 - [ ] Every listed route returns `429` on exhaustion and `503` on Redis failure, with the response flags and `Retry-After` contract above.
 - [ ] MFA-enrolled session revocation rejects password-only and MFA-only requests.
 - [ ] The VULN-016, VULN-015, VULN-024, and VULN-039 exploit reproductions fail against the fixed code and retained regression tests pass.
-- [ ] Update `docs/design/authenticated-step-up-budget.md`, ADR-0046, relevant OpenAPI responses, and `CHANGELOG.md` with the code. Both repositories pass their quality gates after the Hosted import.
+- [ ] Update `docs/design/authenticated-step-up-budget.md`, ADR-0046, relevant OpenAPI responses, and `CHANGELOG.md` with the code. The quality gates pass.
 - [ ] New-code coverage is at least 80%, with zero new blocker/critical issues and zero new high-confidence security hotspots.
 
 ## Review focus
 
-Check double charges on already guarded routes, budget clearing before a commit, direct verifier calls omitted from the census, recovery begin/send races, registration rotation using terminal cleanup, and Hosted import conflicts. Security #82 overlaps the shared MFA budget and Security #118 overlaps recovery/session policy; close or rescope them only after comparing their remaining acceptance criteria against merged proof.
+Check double charges on already guarded routes, budget clearing before a commit, direct verifier calls omitted from the census, recovery begin/send races, and registration rotation using terminal cleanup.
