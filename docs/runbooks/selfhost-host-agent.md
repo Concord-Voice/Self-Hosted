@@ -158,12 +158,20 @@ uses `host-agent-audit.v1`; Nightwatch ingestion is not yet verified.
 
 The Host Agent stores the credentials it trusts at
 `/etc/concord-voice/agent-authorizers/authorizers.json`. The directory and
-file must be root-owned and closed to group and other access. Host root can
-manage it with `concord-agent authorizer list`, `import`, and `revoke`.
-Import requires the exact SHA-256 printed for an admin's exported authorizer
-file. Revoke removes every trusted credential for the named administrator.
-These are host-root recovery and administration operations; the control plane
-only receives a read-only projection.
+file must be root-owned; the directory is mode `0755` and the public-key file
+is mode `0644`. They are intentionally readable through the control plane's
+read-only mount, but only host root can change them. Host root manages the
+store with `concord-agent authorizer list`, `import`, and `revoke`. Import
+requires the exact SHA-256 printed for an admin's exported authorizer file.
+
+Revoke disables every listed credential for root actions, but retains its
+public key and highest authenticator counter as a tombstone. Admin login still
+checks that independent counter, so it cannot fall back to stale database-only
+trust. The store has a 64-record lifetime cap: revoked records count toward
+that cap. A later explicit, root-confirmed import of the same administrator
+and key re-enables it without lowering its saved counter. These are host-root
+recovery and administration operations; the control plane only receives a
+read-only projection.
 
 The agent loads its initial authorizer configuration at startup. After the
 first successful import, the currently running agent remains read-only until
@@ -176,7 +184,64 @@ sudo systemctl restart concord-agent
 Then have the imported administrator begin a host write from the Admin Console.
 It must reach the WebAuthn authorization prompt rather than report
 `authorizer_unavailable`; only complete the action if it is an intended host
-operation.
+operation. While the Host Agent overlay is active, admin WebAuthn login also
+checks the imported credential's root-owned counter. If the Host Agent is
+unavailable, login fails closed rather than accepting a database-only result.
+
+#### First import on a new overlay
+
+The Admin Console, including its pre-auth enrollment routes, is mounted only
+when `ADMIN_CONSOLE_ENABLED=true`. Enable the console and run
+`concord-selfhost up` to apply the Host Agent overlay before first enrollment.
+With `HOST_AGENT_AUTHORIZER_PROJECTION=1`, an absent `authorizers.json` leaves
+the Host Agent unable to verify a normal Admin login assertion, so that login
+fails closed with a service-unavailable response. This does not block the
+separate pre-auth enrollment route.
+
+Bootstrap the administrator through the out-of-band control-plane CLI, then
+complete the one-time enrollment link and register the hardware key. Before the
+administrator's first normal login, host root must export the now-active
+administrator's public-key bundle from the running control-plane, record the
+SHA-256 printed to standard error, and import that exact file into the Host
+Agent:
+
+```bash
+sudo docker exec concordvoice-control-plane ./main admin export-agent-authorizer --username <handle> > admin-authorizer.json
+sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256>
+sudo systemctl restart concord-agent
+```
+
+`concordvoice-control-plane` is the fixed control-plane container name. The
+import command above is for a package install; a checkout install uses
+`/usr/local/libexec/concord-agent` instead. Do not rely on `concord-agent`
+being on `PATH`.
+
+After the import and restart succeed, normal Admin login can proceed. This
+ordering is verified from the source and test contracts; it is not a
+live-install acceptance probe.
+
+### Resetting an administrator with Host Agent trust
+
+When resetting enrollment for an administrator that may have imported Host
+Agent trust, use the root-only wrapper rather than invoking the control-plane
+reset command directly:
+
+```bash
+sudo ./infrastructure/deploy/concord-selfhost admin reset-enrollment --username <handle>
+```
+
+The wrapper resolves the administrator ID, revokes that administrator's Host
+Agent authorizers, then runs the control-plane reset. Each step must succeed;
+on a lookup, revoke, or reset failure it stops and does not print a new
+enrollment token.
+
+The direct `control-plane admin reset-enrollment --username <handle>` path
+fails closed while the administrator remains in the imported, root-owned
+authorizer projection. This prevents an old hardware key from retaining Host
+Agent write authority after its control-plane enrollment is reset. If an
+operator must use the direct path, host root must first explicitly revoke the
+administrator's imported authorizers, then run the reset; prefer the wrapper
+so that ordering is enforced.
 
 ### Rollout dependencies
 
@@ -357,11 +422,13 @@ To install from a checkout instead:
 2. Build the agent: `go -C services/control-plane build -o /usr/local/libexec/concord-agent ./cmd/concord-agent`.
    (`/usr/libexec/concord-agent` belongs to the package.)
 3. Create the group that may use the socket: `groupadd --system concord-agent`.
-4. Copy `infrastructure/host-agent/concord-agent.service` to
+4. Create the root-owned authorizer directory required by the service unit:
+   `sudo install -d -o root -g root -m 0755 /etc/concord-voice/agent-authorizers`.
+5. Copy `infrastructure/host-agent/concord-agent.service` to
    `/etc/systemd/system/`, and in that copy set
    `ExecStart=/usr/local/libexec/concord-agent` and `CONCORD_AGENT_CLI` to
    the wrapper's absolute path in your checkout.
-5. Run `systemctl daemon-reload && systemctl enable --now concord-agent`.
+6. Run `systemctl daemon-reload && systemctl enable --now concord-agent`.
 
 Check it from the host:
 

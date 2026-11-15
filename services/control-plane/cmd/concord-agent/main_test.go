@@ -126,11 +126,21 @@ func TestExpectedControlPlaneUIDRejectsRootAndInvalidValues(t *testing.T) {
 
 func TestConfigureWriteAccessRejectsUnknownApplianceAndKeepsAuditlessAgentReadOnly(t *testing.T) {
 	agent := hostagent.NewServer(hostagent.ExecRunner{})
-	if err := configureWriteAccess(agent, "", "", "", false, "unknown"); err == nil {
+	if err := configureWriteAccess(agent, "", "", "", false, false, "unknown"); err == nil {
 		t.Fatal("unknown appliance accepted")
 	}
-	if err := configureWriteAccess(agent, "", "", "", false, ""); err != nil {
+	if err := configureWriteAccess(agent, "", "", "", false, false, ""); err != nil {
 		t.Fatalf("auditless agent failed instead of remaining read-only: %v", err)
+	}
+}
+
+func TestConfigureAuthorizerTrustMissingProjectionKeepsAgentReadOnly(t *testing.T) {
+	agent := hostagent.NewServer(hostagent.ExecRunner{})
+	if configureAuthorizerTrust(agent, filepath.Join(t.TempDir(), "missing.json")) {
+		t.Fatal("missing authorizer projection enabled trust")
+	}
+	if err := configureWriteAccess(agent, "", "", "", true, false, ""); err != nil {
+		t.Fatalf("missing authorizer trust failed startup: %v", err)
 	}
 }
 

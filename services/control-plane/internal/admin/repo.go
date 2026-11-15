@@ -165,6 +165,29 @@ func (r *AdminRepo) UpdateCredentialSignCount(ctx context.Context, credentialID 
 	return nil
 }
 
+// UpdateCredentialSignCountMonotonic advances a sign count without permitting a
+// lower value to overwrite a counter independently advanced by the Host Agent.
+// Imported credentials must use this before a session is minted.
+func (r *AdminRepo) UpdateCredentialSignCountMonotonic(ctx context.Context, credentialID []byte, signCount int64) error {
+	const q = `
+		UPDATE admin_webauthn_credentials
+		SET sign_count = $1, last_used_at = now()
+		WHERE credential_id = $2 AND sign_count <= $1
+	`
+	res, err := r.db.ExecContext(ctx, q, signCount, credentialID)
+	if err != nil {
+		return fmt.Errorf("monotonic update credential sign count: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("monotonic update credential sign count rows: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("monotonic update credential sign count: expected 1 row, got %d", n)
+	}
+	return nil
+}
+
 // ListCredentials returns all WebAuthn credentials bound to an admin, ordered by
 // creation time. The slice is empty (not nil error) when the admin has none.
 func (r *AdminRepo) ListCredentials(ctx context.Context, adminID string) ([]AdminCredential, error) {

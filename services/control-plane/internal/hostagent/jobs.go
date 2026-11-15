@@ -98,6 +98,9 @@ func (s *Server) EnableWrites(r Runner, backups, marker string) {
 		audit:     s.audit,
 		now:       time.Now,
 	}
+	if s.authorizations != nil {
+		s.authorizations.jobs = s.writes
+	}
 }
 
 // refusal is a refused write: its HTTP status and reason.

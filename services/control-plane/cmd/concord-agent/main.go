@@ -112,7 +112,9 @@ func run() int {
 		log.Print("concord-agent: startup failed: host-agent audit")
 		return 1
 	}
-	if err := configureWriteAccess(agent, cli, resolved, sock, audit != nil, os.Getenv("CONCORD_AGENT_MANAGED_BY")); err != nil {
+	// Login assertions need the root trust projection even when host writes are disabled.
+	trusted := configureAuthorizerTrust(agent, authorizerPath)
+	if err := configureWriteAccess(agent, cli, resolved, sock, audit != nil, trusted, os.Getenv("CONCORD_AGENT_MANAGED_BY")); err != nil {
 		log.Printf("concord-agent: startup failed: %v", err)
 		return 1
 	}
@@ -146,9 +148,34 @@ func run() int {
 	return 0
 }
 
+// configureAuthorizerTrust enables peer-gated login assertions without granting
+// write authority. Missing or unsafe trust leaves the endpoint unavailable.
+func configureAuthorizerTrust(agent *hostagent.Server, path string) bool {
+	authorizers, err := hostagent.LoadAuthorizers(path)
+	if err != nil {
+		log.Print("concord-agent: authorizer trust unavailable; login and writes disabled")
+		return false
+	}
+	rpID, origins, err := authorizers.RPConfig()
+	if err != nil {
+		log.Print("concord-agent: authorizer trust unavailable; login and writes disabled")
+		return false
+	}
+	verifier, err := mfa.NewWebAuthnService(rpID, "Concord Voice Admin", origins)
+	if err != nil {
+		log.Print("concord-agent: authorizer verifier unavailable; login and writes disabled")
+		return false
+	}
+	if err := agent.SetAuthorizationStore(hostagent.NewAuthorizationStore(authorizers, verifier, time.Now)); err != nil {
+		log.Print("concord-agent: authorizer store unavailable; login and writes disabled")
+		return false
+	}
+	return true
+}
+
 // configureWriteAccess leaves the agent read-only unless its local audit and
 // root-confirmed WebAuthn trust root are both available.
-func configureWriteAccess(agent *hostagent.Server, cli, resolved, sock string, auditAvailable bool, appliance string) error {
+func configureWriteAccess(agent *hostagent.Server, cli, resolved, sock string, auditAvailable, trusted bool, appliance string) error {
 	// An appliance (TrueNAS) runs the containers itself; its own UI owns every
 	// write, so the console only reads.
 	if appliance != "" {
@@ -157,34 +184,14 @@ func configureWriteAccess(agent *hostagent.Server, cli, resolved, sock string, a
 		}
 		return nil
 	}
-	if !auditAvailable {
+	if !auditAvailable || !trusted {
 		return nil
 	}
-	// The agent remains read-only until a root-confirmed authorizer file is
-	// installed. A missing or unsafe file never enables legacy write routes.
-	authorizers, loadErr := hostagent.LoadAuthorizers(authorizerPath)
-	if loadErr != nil {
-		log.Print("concord-agent: authorizer trust unavailable; writes disabled")
-	} else {
-		rpID, origins, configErr := authorizers.RPConfig()
-		if configErr != nil {
-			log.Print("concord-agent: authorizer trust unavailable; writes disabled")
-		} else {
-			verifier, verifierErr := mfa.NewWebAuthnService(rpID, "Concord Voice Admin", origins)
-			if verifierErr != nil {
-				log.Print("concord-agent: authorizer verifier unavailable; writes disabled")
-			} else {
-				// Writes report progress on stderr. The CLI's backups directory is three
-				// levels above the trusted executable, like .env.
-				agent.EnableWrites(hostagent.ExecRunner{CLI: cli, Combined: true},
-					filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(resolved))), "backups"),
-					filepath.Join(filepath.Dir(sock), writeMarkerFile))
-				if err := agent.SetAuthorizationStore(hostagent.NewAuthorizationStore(authorizers, verifier, time.Now)); err != nil {
-					return errors.New("authorization store")
-				}
-			}
-		}
-	}
+	// Writes report progress on stderr. The CLI's backups directory is three
+	// levels above the trusted executable, like .env.
+	agent.EnableWrites(hostagent.ExecRunner{CLI: cli, Combined: true},
+		filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(resolved))), "backups"),
+		filepath.Join(filepath.Dir(sock), writeMarkerFile))
 	return nil
 }
 

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -40,7 +42,9 @@ const verbResetEnrollment = "reset-enrollment"
 const verbUnlock = "unlock"
 
 // adminCtlUsage is the one verb list shown for a missing or unknown verb.
-const adminCtlUsage = "bootstrap|reset-enrollment|unlock|export-agent-authorizer"
+const adminCtlUsage = "bootstrap|reset-enrollment|unlock|lookup-id|export-agent-authorizer"
+
+const agentAuthorizerProjectionPath = "/etc/concord-voice/agent-authorizers/authorizers.json"
 
 // adminCtlDeps bundles the injected collaborators an adminctl verb operates on.
 // Tests construct this against the isolated PG/Redis stack and an in-memory
@@ -59,6 +63,9 @@ type adminCtlDeps struct {
 	stdin         io.Reader
 	stdout        io.Writer
 	stderr        io.Writer
+	// Empty outside the Host Agent compose overlay; a reset then uses the legacy path.
+	authorizerProjectionPath string
+	listAuthorizers          func(string) ([]hostagent.AuthorizerListing, error)
 }
 
 type discardSecurityEvents struct{}
@@ -144,7 +151,21 @@ func RunAdminCtl(args []string) int {
 		stdout:        os.Stdout,
 		stderr:        os.Stderr,
 	}
+	if hostAgentProjectionEnabled(filepath.Dir(agentAuthorizerProjectionPath)) {
+		deps.authorizerProjectionPath = agentAuthorizerProjectionPath
+	}
 	return runAdminCtlWithSecurityEvents(context.Background(), deps, args, openSecurityEvents)
+}
+
+// hostAgentProjectionEnabled detects the root-owned mount even when an operator
+// overrides the process environment. Any Lstat error other than absence enables
+// the guard so the authorizer loader can reject unsafe or unreadable paths.
+func hostAgentProjectionEnabled(dir string) bool {
+	if os.Getenv("HOST_AGENT_AUTHORIZER_PROJECTION") == "1" {
+		return true
+	}
+	_, err := os.Lstat(dir)
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 func adminCtlSecurityEventLogger(environment string) *logger.Logger {
@@ -200,6 +221,12 @@ func runAdminCtl(ctx context.Context, deps adminCtlDeps, args []string) int {
 			return 1
 		}
 		return 0
+	case "lookup-id":
+		if err := runLookupAdminID(ctx, deps, rest); err != nil {
+			outf(deps.stderr, "admin lookup-id failed: %v\n", err)
+			return 1
+		}
+		return 0
 	case "export-agent-authorizer":
 		if err := runExportAgentAuthorizer(ctx, deps, rest); err != nil {
 			outf(deps.stderr, "admin export-agent-authorizer failed: %v\n", err)
@@ -210,6 +237,62 @@ func runAdminCtl(ctx context.Context, deps adminCtlDeps, args []string) int {
 		outf(deps.stdout, "admin: unknown verb %q (want %s)\n", verb, adminCtlUsage)
 		return 2
 	}
+}
+
+// runLookupAdminID gives the host-root reset wrapper the UUID to revoke before
+// the database reset. It has no mutation and emits only the UUID on success.
+func runLookupAdminID(ctx context.Context, deps adminCtlDeps, args []string) error {
+	fs := flag.NewFlagSet("lookup-id", flag.ContinueOnError)
+	fs.SetOutput(deps.stderr)
+	username := fs.String("username", "", "admin handle (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *username == "" || fs.NArg() != 0 {
+		return errors.New("--username is required and no positional arguments are allowed")
+	}
+	adminUser, err := deps.repo.GetByUsername(ctx, *username)
+	if err != nil {
+		return fmt.Errorf("look up admin: %w", err)
+	}
+	id, err := uuid.Parse(adminUser.ID)
+	if err != nil {
+		return errors.New("admin ID is invalid")
+	}
+	_, err = fmt.Fprintln(deps.stdout, id.String())
+	return err
+}
+
+func listAgentAuthorizers(path string) ([]hostagent.AuthorizerListing, error) {
+	store, err := hostagent.LoadAuthorizers(path)
+	if err != nil {
+		return nil, err
+	}
+	return store.List()
+}
+
+func ensureAgentAuthorizerRevoked(deps adminCtlDeps, adminID string) error {
+	if deps.authorizerProjectionPath == "" {
+		return nil
+	}
+	list := deps.listAuthorizers
+	if list == nil {
+		list = listAgentAuthorizers
+	}
+	authorizers, err := list(deps.authorizerProjectionPath)
+	if errors.Is(err, os.ErrNotExist) {
+		// LoadAuthorizers checked the root-owned directory before opening the file.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("host-agent authorizer projection unavailable: %w", err)
+	}
+	for _, authorizer := range authorizers {
+		if authorizer.AdminID == adminID && !authorizer.Revoked {
+			return errors.New("host-agent authorizer still trusted; revoke it on the host first")
+		}
+	}
+	return nil
 }
 
 // runExportAgentAuthorizer emits a public-key bundle for explicit host-root import.
@@ -348,6 +431,9 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 	adminUser, err := deps.repo.GetByUsername(ctx, *username)
 	if err != nil {
 		return fmt.Errorf("look up admin: %w", err)
+	}
+	if err := ensureAgentAuthorizerRevoked(deps, adminUser.ID); err != nil {
+		return err
 	}
 
 	// Disable every existing credential so the old key set can no longer be used.

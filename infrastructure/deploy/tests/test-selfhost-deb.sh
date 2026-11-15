@@ -64,6 +64,8 @@ grep -q 'ReadWritePaths=/etc/concord-voice/agent-authorizers' "$REPO/infrastruct
   pass 'agent can update root-owned authorizers' || fail 'agent unit lacks authorizer write path'
 grep -q '/etc/concord-voice/agent-authorizers:/etc/concord-voice/agent-authorizers:ro' "$REPO/docker-compose.host-agent.yml" &&
   pass 'control plane receives read-only authorizer projection' || fail 'authorizer projection is not read-only'
+grep -q 'HOST_AGENT_AUTHORIZER_PROJECTION: "1"' "$REPO/docker-compose.host-agent.yml" &&
+  pass 'control plane enforces authorizer projection on reset' || fail 'authorizer projection reset guard is not enabled'
 grep -q 'install -d -o root -g root -m 0755 /etc/concord-voice/agent-authorizers' "$REPO/infrastructure/host-agent/deb/postinst" &&
   pass 'package creates root-owned authorizer directory' || fail 'authorizer directory is not installed'
 

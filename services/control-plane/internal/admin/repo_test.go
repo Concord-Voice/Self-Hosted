@@ -188,6 +188,16 @@ func TestAdminRepo_Credentials(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("UpdateCredentialSignCountMonotonic refuses a counter regression", func(t *testing.T) {
+		require.NoError(t, repo.UpdateCredentialSignCountMonotonic(ctx, credID, 42))
+		err := repo.UpdateCredentialSignCountMonotonic(ctx, credID, 41)
+		require.Error(t, err)
+		var got int64
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT sign_count FROM admin_webauthn_credentials WHERE credential_id = $1`, credID).Scan(&got))
+		assert.Equal(t, int64(42), got)
+	})
+
 	t.Run("a duplicate credential_id is rejected", func(t *testing.T) {
 		_, err := repo.AddCredential(ctx, cred)
 		require.Error(t, err)

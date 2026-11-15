@@ -95,8 +95,8 @@ func (s *Server) SetExpectedPeerUID(uid int) error {
 // SetAuthorizationStore binds ceremonies to the same closed job parser used
 // for execution. It is configured before the socket starts serving.
 func (s *Server) SetAuthorizationStore(store *AuthorizationStore) error {
-	if store == nil || s.writes == nil {
-		return errors.New("write parser unavailable")
+	if store == nil {
+		return errors.New("authorizer unavailable")
 	}
 	store.jobs = s.writes
 	s.authorizations = store
@@ -129,6 +129,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok || peer.UID != s.expectedPeerUID {
 		s.auditEvent(AuditEvent{Action: requestAction(r.URL.Path), Outcome: "denied", Reason: "peer_forbidden"})
 		refuse(w, http.StatusForbidden, "peer_forbidden")
+		return
+	}
+	if r.URL.Path == "/v1/authorizers/login-assertion" {
+		s.handleLoginAssertion(w, r)
 		return
 	}
 	if s.managedBy != "" && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {

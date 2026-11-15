@@ -27,10 +27,11 @@ import (
 
 const (
 	maxAuthorizerFileBytes = 1 << 20
-	maxAuthorizers         = 64
-	maxAuthorizerIDBytes   = 1024
-	maxAuthorizerKeyBytes  = 4096
-	maxAuthorizerLabel     = 128
+	// shortcut: retained revoked IDs count toward this 64-record lifetime cap.
+	maxAuthorizers        = 64
+	maxAuthorizerIDBytes  = 1024
+	maxAuthorizerKeyBytes = 4096
+	maxAuthorizerLabel    = 128
 )
 
 type authorizerRecord struct {
@@ -39,6 +40,7 @@ type authorizerRecord struct {
 	PublicKey    string `json:"public_key"`
 	SignCount    uint32 `json:"sign_count"`
 	Label        string `json:"label"`
+	Revoked      bool   `json:"revoked,omitempty"`
 }
 
 type authorizerFile struct {
@@ -74,7 +76,10 @@ type AuthorizerListing struct {
 	Label            string `json:"label"`
 	CredentialSHA256 string `json:"credential_sha256"`
 	SignCount        uint32 `json:"sign_count"`
+	Revoked          bool   `json:"revoked"`
 }
+
+var errAuthorizerCounterStale = errors.New("authorizer counter did not advance")
 
 // AuthorizerStore reads root-owned public credentials. Every lookup re-reads the
 // file so a root operator's revocation takes effect without restarting the agent.
@@ -288,7 +293,7 @@ func (s *AuthorizerStore) Credentials(adminID string) []webauthn.Credential {
 	}
 	var credentials []webauthn.Credential
 	for _, entry := range doc.Authorizers {
-		if entry.AdminID != adminID {
+		if entry.AdminID != adminID || entry.Revoked {
 			continue
 		}
 		id, _ := decodeAuthorizerField(entry.CredentialID, maxAuthorizerIDBytes)
@@ -318,7 +323,7 @@ func (s *AuthorizerStore) List() ([]AuthorizerListing, error) {
 	for _, entry := range doc.Authorizers {
 		id, _ := decodeAuthorizerField(entry.CredentialID, maxAuthorizerIDBytes)
 		digest := sha256.Sum256(id)
-		list = append(list, AuthorizerListing{AdminID: entry.AdminID, Label: entry.Label, CredentialSHA256: hex.EncodeToString(digest[:]), SignCount: entry.SignCount})
+		list = append(list, AuthorizerListing{AdminID: entry.AdminID, Label: entry.Label, CredentialSHA256: hex.EncodeToString(digest[:]), SignCount: entry.SignCount, Revoked: entry.Revoked})
 	}
 	return list, nil
 }
@@ -387,7 +392,7 @@ func (s *AuthorizerStore) AdvanceCounter(credentialID []byte, count uint32) erro
 			}
 			old := doc.Authorizers[i].SignCount
 			if count <= old && (count != 0 || old != 0) {
-				return false, errors.New("authorizer counter did not advance")
+				return false, errAuthorizerCounterStale
 			}
 			if count == old {
 				return false, nil
@@ -457,12 +462,17 @@ func importAuthorizerRecord(adminID string, input AuthorizerCredentialImport, se
 }
 
 func addAuthorizerRecord(doc *authorizerFile, candidate authorizerRecord) (bool, error) {
-	for _, existing := range doc.Authorizers {
+	for i := range doc.Authorizers {
+		existing := &doc.Authorizers[i]
 		if existing.CredentialID != candidate.CredentialID {
 			continue
 		}
 		if existing.AdminID != candidate.AdminID || existing.PublicKey != candidate.PublicKey {
 			return false, errors.New("conflicting import credential")
+		}
+		if existing.Revoked {
+			existing.Revoked = false
+			return true, nil
 		}
 		return false, nil
 	}
@@ -470,7 +480,8 @@ func addAuthorizerRecord(doc *authorizerFile, candidate authorizerRecord) (bool,
 	return true, nil
 }
 
-// Revoke removes every credential for one admin in one durable update.
+// Revoke disables every credential for root actions while retaining its
+// counter so a later admin login cannot fall back to stale DB-only trust.
 func (s *AuthorizerStore) Revoke(adminID string) (int, error) {
 	parsed, err := uuid.Parse(adminID)
 	if err != nil || parsed.String() != adminID {
@@ -478,15 +489,12 @@ func (s *AuthorizerStore) Revoke(adminID string) (int, error) {
 	}
 	removed := 0
 	err = s.mutate(func(doc *authorizerFile) (bool, error) {
-		kept := doc.Authorizers[:0]
-		for _, entry := range doc.Authorizers {
-			if entry.AdminID == adminID {
+		for i := range doc.Authorizers {
+			if doc.Authorizers[i].AdminID == adminID && !doc.Authorizers[i].Revoked {
+				doc.Authorizers[i].Revoked = true
 				removed++
-			} else {
-				kept = append(kept, entry)
 			}
 		}
-		doc.Authorizers = kept
 		return removed > 0, nil
 	})
 	if err != nil {

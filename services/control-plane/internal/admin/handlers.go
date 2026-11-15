@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -47,6 +48,12 @@ const (
 
 // errInvalidAdminChallenge denotes an absent, expired or already consumed handle.
 var errInvalidAdminChallenge = errors.New("invalid admin challenge")
+
+var (
+	errImportedCredentialRejected = errors.New("imported credential rejected")
+	errHostAgentUnavailable       = errors.New("host agent unavailable")
+	errHostAgentProtocol          = errors.New("host agent protocol error")
+)
 
 // adminWebAuthnUserHandle is the stable WebAuthn user handle for the admin RP.
 // The admin RP authenticates a single logical "operator" identity per browser
@@ -317,10 +324,39 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		return
 	}
 
-	// Persist the authenticator's advanced sign counter so clone-detection keeps
-	// working (#1688 / Gitar). Non-fatal: the assertion already validated; a failed
-	// write leaves the counter stale, not the login compromised.
-	if scErr := h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount)); scErr != nil {
+	if hostAgentProjectionEnabled(filepath.Dir(agentAuthorizerProjectionPath)) {
+		imported, verifyErr := h.verifyImportedCredential(ctx, challenge.AdminID, req.Assertion, challenge.Session)
+		if verifyErr != nil {
+			h.auditFailure(ctx, challenge.Username, EventLoginFailure)
+			switch {
+			case errors.Is(verifyErr, errImportedCredentialRejected):
+				h.log.Warn("admin imported credential assertion rejected")
+				c.JSON(http.StatusUnauthorized, genericAuthError)
+			case errors.Is(verifyErr, errHostAgentUnavailable):
+				h.log.Warn("admin imported credential verification unavailable")
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": msgInternalError})
+			default:
+				h.log.Error("admin imported credential verification failed")
+				c.JSON(http.StatusBadGateway, gin.H{"error": msgInternalError})
+			}
+			return
+		}
+		if imported {
+			if scErr := h.repo.UpdateCredentialSignCountMonotonic(ctx, cred.ID, int64(cred.Authenticator.SignCount)); scErr != nil {
+				h.log.Error("admin imported sign-count persist failed", "error", scErr)
+				h.auditFailure(ctx, challenge.Username, EventLoginFailure)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+				return
+			}
+		} else if scErr := h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount)); scErr != nil {
+			// Non-imported credentials retain the established best-effort persistence
+			// behavior; the Host Agent does not hold an independent counter for them.
+			h.log.Warn("admin sign-count persist failed", "error", scErr)
+		}
+	} else if scErr := h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount)); scErr != nil {
+		// Persist the authenticator's advanced sign counter so clone-detection keeps
+		// working (#1688 / Gitar). A non-imported assertion already validated, so
+		// legacy login behavior keeps this best-effort.
 		h.log.Warn("admin sign-count persist failed", "error", scErr)
 	}
 
@@ -342,6 +378,52 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	adminID := challenge.AdminID
 	h.auditOK(ctx, &adminID, challenge.Username, EventLoginSuccess)
 	c.JSON(http.StatusOK, gin.H{"status": "authenticated"})
+}
+
+// verifyImportedCredential asks the Host Agent to verify the assertion against
+// its independent root-owned counter. A 404 is the sole compatibility result:
+// the key has never been imported and therefore has no second counter.
+func (h *Handler) verifyImportedCredential(ctx context.Context, adminID string, assertion json.RawMessage, session webauthn.SessionData) (bool, error) {
+	payload, err := json.Marshal(struct {
+		AdminID     string               `json:"admin_id"`
+		Assertion   json.RawMessage      `json:"assertion"`
+		SessionData webauthn.SessionData `json:"session_data"`
+	}{AdminID: adminID, Assertion: assertion, SessionData: session})
+	if err != nil {
+		return false, fmt.Errorf("marshal imported credential assertion: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://agent/v1/authorizers/login-assertion", bytes.NewReader(payload))
+	if err != nil {
+		return false, fmt.Errorf("create imported credential request: %w", err)
+	}
+	req.Header.Set("Content-Type", contentTypeJSON)
+	resp, err := h.server.agent.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", errHostAgentUnavailable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<10)+1))
+	if err != nil || len(body) > 1<<10 {
+		return false, errHostAgentProtocol
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		var result struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &result) == nil && result.Error == "authorizer_not_imported" {
+			return false, nil
+		}
+		return false, errHostAgentProtocol
+	case http.StatusForbidden:
+		return false, errImportedCredentialRejected
+	case http.StatusServiceUnavailable:
+		return false, errHostAgentUnavailable
+	default:
+		return false, errHostAgentProtocol
+	}
 }
 
 // Logout revokes the current admin session and clears the cookie. It is mounted
