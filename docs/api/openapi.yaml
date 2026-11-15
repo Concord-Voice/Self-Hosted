@@ -13082,6 +13082,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '409':
+          description: Maximum of 10 WebAuthn credentials reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /mfa/webauthn/verify-inline/begin:
     post:
       tags:
