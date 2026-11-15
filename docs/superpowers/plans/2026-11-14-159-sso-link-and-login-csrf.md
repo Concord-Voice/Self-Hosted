@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close Security#159 across Self-Hosted and Hosted without stranding supported Desktop SSO users.
+**Goal:** Close the SSO linking and login CSRF gaps across Self-Hosted and the managed deployment without stranding supported Desktop SSO users.
 
-**Architecture:** Self-Hosted defines the server contract; Hosted ports the same behavior and tests around its branch-local drift. A signed MFA completion kind and single-use pending link defer identity and session writes to one locked transaction. Desktop main binds each provider state to a per-flow secret before mandatory server enforcement; one auth-group middleware guards exactly six cookie-establishing public POST routes.
+**Architecture:** Self-Hosted defines the server contract; the managed deployment repository ports the same behavior and tests around its branch-local drift. A signed MFA completion kind and single-use pending link defer identity and session writes to one locked transaction. Desktop main binds each provider state to a per-flow secret before mandatory server enforcement; one auth-group middleware guards exactly six cookie-establishing public POST routes.
 
 **Tech Stack:** Go, Gin, Postgres, Redis, JWT, existing singleflight; Electron/TypeScript, Vitest.
 
-**Spec:** `docs/superpowers/specs/2026-11-14-159-sso-link-and-login-csrf-design.md` (read before execution); [Security#159](https://github.com/Concord-Voice/Security/issues/159).
+**Spec:** `docs/superpowers/specs/2026-11-14-159-sso-link-and-login-csrf-design.md` (read before execution).
 
 ## Global constraints
 
@@ -20,7 +20,7 @@
 - JWKS: successful HTTP 200 valid nonempty snapshots replace; every key lookup checks expiry; at most one provider-wide unknown-`kid` refresh opportunity per 60 seconds, including failed fetches.
 - Keep per-IP initiate limit `10/15m`; add provider-wide fail-closed `600/min` before state/CFKV allocation. Fixed encoded/decoded E2EE maxima are `16384/12288` wrapped-key and `1024/768` salt.
 - Integration tests use real isolated `DATABASE_URL` per worktree and the `REDIS_URL` backed `redistest` allocator. Never point at shared `concord`, use raw Redis `FlushDB`/`FlushAll`, or set private `GOCACHE`, `GOMODCACHE`, or `GOLANGCI_LINT_CACHE`. If shared cache access fails, report the sandbox error.
-- Server commands run from the current Self-Hosted root or the Hosted root when Task 10 explicitly says so. Desktop commands use the absolute checked-out Desktop path; never run Self-Hosted and Hosted Postgres suites concurrently against one database. Test fixtures must supply valid JSON and binding headers when testing a later gate.
+- Server commands run from the current Self-Hosted root or the managed deployment root when Task 10 explicitly says so. Desktop commands use the absolute checked-out Desktop path; never run Self-Hosted and managed deployment Postgres suites concurrently against one database. Test fixtures must supply valid JSON and binding headers when testing a later gate.
 
 ## File map and ordering
 
@@ -34,7 +34,7 @@
 | CSRF and exemptions | Create Self-Hosted `services/control-plane/internal/middleware/login_csrf{,_test}.go`; modify `api/router.go`, auth/API/admin tests | Characterization |
 | JWKS and limits | Self-Hosted `oauth/{apple,google,handler}.go`, `auth/handlers.go`, owning tests | Characterization |
 | Docs and gate | Self-Hosted `docs/adr/0046-account-authentication-and-recovery.md`, `docs/api/openapi.yaml`, `docs/development.md`, `CHANGELOG.md`; `docs/api/README.md` only if schema needs prose | Server behavior stable |
-| Hosted mirror | Corresponding Hosted paths and tests; branch-specific policy test | Self-Hosted contract stable |
+| Managed deployment mirror | Corresponding managed deployment paths and tests; branch-specific policy test | Self-Hosted contract stable |
 | Release | Desktop companion release, supported shell floor, staged Apple/Google proof, then server enforcement | All code/tests/docs pass |
 
 No deletion is planned. `Desktop/` denotes the sibling repository root, not a directory inside Self-Hosted. Existing exploit files are evidence to invert in owning package tests; keep them if the scan harness supports regression execution.
@@ -51,7 +51,7 @@ No deletion is planned. `Desktop/` denotes the sibling repository root, not a di
 
 ### Task 0: Capture exploit behavior and route census
 
-**Files:** Test/modify `services/control-plane/internal/oauth/handler_integration_test.go`, `services/control-plane/internal/api/oauth_wiring_test.go`, `services/control-plane/internal/auth/oauth_adapter_test.go`; inspect Security-repository `scans/2026-11-11-self-hosted-vulnhunt/exploit_tests/{sso_link_mfa_skip_vuln032_test.go,login_csrf_vuln031_test.go}` and all public `SetRefreshCookie` callers. Mirror baseline tests into Hosted only after locating its corresponding files.
+**Files:** Test/modify `services/control-plane/internal/oauth/handler_integration_test.go`, `services/control-plane/internal/api/oauth_wiring_test.go`, `services/control-plane/internal/auth/oauth_adapter_test.go`; inspect the internal MFA-skip and login-CSRF exploit fixtures and all public `SetRefreshCookie` callers. Mirror baseline tests into managed deployment only after locating its corresponding files.
 
 **Interfaces:** Records the current HTTP shapes, route templates, writer census and DB/Redis fixtures consumed by later tasks. No production interface.
 
@@ -99,7 +99,7 @@ No deletion is planned. `Desktop/` denotes the sibling repository root, not a di
 
 **Interfaces:** Keep `OAuth.AuthAdapter` in `oauth/handler.go` as the consumer interface; add an SSO-link-specific challenge issuer accepting target user ID, verified epoch and `auth.SSOIdentityLink`. Add a dedicated auth SSO-link completer called only after Task 3's verified callback. The existing `IssueAccessAndRefreshBound` no-proof entry refuses an MFA-enrolled target with `ErrMFARequired`; the privileged completion uses an internal, non-boolean proof path. Pending state is `mfa_sso_link:<jti>` with target ID, epoch and provider identity only.
 
-- [ ] Write integration tests for effective password disable before challenge (Hosted stored `true` refuses; Self-Hosted's deployment override remains explicit), MFA challenge response with zero token/cookie/header and zero identity/family/refresh rows, no-MFA direct completion, and direct bound mint returning `ErrMFARequired` for enrolled MFA.
+- [ ] Write integration tests for effective password disable before challenge (managed deployment stored `true` refuses; Self-Hosted's deployment override remains explicit), MFA challenge response with zero token/cookie/header and zero identity/family/refresh rows, no-MFA direct completion, and direct bound mint returning `ErrMFARequired` for enrolled MFA.
 - [ ] Run `cd services/control-plane && go test -p 1 ./internal/oauth ./internal/auth ./internal/mfa -run 'Test.*(SSOLink|BoundMintMFA|PasswordLoginDisabled)' -count=1`; expect the new protected assertions to fail.
 - [ ] Implement initial `CompleteLink`: consume SSO token, verify password with current lockout semantics, check effective policy, capture epoch, query login-eligible factors fail closed, then issue a five-minute signed `sso_link` challenge plus `SET NX EX` pending record. On Redis/WebAuthn transient write failure, invalidate created state and return dependency failure. No identity/session/cookie before MFA.
 - [ ] Implement the final adapter transaction: acquire the same user authority lock, re-read disabled/policy/epoch/MFA, reject stale/changed state, then insert identity, family and refresh in one transaction. Map duplicate/lock/dependency errors without a cookie; emit cookie/header/body only after commit. Audit and, if needed, lock MFA enrollment/disable writers on the same row.
@@ -164,16 +164,16 @@ No deletion is planned. `Desktop/` denotes the sibling repository root, not a di
 - [ ] Run the configured `.claude/repo-config.json` `/verify-quality-gate` checks, relevant pre-commit hooks, and required whole-repository CI. Record exact-head lint/type/test, new-code coverage >=80%, zero new blocker/critical findings and zero new high-confidence hotspots; local green results do not substitute for server reports.
 - [ ] Commit Self-Hosted docs and any tested count delta with the implementation. Do not claim deployment or live protection from source/CI proof.
 
-### Task 10: Port the semantic contract to Hosted
+### Task 10: Port the semantic contract to the managed deployment
 
-**Files:** Create Hosted `services/control-plane/internal/middleware/login_csrf{,_test}.go`; modify corresponding Hosted `services/control-plane/internal/{api/router.go,oauth/handler.go,oauth/apple_session.go,oauth/apple.go,oauth/google.go,auth/oauth_adapter.go,auth/handlers.go,mfa/challenge.go,mfa/handlers.go}` and owning tests. Modify Hosted `docs/adr/0046-account-authentication-and-recovery.md`, `docs/api/openapi.yaml`, `docs/development.md`, `CHANGELOG.md` and `docs/api/README.md` only if needed.
+**Files:** Create managed deployment `services/control-plane/internal/middleware/login_csrf{,_test}.go`; modify corresponding managed deployment `services/control-plane/internal/{api/router.go,oauth/handler.go,oauth/apple_session.go,oauth/apple.go,oauth/google.go,auth/oauth_adapter.go,auth/handlers.go,mfa/challenge.go,mfa/handlers.go}` and owning tests. Modify managed deployment `docs/adr/0046-account-authentication-and-recovery.md`, `docs/api/openapi.yaml`, `docs/development.md`, `CHANGELOG.md` and `docs/api/README.md` only if needed.
 
-**Interfaces:** Match Self-Hosted HTTP status/body/header/cookie, signed completion kind, state digest, Redis keys/TTLs, JWKS/rate/key constants and six-route census. Preserve Hosted's stored `password_login_disabled=true` enforcement and branch-local config/handler differences.
+**Interfaces:** Match Self-Hosted HTTP status/body/header/cookie, signed completion kind, state digest, Redis keys/TTLs, JWKS/rate/key constants and six-route census. Preserve managed deployment's stored `password_login_disabled=true` enforcement and branch-local config/handler differences.
 
-- [ ] Diff named Hosted files and tests against the reviewed Self-Hosted contract immediately before porting. Copy test intent and route census, then run focused Hosted Go tests red first against its own isolated `DATABASE_URL` and `REDIS_URL`.
-- [ ] Port one behavior slice at a time in Task 3→8 order; after each slice run its same `cd services/control-plane && go test -p 1 ... -run ... -count=1` command in Hosted. Add an explicit Hosted stored-disabled test and repeat Apple/Google binding and Desktop continuation probes.
-- [ ] Run the full Task 9 focused/race suites, original exploit regressions, OpenAPI drift, `./scripts/update-claude-md-counts.sh`, changelog guard, pre-commit and configured quality gate in Hosted. Review drift instead of copying whole Self-Hosted files. Record separate Hosted exact-head coverage >=80%, zero new blocker/critical issues and zero new high-confidence hotspots.
-- [ ] Commit Hosted code, tests, docs and reviewed generated count delta as its own PR. Cross-check the eighteen design acceptance criteria against Self-Hosted, Hosted and Desktop artifacts; a missing mirror proof keeps enforcement blocked.
+- [ ] Diff named managed deployment files and tests against the reviewed Self-Hosted contract immediately before porting. Copy test intent and route census, then run focused managed deployment Go tests red first against its own isolated `DATABASE_URL` and `REDIS_URL`.
+- [ ] Port one behavior slice at a time in Task 3→8 order; after each slice run its same `cd services/control-plane && go test -p 1 ... -run ... -count=1` command in managed deployment. Add an explicit managed deployment stored-disabled test and repeat Apple/Google binding and Desktop continuation probes.
+- [ ] Run the full Task 9 focused/race suites, original exploit regressions, OpenAPI drift, `./scripts/update-claude-md-counts.sh`, changelog guard, pre-commit and configured quality gate in managed deployment. Review drift instead of copying whole Self-Hosted files. Record separate managed deployment exact-head coverage >=80%, zero new blocker/critical issues and zero new high-confidence hotspots.
+- [ ] Commit managed deployment code, tests, docs and reviewed generated count delta as its own PR. Cross-check the eighteen design acceptance criteria against Self-Hosted, managed deployment and Desktop artifacts; a missing mirror proof keeps enforcement blocked.
 
 ### Task 11: Release floor, staged proof and enforcement
 
@@ -182,8 +182,8 @@ No deletion is planned. `Desktop/` denotes the sibling repository root, not a di
 **Interfaces:** Supported Desktop build contains contract 34, Apple/Google binding and link-MFA continuation before mandatory server binding is deployed.
 
 - [ ] Release Desktop companion with Task 1 and 2 evidence; verify installed build and supported minimum through the real release-admission mechanism. Do not treat `IPC_CONTRACT_VERSION` or `SPA_MIN_CONTRACT` source values alone as proof of the supported shell floor.
-- [ ] Exercise both providers against Self-Hosted and Hosted staging: same-secret initiate/session succeeds; mismatch consumes state; complete-link MFA remains tokenless until successful factor; exact-origin and origin-less native JSON work. Capture build, server SHA and test environment.
-- [ ] Only after the floor is observable, deploy Self-Hosted and Hosted enforcement in the approved order. Observe outcome-class counts only; never log state, binding, JTI/challenge, provider token, email or key material.
+- [ ] Exercise both providers against Self-Hosted and managed deployment staging: same-secret initiate/session succeeds; mismatch consumes state; complete-link MFA remains tokenless until successful factor; exact-origin and origin-less native JSON work. Capture build, server SHA and test environment.
+- [ ] Only after the floor is observable, deploy Self-Hosted and managed deployment enforcement in the approved order. Observe outcome-class counts only; never log state, binding, JTI/challenge, provider token, email or key material.
 - [ ] Rollback is an application rollback for a demonstrated outage, with the Desktop companion retained; document that rollback restores exposure. No schema rollback exists; Redis records expire after their TTL.
 
 ## Risk register and open gates
@@ -197,7 +197,7 @@ No deletion is planned. `Desktop/` denotes the sibling repository root, not a di
 | Refresh/logout exemption drifts | Executable cookie, credential-source and route inventory assumptions; reclassify if any fails |
 | JWKS rotation availability | Fixed 60-second unknown-kid bound, fake-clock tests, outcome-only telemetry; no expired or withdrawn key acceptance |
 | 600/min/provider too low for real burst | Measure initiation traffic before deploy; revise constant only with measured evidence and security review |
-| Hosted divergence | Port semantics/test IDs, not files; prove stored-disabled Hosted behavior independently |
+| Managed deployment divergence | Port semantics/test IDs, not files; prove stored-disabled managed deployment behavior independently |
 
 **Resolve before enforcement:** identify the real supported Desktop release-floor control; confirm all MFA enrollment/disable writers serialize on the user lock; measure provider initiation volume; inspect the final reflective cookie-route census. These are verification gates, not reasons to omit state binding or defer the server fix.
 

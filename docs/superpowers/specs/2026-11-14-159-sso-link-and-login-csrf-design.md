@@ -1,8 +1,8 @@
 # MFA-safe SSO linking and login-CSRF closure — design
 
-**Issue:** Concord-Voice/Security#159 · **Date:** 2026-11-14 · **Status:** approved for planning
+**Scope:** SSO linking and login CSRF · **Date:** 2026-11-14 · **Status:** approved for planning
 
-This is the Phase-2 reconciled design for VULN-032, VULN-031, VULN-034, VULN-029 and VULN-030, including the related VULN-007/VULN-020 login-CSRF surface. It is a semantic two-repository change: Self-Hosted is the reference implementation and Hosted receives the same security contract, adapted to any branch-local drift. Desktop is a release-order dependency, not optional follow-up work.
+This is the Phase-2 reconciled design for VULN-032, VULN-031, VULN-034, VULN-029 and VULN-030, including the related VULN-007/VULN-020 login-CSRF surface. It is a semantic two-repository change: Self-Hosted is the reference implementation and the managed deployment repository receives the same security contract, adapted to any branch-local drift. Desktop is a release-order dependency, not optional follow-up work.
 
 No new third-party API or dependency is introduced. The design uses the repository's current Gin, Redis, JWT, Postgres, `crypto/subtle`, and existing singleflight patterns, so there is no external dependency contract to refresh before planning. Symbol names and route shapes below were read from the current branch; implementers must locate symbols rather than rely on line numbers.
 
@@ -19,8 +19,8 @@ The account-link completion path proves a password and immediately creates an SS
 | Identity and session are indivisible | SSO identity, login family and refresh row commit in one transaction. A failure leaves none of them. Cookie/header/body are emitted only after commit. | `.claude/rules/domains/backend.md` transaction invariants |
 | E2EE material is opaque and bounded | The server validates only encoding and size, never logs or interprets the wrapped private key. Existing public-key/PoP validation remains unchanged. | `.claude/rules/domains/backend.md`; E2EE review trigger |
 | Native clients remain supported | Missing `Origin` and Fetch Metadata are allowed because Desktop main is not a browser. If either header is present, it is evaluated strictly. All six guarded routes still require JSON. | Existing Desktop main-process auth architecture |
-| No open-ended compatibility bypass | Desktop support lands before mandatory server enforcement. There is no permanent `compat` mode or environment switch that accepts an unbound SSO state after cutover. | Security#159 state-binding acceptance |
-| Mirrors are semantic, not blind copies | Self-Hosted and Hosted must satisfy identical tests and API behavior even where their handler/config files differ. | Org mirror/release practice |
+| No open-ended compatibility bypass | Desktop support lands before mandatory server enforcement. There is no permanent `compat` mode or environment switch that accepts an unbound SSO state after cutover. | SSO state-binding acceptance |
+| Mirrors are semantic, not blind copies | Self-Hosted and managed deployment must satisfy identical tests and API behavior even where their handler/config files differ. | Org mirror/release practice |
 | Real backing services in integration tests | Postgres/Redis integration coverage uses the repository harness and isolated test DB/Redis indices; shared Go caches remain untouched. | `.claude/rules/domains/tests.md` |
 
 There is no migration. No existing token or Redis record is made more permissive. Old in-flight SSO states and old MFA challenges may fail after enforcement and must be restarted; their TTLs are short and this is safer than dual parsing.
@@ -65,7 +65,7 @@ It contains no password and no bearer/session token. Store it with `SET NX EX`; 
 
 `POST /api/v1/auth/sso/:provider/complete-link` continues to consume the one-time `sso_token` and verify the target account password under existing lockout behavior. It then:
 
-1. Reads the stored `password_login_disabled` preference and evaluates `auth.EffectivePasswordLoginDisabled(instanceType, stored)`. An effective disable returns `403 account_uses_sso`; no MFA challenge, identity, session, or cookie is produced. Self-Hosted retains its existing deployment-policy override; Hosted enforces the stored preference.
+1. Reads the stored `password_login_disabled` preference and evaluates `auth.EffectivePasswordLoginDisabled(instanceType, stored)`. An effective disable returns `403 account_uses_sso`; no MFA challenge, identity, session, or cookie is produced. Self-Hosted retains its existing deployment-policy override; managed deployment enforces the stored preference.
 2. Captures the verified credential epoch.
 3. Queries current login-eligible MFA enrollment using the existing fail-closed adapter.
 4. If no login-eligible factor exists, invokes the bound final transaction. That transaction must re-check that MFA is still absent under the locked authority read; an enrollment race returns `mfa_required` and writes nothing.
@@ -249,7 +249,7 @@ Tests must first demonstrate each old exploit against the unmodified behavior, t
 - MFA-enrolled target: `complete-link` returns the challenge shape with no `Set-Cookie`, session header, tokens, identity, login family, or refresh row; correct MFA produces all three rows atomically and one cookie.
 - Wrong/expired/replayed factor, expired/missing/replayed Redis JTI, signed/pending user or epoch mismatch, and unknown `completion_kind` all fail closed.
 - A normal legacy login challenge with no kind still completes ordinary login; `sso_link` can never dispatch to the ordinary login completer.
-- Effective `password_login_disabled` refuses before challenge creation in Hosted policy, while Self-Hosted's existing policy override remains covered.
+- Effective `password_login_disabled` refuses before challenge creation in managed deployment policy, while Self-Hosted's existing policy override remains covered.
 - A credential-epoch change after password proof and an MFA enrollment/policy change before final commit each leave no identity/session. A direct bound mint for an MFA-enrolled user without internal proof returns `ErrMFARequired`.
 - Force identity insert, family insert, refresh insert and commit failures separately; each leaves zero partial rows and no response cookie.
 - Concurrent final attempts yield one consumed challenge/pending record and at most one identity/session.
@@ -292,7 +292,7 @@ The route inventory pins exactly six guarded public routes, the refresh/logout e
 - Run focused Go unit/integration suites with real isolated Postgres/Redis per `.claude/rules/domains/tests.md`; do not set private Go caches.
 - Run Desktop Vitest suites for main IPC/provider flows, preload/service and account-link/MFA UI.
 - Run OpenAPI coverage, pre-commit, lint/race checks required by each repository, and both repositories' exploit regressions.
-- Because this changes API routes/middleware, Go packages and test files, Phase 4 runs `./scripts/update-claude-md-counts.sh` in Self-Hosted and Hosted and records any resulting documentation delta. There is no migration, new Zustand store, or CSS theme block.
+- Because this changes API routes/middleware, Go packages and test files, Phase 4 runs `./scripts/update-claude-md-counts.sh` in Self-Hosted and managed deployment and records any resulting documentation delta. There is no migration, new Zustand store, or CSS theme block.
 
 ## 7. Exact file map
 
@@ -342,9 +342,9 @@ If the MFA factor-writer audit finds an unserialized policy writer, edit only it
 - `docs/development.md` — focused test commands and Desktop-first rollout
 - `CHANGELOG.md` — user/security-visible behavior under Prerelease
 
-### Hosted semantic mirror
+### Managed deployment semantic mirror
 
-Apply the same create/edit list under Hosted's corresponding paths:
+Apply the same create/edit list under the managed deployment repository's corresponding paths:
 
 - `services/control-plane/internal/{api,oauth,auth,mfa,middleware,admin}/...`
 - `docs/adr/0046-account-authentication-and-recovery.md`
@@ -352,7 +352,7 @@ Apply the same create/edit list under Hosted's corresponding paths:
 - `docs/development.md`
 - `CHANGELOG.md`
 
-`oauth/handler.go`, `auth/handlers.go`, router and config surfaces have branch-local drift. Port the contract and tests; do not copy whole files. Hosted additionally proves that stored `password_login_disabled=true` is effective.
+`oauth/handler.go`, `auth/handlers.go`, router and config surfaces have branch-local drift. Port the contract and tests; do not copy whole files. The managed deployment additionally proves that stored `password_login_disabled=true` is effective.
 
 ### Desktop companion
 
@@ -384,9 +384,9 @@ No renderer network call, new IPC channel, migration, CSS/theme change, or new d
 
 There is no durable compatibility flag.
 
-1. **Desktop companion release:** ship contract 34 with both provider-binding headers and complete-link MFA continuation. Server still runs the old compatible contract during this release step. Verify both providers against Self-Hosted and Hosted staging.
+1. **Desktop companion release:** ship contract 34 with both provider-binding headers and complete-link MFA continuation. Server still runs the old compatible contract during this release step. Verify both providers against Self-Hosted and managed deployment staging.
 2. **Client floor:** advance the supported Desktop minimum/release admission to the companion build. If the remote SPA starts depending on the widened result, raise `SPA_MIN_CONTRACT` to 34 in that coordinated release; otherwise leave it 19.
-3. **Self-Hosted and Hosted enforcement:** land the semantic mirror with mandatory binding, closed MFA completion, CSRF guard, JWKS/rate/key limits, docs and exploit tests. Deploy Hosted only after the client floor is observable. Self-Hosted release notes state that in-flight SSO attempts restart and older Desktop builds cannot start SSO.
+3. **Self-Hosted and managed deployment enforcement:** land the semantic mirror with mandatory binding, closed MFA completion, CSRF guard, JWKS/rate/key limits, docs and exploit tests. Deploy the managed deployment only after the client floor is observable. Self-Hosted release notes state that in-flight SSO attempts restart and older Desktop builds cannot start SSO.
 4. **Observe:** metrics/logs may count only outcome classes (missing/malformed/mismatch binding, CSRF rejection class, provider refresh attempted/suppressed, global limit hit). They must not include state, binding, challenge, JTI, provider token, key material or email.
 
 Rollback of the server enforcement release is an application rollback, not a runtime bypass. Rolling back restores vulnerability, so use it only for a demonstrated outage and keep the Desktop companion in place. Database rollback is unnecessary because there is no schema change. Redis records expire naturally and are versioned/namespaced so an older process ignores them.
@@ -403,15 +403,15 @@ Rollback of the server enforcement release is an application rollback, not a run
 | T5 | JWKS replace/expiry/unknown-`kid` refresh bound | Parallel per provider, shared contract first |
 | T6 | Initiation aggregate bound and key-material ceilings | Parallel with T3–T5 |
 | T7 | Self-Hosted integration, OpenAPI, ADR 0046, changelog and quality/count probes | After T3–T6 |
-| T8 | Hosted semantic port and Hosted-only password-disabled coverage | After Self-Hosted contract stabilizes; can prepare tests earlier |
+| T8 | Managed deployment semantic port and managed deployment-only password-disabled coverage | After Self-Hosted contract stabilizes; can prepare tests earlier |
 | T9 | Client-floor release, staging verification, then mandatory server deploy | Strictly serial after T1/T2/T7/T8 |
 
 ## 10. Acceptance criteria
 
 | # | Criterion | Required proof |
 |---|---|---|
-| 1 | MFA-enrolled `complete-link` returns a challenge and no identity, access/refresh token, session header or cookie; the identity/session appear only after successful MFA. | Self-Hosted + Hosted integration tests; Desktop continuation tests |
-| 2 | Effective `password_login_disabled` refuses link completion; Self-Hosted's existing override and Hosted enforcement are each explicit. | Policy table tests in both repos |
+| 1 | MFA-enrolled `complete-link` returns a challenge and no identity, access/refresh token, session header or cookie; the identity/session appear only after successful MFA. | Self-Hosted + managed deployment integration tests; Desktop continuation tests |
+| 2 | Effective `password_login_disabled` refuses link completion; Self-Hosted's existing override and managed deployment enforcement are each explicit. | Policy table tests in both repos |
 | 3 | A direct/bound mint for an MFA-enrolled user without verifier-issued proof fails, including an enrollment race after password proof. | Atomic adapter integration tests |
 | 4 | Final disabled/password/MFA/epoch policy read is under the user lock; identity, family and refresh are one transaction with rollback on every forced failure. | Real-Postgres transaction tests and review |
 | 5 | Signed completion kind is closed; legacy login remains compatible; unknown kind and missing/mismatched pending JTI fail closed. | Challenge + verifier tests |
@@ -422,12 +422,12 @@ Rollback of the server enforcement release is an application rollback, not a run
 | 10 | A successful JWKS refresh fully replaces the provider snapshot; withdrawn/expired keys fail. Distinct/concurrent unknown kids cause at most one attempt/provider/60s, including failures. | Apple + Google fake-clock tests |
 | 11 | Existing per-IP initiation limit remains and a provider-global 600/minute fail-closed bound prevents state/CFKV allocation after exhaustion. | Redis-backed rate-limit tests |
 | 12 | Password registration and SSO use the shared encoded/decoded key-material bounds; over-limit data returns 400 without logging material. | Boundary/redaction tests + OpenAPI schema |
-| 13 | Every original exploit test is inverted and the focused, race/lint, OpenAPI, pre-commit and repository-required suites pass in Self-Hosted, Hosted and Desktop as applicable. | CI links and local command transcript |
+| 13 | Every original exploit test is inverted and the focused, race/lint, OpenAPI, pre-commit and repository-required suites pass in Self-Hosted, managed deployment and Desktop as applicable. | CI links and local command transcript |
 | 14 | **0 new blocker/critical issues.** | Quality-gate report in each server repository and Desktop |
 | 15 | **0 new high-confidence security hotspots.** | Quality-gate/security scan report in each affected repository |
 | 16 | **At least 80% new-code coverage.** | Quality-gate coverage report in each affected repository |
-| 17 | Docs ship with the code: ADR 0046, OpenAPI, development/release notes and Hosted mirror are updated in their owning PRs. | Diff review; OpenAPI drift gate |
-| 18 | Phase-4 count probe runs in Self-Hosted and Hosted because API routes/middleware, Go packages and tests changed. | `./scripts/update-claude-md-counts.sh` transcript and any generated doc delta |
+| 17 | Docs ship with the code: ADR 0046, OpenAPI, development/release notes and managed deployment mirror are updated in their owning PRs. | Diff review; OpenAPI drift gate |
+| 18 | Phase-4 count probe runs in Self-Hosted and managed deployment because API routes/middleware, Go packages and tests changed. | `./scripts/update-claude-md-counts.sh` transcript and any generated doc delta |
 
 ## 11. Risk register
 
@@ -442,7 +442,7 @@ Rollback of the server enforcement release is an application rollback, not a run
 | JWKS bound delays a legitimate emergency rotation | Low | 60-second ceiling; successful scheduled/ordinary refresh still replaces snapshot; never serve withdrawn/expired keys |
 | Provider-global initiation ceiling is too low for a burst | Low at 600/min/provider | Keep per-IP tighter, add outcome-only metric, change the constant only with measured evidence and security review |
 | Fixed key bounds reject an unusual legacy key | Low | Bounds match current Desktop envelope and far exceed legitimate material; stage boundary telemetry without values |
-| Hosted drift causes a partial mirror | Medium | Port tests and semantics, not whole files; cross-repo acceptance checklist and same exploit IDs |
+| Managed deployment drift causes a partial mirror | Medium | Port tests and semantics, not whole files; cross-repo acceptance checklist and same exploit IDs |
 | Secret leaks through diagnostics | Medium without custody tests | Header only, main memory only, digest in Redis, redaction assertions over logs/responses/IPC |
 
 ## 12. Phase-8 reviewers and out of scope
@@ -462,6 +462,6 @@ Out of scope:
 
 - Confirm every MFA factor-enrollment/disable writer serializes with the chosen user authority lock; this design requires remediation only where the audit proves a gap.
 - Confirm the release system's exact supported-Desktop floor mechanism before T9; `SPA_MIN_CONTRACT` alone is not proof that an old shell cannot call SSO.
-- Confirm the Hosted drift at each named file immediately before porting and preserve Hosted-only policy behavior.
+- Confirm the managed deployment drift at each named file immediately before porting and preserve managed deployment-only policy behavior.
 - Measure provider-initiation traffic before deploy; 600/min/provider is deliberately conservative but has not been validated against production telemetry.
 - Run the reflective cookie-route inventory against the final diff so no new or branch-only `SetRefreshCookie` call site is omitted.

@@ -50,7 +50,7 @@ Two hard constraints pull against each other. An attacker who changed the passwo
 - **Delivery becomes a security control.** Notices go through a durable outbox, and completion holds while they are undelivered.
 - **To revisit:** passwordless accounts (needs a floor branch and PRF); Touch ID for the recovery device (needs a signed-build entitlements spike); a hardware security key used only for recovery.
 
-## Current SSO authentication boundary (Security #159)
+## Current SSO authentication boundary
 
 The account-link path proves the existing password, applies the deployment's
 effective password-login policy, then either mints under a locked final policy
