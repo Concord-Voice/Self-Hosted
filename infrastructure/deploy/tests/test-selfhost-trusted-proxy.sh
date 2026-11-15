@@ -52,7 +52,7 @@ assert [line for line in aop.splitlines() if line and not line.startswith("#")] 
 api_start = vhost.index("# HTTPS — API + WebSocket Hub")
 media_start = vhost.index("# HTTPS — Media Plane")
 api_block = vhost[api_start:media_start]
-assert 'map "$ssl_server_name:$host" $api_tls_name_match {' in vhost, "API SNI/Host guard map missing"
+assert 'map "$ssl_server_name:$validated_host" $api_tls_name_match {' in vhost, "API SNI/Host guard map missing"
 assert "if ($api_tls_name_match = 0) { return 444; }" in api_block, "API must reject Host routing after a different TLS SNI handshake"
 assert "if ($api_tls_name_match = 0) { return 444; }" not in vhost[media_start:], "media must not receive the API SNI/Host guard"
 try:
@@ -203,7 +203,8 @@ pid {temp}/nginx.pid;
 error_log {temp}/error.log;
 events {{ worker_connections 128; }}
 http {{
-    map \"$ssl_server_name:$host\" $api_tls_name_match {{
+    map $host $validated_host {{ default ""; api.example.test api.example.test; }}
+    map \"$ssl_server_name:$validated_host\" $api_tls_name_match {{
         default 0;
         \"api.example.test:api.example.test\" 1;
     }}
