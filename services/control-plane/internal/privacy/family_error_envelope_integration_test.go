@@ -39,7 +39,9 @@ func TestFamilyErrorEnvelope_ErasureFamilyDependency(t *testing.T) {
 					return nil
 				}, stmthook.ErrInjected)
 			}
-			response := ts.DoRequest(http.MethodPost, "/api/v1/privacy/erase-account", map[string]interface{}{}, testhelpers.AuthHeaders(user.AccessToken))
+			response := ts.DoRequest(http.MethodPost, "/api/v1/privacy/erase-account", map[string]interface{}{
+				"password": user.Password, "confirmed_owned_server_ids": []string{},
+			}, testhelpers.AuthHeaders(user.AccessToken))
 			admission := hook.AdmissionReport()
 			require.Equal(t, 1, admission.Fired)
 			require.True(t, admission.Completed)

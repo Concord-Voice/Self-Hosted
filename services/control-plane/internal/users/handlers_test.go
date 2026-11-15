@@ -835,7 +835,9 @@ func TestDeleteSSOIdentity_RequiresPassphraseIfLastAuthMethod(t *testing.T) {
 	require.NoError(t, err)
 
 	// Attempt to unlink — must fail with would_lock_out.
-	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", map[string]interface{}{
+		"password": testPassword,
+	}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "would_lock_out")
 
@@ -860,7 +862,9 @@ func TestDeleteSSOIdentity_HappyPath_AllowsUnlinkWithPasswordFallback(t *testing
 		 VALUES ($1, 'google', 'g-unlink', $2)`, user.ID, user.Email)
 	require.NoError(t, err)
 
-	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", map[string]interface{}{
+		"password": testPassword,
+	}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `"ok":true`)
 
@@ -879,7 +883,9 @@ func TestDeleteSSOIdentity_NotLinked_404(t *testing.T) {
 	user := ts.CreateTestUser(t, "notlinked")
 
 	// User has password fallback (default) but no SSO identity linked.
-	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", map[string]interface{}{
+		"password": testPassword,
+	}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "not_linked")
 }
@@ -899,9 +905,9 @@ func TestPatchSecurity_NoFields_400(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "no_fields")
 }
 
-// TestPatchSecurity_NoPassphrase_401 verifies that omitting current_passphrase
-// returns 401 passphrase_required and does not even read the password hash.
-func TestPatchSecurity_NoPassphrase_401(t *testing.T) {
+// TestPatchSecurity_TrustEnableNeedsFreshPassword verifies that a bearer alone
+// cannot weaken SSO trust; the transactional gate reports missing proof.
+func TestPatchSecurity_TrustEnableNeedsFreshPassword(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "nopass")
 
@@ -909,8 +915,23 @@ func TestPatchSecurity_NoPassphrase_401(t *testing.T) {
 		"trust_sso_security": true,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
-	require.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "passphrase_required")
+	require.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "password_required")
+}
+
+func TestPatchSecurity_RejectsPasswordTokenAsMFAProof(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "trustssotoken")
+
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"trust_sso_security": true,
+		"step_up_token":      strings.Repeat("x", 8),
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	var trust bool
+	require.NoError(t, ts.DB.QueryRow(`SELECT trust_sso_security FROM users WHERE id = $1`, user.ID).Scan(&trust))
+	assert.False(t, trust)
 }
 
 // TestPatchSecurity_TrustSSOSecurity_TogglesFlag verifies the second supported
@@ -932,6 +953,22 @@ func TestPatchSecurity_TrustSSOSecurity_TogglesFlag(t *testing.T) {
 		ts.DB.QueryRow(`SELECT trust_sso_security FROM users WHERE id = $1`, user.ID).Scan(&trust),
 	)
 	assert.True(t, trust)
+}
+
+func TestPatchSecurity_TrustSSODisableDoesNotNeedStepUp(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "trustssodisable")
+	_, err := ts.DB.Exec(`UPDATE users SET trust_sso_security = TRUE WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"trust_sso_security": false,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var trust bool
+	require.NoError(t, ts.DB.QueryRow(`SELECT trust_sso_security FROM users WHERE id = $1`, user.ID).Scan(&trust))
+	assert.False(t, trust)
 }
 
 // TestPatchSecurity_BothFlags_DynamicUpdateBuilder verifies that supplying

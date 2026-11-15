@@ -18,26 +18,60 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/privacy"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/google/uuid"
 )
 
 // stubAccountDeleter implements users.AccountDeleter for unit tests.
 // Configurable to return any error or nil. Records the userID it was
 // called with so tests can assert the handler passed the right value.
 type stubAccountDeleter struct {
-	err            error
-	called         bool
-	calledWithUser string
+	err             error
+	called          bool
+	calledWithUser  string
+	emailUnverified bool
+	emailPrepared   users.EmailErasureConfirmation
 }
 
-func (s *stubAccountDeleter) DeleteAccount(_ context.Context, userID string) error {
+func (s *stubAccountDeleter) PrepareAccountErasure(
+	_ context.Context, _, _, _ string,
+) (*stepup.PasswordAttempt, *stepup.Error) {
+	return &stepup.PasswordAttempt{}, nil
+}
+
+func (s *stubAccountDeleter) EmailVerified(context.Context, string) (bool, error) {
+	return !s.emailUnverified, nil
+}
+
+func (s *stubAccountDeleter) EmailErasureConfirmationBinding(
+	context.Context, users.AccountErasureRequest,
+) (users.EmailErasureConfirmation, error) {
+	return s.emailPrepared, nil
+}
+
+func (s *stubAccountDeleter) PrepareEmailErasureConfirmation(
+	context.Context, users.AccountErasureRequest,
+) (users.EmailErasureConfirmation, error) {
+	return s.emailPrepared, nil
+}
+
+type recordingErasureEmailSender struct{ to, url string }
+
+func (s *recordingErasureEmailSender) SendAccountErasureConfirmation(to, confirmationURL string) error {
+	s.to, s.url = to, confirmationURL
+	return nil
+}
+
+func (s *stubAccountDeleter) DeleteAccount(_ context.Context, request users.AccountErasureRequest) error {
 	s.called = true
-	s.calledWithUser = userID
+	s.calledWithUser = request.Actor.UserID.String()
 	return s.err
 }
 
@@ -48,11 +82,17 @@ func newTestContext(t *testing.T, body string, userID string) (*gin.Context, *ht
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
+	if body == "" || body == `{}` {
+		body = `{"password":"test-password","confirmed_owned_server_ids":[]}`
+	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/privacy/erase-account", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	c.Request = req
 	if userID != "" {
-		c.Set("user_id", userID)
+		actorID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(userID))
+		c.Set("user_id", actorID.String())
+		identity := loginfamily.AccessIdentity{UserID: actorID, SID: uuid.New(), CredentialEpoch: "test"}
+		c.Request = c.Request.WithContext(loginfamily.WithAccessIdentity(c.Request.Context(), identity))
 	}
 	return c, w
 }
@@ -107,7 +147,7 @@ func TestEraseAccount_Returns204OnEmptyBody(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, c.Writer.Status())
 	assert.True(t, stub.called)
-	assert.Equal(t, "test-user-uuid", stub.calledWithUser)
+	assert.Equal(t, c.GetString("user_id"), stub.calledWithUser)
 }
 
 func TestEraseAccount_Returns204OnEmptyJSONBody(t *testing.T) {
@@ -149,11 +189,11 @@ func TestEraseAccount_RevokesAccessTokensFromClaims(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, ttl, time.Duration(0))
 
-	disabledVal, err := rdb.Get(ctx, middleware.UserDisabledKey("test-user-uuid")).Result()
+	disabledVal, err := rdb.Get(ctx, middleware.UserDisabledKey(c.GetString("user_id"))).Result()
 	require.NoError(t, err)
 	assert.Equal(t, "1", disabledVal)
 
-	disabledTTL, err := rdb.TTL(ctx, middleware.UserDisabledKey("test-user-uuid")).Result()
+	disabledTTL, err := rdb.TTL(ctx, middleware.UserDisabledKey(c.GetString("user_id"))).Result()
 	require.NoError(t, err)
 	assert.Greater(t, disabledTTL, time.Duration(0))
 	assert.LessOrEqual(t, disabledTTL, auth.AccessTokenTTL)
@@ -239,7 +279,7 @@ func TestEraseAccount_IgnoresUnknownClientIdField(t *testing.T) {
 	stub := &stubAccountDeleter{}
 	h := privacy.NewHandler(stub, nil, logger.New("test"))
 
-	body := `{"clientId":"` + sentinelClientID + `"}`
+	body := `{"clientId":"` + sentinelClientID + `","password":"test-password","confirmed_owned_server_ids":[]}`
 	c, _ := newTestContext(t, body, "test-user-uuid")
 	h.EraseAccount(c)
 
@@ -247,6 +287,74 @@ func TestEraseAccount_IgnoresUnknownClientIdField(t *testing.T) {
 		"unknown clientId field must be silently ignored — POST returns 204")
 	assert.True(t, stub.called,
 		"DeleteAccount must still be invoked when the body has an extra field")
+}
+
+func TestEraseAccount_UnverifiedEmailIssuesIntentWithoutDeletion(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	defer cleanup()
+	familyID := uuid.NewString()
+	stub := &stubAccountDeleter{emailUnverified: true, emailPrepared: users.EmailErasureConfirmation{
+		Recipient: "unverified@example.test", FamilyID: familyID, CredentialEpoch: "test", OwnedServerIDs: []string{},
+	}}
+	h := privacy.NewHandler(stub, rdb, logger.New("test"))
+	sender := &recordingErasureEmailSender{}
+	h.SetErasureEmailSender(sender)
+	c, _ := newTestContext(t, `{"password":"test-password","confirmed_owned_server_ids":[]}`, "unverified-user")
+
+	h.EraseAccount(c)
+
+	require.Equal(t, http.StatusAccepted, c.Writer.Status())
+	assert.False(t, stub.called, "first unverified-email proof must only issue intent")
+	assert.Equal(t, "unverified@example.test", sender.to)
+	assert.Regexp(t, `^concord://account-erasure/confirm/[0-9a-f-]{36}/[A-Za-z0-9_-]{43}$`, sender.url)
+}
+
+func TestEraseAccount_UnverifiedEmailConfirmationIsOneUseAndReleasesOnFailure(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	defer cleanup()
+
+	const recipient = "unverified@example.test"
+	familyID := uuid.NewString()
+	stub := &stubAccountDeleter{emailUnverified: true, emailPrepared: users.EmailErasureConfirmation{
+		Recipient: recipient, FamilyID: familyID, CredentialEpoch: "test", OwnedServerIDs: []string{},
+	}}
+	h := privacy.NewHandler(stub, rdb, logger.New("test"))
+	store := privacy.NewEmailConfirmationStore(rdb)
+
+	issue := func(t *testing.T) (string, string) {
+		t.Helper()
+		intent, err := store.Issue(context.Background(), privacy.EmailConfirmationBinding{
+			Recipient: recipient, UserID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("unverified-user")).String(),
+			FamilyID: familyID, CredentialEpoch: "test", OwnedServerIDs: []string{},
+		})
+		require.NoError(t, err)
+		return intent.RequestID, intent.Token
+	}
+
+	requestID, token := issue(t)
+	c, _ := newTestContext(t, fmt.Sprintf(`{"password":"test-password","confirmed_owned_server_ids":[],"email_confirmation":{"request_id":"%s","token":"%s"}}`, requestID, token), "unverified-user")
+	h.EraseAccount(c)
+	require.Equal(t, http.StatusNoContent, c.Writer.Status())
+	require.True(t, stub.called)
+
+	_, err := store.Claim(context.Background(), requestID, token, privacy.EmailConfirmationBinding{
+		Recipient: recipient, UserID: c.GetString("user_id"), FamilyID: familyID, CredentialEpoch: "test", OwnedServerIDs: []string{},
+	})
+	require.ErrorIs(t, err, privacy.ErrEmailConfirmationStale, "a committed deletion must consume its email confirmation")
+
+	stub.called = false
+	stub.err = errors.New("delete failed before commit")
+	requestID, token = issue(t)
+	c, _ = newTestContext(t, fmt.Sprintf(`{"password":"test-password","confirmed_owned_server_ids":[],"email_confirmation":{"request_id":"%s","token":"%s"}}`, requestID, token), "unverified-user")
+	h.EraseAccount(c)
+	require.Equal(t, http.StatusInternalServerError, c.Writer.Status())
+	require.True(t, stub.called)
+
+	claim, err := store.Claim(context.Background(), requestID, token, privacy.EmailConfirmationBinding{
+		Recipient: recipient, UserID: c.GetString("user_id"), FamilyID: familyID, CredentialEpoch: "test", OwnedServerIDs: []string{},
+	})
+	require.NoError(t, err, "a pre-commit deletion failure must release the confirmation for retry")
+	require.NoError(t, claim.Release(context.Background()))
 }
 
 // A DURABLE erasure — the account IS gone, only presence delivery failed — must
@@ -290,11 +398,11 @@ func TestEraseAccount_DurableDeliveryFailureStillRevokesTokens(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, blacklisted, "the access token's jti must be blacklisted")
 
-	disabled, err := rdb.Exists(ctx, middleware.UserDisabledKey(userID)).Result()
+	disabled, err := rdb.Exists(ctx, middleware.UserDisabledKey(c.GetString("user_id"))).Result()
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, disabled, "the user_disabled key must be set")
 
-	ttl, err := rdb.TTL(ctx, middleware.UserDisabledKey(userID)).Result()
+	ttl, err := rdb.TTL(ctx, middleware.UserDisabledKey(c.GetString("user_id"))).Result()
 	require.NoError(t, err)
 	assert.Positive(t, ttl, "the disabled marker must carry a TTL, not linger forever")
 }

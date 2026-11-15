@@ -275,8 +275,8 @@ func TestTOTPDisableNotEnabled(t *testing.T) {
 		"password": testPassword,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
-	// Should return 404 or similar since TOTP not set up
-	assert.Contains(t, []int{http.StatusNotFound, http.StatusBadRequest}, w.Code)
+	// Disabling a missing factor is an idempotent cleanup.
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 // --- Backup Codes ---
@@ -3039,9 +3039,8 @@ func TestTOTPDisableNotEnrolledIdempotent(t *testing.T) {
 
 // --- TOTP Disable: undecryptable stored secret ---
 
-// decryptErrorBody is what the disable handler writes when the stored TOTP
-// secret cannot be decrypted.
-const decryptErrorBody = "MFA verification failed because of a server error. Contact support if this continues."
+// decryptErrorBody deliberately matches the opaque step-up failure response.
+const decryptErrorBody = "Verification failed"
 
 // A stored secret that cannot be decrypted must refuse the disable with the
 // same error body whether its nonce is the wrong length or it was sealed

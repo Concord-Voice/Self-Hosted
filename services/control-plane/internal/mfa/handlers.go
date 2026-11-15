@@ -602,30 +602,6 @@ func (h *Handler) verifyUserPassword(ctx context.Context, userID, password strin
 	return auth.VerifyPasswordWithLockout(ctx, h.redis, email, password, passwordHash)
 }
 
-// verifyFactorRemovalPassword is the password leg of a factor removal, on the
-// subject the caller's locked transaction read. attempt is the guess's
-// shared /auth/login lockout reservation, taken before BeginTx; this makes no
-// Redis call. On refusal it writes the response and returns false.
-func (h *Handler) verifyFactorRemovalPassword(
-	c *gin.Context, subj stepup.Subject, attempt *stepup.PasswordAttempt, password, failureLog string,
-) bool {
-	match, err := attempt.Check(password, subj.PasswordHash)
-	switch {
-	case err != nil:
-		// err is stepup.ErrPasswordNotReserved or ErrPasswordVerification,
-		// never the argon2 decode error that can embed the hash
-		// (observability.md principle 1).
-		h.log.Error(failureLog, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": stepup.ErrMsgVerificationFailed})
-	case !match:
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword})
-		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidPassword})
-	default:
-		return true
-	}
-	return false
-}
-
 func containsStr(ss []string, target string) bool {
 	for _, s := range ss {
 		if s == target {
@@ -1407,14 +1383,16 @@ func (h *Handler) grantTOTPEnrollmentUpgrade(c *gin.Context, userID string, firs
 	}
 }
 
-// totpDisableRequest is TOTPDisable's body. Its bodies predate the step-up
-// seam and are unchanged; only the transaction around them is new.
+// totpDisableRequest is TOTPDisable's body. Code intentionally has no binding
+// requirement: a missing fresh proof reaches the gate and receives its
+// actionable 403 response rather than a validation 400.
 type totpDisableRequest struct {
 	Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
-	Code     string `json:"code" binding:"required"`
+	Code     string `json:"code"`
 }
 
-// TOTPDisable disables TOTP MFA. Requires password + a valid MFA code.
+// TOTPDisable disables TOTP MFA. Removing an enrolled factor requires password
+// and a valid MFA code; an absent factor is an idempotent no-op.
 //
 // The enrollment probe and any attempt-budget admission run before the
 // transaction. The transaction then takes the users row FOR NO KEY UPDATE:
@@ -1429,17 +1407,19 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password and MFA code are required"})
 		return
 	}
-	// Probe enrollment before beginning the locked transaction. A Redis charge
-	// while LockSubjectTx holds the users row would let a slow Redis consume a
-	// scarce SQL connection and block factor writers. The locked recheck below
-	// is still authoritative.
-	var preflightTOTPExists bool
-	if err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&preflightTOTPExists); err != nil {
+	// A missing TOTP factor is an idempotent no-op, so no code was verified.
+	// Keep the locked read below for factors that change after this probe.
+	var enrolled bool
+	if err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&enrolled); err != nil {
 		h.log.Error("Failed to read TOTP enrollment", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	if preflightTOTPExists && !h.chargeMFASettingsCode(c, userID, req.Code) {
+	if !enrolled {
+		c.JSON(http.StatusOK, gin.H{"message": "TOTP MFA has been disabled"})
+		return
+	}
+	if !h.chargeMFASettingsCode(c, userID, req.Code) {
 		return
 	}
 
@@ -1472,19 +1452,12 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	// Row gone but mfa_methods may still list 'totp': the sync below cleans
-	// the denormalized flags either way.
-	mfaVerified := false
+	if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, attempt, req.Password, req.Code, stepup.PurposeTOTPDisable); e != nil {
+		h.refuseMFASettingsStepUp(c, e, factorRemovalStage(e, req.Password, req.Code))
+		return
+	}
 	if totpExists {
-		// A factor appearing after the preflight has not been charged. Refuse it
-		// for a retry instead of offering a free verifier guess; charging here
-		// would reintroduce a Redis round trip while the users row is locked.
-		if !preflightTOTPExists {
-			c.JSON(http.StatusConflict, gin.H{"error": "TOTP enrollment changed; retry"})
-			return
-		}
-		var verified bool
-		if verified, mfaVerified = h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, req, es); !verified {
+		if !h.deleteTOTPTx(c, tx, userID, es) {
 			return
 		}
 	}
@@ -1501,7 +1474,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	if mfaVerified {
+	if totpExists && subj.MFAEnabled {
 		h.clearTxStepUpAfterCommit(c, userID)
 	}
 
@@ -1511,37 +1484,18 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "TOTP MFA has been disabled"})
 }
 
-// verifyAndDeleteTOTPTx is TOTPDisable's verified delete, on the caller's
-// locked transaction. On refusal or failure it has written the response and
-// returns false; the caller's deferred rollback undoes the delete.
-func (h *Handler) verifyAndDeleteTOTPTx(
-	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, attempt *stepup.PasswordAttempt,
-	req totpDisableRequest, es emailSmsState,
-) (proceed, mfaVerified bool) {
+// deleteTOTPTx deletes TOTP on the caller's locked transaction. On refusal or
+// failure it has written the response and returns false; the caller's deferred
+// rollback undoes the delete.
+func (h *Handler) deleteTOTPTx(c *gin.Context, tx *sql.Tx, userID string, es emailSmsState) bool {
 	ctx := c.Request.Context()
-
-	if !h.verifyFactorRemovalPassword(c, subj, attempt, req.Password, "Password verification failed during TOTP disable") {
-		return false, false
-	}
-
-	valid, err := h.VerifyCodeTx(ctx, tx, userID, stepup.PurposeTOTPDisable, req.Code)
-	if err != nil {
-		h.log.Error("MFA code verification error during TOTP disable", "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed because of a server error. Contact support if this continues."})
-		return false, false
-	}
-	if !valid {
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid})
-		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidMFACode})
-		return false, false
-	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_mfa_totp WHERE user_id = $1`, userID); err != nil {
 		h.log.Error("Failed to disable TOTP MFA", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
-		return false, false
+		return false
 	}
-	return !h.refuseLastInlineFactorTx(c, tx, userID, es, errMsgFailedDisableMFA), true
+	return !h.refuseLastInlineFactorTx(c, tx, userID, es, errMsgFailedDisableMFA)
 }
 
 // RegenerateBackupCodes generates new backup codes. Requires password + TOTP code.
@@ -1887,9 +1841,13 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 
 	var req struct {
 		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
+		MFACode  string `json:"mfa_code"`                    //nolint:gosec // request field, not a secret
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
+		return
+	}
+	if !h.chargeMFASettingsCode(c, userID, req.MFACode) {
 		return
 	}
 
@@ -1914,8 +1872,11 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 		h.refuseMFASettingsStepUp(c, e, subjectStage(e))
 		return
 	}
-	if !h.verifyFactorRemovalPassword(c, subj, attempt, req.Password, "Password verification failed during WebAuthn delete") ||
-		!h.deleteWebAuthnTx(c, tx, userID, credentialID, es) {
+	if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, attempt, req.Password, req.MFACode, stepup.PurposeWebAuthnDelete); e != nil {
+		h.refuseMFASettingsStepUp(c, e, factorRemovalStage(e, req.Password, req.MFACode))
+		return
+	}
+	if !h.deleteWebAuthnTx(c, tx, userID, credentialID, es) {
 		return
 	}
 	if err := syncMFAFlagsTx(ctx, tx, userID, es); err != nil {
@@ -1930,6 +1891,9 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 		h.log.Error("Failed to commit WebAuthn delete", "error", commitErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteCredential})
 		return
+	}
+	if req.MFACode != "" {
+		h.clearTxStepUpAfterCommit(c, userID)
 	}
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonFactorDisabled, AuthMethod: securityevent.AuthWebAuthn})
 
