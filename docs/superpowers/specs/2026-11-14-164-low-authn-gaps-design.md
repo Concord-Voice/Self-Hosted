@@ -1,17 +1,17 @@
-# Security #164 Low Authentication Gaps Design
+# Low Authentication Gaps Design
 
-**Issue:** `Concord-Voice/Security#164`
-**Parent:** `Concord-Voice/Security#151`
+**Tracking:** Internal authentication-gap issue
+**Program:** Internal security hardening
 **Owning source:** `Concord-Voice/Self-Hosted`
-**Mirror:** `Concord-Voice/Hosted` after each source PR merges
+**Mirror:** hosted deployment after each reviewed source PR merges
 **Status:** Final Phase 2 design
 
 ## Intent
 
 Six low-severity authentication gaps currently let a prerequisite-bearing
 attacker bypass a defense-in-depth control or spend disproportionate server
-work. A seventh finding, refresh machine binding, belongs to Security #39 and
-is a dependency verification here rather than duplicate implementation. This
+work. A seventh finding, refresh machine binding, belongs to separate refresh-machine binding work and
+is verified here instead of being implemented again. This
 design closes the remaining gaps at their existing seams: WebAuthn assertion
 results, the transaction that stores credentials, backup-code encoding, the
 two MFA method-list handlers, registration parsing, and the WebSocket JWT
@@ -30,7 +30,7 @@ dependency is introduced.
 
 | Finding | Source surfaces | Tests and docs |
 |---|---|---|
-| VULN-009 | No #164 production edit; verify Security #39 on `internal/auth` | #39 exact-head test evidence |
+| VULN-009 | No production edit here; verify the separate refresh-machine binding fix in `internal/auth` | exact-head regression evidence |
 | VULN-021 | `internal/mfa/handlers.go`; existing security-event vocabulary only | MFA WebAuthn and security-event tests |
 | VULN-026 | `internal/mfa/handlers.go`; existing `withMFAFactorWriteTx` | real PostgreSQL concurrent finish test |
 | VULN-022 | `internal/mfa/totp.go`, backup-code callers, migrations `000195_*` | unit, integration, migration up/down tests; architecture docs |
@@ -39,7 +39,7 @@ dependency is introduced.
 | VULN-192 | `internal/middleware/attestation.go`, `internal/websocket/handler.go`, router wiring tests | JWT/ticket WebSocket tests; OpenAPI and architecture docs |
 
 The Self-Hosted migration number is `000195` at the inspected `origin/main`
-head (`b3b7f490`). Hosted currently ends at `000197`, so its reviewed mirror is
+head (`b3b7f490`). The hosted deployment currently ends at `000197`, so its reviewed mirror is
 expected to use `000198`. Both numbers are reservations, not constants: each
 implementer must re-resolve the next free number immediately before creating
 the migration.
@@ -71,7 +71,7 @@ pinned by a representative contract fixture.
 | Up/down symmetry and guarded destructive rollback | `.claude/rules/migrations.md`, `.claude/rules/domains/migrations.md` | v2 rows make the backup-hash downgrade refuse rather than silently corrupt codes |
 | Real integration DB, race-safe tests, ≥80% new-code coverage | `.claude/rules/domains/tests.md` | concurrency tests use isolated PostgreSQL with barriers, not sleeps or the shared `concord` DB |
 | Current third-party contract must be verified | `.claude/skills/_shared/context7-docs-discipline.md` | implementation pins behavior against the repository's go-webauthn version; current docs confirm `CloneWarning` and returned `SignCount` semantics |
-| Source owns `services/**`; Hosted imports reviewed source changes | org split contract | no hand-port into Hosted before the corresponding Self-Hosted PR merges |
+| Source owns `services/**`; the hosted deployment imports reviewed changes | org split contract | no mirror into the hosted deployment before the corresponding Self-Hosted PR merges |
 
 The repository has `.claude/rules/**`, not `.codex/rules/**`; the imported rule
 files are the applicable source of truth in this checkout.
@@ -177,7 +177,7 @@ closed versioned string:
 The v2 parameters are deliberately bounded and exact. A single submitted code
 may be tested against up to eight independent salts, so password-grade 64 MiB
 parameters would multiply into an unauthenticated CPU/memory denial. The codes
-already have a fail-closed per-account attempt budget from Security #157. Eight
+already have a fail-closed per-account attempt budget. Eight
 8 MiB, one-pass computations retain a meaningful database-only cracking cost
 without multiplying one valid request into half a gigabyte of memory. The
 parser rejects any different algorithm, version, parameter tuple, salt length,
@@ -188,10 +188,10 @@ representations: bare lowercase 64-hex legacy SHA-256, `v1$` plus that same
 digest, and v2. Bare acceptance is intentionally retained after migration so a
 B2 binary can read a row created by an in-flight B1 request and a B1 binary can
 be used for application rollback. Removing bare reads is a later cleanup, not
-part of #164. Verification uses constant-time digest comparison, skips used
+part of this work. Verification uses constant-time digest comparison, skips used
 indices, and returns an error for any other stored element. A storage error
 fails the verifier closed. The existing atomic consumption mutation remains
-the sole owner of marking a code used; #164 does not redesign Security #35.
+the sole owner of marking a code used; this work does not redesign existing atomic backup-code consumption.
 
 Migration `000195` rewrites every bare 64-hex legacy element to `v1$...` in
 place while preserving array order and `backup_codes_used`. It does not hash or
@@ -211,7 +211,7 @@ This storage change uses an expand-then-write rollout:
    are safe. Rollback to B0 is forbidden. The guarded down migration is not
    required for application rollback.
 
-Hosted MUST use this two-phase sequence because its blue-green pools overlap.
+The hosted deployment MUST use this two-phase sequence because its blue-green pools overlap.
 An operator-controlled Self-Hosted installation may instead perform a one-shot
 upgrade only if all B0 processes and workers are stopped and fenced from the
 database before migration, and only B2 starts afterward. Direct rolling
@@ -280,7 +280,7 @@ revocation check, user binding, and 403/503 behavior.
 user ID and server-verified `sid` in the same Gin context keys used by auth
 middleware (`user_id` and `JWTClaimsContextKey`), then invokes that shared
 validator when `RequireClientAttestation` is enabled. This does not itself
-replace the current client-selected attestation namespace; Security #44 owns
+replace the current client-selected attestation namespace; separate namespace-binding work owns
 that change. A failure aborts the HTTP handshake before upgrade or client
 allocation. The handler receives the existing config boolean through
 constructor wiring; no environment variable is added.
@@ -297,26 +297,26 @@ middleware expects the bearer before the handler's ticket/JWT classifier and
 would either reject tickets or apply the wrong proof twice. The shared validator
 inside only the JWT branch preserves both rails.
 
-Security #44 will later replace caller-selected attestation namespaces with
+Separate namespace-binding work will later replace caller-selected attestation namespaces with
 the authoritative JWT `sid`. The shared validator is the integration seam;
-#164 must not create a second key derivation or freeze today's header keying in
+this work must not create a second key derivation or freeze today's header keying in
 WebSocket code.
 
 ## PR and rollout order
 
-1. Security #39 lands and proves VULN-009. #164 records that exact-head result;
+1. The separate refresh-machine binding fix lands and proves VULN-009. This work records that exact-head result;
    it does not duplicate the fix.
 2. **PR A:** VULN-021 + VULN-026 (WebAuthn).
 3. **PR B1:** backup-code compatible reader only. It accepts bare/v1/v2 while
    leaving the legacy bare writer unchanged.
-4. Deploy B1 to every Hosted blue/green replica and prove B0 count is zero.
+4. Deploy B1 to every hosted blue/green replica and prove B0 count is zero.
 5. **PR B2:** v2 writer, prefix migration, and VULN-028 method bounds. It must
-   coordinate with Security #35 if that issue edits the same verifier.
+   coordinate with the separate backup-code work if it edits the same verifier.
 6. **PR C:** VULN-002 + VULN-192 (registration/WS). It coordinates with
-   Security #44 at the shared attestation validator.
-7. After each Self-Hosted source PR merges, create the scheduled reviewed Hosted
+   separate namespace-binding work at the shared attestation validator.
+7. After each Self-Hosted source PR merges, create the scheduled reviewed hosted-deployment
    mirror PR from the merged source commit. Re-resolve migration numbering and
-   run Hosted's own hooks, CI, reviews, and Phase 9 approval.
+   run that repository's own hooks, CI, reviews, and Phase 9 approval.
 
 No deployment or live acceptance is implied by source merge. Client attestation
 is default-off in Self-Hosted; its enabled-mode handshake must still be tested.
@@ -360,7 +360,7 @@ Required proof:
   Desktop payload; 413/conflict paths observe zero password hashes.
 - Attestation enabled: JWT missing/invalid/Redis-failure cases deny before
   upgrade; valid JWT attestation succeeds; ticket path is unchanged.
-- VULN-009 verification cites Security #39's exact tested head.
+- VULN-009 verification cites the separate fix's exact tested head.
 
 ## Phase 8 reviewers predicted
 
@@ -409,7 +409,7 @@ Docs ship in the PR that changes their contract; no follow-up docs PR.
 
 | Criterion | Required evidence |
 |---|---|
-| VULN-009 remains owned by #39 | #39 exact-head regression result; no duplicate #164 production edit |
+| VULN-009 remains separately owned | exact-head refresh-machine regression; no duplicate production edit |
 | Clone warning denied | login and inline tests show no counter write or authority mint |
 | Write-time cap | real PostgreSQL concurrent finish test leaves at most ten |
 | Salted backup storage | B1/B2 compatibility matrix, zero-B0 rollout gate, distinct v2 salts, guarded migration and regeneration proof |
@@ -421,13 +421,13 @@ Docs ship in the PR that changes their contract; no follow-up docs PR.
 | New high-confidence security hotspots | **0** |
 | New-code coverage | **≥80%** |
 | Source quality gate | lint, race-focused tests, migration checks, PR CI, and required ruleset checks pass on exact head |
-| Mirror | each Hosted mirror passes independent lint/tests/CI/review and receives separate Phase 9 approval |
+| Mirror | each hosted-deployment mirror passes independent lint/tests/CI/review and receives separate Phase 9 approval |
 
 ## Non-goals
 
-- Implementing VULN-009 outside Security #39.
-- Solving #35 backup-code claim atomicity, #36 ceremony consumption, #44
-  attestation namespace ownership, or #53 WebSocket connection capacity.
+- Implementing VULN-009 in this work.
+- Redesigning backup-code claim atomicity, Redis ceremony consumption,
+  attestation namespace ownership, or WebSocket connection capacity.
 - Adding a pepper, secret rotation, generic validation framework, new MFA
   method, new route, new dependency, or Desktop UI.
 - Claiming deployment or live attestation acceptance from source tests.
@@ -436,13 +436,13 @@ Docs ship in the PR that changes their contract; no follow-up docs PR.
 
 | Risk | Likelihood | Mitigation |
 |---|---:|---|
-| Backup verification becomes a resource amplifier | Medium | exact low Argon2 tuple, eight-code ceiling, #157 account budget, malformed-parameter precheck |
-| Migration or v2 write reaches a B0 replica | High | B1 read expansion first; zero-B0 gate; Hosted blue-green overlap test; Self-Hosted full-stop alternative only |
+| Backup verification becomes a resource amplifier | Medium | exact low Argon2 tuple, eight-code ceiling, existing account attempt budget, malformed-parameter precheck |
+| Migration or v2 write reaches a B0 replica | High | B1 read expansion first; zero-B0 gate; hosted blue-green overlap test; Self-Hosted full-stop alternative only |
 | Downgrade destroys v2 codes | High impact | table lock + refuse down while any v2 entry exists |
 | Finish cap races at nine | High without lock | count and insert after the existing users-row lock in one transaction |
 | Zero-counter authenticators are falsely rejected | Low | branch only on library `CloneWarning`; zero/increasing counter regression tests |
 | Registration cap breaks Desktop | Low | limits derived from producer format and representative client fixture |
 | Attestation is checked twice or tickets break | Medium | validate only JWT fallback; ticket regression test and route-wiring test |
-| #44 changes the namespace contract mid-branch | Medium | one shared validator seam; rebase and rerun both HTTP/WS tests |
-| Source/Hosted migration numbers diverge | Certain | re-resolve per repo; mirror content, not numeric filename |
-| Overlap with #35/#36 overwrites atomicity fixes | Medium | rebase before each PR; retain GETDEL and conditional backup consumption tests |
+| Separate namespace-binding work changes the namespace contract mid-branch | Medium | one shared validator seam; rebase and rerun both HTTP/WS tests |
+| Source/hosted-deployment migration numbers diverge | Certain | re-resolve per repo; mirror content, not numeric filename |
+| Overlap with separate backup-code or ceremony work overwrites atomicity fixes | Medium | rebase before each PR; retain GETDEL and conditional backup consumption tests |

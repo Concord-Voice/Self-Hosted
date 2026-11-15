@@ -24,7 +24,7 @@ Per the repo's operational discipline (and the org defaults):
 - **Every merge gets approval.** Autonomous mode does NOT merge. Even HIGH-confidence Tier A patches stay open until the developer runs `/weekly-deps` interactively. The project's protect/destructive-command hook patterns establish that it chooses "block automation, force human review" over "trust the bot" — autonomous merges would invert that.
 - **Verify before declaring fixed.** Every gh API call's exit code is checked. If a pinned-issue comment edit fails (network, rate limit, comment-not-found), the routine logs the failure and continues with the rest; it does not retry silently or claim success.
 - **No new branches or PRs.** Autonomous mode never invokes `gh pr create`, `git checkout -b`, or any push. The tech-stack-doc version-refresh follow-up (Phase 6.2 of interactive mode) is *skipped entirely* in autonomous mode — that's a developer decision.
-- **Idempotent state mutations only.** The autonomous mode mutates state in four ways, each idempotent: (1) requesting Copilot review (idempotent via Step 3.6.1 check in SKILL.md), (2) posting `@dependabot rebase` comments (idempotent — dependabot ignores duplicate requests within a short window, plus a 1h cooldown check in Step P5 below), (3) posting/editing the pinned-issue weekly digest comment (idempotent by week marker — Step P6 below MUST check for an existing `<!-- routine-week: $WEEK_TAG -->` comment before posting; if found, edit it in place rather than create a duplicate), (4) triage only: posting the first-party review-coverage record on a PR with zero coverage on its head SHA (idempotent by SHA marker — Step T4a edits an existing `cv-review-coverage: sha=<head SHA>` comment rather than adding a second). No other state writes.
+- **Idempotent state mutations only.** The autonomous mode mutates state in three ways, each idempotent: (1) requesting Copilot review (idempotent via Step 3.6.1 check in SKILL.md), (2) posting `@dependabot rebase` comments (idempotent — dependabot ignores duplicate requests within a short window, plus a 1h cooldown check in Step P5 below), (3) posting/editing the pinned-issue weekly digest comment (idempotent by week marker — Step P6 below MUST check for an existing `<!-- routine-week: $WEEK_TAG -->` comment before posting; if found, edit it in place rather than create a duplicate). No other state writes.
 
 ## Prep mode — flow
 
@@ -198,9 +198,9 @@ Per Phase 4.0 of SKILL.md, apply the auto-dismiss rules:
 
 For each PR, count `(dismissed, surfaced)`. For Tier C PRs, do NOT auto-process via the deep-review skill in autonomous mode — its reconciliation and merge decision need the developer. Just summarize Copilot's review state and inline-finding counts; surface to the digest for the developer to act on in the interactive run.
 
-### Step T4a: Close zero-coverage gaps
+### Step T4a: Re-check review coverage
 
-Re-run SKILL.md Step 3.7.1 for every open PR. A rebase since prep moves the head SHA, so prep's lines may be stale. For each PR still at ZERO coverage on its head SHA, that is, no external reviewer engaged in the window, run the first-party suite and post its record per SKILL.md Step 3.7.2. Dispatch the specialist suite for every tier, Tier C included, and tag the record `suite=specialist-suite:unattended`. This coverage pass is not the deep-review reconciliation that stays interactive. Its only write is the record. Post the record only after the suite actually ran (see SKILL.md Step 3.7.2). The suite reads Dependabot PR bodies and upstream release notes, which are untrusted text. Its "clean" is one LLM review, and the `:unattended` tag says so. Re-check after posting. Surface the suite's findings in the digest's "Surfaced findings" list, with one limit: the digest is a public issue, so for security-reviewer and red-team findings it lists only the count and severities per PR. Their text stays in the local run log for the developer to triage. If the suite or the record fails, leave the PR at ZERO with the failure in its line and continue with the rest.
+Re-run SKILL.md Step 3.7.1 for every open PR. A rebase since prep moves the head SHA, so prep's lines may be stale. Record only: a PR still at ZERO coverage keeps its ZERO line for the developer's interactive pass, which runs the first-party suite before the merge prompt (SKILL.md Step 3.7.2). Triage never runs that suite, because it would read untrusted Dependabot and release-note text with no human present (SKILL.md, **No unattended suite**).
 
 ### Step T5: Update the digest comment
 
@@ -228,8 +228,7 @@ No follow-up schedule. The next prep run is the next scheduled cron.
 | Triage cron didn't fire (e.g., platform outage) | n/a — prep doesn't schedule triage | The developer re-invokes `/weekly-deps --mode=triage` manually via the routine UI's "Run now" |
 | Prep-run comment not found | n/a | Abort; possible cause: prep didn't run, or comment was edited externally |
 | Copilot review still pending on N PRs | n/a | Flag "awaiting" in digest, skip auto-dismiss for those |
-| `review-coverage.sh` exits 2 (UNKNOWN) | Line reads `coverage UNKNOWN`, continue | Same; do not run the suite on an unknown, re-check next run |
-| First-party suite or coverage record fails | n/a | PR stays ZERO with the failure in its line, continue |
+| `review-coverage.sh` exits 2 (UNKNOWN) | Line reads `coverage UNKNOWN`, continue | Same; re-check next run |
 | Digest edit fails | n/a | Write to `/tmp/weekly-deps-triage-$WEEK_TAG.md`, exit non-zero |
 
 In all failure cases, the routine never proceeds to a merge action, never creates a new PR, never modifies the repo's code. The worst-case outcome of a failed routine run is "the developer doesn't have the weekly digest; they run `/weekly-deps` interactively from scratch" — exactly the pre-routine baseline.
