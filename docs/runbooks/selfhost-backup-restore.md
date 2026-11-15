@@ -42,7 +42,7 @@ When every check passes, the command:
 
 The new signing secret invalidates every pre-restore signed access, challenge, and recovery token; restored refresh tokens are revoked and old opaque Redis authorization state is cleared too. Sign in again after a successful restore. This prevents a recovery token consumed after the backup was made from becoming valid when the restored system has no Redis replay marker, and prevents an old refresh token or admin session from regaining access. Both application planes start together with the same new secret.
 
-Expect a burst of high-severity refresh-replay security events after startup. Each client's first refresh presents a token that restore revoked, which is the replay path working as intended.
+Expect refresh failures after startup as each client presents a token that restore revoked. Unbound clients emit high-severity refresh-replay security events, and key-bound clients log a "no live successor" warning. Both are the replay defence working as intended.
 
 ### What a restore rolls back
 
@@ -52,7 +52,8 @@ The database returns to the moment of the backup. Rotating the signing secret an
 - removed passkeys, security keys, and admin WebAuthn credentials;
 - MFA resets and used backup codes;
 - removed trusted recovery devices and replaced recovery keys;
-- revoked server invites and redeemed redemption codes.
+- revoked server invites and redeemed redemption codes;
+- reversed or completed ownership transfers, whose emailed reversal tokens work again.
 
 After a successful restore, re-apply each such change that you know of, starting with any made in response to a compromise.
 

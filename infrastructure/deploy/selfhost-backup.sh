@@ -398,7 +398,7 @@ PY
   echo 'Starting the stack...'
   main up || return 1
   main health || return 1
-  echo 'Restore complete. Every user must sign in again. Password, MFA, key and invite changes made after this backup were rolled back; re-apply them (see the restore runbook).'
+  echo 'Restore complete. Every user must sign in again. Password, MFA, key, invite and ownership-transfer changes made after this backup were rolled back; re-apply them (see the restore runbook).'
 }
 
 # _restore_stopped MSG — a pre-restore failure left the prior authorization
