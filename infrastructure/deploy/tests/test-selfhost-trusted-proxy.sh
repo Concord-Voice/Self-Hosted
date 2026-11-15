@@ -251,8 +251,9 @@ http {{
             with untrusted_media.wrap_socket(raw, server_hostname="media.example.test") as connection:
                 connection.sendall(b"GET / HTTP/1.1\r\nHost: api.example.test\r\nCF-Connecting-IP: 198.51.100.14\r\nConnection: close\r\n\r\n")
                 response = connection.recv(4096)
-        # nginx's nonstandard 444 intentionally closes without an HTTP response.
-        assert response == b"", f"media-SNI/API-Host bypass was accepted: {response[:120]!r}"
+        # nginx may reject the SNI/Host mismatch with 421 before our 444 guard.
+        assert response == b"" or response.startswith(b"HTTP/1.1 421 Misdirected Request\r\n"), \
+            f"media-SNI/API-Host bypass was accepted: {response[:120]!r}"
 
         trusted_api = ssl.create_default_context(cafile=ca_cert)
         trusted_api.check_hostname = False
