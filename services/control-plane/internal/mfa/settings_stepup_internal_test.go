@@ -39,7 +39,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -311,29 +310,10 @@ func TestTOTPDisableWithoutTOTPDoesNotChargeMFABudget(t *testing.T) {
 	require.Zero(t, exists, "a no-TOTP request never reaches VerifyCodeTx and must not consume the shared budget")
 }
 
-// TOTPDisable's budget is conditional on the preflight enrollment probe, but
-// must never issue Redis I/O after LockSubjectTx has acquired the users-row
-// lock. The real no-TOTP test above covers the behavioral half; this focused
-// source guard keeps the ordering/race contract visible to refactors.
-func TestTOTPDisableBudgetPreflightPrecedesLockedTransaction(t *testing.T) {
-	source, err := os.ReadFile("handlers.go") //nolint:gosec // fixed sibling test fixture
-	require.NoError(t, err)
-	start := strings.Index(string(source), "func (h *Handler) TOTPDisable(")
-	require.GreaterOrEqual(t, start, 0)
-	rest := string(source)[start:]
-	end := strings.Index(rest, "\nfunc ")
-	require.Greater(t, end, 0)
-	body := rest[:end]
-	preflight := strings.Index(body, "preflightTOTPExists")
-	charge := strings.Index(body, "h.chargeMFASettingsCode")
-	begin := strings.Index(body, "h.db.BeginTx")
-	lockedRecheck := strings.Index(body, "if !preflightTOTPExists")
-	require.GreaterOrEqual(t, preflight, 0)
-	require.Greater(t, charge, preflight, "charge must follow the unlocked enrollment probe")
-	require.Greater(t, begin, charge, "Redis admission must finish before the SQL transaction starts")
-	require.Greater(t, lockedRecheck, begin, "a factor appearing after preflight must be refused under the lock")
-	require.Contains(t, body[lockedRecheck:], "http.StatusConflict")
-}
+// The ordering contract (the budget charge precedes the locked transaction,
+// and nothing touches Redis under the lock) is pinned behaviourally by
+// TestTOTPDisable_NoRedisWhileTheUsersRowIsLocked and
+// TestTOTPDisable_EnrollmentAfterPreflightIs409Uncharged.
 
 func TestLegacyMFASettingsBudgetIsSharedAndChargesOncePerRequest(t *testing.T) {
 	db := iuNewTestDB(t)
