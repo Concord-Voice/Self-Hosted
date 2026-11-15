@@ -1,12 +1,10 @@
-# Security #158: Fresh step-up for destructive account and session actions
-
-**Issue:** [Concord-Voice/Security#158](https://github.com/Concord-Voice/Security/issues/158)
+# Fresh step-up for destructive account and session actions
 
 **Date:** 2026-11-14
 
 **Status:** approved for planning
 
-**Canonical source:** Concord-Voice/Self-Hosted
+**Canonical source:** canonical server repository
 
 This design is the Phase-2 reconciliation of the architect, system-engineer,
 UI/UX/frontend, and live-repository findings. It closes VULN-038, VULN-027,
@@ -24,7 +22,7 @@ ownership transfer, or revoke another session.
 Every proof-bearing action uses the existing `internal/stepup` machinery. The
 password and, when enrolled, the second factor are checked against the actor
 state locked by the same transaction that owns the protected mutation. MFA-code
-attempts are charged before that transaction through Security #157's shared
+attempts are charged before that transaction through the shared account-attempt
 budget. A successful proof clears its charge only after the protected effect has
 definitely committed. Rollback and commit uncertainty retain the charge.
 
@@ -37,35 +35,34 @@ never replaces password/MFA and never deletes the account by itself.
 
 | Conflict | Ruling | Consequence |
 |---|---|---|
-| Defer the account-erasure UI to Desktop #661 | **Rejected.** Live `Concord-Voice/Desktop#661` does not exist, and `Concord-Voice/Hosted#661` is a closed, unrelated telemetry issue. The comment in `desktop/src/renderer/api/privacy.ts` is stale. | The Desktop erasure danger-zone flow is required #158 scope. Backend hardening may land first, but #158 cannot close until the companion ships. |
+| Defer the account-erasure UI to a later Desktop change | **Rejected.** The apparent Desktop follow-up is not an active companion, and an unrelated closed tracker reference does not establish ownership. The comment in `desktop/src/renderer/api/privacy.ts` is stale. | The Desktop erasure danger-zone flow is required scope. Backend hardening may land first, but this work cannot close until the companion ships. |
 | Let the emailed link authorize erasure for an unverified address | **Rejected.** An unverified address is not an authenticator. | The link confirms intent only. Final erasure still requires a new password/MFA proof inside the deletion transaction. It does not mark the email verified. |
 | Verify step-up in middleware or a preflight transaction | **Rejected.** | The route reserves external attempt state before `BeginTx`; the mutation owner verifies and consumes proof using its already-locked actor in the effect transaction. |
-| Call Redis while holding SQL locks | **Rejected.** | Security #157's `stepup.Charge` call, password-attempt reservation, email-confirmation claim, and free-revoke reservation all happen before the SQL transaction. |
-| Add an opaque new budget abstraction in #158 | **Rejected.** | Reuse #157's chosen call-site `stepup.Charge` model and caller census. Do not double-charge routes #157 already covers. |
+| Call Redis while holding SQL locks | **Rejected.** | The shared `stepup.Charge` call, password-attempt reservation, email-confirmation claim, and free-revoke reservation all happen before the SQL transaction. |
+| Add an opaque new budget abstraction | **Rejected.** | Reuse the existing call-site `stepup.Charge` model and caller census. Do not double-charge routes already covered by the budget contract. |
 | Give every route a reusable “dangerous action” purpose | **Rejected.** | Add one closed purpose per consumer route. The new purposes are never grace eligible. |
-| Implement the free-revoke race in both #37 and #158 | **Rejected.** Security #37 remains the implementation owner for VULN-013. | #158 depends on the one #37 atomic reservation and carries the cross-finding acceptance test. If delivered in the same train, the code lands once and both issues reference it. |
+| Implement the free-revoke race in two places | **Rejected.** The existing atomic reservation remains the implementation owner for VULN-013. | This work depends on that single atomic reservation and carries the cross-finding acceptance test. If delivered in the same train, the code lands once. |
 | Invent an ownership-transfer UI because none was located | **Rejected.** | Harden the server and add the typed Desktop purpose/API contract. A census test records that there is currently no renderer mutation callsite; a future surface must use the contract. |
 
 ## 3. Scope, ownership, and dependencies
 
 ### 3.1 Repositories
 
-- **Self-Hosted** owns canonical control-plane code, OpenAPI, ADR/design updates,
+- The **canonical server repository** owns control-plane code, OpenAPI, ADR/design updates,
   tests, and the implementation changelog.
 - **Desktop** owns user prompts, the account-erasure consequence review, the
   custom-protocol email-confirmation handoff, and API adapters.
-- **Hosted** receives `services/**` and `docs/api/**` only through the scheduled,
-  reviewed upstream mirror. Hosted-specific changelog or non-imported docs are
-  updated in its mirror PR.
+- The **managed deployment repository** receives `services/**` and `docs/api/**`
+  only through the scheduled, reviewed upstream mirror. Its changelog or
+  non-imported docs are updated in its mirror PR.
 
-The Self-Hosted admin console is not the user client and receives no erasure UI.
+The administrator console is not the user client and receives no erasure UI.
 Mobile has no confirmed callsite in this issue and is not a substitute for the
 required Desktop companion.
 
 ### 3.2 Required predecessor contracts
 
-**Security #157 — account attempt budgets.** #158 consumes #157's chosen
-contract:
+**Account-attempt budgets.** This work consumes the existing chosen contract:
 
 ```go
 stepup.Charge(ctx, stepup.DangerousActionBudget(redis), userID, mfaCode)
@@ -75,16 +72,15 @@ The outer request owner charges a non-empty submitted MFA code once, before
 `BeginTx`. A missing code is not charged. Exhaustion is `429`; unavailable Redis
 is `503`. A definite successful protected effect clears the budget after commit.
 Wrong proof, rollback, cancellation, and unknown commit retain it. Direct
-`VerifyCode`/`VerifyCodeTx` callers remain covered by #157's production census.
+`VerifyCode`/`VerifyCodeTx` callers remain covered by the production census.
 
-**Security #37 — atomic free revoke.** #37 owns the Lua reservation that replaces
-the check-then-act free-revoke counter. #158 must not add a second counter or a
-parallel policy. Its session acceptance suite runs against #37's merged
-primitive.
+**Atomic free revoke.** The existing Lua reservation replaces the check-then-act
+free-revoke counter. This work must not add a second counter or a parallel
+policy. Its session acceptance suite runs against the merged primitive.
 
-**Security #118 — overlap only.** #118 partially overlaps factor removal, SSO
-unlink/trust, and session revocation. #158 is the concrete vulnerability owner.
-After #158 merges, #118 is rescaled against its remaining acceptance criteria;
+**Overlap only.** A follow-up partially overlaps factor removal, SSO unlink/trust,
+and session revocation. This work is the concrete vulnerability owner. After it
+merges, the follow-up is rescaled against its remaining acceptance criteria;
 the same route must not acquire a second proof gate.
 
 ## 4. Common step-up contract
@@ -124,7 +120,7 @@ at the top level:
 distinguishes a typed TOTP/backup code from the 43-character purpose-bound
 WebAuthn inline token. `step_up_token` is the existing password-token field for
 own-rule routes and is **not** an alternative second factor for these actions;
-new #158 consumers reject it. Route-specific request structs reuse
+new consumers reject it. Route-specific request structs reuse
 `stepup.Fields.Input`'s size/shape rules without reading a Gin body twice.
 `TOTPDisable` preserves its existing `code` field instead of silently renaming
 it. `PATCH /users/me/security` preserves `current_passphrase` instead of adding
@@ -141,7 +137,7 @@ suffixes must never enter logs, metrics, security events, or error text.
 | Required proof absent | 403 | `{"error_code":"step_up_required"}` plus the existing safe method hints |
 | Password/factor invalid | 403 | Existing generic invalid-proof response; do not reveal which leg failed |
 | Password lockout | 423 | Existing `stepup.LockedError` response |
-| Shared MFA budget exhausted | 429 | `step_up_budget_exhausted: true` and `Retry-After` from #157 |
+| Shared MFA budget exhausted | 429 | `step_up_budget_exhausted: true` and the budget contract's `Retry-After` |
 | Shared MFA budget unavailable | 503 | `step_up_budget_unavailable: true`; no invalid-code claim |
 | Actor/session/epoch stale | 401 | Existing authentication-required response |
 | Protected state changed | 409 | Route-specific stable `error_code`; no partial mutation |
@@ -157,7 +153,7 @@ Every route follows this order:
    credential epoch from middleware.
 3. Reserve the password guess with `stepup.ReserveUserPasswordAttempt` when a
    password is supplied.
-4. Charge a submitted MFA code once through #157's
+4. Charge a submitted MFA code once through the shared
    `stepup.DangerousActionBudget`.
 5. Perform any route-specific Redis claim needed before SQL.
 6. Open the route owner's transaction and take its existing canonical locks.
@@ -290,7 +286,7 @@ An unverified address is an intent channel, not a factor. The protocol is:
 
 Issuing the email and final erasure are separate protected effects, so an
 unverified-email account performs two fresh step-ups. A successfully issued
-pending confirmation may clear that request's #157 budget only after both the
+pending confirmation may clear that request's shared budget only after both the
 Redis record and email handoff succeed. The final request charges independently
 and clears only after definite erasure commit.
 
@@ -325,7 +321,7 @@ verifier. WebAuthn uses a one-use inline token minted for the exact route.
 ### 6.1 TOTP disable
 
 Keep the existing `password` and `code` request fields and
-`mfa_settings.totp_disable` purpose. #157 charges `code` once before `BeginTx`.
+`mfa_settings.totp_disable` purpose. The shared budget charges `code` once before `BeginTx`.
 Under the existing users-row `FOR NO KEY UPDATE` lock, verify password and the
 second factor, delete TOTP, enforce the last-inline-factor policy, synchronize
 MFA flags, and commit. A proof or flag-sync failure rolls back the delete.
@@ -394,7 +390,7 @@ Ending another session remains exclusively
 
 ### 8.2 Atomic free-revoke allowance
 
-Replace `countRevokesInWindow` followed by `recordRevoke` with #37's single Lua
+Replace `countRevokesInWindow` followed by `recordRevoke` with the single Lua
 reservation. The authority key is:
 
 ```text
@@ -533,17 +529,17 @@ the hardened API remains authoritative for every caller.
 
 Line numbers are leads, not anchors. Locate symbols before editing.
 
-### 11.1 Self-Hosted canonical changes
+### 11.1 Canonical server changes
 
 | Unit | Likely files | Responsibility |
 |---|---|---|
-| Closed purposes and common proof | `internal/stepup/purpose.go`, purpose/OpenAPI/census tests | Add exact purposes; keep them out of grace/own-rule sets; integrate #157 budget classification. |
+| Closed purposes and common proof | `internal/stepup/purpose.go`, purpose/OpenAPI/census tests | Add exact purposes; keep them out of grace/own-rule sets; integrate shared budget classification. |
 | Erasure HTTP/email handoff | `internal/privacy/handler.go`, focused confirmation helper/tests | Bind the new body, issue/claim the Redis email confirmation, map stable responses. |
 | Erasure transaction | `internal/users/delete_account.go`, focused erasure tests | Closed request type, locked proof, owned-server exact set, unchanged post-commit obligations. |
 | Factor removal | `internal/mfa/handlers.go` or a focused `factor_removal_stepup.go`, tests | Shared transactional helper for TOTP and WebAuthn removal. |
 | SSO security | `internal/users/handlers.go`, tests | Transactional unlink and trust-enable proof. |
 | Own-family logout | `internal/auth/handlers.go`, E2E tests | Reject cross-family header targets without side effects. |
-| Session revoke | `internal/sessions/handlers.go`, #37 helper/tests | Atomic per-family allowance and per-family simple window. |
+| Session revoke | `internal/sessions/handlers.go`, atomic-reservation helper/tests | Atomic per-family allowance and per-family simple window. |
 | Ownership | `internal/ownership/handlers.go`, tests | Fresh confirmation proof in coordinator transaction. |
 | API/docs | `docs/api/openapi.yaml`, ADR-0046, `docs/design/authenticated-step-up-budget.md`, `CHANGELOG.md` | Wire contract, policy/caller census, release note. |
 
@@ -561,7 +557,7 @@ Line numbers are leads, not anchors. Locate symbols before editing.
 
 | Task | Ordering |
 |---|---|
-| A. Merge or import #157 budget contract; merge #37 atomic reservation | Serial prerequisites for their consumers |
+| A. Merge or import the budget contract and atomic reservation | Serial prerequisites for their consumers |
 | B. Closed purposes, OpenAPI enum, Desktop purpose map | First shared contract |
 | C. Factor removal and SSO mutations | Parallel after B |
 | D. Logout and session revoke | Parallel after A |
@@ -569,7 +565,7 @@ Line numbers are leads, not anchors. Locate symbols before editing.
 | F. Erasure transactional core and email-confirmation state | Serial within erasure; parallel with C-E |
 | G. Desktop existing settings and erasure/deep-link companion | Starts after B/API contract; must finish before issue closure |
 | H. Docs, caller census, exploit regressions, quality gates | After implementation surfaces stabilize |
-| I. Hosted mirror | Only after canonical Self-Hosted merge and green gate |
+| I. Managed deployment mirror | Only after canonical-server merge and green gate |
 
 ## 12. Test strategy
 
@@ -615,7 +611,7 @@ Additional suites:
 - **Ownership:** initiation proof cannot confirm; actor/owner/member/epoch
   changes under lock refuse without partial transfer.
 - **Census:** every production closed-purpose consumer reaches the shared helper;
-  every direct MFA verifier call is charged or explicitly exempt under #157;
+  every direct MFA verifier call is charged or explicitly exempt under the budget contract;
   Desktop has no unclassified dangerous mutation callsite.
 
 ### 12.3 Desktop matrices
@@ -634,7 +630,7 @@ Additional suites:
 
 ## 13. Acceptance mapping
 
-| Security #158 criterion | Required proof |
+| Acceptance criterion | Required proof |
 |---|---|
 | Bearer-only erasure is rejected | `403 step_up_required`; no user/server/DM/session/audit mutation |
 | Multi-member owned servers are protected | Exact locked set; unconfirmed or stale set returns `409` and deletes nothing |
@@ -643,20 +639,20 @@ Additional suites:
 | TOTP and WebAuthn removal share one policy | Caller census and both route matrices |
 | SSO unlink and trust enable require step-up | Missing/stale proof tests; no partial state |
 | Logout cannot end another family | Component and disposable-Postgres E2E exploit regressions |
-| Free revoke is atomic | Parallel test admits at most the configured allowance; #37 implementation referenced once |
+| Free revoke is atomic | Parallel test admits at most the configured allowance; atomic implementation referenced once |
 | Simple-mode grant is per family | Family A/B isolation test |
 | Transfer confirmation needs fresh proof | Coordinator transaction tests; initiation proof rejected |
 | Desktop sends every current required proof | Component/API tests plus zero-callsite ownership census |
 | Docs ship with code | ADR-0046, authenticated-step-up budget design, OpenAPI, and changelogs updated in the owning PRs |
 | Quality gate | 0 new blocker/critical issues; 0 new high-confidence security hotspots; at least 80% new-code coverage |
 
-All listed issue exploit tests must fail against the fixed code. Self-Hosted and
-Hosted each pass their own lint, type-check, test, security, and review gates;
-one repository's result is not evidence for the other.
+All listed exploit tests must fail against the fixed code. The canonical server
+and managed deployment repositories each pass their own lint, type-check, test,
+security, and review gates; one repository's result is not evidence for the other.
 
 ### Docs to update
 
-- `docs/design/authenticated-step-up-budget.md`: add every #158 consumer to the
+- `docs/design/authenticated-step-up-budget.md`: add every affected consumer to the
   production caller census, its purpose, charge owner, transaction owner, and
   success-only clear point.
 - `docs/adr/0046-account-authentication-and-recovery.md`: record factor-removal,
@@ -664,30 +660,31 @@ one repository's result is not evidence for the other.
   the unverified-email rule.
 - `docs/api/openapi.yaml`: exact request fields, closed-purpose enum, `202`,
   `403`, `409`, `423`, `429`, and `503` responses, and size/format bounds.
-- Self-Hosted and Desktop `CHANGELOG.md`; Hosted's changelog in the reviewed
-  mirror PR because it is not imported from Self-Hosted.
-- The stale Desktop `privacy.ts` #661 ownership comment: replace it with the
+- Canonical-server and Desktop `CHANGELOG.md`; the managed deployment changelog
+  in the reviewed mirror PR because it is not imported from the canonical source.
+- The stale Desktop `privacy.ts` ownership comment: replace it with the
   shipped component/API owner or remove it.
 
 These docs ship with the code they describe; a follow-up documentation PR does
-not satisfy #158.
+not satisfy this work.
 
 ## 14. Rollout and mirror order
 
-1. Merge Security #157's budget call-site coverage and Security #37's one atomic
-   free-revoke reservation, or rebase #158 onto the exact merged contracts.
-2. Land Self-Hosted closed purposes, backend behavior, regression tests,
+1. Merge the budget call-site coverage and one atomic free-revoke reservation,
+   or rebase this work onto the exact merged contracts.
+2. Land canonical-server closed purposes, backend behavior, regression tests,
    OpenAPI, ADR/design updates, and changelog.
 3. Land Desktop support for the new purposes, existing Settings actions,
    erasure danger zone, and closed email-confirmation deep link.
 4. Release ordering prefers Desktop first, then server enforcement. If the
    server reaches a user first, old clients fail closed on dangerous actions;
    there is no legacy bearer-only fallback.
-5. After the canonical Self-Hosted merge is green, allow the scheduled upstream
-   mirror to import `services/**` and `docs/api/**` into Hosted through a
+5. After the canonical-server merge is green, allow the scheduled upstream
+   mirror to import `services/**` and `docs/api/**` into the managed deployment
+   repository through a
    reviewed PR. Resolve only mirror conflicts; do not hand-copy a competing
    implementation.
-6. Add Hosted-only changelog/non-imported docs, run Hosted's independent quality
+6. Add managed-deployment-only changelog/non-imported docs, run its independent quality
    gate and security reviews, then merge.
 7. Observe `step_up_required`, 409 drift, 429 exhaustion, 503 dependency,
    email-confirmation issuance/expiry, cross-family logout refusal, and
@@ -702,7 +699,7 @@ forward code; it must not restore bearer-only erasure or factor removal.
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | A handler verifies proof before the transaction and the locked state changes afterward | Medium | Transaction-owner helpers accept already-locked subject/authority; race tests for every route |
-| #157 and #158 both charge the same code | Medium during parallel development | Production caller census; one outer request owner; rebase on #157 before implementation review |
+| Two concurrent changes both charge the same code | Medium during parallel development | Production caller census; one outer request owner; rebase on the budget contract before implementation review |
 | Erasure set is computed before locks or ignores newly joined members | Medium | Locked exact recomputation and `409`; acknowledgements clear in Desktop |
 | Email link becomes a bearer-only delete or verifies the address | High impact | Link only supplies a bound intent secret; second fresh step-up in deletion tx; explicit tests for no delete/no email verification |
 | Deep-link secret leaks through argv or logging | Medium | Closed parser, fixed outcome logs, no URL logging, transient IPC/component memory, reset fences |
@@ -710,11 +707,11 @@ forward code; it must not restore bearer-only erasure or factor removal.
 | Wrong login family earns or spends simple-mode/free authority | Medium | Keys derive only from verified access identity; family A/B tests |
 | Factor-removal helper relocks the user and inverts lock order | Medium | Pass locked subject into helper; no nested `LockSubjectTx`; lock-order tests |
 | Ownership confirmation trusts initiation-time proof | Medium | New non-grace purpose checked in coordinator transaction |
-| Backend lands without usable Desktop erasure UI | High product impact | Desktop companion is an acceptance gate; stale #661 comment removed/updated |
-| Hosted diverges through manual porting | Medium | Self-Hosted first, scheduled reviewed mirror, independent Hosted gate |
+| Backend lands without usable Desktop erasure UI | High product impact | Desktop companion is an acceptance gate; stale ownership comment removed/updated |
+| Managed deployment diverges through manual porting | Medium | Canonical server first, scheduled reviewed mirror, independent managed-deployment gate |
 
 Phase-8 reviewers must focus on direct-verifier census coverage, transaction
 lock ordering, commit-ambiguity settlement, deep-link secret handling, Desktop
-request-context fences, RBAC/ownership rechecks, and scope overlap with #37,
-#118, and #157. Security and red-team review are mandatory; renderer changes
+request-context fences, RBAC/ownership rechecks, and scope overlap with the
+atomic reservation, the overlapping follow-up, and the budget contract. Security and red-team review are mandatory; renderer changes
 also require the frontend specialist review.
