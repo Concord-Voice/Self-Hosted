@@ -9,6 +9,8 @@ allowed-tools:
   - Bash(gh label *)
   - Bash(gh repo *)
   - Bash(git log *)
+  - Bash(git rev-parse *)
+  - Bash(source *)
   - Bash(date *)
   - Bash(jq *)
   - Read
@@ -61,8 +63,54 @@ Resolve mode from `$ARGUMENTS` (default `auto`). **Always read [`references/auto
 ## Phase 0 — Resolve context + safety envelope (read-only)
 
 ```bash
-PUBLIC=${public:-example-org/example-repo}         # source-available feedback repo (FEEDBACK_REPO)
-TRACKER=${tracker:-example-org/example-repo-private}  # private tracker
+# On any FATAL below, stop the skill and report it. The snippet uses `return`
+# so it ends the snippet without killing a sourced or shared shell.
+# Load the helper from the default branch, never this checkout (on a PR branch it is the PR's code).
+RC_REF="refs/remotes/origin/$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"   # the API is the authority; origin/HEAD goes stale after a rename
+[ "$RC_REF" != refs/remotes/origin/ ] || RC_REF="$(git symbolic-ref --quiet refs/remotes/origin/HEAD || echo refs/remotes/origin/main)"
+case "$RC_REF" in refs/remotes/origin/HEAD) RC_REF= ;; refs/remotes/origin/?*) ;; *) RC_REF= ;; esac
+RC_OID="$([ -n "$RC_REF" ] && git show-ref --verify --hash "$RC_REF" 2>/dev/null)"   # exact refname, no DWIM: a same-named branch or tag cannot stand in
+case "$([ -n "$RC_OID" ] && git ls-tree "$RC_OID" -- scripts/repo-config.sh | cut -d' ' -f1)" in
+  100644|100755) ;;
+  *) echo "FATAL: ${RC_REF:-the default branch} is not fetched or has no regular scripts/repo-config.sh" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+RC_SRC="$(git show "$RC_OID:scripts/repo-config.sh")" || { echo "FATAL: could not read the default-branch helper" >&2; return 1 2>/dev/null || exit 1; }
+eval "$RC_SRC"   # the commit that was checked; the checkout's copy is never sourced
+unset RC_TRUSTED_STATE RC_TRUSTED_CFG   # nothing carries over from an earlier run in this shell
+# Presence comes from the tree, not from a read: a blob that is listed but cannot be read is an
+# error, never "absent". RC_TRUSTED_STATE: absent = no config on the default branch; present = read.
+RC_ENT="$(git ls-tree "$RC_OID" -- .claude/repo-config.json)" || { echo "FATAL: could not list the default-branch tree" >&2; return 1 2>/dev/null || exit 1; }
+case "${RC_ENT%% *}" in
+  "") RC_TRUSTED_STATE=absent ;;
+  100644|100755)
+    RC_TRUSTED_CFG="$(git show "$RC_OID:.claude/repo-config.json")" && [ -n "$RC_TRUSTED_CFG" ] \
+      || { echo "FATAL: could not read the default-branch .claude/repo-config.json" >&2; return 1 2>/dev/null || exit 1; }
+    RC_TRUSTED_STATE=present ;;
+  *) echo "FATAL: the default-branch .claude/repo-config.json is not a regular file" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+DEFAULT_BRANCH="${RC_REF#refs/remotes/origin/}"
+# Repo pair and sentinel prefix come from .claude/repo-config.json (.feedback_triage.*);
+# a flag (--public / --tracker, or a repo named in the request) still wins. A scheduled
+# run passes no flags, so a repo that runs this routine MUST set .feedback_triage.public
+# and .tracker. The example-org placeholders are allowed only in --mode=dry-run (read-only).
+PUBLIC=${public:-$(rc_get '.feedback_triage.public' 'example-org/example-repo')}           # source-available feedback repo (FEEDBACK_REPO)
+TRACKER=${tracker:-$(rc_get '.feedback_triage.tracker' 'example-org/example-repo-private')}  # private tracker
+# Fail closed: an empty, placeholder, malformed or identical pair would send private
+# tracker detail to the public repo (gh -R "" falls back to the current checkout).
+nwo='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+PUBLIC=${PUBLIC%.git}; TRACKER=${TRACKER%.git}   # GitHub names ignore case and a .git suffix
+placeholder=0; [[ $PUBLIC == example-org/example-repo || $TRACKER == example-org/example-repo-private ]] && placeholder=1
+if [[ ! $PUBLIC =~ $nwo || ! $TRACKER =~ $nwo || ${PUBLIC,,} == "${TRACKER,,}" ]] || { [ "$placeholder" = 1 ] && [ "${mode:-auto}" != dry-run ]; }; then
+  echo "FATAL: set .feedback_triage.public and .tracker (owner/repo, different repos) in .claude/repo-config.json, or pass --public/--tracker" >&2
+  return 1 2>/dev/null || exit 1
+fi
+# Sentinel prefix for every routine marker. Keep the prefix a repo already has on
+# its public issues: a renamed prefix orphans the existing status comments and the
+# pinned Known Issues issue, and the next run would duplicate them.
+SP="$(rc_get '.feedback_triage.sentinel_prefix' 'feedback-triage')"
+# An empty or odd prefix would miss existing markers (duplicating them) or close the
+# HTML comment early (exposing the marker text), so fail closed.
+[[ $SP =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "FATAL: .feedback_triage.sentinel_prefix must match ^[a-z0-9][a-z0-9-]*\$" >&2; return 1 2>/dev/null || exit 1; }
 TODAY=$(date -u +%Y-%m-%d)
 ```
 
@@ -79,12 +127,12 @@ TODAY=$(date -u +%Y-%m-%d)
 
 ## Phase 1 — Catalog the public inbox (read-only)
 
-Pull **open** issues plus issues **closed in the last 2 days** (to reconcile in-flight reverse-sync). The GitHub author is the same feedback bot on every issue — **never key on author**; the real reporter is the non-reversible per-reporter correlation token in the body (`**Reported by:** report \`<token>\`` for bugs / `**Requested by:** report \`<token>\`` for features).
+Pull **open** issues plus issues **closed in the last 30 days** (to reconcile in-flight reverse-sync, and to feed the 30-day `Recently fixed` list in Phase 6.5). The GitHub author is the same feedback bot on every issue — **never key on author**; the real reporter is the non-reversible per-reporter correlation token in the body (`**Reported by:** report \`<token>\`` for bugs / `**Requested by:** report \`<token>\`` for features).
 
 ```bash
 gh issue list -R "$PUBLIC" --state open  --limit 200 \
   --json number,title,body,labels,createdAt,updatedAt,comments,reactionGroups,author > /tmp/ft-open.json
-gh issue list -R "$PUBLIC" --state closed --limit 60 --search "closed:>=$(date -u -v-2d +%Y-%m-%d 2>/dev/null || date -u -d '2 days ago' +%Y-%m-%d)" \
+gh issue list -R "$PUBLIC" --state closed --limit 300 --search "closed:>=$(date -u -v-30d +%Y-%m-%d 2>/dev/null || date -u -d '30 days ago' +%Y-%m-%d)" \
   --json number,title,body,labels,closedAt > /tmp/ft-closed-recent.json
 ```
 
@@ -94,7 +142,7 @@ For each open issue derive its **state record** (see [`references/idempotency.md
 - **reporter_id** — the dedup/uniqueness key; parsed from the `report \`<token>\`` line — now the per-user HMAC correlation token (stable per user; no longer a raw UUID).
 - **managed marker** — parse the routine's status comment if present (`reports`, `consolidated`, `alpha`, `state`, `release`, `fixed_in`, `last_synced`). Absent ⇒ `state: untriaged`.
 - **human-touched?** — any non-routine maintainer comment, or a `wontfix`/`duplicate`/`invalid`/`question` label. Human-touched issues are **reported in the catalog but excluded from auto-consolidation and auto-close** — a human already exercised judgment.
-- **Routine artifacts excluded.** The routine's own pinned **Known Issues** issue (its body starts with the `<!-- feedback-triage:known-issues v1 -->` sentinel) is NOT user feedback — skip it entirely in catalog / cluster / consolidate. See [`references/known-issues.md`](references/known-issues.md).
+- **Routine artifacts excluded.** The routine's own pinned **Known Issues** issue (its body starts with the `<!-- $SP:known-issues v1 -->` sentinel, where `$SP` is the Phase 0 sentinel prefix) is NOT user feedback — skip it entirely in catalog / cluster / consolidate. See [`references/known-issues.md`](references/known-issues.md).
 
 Emit the catalog table: `# | kind | age | reporter | status | reports | alpha | flags`.
 
@@ -192,7 +240,7 @@ Respect the combined closure cap.
 
 Maintain ONE pinned **Known Issues** issue in `$PUBLIC` — the user-facing list of what's been reported and where it stands. Its body is **regenerated wholesale** each run from the per-issue marker state collected in Phases 1–6, so it's idempotent by construction (same state ⇒ same body ⇒ no edit). Full templates + create/pin/find mechanics in [`references/known-issues.md`](references/known-issues.md).
 
-1. **Locate or create.** Find the pinned issue by the `<!-- feedback-triage:known-issues v1 -->` sentinel. If absent, create it (label `documentation`, pin via the GraphQL `pinIssue` mutation) — first run only.
+1. **Locate or create.** Find the pinned issue by the `<!-- $SP:known-issues v1 -->` sentinel. If absent, create it (label `documentation`, pin via the GraphQL `pinIssue` mutation) — first run only.
 2. **Build the body** from the surviving (non-dupe, non-human-closed) catalog issues, grouped by `state`:
    - 🔧 **In progress** (`state: in-progress`) — fix underway, with target version.
    - 📋 **Tracked** (`state: tracked`, plus surviving `untriaged`) — acknowledged, with release window.

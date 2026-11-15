@@ -4,7 +4,7 @@ Read this file when Phase 3.5 (confidence assessment) needs to decide whether a 
 
 **This list is the shared, universal default — package families that sit on a security boundary in essentially any codebase that uses them** (authentication, cryptography, parsers/validators, deserialization, HTTP clients, XSS sanitizers, logging). It is intentionally framework- and stack-agnostic: it does NOT name any single repo's framework, UI library, or infrastructure-specific actions.
 
-**The effective list = this universal default ∪ the repo's `.weekly_deps.security_sensitive_extra`.** Repos add their own boundary packages (a UI framework, a desktop runtime, a server framework, code-signing actions, etc.) via `.weekly_deps.security_sensitive_extra` in `.claude/repo-config.json` — see `knowledge/repo-config.reference.md`. Do not edit this shared file to add a repo-specific package; put it in that repo's config instead.
+**The effective list = this universal default ∪ the repo's `.weekly_deps.security_sensitive_extra`.** Repos add their own boundary packages (a UI framework, a desktop runtime, a server framework, code-signing actions, etc.) via `.weekly_deps.security_sensitive_extra` in `.claude/repo-config.json` — see `config/repo-config.reference.md`. Do not edit this shared file to add a repo-specific package; put it in that repo's config instead.
 
 ## NPM / JavaScript
 

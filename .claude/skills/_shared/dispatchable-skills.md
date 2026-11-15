@@ -12,6 +12,14 @@ This file is the single source of truth for skills that `/issue-creation`, `/pr-
 
 > **Content status:** Each entry follows a 4-axis structure: Trigger / Use case / Example / Mode interaction. Always-dispatch entries omit the Trigger axis (they fire unconditionally subject to mode authorization). New entries require Repo Admin approval — see "Adding a new skill to the catalog" at the bottom of this file.
 
+## Agent-model boundary
+
+This catalog selects skills; it never selects a subagent model. Agent-dispatching skills use the
+named profiles from `lifecycle-agent-dispatch.md` or `pr-review-agent-dispatch.md`, and dispatch
+without a `model` override. Cross-vendor profile generation follows
+[`model-capability-tiers.md`](model-capability-tiers.md), including the Codex-only `gpt-6-sol`
+assignment for `red-team`; the source agent pins remain unchanged.
+
 ## Dynamic skill scoping (mandatory)
 
 Every ingesting skill (`/issue-creation`, `/pr-creation`, `/dev-lifecycle`, `/enhanced-pr-review`) runs this algorithm at each of its phases. Consulting the catalog is **not optional**, and dispatch of a matched skill is **mandatory** — the selected mode controls *when the gate fires*, not *whether the skill runs*.
@@ -64,7 +72,7 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 
 **Use case:** Produce a structured ADR (Architecture Decision Record) for a non-trivial technology or design choice, with context, options considered, decision, and consequences. Use when the issue's resolution path requires committing to one of multiple credible technical alternatives.
 
-**Example:** ADR-0002 "Actions-as-SoT deploys" — exactly this skill's shape: context, alternatives considered, decision, and consequences for the infrastructure choice of "GitHub Actions as the source of truth for production deploys." An ADR catalog under `docs/adr/` (in repos that keep one) shows the established ADR pattern.
+**Example (hypothetical):** an ADR choosing CI as the source of truth for production deploys — exactly this skill's shape: context, alternatives considered, decision, and consequences. An ADR catalog under `docs/adr/` (in repos that keep one) shows the established ADR pattern.
 
 **Mode interaction:** Auto-dispatch in all modes (Phase 1 is ungated in every mode under the consolidated matrix). Architecture decisions warrant explicit buy-in, but that gate lives at the Phase 2 PLAN boundary (gated in In-the-Loop), not at understand-time; the ADR is surfaced via the Phase 1 visibility line.
 
@@ -103,7 +111,7 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 
 **Use case:** Refine an idea into a written design spec through structured dialogue: explore project context, ask clarifying questions, propose alternatives, present a design, get user approval, write the spec to `docs/superpowers/specs/`. Mandatory before any creative work. **Runs as the synthesis sweep** — after any matched `design-class` skill (architecture, system design, frontend design, diagnosis) produces its artifact, brainstorming integrates those artifacts into the spec rather than being the sole design step (see § Design-class sequencing).
 
-**Example:** This catalog content's spec (`docs/superpowers/specs/2026-05-22-1139-skill-catalog-content-design.md`, in the repo that owns it) was produced by this skill.
+**Example (hypothetical):** a spec such as `docs/superpowers/specs/<date>-<N>-<topic>-design.md` is produced by this skill.
 
 **Mode interaction:** Always-dispatch at Phase 2 when no `*-NNN-*-design.md` spec exists for the issue. Mode controls whether the brainstorming output's gate (HARD-GATE on design approval) waits for explicit user reply or accepts inline approval from prior context. In-the-Loop: waits explicitly. On-the-Loop / Automated End-to-End: accepts pre-approved synthesis if design was just confirmed.
 
@@ -111,7 +119,7 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 
 **Use case:** Produce an executable task-by-task plan from an approved spec, saved to `docs/superpowers/plans/`. Plan contains actual content (file paths, code snippets, commands) — no placeholders. Required input for `/superpowers:subagent-driven-development` or `/superpowers:executing-plans`.
 
-**Example:** The plan `docs/superpowers/plans/2026-05-22-1139-skill-catalog-content.md` (in the repo that owns it) was produced by this skill.
+**Example (hypothetical):** a plan such as `docs/superpowers/plans/<date>-<N>-<topic>.md` is produced by this skill.
 
 **Mode interaction:** Always-dispatch at Phase 2 after brainstorming produces a spec (or when the spec already exists). Read-only of the spec; write-only of the plan file.
 
@@ -141,7 +149,7 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 
 **Use case:** Design multi-service systems and architectures — API contracts, data modeling, service boundaries, failure-mode handling. Use when the work crosses service boundaries or introduces persistence.
 
-**Example:** The autonomy framework spec (`2026-05-21-1109-autonomy-framework-design.md`) is a multi-component system design across hooks, skills, and CLI surfaces — exactly this skill's shape.
+**Example (hypothetical):** a spec like `<date>-<N>-autonomy-framework-design.md` that is a multi-component system design across hooks, skills, and CLI surfaces — exactly this skill's shape.
 
 **Mode interaction:** Gated in In-the-Loop. Auto-dispatch in On-the-Loop / Automated End-to-End when triggers fire. Often co-dispatched with `/superpowers:brainstorming` (architecture-led brainstorm).
 
@@ -154,7 +162,7 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 
 **Use case:** Explore a product idea, problem space, or strategic question with a thinking-partner — an alternative to engineering `/superpowers:brainstorming` when the question is "what should we build" rather than "how should we build it".
 
-**Example (hypothetical):** Brainstorming what monetization tier structure makes sense before any engineering work begins on the licensing-authority service.
+**Example (hypothetical):** Brainstorming what monetization tier structure makes sense before any engineering work begins on a new monetization surface.
 
 **Mode interaction:** Gated in In-the-Loop. Auto in On-the-Loop / Automated End-to-End. Distinct from `/superpowers:brainstorming`, which terminates in an engineering spec; this skill terminates in product direction.
 
@@ -274,8 +282,8 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 ### `/cloudflare:wrangler` (candidate)
 
 **Trigger:**
-- **File paths in diff:** `src/frontend/functions/**` (adjust to your layout), `**/wrangler.toml`, `infrastructure/deploy/deploy-spa.sh`, any Cloudflare Worker source
-- **Keywords:** `cloudflare`, `wrangler`, `pages`, `worker`, `kv namespace`, `deploy-spa`
+- **File paths in diff:** `src/frontend/functions/**` (adjust to your layout), `**/wrangler.toml`, `<your SPA deploy script>` (adjust to your layout), any Cloudflare Worker source
+- **Keywords:** `cloudflare`, `wrangler`, `pages`, `worker`, `kv namespace`
 
 **Use case:** Current Wrangler CLI/config contract for Pages and Workers work — your deploy CLI reference whenever the repo's static/edge deploy relies on Cloudflare Pages or Workers. The `--cwd` discovery foot-gun is a known source of silent Function drops.
 
@@ -340,6 +348,18 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 **Example:** A docs-only issue's execution went inline via `/superpowers:executing-plans` because Phase 1.5 selected `Inline` for that lift.
 
 **Mode interaction:** Always-dispatch at Phase 3 once a plan exists. All modes auto-progress through plan completion — Phase 3 is ungated in every mode under the consolidated matrix (the former `Hand-Held` per-task gate was retired on 2026-06-20). The Phase 1.5 Implementation Approach (with tier-aware defaults per `_shared/model-capability-tiers.md`) determines which skill(s) fire and at what granularity. Tier never alters the gate matrix (see the tier catalog's "Invariants tiers may not alter").
+
+### `/reproduce-then-fix` (candidate, per-task — defect repair)
+
+**Trigger:**
+- **Task shape:** a plan task whose work is "find why this broken behavior happens and stop it," rather than "build the thing the spec describes"
+- **Signal, not test:** the issue carrying `type: bug` is suggestive but not decisive — a `type: bug` issue often contains construction tasks (a missing guard, a new validation), and an enhancement issue can contain one genuine defect-repair task
+
+**Use case:** Test-first defect repair. Writes a failing reproduction test, proves it is not vacuous against a seven-mode checklist plus a positive control, commits it, then iterates hypothesis → fix → green inside a bounded 5-iteration budget. Dispatched **per task**, so one issue may route one task through it and execute the others normally.
+
+**Example:** A three-task plan where Task 2 is "the pin endpoint returns 500 on a revoked key, it should return 410." Task 2 dispatches `/reproduce-then-fix`; Tasks 1 and 3 execute normally.
+
+**Mode interaction:** Auto-dispatch in all modes (Phase 3 is ungated). The skill inherits this session's autonomy mode: its Step 1.4 non-vacuity gate prompts the developer in `In-the-Loop` and is discharged by evidence in `On-the-Loop` / `Automated End-to-End`. The gate itself is never skipped — an incomplete vacuity checklist stops the run in every mode. Escalation on budget exhaustion is E4 evidence per [`lifecycle-agent-dispatch.md`](lifecycle-agent-dispatch.md).
 
 ### `/superpowers:test-driven-development` (candidate)
 
@@ -511,7 +531,7 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 
 ### `/ci-status` (always-dispatch)
 
-**Use case:** Poll the CI check status for the open PR, summarize pass/fail/pending, suggest remediation when something fails, and offer to mark Ready when green. Optionally loop via `/loop 2m /ci-status <PR>` for hands-off polling.
+**Use case:** Poll the CI check status for the open PR, summarize pass/fail/pending, suggest remediation when something fails, and offer to mark Ready when green. Waiting is native: when checks are pending, arm a background Bash wait that exits once nothing is pending and let the harness re-invoke the session. `/loop 2m /ci-status <PR>` is the fallback when that wait cannot be armed, not the default.
 
 **Example:** Every Phase 6 invocation. For a pure-docs PR the relevant checks are pre-commit hooks (already passed locally), Semgrep SAST (no-op for `.md`), and the static-analysis gate (filters non-source files).
 
@@ -535,11 +555,11 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 - **Keywords in body/title:** none — fires on CI signal, not text
 - **Other:** CI test failure that maps to a reproducible bug (failing test names a specific code path; not an infrastructure flake)
 
-**Use case:** Test-first bug fixing — write a failing reproduction test first, then iterate hypothesis → fix → green inside a bounded retry budget. Replaces ad-hoc Phase 6 debug-and-patch when CI surfaces a real bug introduced by the PR.
+**Use case:** Test-first bug fixing — write a failing reproduction test first, then iterate hypothesis → fix → green inside a bounded retry budget. Replaces ad-hoc Phase 6 debug-and-patch when CI surfaces a real bug introduced by the PR. Same skill and same discipline as the Phase 3 entry; the difference is only that CI, rather than the plan, identified the defect.
 
 **Example (hypothetical):** CI reports `TestUserCreate_DuplicateEmail` failing on the PR. `/reproduce-then-fix` runs the failing test locally to confirm reproduction, then iterates fix candidates until the test passes. The reproduction test ensures the fix actually closes the bug class, not just a surface symptom.
 
-**Mode interaction:** Gated for entry into the reproduce-then-fix flow (it's a different lifecycle shape than `/dev-lifecycle`). Auto-progression once the reproduction test exists.
+**Mode interaction:** Auto-dispatch in all modes (Phase 6 is ungated). Because a PR already exists at Phase 6, the skill's Phase-3 handoff does not apply — it stops at the green fix commit and the lifecycle resumes at Phase 5 to push it, per the existing Phase 6 failure loop.
 
 ## Phase 7: READY
 
@@ -549,7 +569,7 @@ No skills dispatched — `gh pr ready` is a single command.
 
 ### `/enhanced-pr-review` (always-dispatch)
 
-**Use case:** Reconcile findings from whichever AI reviewers the repo has configured (e.g. Copilot, a static-analysis gate, Semgrep SAST, a release classifier) with project-specific subagent reviews (security-reviewer, code-reviewer, docs-reviewer, file-pattern specialists) into a unified triage table. Surfaces version-bump recommendations from a release classifier when present (high miss rate otherwise). Internally dispatches `/review-pr` for the subagent suite.
+**Use case:** Reconcile findings from whichever AI reviewers the repo has configured (e.g. Copilot, a static-analysis gate, Semgrep SAST, a release classifier) with project-specific subagent reviews (security-reviewer, red-team by its risk tier, code-reviewer by its Codex-conditional rule, docs-reviewer, file-pattern specialists) into a unified triage table. Surfaces version-bump recommendations from a release classifier when present (high miss rate otherwise). Internally dispatches `/review-pr` for the subagent suite.
 
 **Example:** Every Phase 8 invocation. See [`enhanced-pr-review` SKILL.md](../enhanced-pr-review/SKILL.md) for the full reconciliation logic.
 
@@ -602,7 +622,7 @@ No skills dispatched — `gh pr ready` is a single command.
 - **File paths in diff:** the repo's auth/authz code, IPC/trust-boundary surfaces, origin/CORS gating, anything under `**/crypto/**` or matching encryption-related paths
 - **Other:** PR body names an auth/crypto/RBAC surface
 
-**Use case:** Run a security review of the pending branch changes against OWASP Top 10 / CWE Top 25 / the repo's security policy. Complements `/review-pr`'s `security-reviewer` subagent with a focused, branch-level pass when the diff is security-dense.
+**Use case:** Run a security review of the pending branch changes against OWASP Top 10 / CWE Top 25 / the repo's security policy. Complements `/review-pr`'s `security-reviewer` and `red-team` subagents with a focused, branch-level checklist pass when the diff is security-dense.
 
 **Example (hypothetical):** A PR touching a token-manager + the refresh-token rotation path — `/security-review` runs a dedicated pass before merge.
 
@@ -661,6 +681,8 @@ No skills dispatched — `gh pr ready` is a single command.
 
 **Use case:** Draft GitHub release notes for a version tag by walking git log since the previous tag, grouping commits by Conventional Commit type, and cross-referencing closed issues. Includes a "Docs that may need updating" section.
 
+**Scope (load-bearing):** the release is `<previous-tag>..HEAD` — **everything merged to `main` since the last tag, not the diff of the PR that carried the version bump**. The bump rides on one PR, so a dispatch from that PR's context inherits its scope unless the range is set explicitly; pass `--since=<previous-tag>` and verify the printed range and commit count. The skill emits three artifacts from that one range (its Step 3.5): the complete draft release body; the `CHANGELOG.md` `###` detail bullets, which are the complete public record in `/ste-writing` flavored mode and are never capped; and the `CHANGELOG.md` version preamble, a 1–3 sentence summary in the project's brand voice, which is the ONLY zone an in-app post-update view renders where the app has one. `docs-writer` owns that two-voice split; neither pass may re-narrow scope.
+
 **Example (hypothetical):** Cutting a new milestone-completing version tag. Every published tag would go through this skill.
 
 **Mode interaction:** Gated in all modes. Release notes are an author-facing artifact — user reviews the draft before the tag is pushed.
@@ -681,13 +703,13 @@ No skills dispatched — `gh pr ready` is a single command.
 
 ### `/reproduce-then-fix`
 
-Replaces `/dev-lifecycle` for bug-fix entry. Test-first ordering: failing reproduction test before any production code change.
+**No longer a rival entry point (changed 2026-08-26).** It is a **sub-skill of `/dev-lifecycle` Phase 3**, dispatched per defect-repair task — see the Phase 3 entry, which is canonical. `/dev-lifecycle` is now the entry point for every shape of work, and it never asks mid-run whether you would rather have started elsewhere.
 
-**Use case:** Bounded retry budget for the hypothesis → fix → green cycle. Produces its own draft PR and hands back to `/dev-lifecycle` from Phase 6 onward, so the bug-fix lifecycle still benefits from CI monitoring + bot review.
+**Use case:** Test-first ordering — a failing reproduction test, proven non-vacuous, committed before any production-code change; then a bounded hypothesis → fix → green cycle.
 
-**Example:** Any issue with label `type: bug` and a clear reproduction path. Started via `/reproduce-then-fix <issue#>` instead of `/dev-lifecycle`.
+**Direct invocation is still supported** for a one-line hotfix that does not want a full lifecycle: `/reproduce-then-fix <issue#>`. It stops at the green fix commit and hands to `/dev-lifecycle <issue#>`, whose detection resolves `branch + implementation commits + no PR` to **Phase 4: VALIDATE**. It does **not** open a PR in either entry mode — that was the old contract, and it skipped Phase 4's quality gate, coverage gate, count-drift probe, and pre-PR adversarial security pass for every bug fix routed through it.
 
-**Mode interaction:** Independent lifecycle, not gated by `/dev-lifecycle` modes. The reproduction-test discipline is structural — modes don't soften the "failing test first" rule.
+**Mode interaction:** Inherits the caller's Phase-1.5 autonomy contract rather than running an independent one. The failing-test-first ordering and the Step-1.4 non-vacuity gate are structural — no mode softens either; what the mode changes is whether Step 1.4 is discharged by a developer answer or by written evidence.
 
 ### `/weekly-deps`
 

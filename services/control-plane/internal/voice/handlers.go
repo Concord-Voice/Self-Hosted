@@ -21,6 +21,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/roomplacement"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
@@ -41,7 +42,7 @@ const (
 	voiceAdmissionActivationRequestPurpose  = "concord/voice-admission-activate/request/v1"
 	voiceAdmissionActivationResponsePurpose = "concord/voice-admission-activate/response/v1"
 	voiceAdmissionActivationNotReadyPurpose = "concord/voice-admission-activate/response/not-ready/v1"
-	errMsgInvalidVoiceJoinRequestBody       = "Invalid request body"
+	errMsgInvalidVoiceRequestBody           = "Invalid request body"
 	errMsgVoiceChannelAccessDenied          = "Channel not found or access denied"
 )
 
@@ -120,12 +121,12 @@ func parseVoiceJoinAdmission(c *gin.Context, channelID string) (voiceJoinAdmissi
 
 	var admission voiceJoinAdmission
 	if err := c.ShouldBindJSON(&admission); err != nil || admission.SocketID == "" || len(admission.SocketID) > 128 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceJoinRequestBody})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
 		return voiceJoinAdmission{}, false
 	}
 	parsedAdmissionID, err := uuid.Parse(admission.AdmissionID)
 	if err != nil || parsedAdmissionID == uuid.Nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceJoinRequestBody})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
 		return voiceJoinAdmission{}, false
 	}
 	return admission, true
@@ -893,9 +894,8 @@ func (h *Handler) claimVoiceJoinPlacement(c *gin.Context, channelID, userID stri
 // POST /channels/:id/voice/authorize-action
 func (h *Handler) AuthorizeVoiceAction(c *gin.Context) {
 	userID := c.GetString("user_id")
-	channelID := c.Param("id")
-
-	if _, err := uuid.Parse(channelID); err != nil {
+	channelID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
@@ -905,7 +905,12 @@ func (h *Handler) AuthorizeVoiceAction(c *gin.Context) {
 		TargetUserID string `json:"target_user_id" binding:"required,uuid"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
+		return
+	}
+	req.TargetUserID, err = requestid.Canonical(req.TargetUserID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
 		return
 	}
 
@@ -1107,15 +1112,8 @@ func (h *Handler) guardVoiceModEffectTx(
 // Returns nil and sends the HTTP error response if any check fails.
 func (h *Handler) authorizeVoiceMod(c *gin.Context, perm rbac.Permission) *voiceModContext {
 	actorID := c.GetString("user_id")
-	serverID := c.Param("id")
-	targetID := c.Param("userId")
-
-	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
-		return nil
-	}
-	if _, err := uuid.Parse(targetID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
+	serverID, targetID, ok := canonicalVoiceModParams(c)
+	if !ok {
 		return nil
 	}
 
@@ -1142,6 +1140,20 @@ func (h *Handler) authorizeVoiceMod(c *gin.Context, perm rbac.Permission) *voice
 	}
 
 	return &voiceModContext{serverID: serverID, targetID: targetID}
+}
+
+func canonicalVoiceModParams(c *gin.Context) (string, string, bool) {
+	serverID, err := requestid.Param(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
+		return "", "", false
+	}
+	targetID, err := requestid.Param(c, "userId")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
+		return "", "", false
+	}
+	return serverID, targetID, true
 }
 
 // checkMembership verifies that userID is a member of serverID.
@@ -1342,7 +1354,7 @@ func (h *Handler) applyServerEnforcement(c *gin.Context, ctx *voiceModContext, p
 
 // userLevelAction commits exact session commands before accepting queued work.
 func (h *Handler) userLevelAction(c *gin.Context, perm rbac.Permission, action, successMsg, failMsg string) {
-	if c.GetString("user_id") == c.Param("userId") {
+	if targetID, err := requestid.Param(c, "userId"); err == nil && c.GetString("user_id") == targetID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCannotTargetSelf})
 		return
 	}
@@ -1611,6 +1623,12 @@ func (h *Handler) RevokeTempAccess(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelIDBody})
 		return
 	}
+	channelID, err := requestid.Canonical(req.ChannelID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelIDBody})
+		return
+	}
+	req.ChannelID = channelID
 
 	reqCtx := c.Request.Context()
 
@@ -1689,10 +1707,12 @@ type moveRequest struct {
 // POST /servers/:id/voice/:userId/move  body {target_channel_id}
 func (h *Handler) ServerMove(c *gin.Context) {
 	actorID := c.GetString("user_id")
-	serverID := c.Param("id")
-	targetID := c.Param("userId")
+	serverID, targetID, ok := canonicalVoiceModParams(c)
+	if !ok {
+		return
+	}
 
-	req, ok := h.parseMoveRequest(c, serverID, targetID)
+	req, ok := h.parseMoveRequest(c)
 	if !ok {
 		return
 	}
@@ -1819,19 +1839,16 @@ func (h *Handler) commitVoiceEffectTx(tx *sql.Tx) error {
 	return tx.Commit()
 }
 
-// parseMoveRequest validates the path params + JSON body of a move request. It
-// writes the 400 response and returns ok=false on any malformed input.
-func (h *Handler) parseMoveRequest(c *gin.Context, serverID, targetID string) (moveRequest, bool) {
+// parseMoveRequest canonicalizes the validated target channel ID.
+func (h *Handler) parseMoveRequest(c *gin.Context) (moveRequest, bool) {
 	var req moveRequest
-	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
-		return req, false
-	}
-	if _, err := uuid.Parse(targetID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
-		return req, false
-	}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidTargetChannel})
+		return req, false
+	}
+	var err error
+	req.TargetChannelID, err = requestid.Canonical(req.TargetChannelID)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidTargetChannel})
 		return req, false
 	}

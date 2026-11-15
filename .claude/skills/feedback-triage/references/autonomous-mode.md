@@ -37,7 +37,7 @@ The scheduled run is a Claude cloud routine (cron) that invokes this skill in au
 Routine contract:
 
 - **Cadence:** daily. Pick a quiet UTC hour (e.g. `0 8 * * *`). One run per day; runs are idempotent so a missed/retried run self-heals.
-- **Command:** `/feedback-triage --mode=auto`.
+- **Command:** `/feedback-triage --mode=auto`. It passes no `--public` or `--tracker`, so the repo pair comes from `.feedback_triage.public` and `.tracker` in `.claude/repo-config.json`; Phase 0 stops when they are unset.
 - **Identity/secrets:** runs under an identity with `issues:write` on **both** repos and `project` scope for the tracker board. If that identity is the same `FEEDBACK_PAT` family used by the control-plane, keep its scope minimal (issues + project only).
 - **Audit:** every run posts its Phase 7 digest to a pinned tracking issue in the **tracker** repo, so there's a durable daily log even when the run was a no-op.
 - **Kill switch:** disabling the routine stops all mutation immediately; in-flight state is consistent because each issue's actions are individually guarded (see `idempotency.md`).

@@ -17,12 +17,15 @@
 #   PRIORITY_FIELD_ID / OWNER / REPO_NAME / LABELS_FILE / LABEL_NAMESPACES.
 
 # Source the shared repo-config reader (best-effort; absent => helpers degrade).
-# Installed, it lives at <repo>/scripts/repo-config.sh; in this tooling repo it is two levels up.
-_rc_helper="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/repo-config.sh"
-[ -f "$_rc_helper" ] || _rc_helper="$(dirname "${BASH_SOURCE[0]}")/../../scripts/repo-config.sh"
-# shellcheck disable=SC1090,SC1091 # path resolved at runtime
-source "$_rc_helper" 2>/dev/null || true
-unset _rc_helper
+# Installed, it lives at <repo>/scripts/repo-config.sh; in this tooling repo it is four levels up.
+# A caller that already loaded the default branch's helper (see SKILL.md § Execution) keeps it.
+if ! declare -F rc_get >/dev/null 2>&1; then
+  _rc_helper="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/repo-config.sh"
+  [ -f "$_rc_helper" ] || _rc_helper="$(dirname "${BASH_SOURCE[0]}")/../../../../scripts/repo-config.sh"
+  # shellcheck disable=SC1090,SC1091 # path resolved at runtime
+  source "$_rc_helper" 2>/dev/null || true
+  unset _rc_helper
+fi
 
 # Default the board env vars from config when the caller hasn't exported them.
 # When config is ALSO absent/empty, rc_get returns "" so these stay empty — and
@@ -110,8 +113,10 @@ _strip_code_blocks() {
             BEGIN { in_fence = 0; fence_len = 0 }
             {
                 # Strip up to 3 leading spaces for fence detection (GFM rule)
+                # (match + substr, not / ? ? ?/: mawk strips only one space with that)
                 stripped = $0
-                sub(/^ ? ? ?/, "", stripped)
+                match(stripped, /^ */)
+                if (RLENGTH <= 3) stripped = substr(stripped, RLENGTH + 1)
                 # Check if this line is a candidate fence opener/closer
                 if (match(stripped, /^```+/)) {
                     run = RLENGTH
@@ -134,6 +139,55 @@ _strip_code_blocks() {
         | sed 's/`[^`]*`//g'
 }
 
+# --- Cloud session routing (Projects v2 proxy bypass) --------------------------------------
+# Projects v2 is GraphQL-only, and a cloud session's GitHub proxy serves only a
+# pinned set of GraphQL operations — every board call 403s there regardless of
+# the token supplied. So in the cloud the board helpers below do not call
+# GraphQL at all: the two ID-returning helpers emit a SENTINEL instead of a real
+# node ID, and the two mutating helpers recognise that sentinel and dispatch
+# the repo's board-sync workflow (via a repo-provided scripts/board-op.sh, REST)
+# to do the work on a runner. With no board-op.sh the dispatch fails with an
+# ERROR and the SKILL.md call sites WARN and continue.
+#
+# The sentinel is what keeps every call site in SKILL.md unchanged: a phase still
+# "gets an item id" and still "sets a field on it"; only the plumbing under those
+# two steps differs by environment.
+_board_is_cloud() { [[ "${CLAUDE_CODE_REMOTE:-}" = "true" ]]; }
+
+# BOARD_OP_BIN exists so the routing is testable without a real board or a real
+# workflow dispatch — test-lib.sh points it at a stub that
+# records its arguments. Unset in normal use.
+_board_op() {
+    local root bin="${BOARD_OP_BIN:-}"
+    if [[ -z "$bin" ]]; then
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+        bin="${root}/scripts/board-op.sh"
+    fi
+    if [[ ! -x "$bin" ]]; then
+        echo "  ERROR: board-op.sh missing or not executable: $bin" >&2
+        return 1
+    fi
+    "$bin" "$@"
+}
+
+# Decodes a CLOUD:<n> / CLOUD_NOCREATE:<n> sentinel into the board-op.sh argv it
+# stands for, assigning to the caller's board_argv array. Returns non-zero for a
+# real node ID, which is how the callers below tell the two apart.
+#
+# There is deliberately NO name<->option-ID map here. The board-sync workflow takes
+# free-form strings and allowlists them, so raw option IDs pass straight through
+# to board-op.sh, which owns the single mapping. An earlier
+# revision kept a reverse map at this layer because the workflow's inputs were
+# `type: choice` and rejected raw IDs; that put the same table in four places
+# (here x3 mirrors, plus board-op.sh) with nothing keeping them in sync.
+_board_sentinel_argv() {
+    case "$1" in
+        CLOUD_NOCREATE:*) board_argv=("${1#CLOUD_NOCREATE:}" --no-create) ;;
+        CLOUD:*)          board_argv=("${1#CLOUD:}") ;;
+        *) return 1 ;;
+    esac
+}
+
 # parse_pr_closes BODY
 # Emits one issue number per line from `Closes #N` / `Fixes #N` / `Resolves #N`
 # references in the PR body (case-insensitive). Matches GitHub's exact
@@ -146,8 +200,8 @@ _strip_code_blocks() {
 parse_pr_closes() {
     local body="$1"
     _strip_code_blocks "$body" \
-        | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
-        | grep -oE '[0-9]+' \
+        | grep -oiE '(^|[^[:alnum:]_])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]+#[0-9]+' \
+        | grep -oE '#[0-9]+' | tr -d '#' \
         || true
 }
 
@@ -177,7 +231,9 @@ validate_pr_invariants() {
         echo "WARN: PR has no labels. Apply labels manually via 'gh pr edit \$PR --add-label \"...\"'." >&2
     fi
     if [ "$has_milestone" = false ]; then
-        echo "WARN: PR has no milestone. Set via 'gh pr edit \$PR --milestone \"<milestone>\"'." >&2
+        # Do NOT hardcode a title here — milestone titles drift and closed ones are
+        # not assignable (see /issue-creation Phase 4 Step 2).
+        echo "WARN: PR has no milestone. Set via 'gh pr edit \$PR --milestone \"<title>\"' — list open titles with: gh api --paginate 'repos/{owner}/{repo}/milestones?state=open' --jq '.[].title'" >&2
     fi
     if [ "$has_assignee" = false ]; then
         echo "WARN: PR has no assignee. Assign via 'gh pr edit \$PR --add-assignee @me'." >&2
@@ -213,6 +269,16 @@ move_to_status() {
     local option_id="$2"
     local project_id="${PROJECT_ID:?PROJECT_ID required, set via repo-config .project.id}"
     local status_field_id="${STATUS_FIELD_ID:?STATUS_FIELD_ID required, set via repo-config .project.fields.status.id}"
+
+    # Cloud session: $item_id is a CLOUD:/CLOUD_NOCREATE: sentinel rather than a
+    # node ID, because Projects v2 is unreachable from here. Dispatch instead of
+    # mutating — see "Cloud session routing" above. The raw option ID is passed
+    # through; the board-sync workflow allowlists it and board-op.sh owns the mapping.
+    local -a board_argv=()
+    if _board_sentinel_argv "$item_id"; then
+        _board_op "${board_argv[@]}" --status "$option_id"
+        return $?
+    fi
 
     local query='mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
         updateProjectV2ItemFieldValue(input: {
@@ -275,6 +341,27 @@ find_project_item_id() {
     # No project board configured → nothing to resolve (skip the gh lookups).
     [ -z "$project_id" ] && return 0
 
+    # Cloud session: this lookup is a Projects v2 query and is blocked here, so
+    # emit a sentinel for move_to_status/set_priority to route on.
+    #
+    # CLOUD_NOCREATE, not CLOUD: this function's local contract is LOOKUP-ONLY —
+    # empty means "not on the board" and SKILL.md Phase 3a skips the Status sync
+    # on that. A plain CLOUD: sentinel would make the runner's addProjectV2ItemById
+    # force-add an issue deliberately kept off the board, so the cloud path would
+    # do something the local path refuses. --no-create reproduces the skip.
+    # ensure_pr_on_project is the opposite case and does emit CLOUD:.
+    #
+    # The digits-only guard is repeated because the normal one below is not
+    # reached on this path, and the sentinel feeds a workflow dispatch.
+    if _board_is_cloud; then
+        if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+            echo "  ERROR: find_project_item_id: issue_number '$issue_number' is not digits-only" >&2
+            return 1
+        fi
+        printf 'CLOUD_NOCREATE:%s\n' "$issue_number"
+        return 0
+    fi
+
     local owner repo
     owner="$(_resolve_owner)"
     repo="$(_resolve_repo)"
@@ -327,9 +414,11 @@ find_project_item_id() {
 #   <repo-root>/.claude/rules/labels.md.
 # Deprecated labels are dropped with a stderr WARN.
 #
-# Graceful degradation: when the labels source file is ABSENT, this is a NO-OP —
-# every candidate label is passed through unchanged and the function returns
-# success. (A repo may legitimately not maintain a curated labels.md.)
+# Graceful degradation: when NO labels source was named (no $LABELS_FILE, no
+# repo-config `.labels.source`) and the default .claude/rules/labels.md is ABSENT,
+# this is a NO-OP passthrough that returns success. (A repo may legitimately not
+# maintain a curated labels.md.) When a source WAS named and is missing, it fails
+# closed (exit 1, no output) so the taxonomy check is not silently skipped.
 #
 # When the source file EXISTS but its Active section is empty/malformed, that's a
 # real misconfiguration: return exit 1 rather than silently passing through
@@ -338,16 +427,29 @@ find_project_item_id() {
 # The namespace allowlist regex is built from LABEL_NAMESPACES (default from
 # repo-config `.labels.namespaces`).
 validate_against_active_labels() {
-    local labels_file="${LABELS_FILE:-}"
+    local labels_file="${LABELS_FILE:-}" explicit=1
     if [ -z "$labels_file" ]; then
         local root configured
         root="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
-        configured="$(rc_get '.labels.source' '.claude/rules/labels.md')"
+        # Without the helper (a --user or plugin-only install) read the key directly,
+        # so a named source still fails closed instead of degrading to passthrough.
+        if declare -F rc_get >/dev/null; then
+            configured="$(rc_get '.labels.source' '')"
+        else
+            configured="$(jq -r '.labels.source // empty' "${root%/}/.claude/repo-config.json" 2>/dev/null || true)"
+        fi
+        [[ -n "$configured" ]] || { explicit=0; configured=.claude/rules/labels.md; }
         labels_file="${root%/}/${configured}"
     fi
 
-    # Source file absent → degrade to a no-op passthrough (return success).
+    # Source file absent: a repo that never named one degrades to a passthrough.
+    # A source that was named (LABELS_FILE or .labels.source) and is missing fails
+    # closed, because passing labels through would skip the taxonomy check.
     if [ ! -f "$labels_file" ]; then
+        if [[ "$explicit" == 1 ]]; then
+            echo "ERROR: labels source '${labels_file}' not found; refusing to pass labels through unchecked." >&2
+            return 1
+        fi
         echo "INFO: labels source '${labels_file}' not found; skipping Active-labels validation (passthrough)." >&2
         cat
         return 0
@@ -393,11 +495,55 @@ validate_against_active_labels() {
 # filter_inherited_labels JSON_LABEL_ARRAY
 # Emits one label per line, filtered for inheritance into a PR.
 # Input is a JSON array of strings (e.g., from `gh issue view --json labels --jq '[.labels[].name]'`).
-# Excludes: `type: epic` (PRs are not epics), any `routine: *` (PRs are not auto-generated).
+# Excludes: `type: epic` (PRs are not epics), any `routine: *` (PRs are not
+# auto-generated), and `risk: hotfix`.
+#
+# `risk: hotfix` is excluded for a different reason than the other two, and the
+# distinction matters. Those are semantically wrong on a PR. This one is a
+# RELEASE CONTROL in repos that define it: on the PR it means "this merge cuts a
+# release immediately, bypassing the scheduled blocking-red gate", so a hotfix
+# can ship on a red suite. On the ISSUE it meant something
+# weaker and older — "this problem is urgent" — decided during triage, possibly
+# weeks earlier and by someone else.
+#
+# Inheriting it would silently convert a triage opinion into an ungated release
+# nobody consciously chose. The label is not lost: callers warn and print the
+# exact command to apply it, so the decision is made at PR time by a person.
 filter_inherited_labels() {
     local labels_json="$1"
     printf '%s' "$labels_json" \
-        | jq -r '.[] | select(. != "type: epic") | select(startswith("routine: ") | not)'
+        | jq -r '.[] | select(. != "type: epic") | select(. != "risk: hotfix") | select(startswith("routine: ") | not)'
+}
+
+# dropped_release_controls JSON_LABEL_ARRAY
+# Emits the release-control labels filter_inherited_labels deliberately dropped,
+# one per line, so the caller can surface them instead of silently discarding.
+dropped_release_controls() {
+    local labels_json="$1"
+    printf '%s' "$labels_json" | jq -r '.[] | select(. == "risk: hotfix")'
+}
+
+# warn_dropped_release_controls JSON_LABEL_ARRAY ISSUE_NUMBER PR_NUMBER
+# Writes the operator-facing warning for each withheld release control to stderr,
+# including a copy-pasteable command to apply it deliberately. Silent when none.
+#
+# This lives here rather than inline in SKILL.md because the inline version had a
+# bug no test could reach: `for d in $(dropped_release_controls ...)` word-splits
+# on the space inside `risk: hotfix`, iterating over `risk:` and `hotfix` and
+# emitting two --add-label commands for labels that do not exist — breaking the
+# one thing the warning exists to provide. Logic that can be wrong belongs where
+# the suite can execute it.
+warn_dropped_release_controls() {
+    local labels_json="$1" issue_n="$2" pr_number="$3" dropped
+    # `while IFS= read -r`, never `for ... in $(...)` — label names contain spaces.
+    dropped_release_controls "$labels_json" | while IFS= read -r dropped; do
+        [[ -n "$dropped" ]] || continue
+        echo "WARN: #${issue_n} carries '${dropped}' — NOT inherited." >&2
+        echo "      In repos that use it as a release control, on this PR it" >&2
+        echo "      would cut a release on merge and bypass the scheduled gate." >&2
+        echo "      Apply it only if that is the intent:" >&2
+        echo "      gh pr edit ${pr_number} --add-label '${dropped}'" >&2
+    done
 }
 
 # parse_pr_refs BODY
@@ -408,14 +554,36 @@ filter_inherited_labels() {
 parse_pr_refs() {
     local body="$1"
     _strip_code_blocks "$body" \
-        | grep -oiE 'refs?[[:space:]]+#[0-9]+' \
-        | grep -oE '[0-9]+' \
+        | grep -oiE '(^|[^[:alnum:]_])refs?[[:space:]]*:?[[:space:]]+#[0-9]+' \
+        | grep -oE '#[0-9]+' | tr -d '#' \
         || true
+}
+
+# pick_inheritance_source CLOSES REFS
+# Emits the issue number this PR should inherit metadata from: the first
+# `Closes` issue if there is one, else the first `Refs` issue.
+# Empty stdout + exit 0 when neither is present (no-source is a normal result,
+# not an error — the `set -e` call sites depend on this).
+#
+# Used by BOTH Phase 3c (Project Priority) and Phase 4 (milestone). Both write
+# the PR's OWN board item / milestone, so both take the same source. (Phase 3a
+# is different and correctly stays `Closes`-only: it mutates the *issue's*
+# board Status, and a `Refs` issue is not being closed by this PR.)
+#
+# The `Refs` fallback is not a courtesy — staged multi-PR work references its
+# issue with `Refs #N` ON PURPOSE so stage 1 does not auto-close the issue and
+# orphan stages 2..n. Those PRs belong to the issue's milestone exactly as much
+# as a `Closes` PR does, so inheriting only from `Closes` silently drops them
+# out of the release-tracking view (observed on a staged four-PR change).
+# `Closes` still wins when both are present.
+pick_inheritance_source() {
+    local closes="$1" refs="$2"
+    printf '%s\n%s\n' "$closes" "$refs" | grep -m1 -E '^[0-9]+$' || true
 }
 
 # ensure_pr_on_project PR_NUMBER
 # Adds PR to the project board (idempotent) and emits its project item ID.
-# Per user direction (2026-05-22): ALL PRs are technically in review status,
+# By design: ALL PRs are technically in review status,
 # even in draft — so we always ensure the PR is on the board with Status: In Review.
 #
 # addProjectV2ItemById is idempotent — if the PR is already on the board,
@@ -427,6 +595,20 @@ parse_pr_refs() {
 ensure_pr_on_project() {
     local pr_number="$1"
     local project_id="${PROJECT_ID:?PROJECT_ID required, set via repo-config .project.id}"
+
+    # Cloud session: adding to the board is a Projects v2 mutation and is
+    # blocked here. Emit the sentinel — the runner's board-op.sh does the add
+    # via addProjectV2ItemById, which is idempotent, so the caller's subsequent
+    # move_to_status dispatch adds-and-sets in one go.
+    if _board_is_cloud; then
+        if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+            echo "  ERROR: ensure_pr_on_project: pr_number '$pr_number' is not digits-only" >&2
+            return 1
+        fi
+        printf 'CLOUD:%s\n' "$pr_number"
+        return 0
+    fi
+
     local owner repo
     owner="$(_resolve_owner)"
     repo="$(_resolve_repo)"
@@ -489,6 +671,20 @@ get_issue_priority_option_id() {
     # No project board configured → nothing to look up (skip the gh lookups).
     [ -z "$project_id" ] && return 0
 
+    # Cloud session: reading the source issue's Priority is a Projects v2 query,
+    # blocked here. Defer the whole inheritance to the runner by emitting
+    # CLOUD_INHERIT:<issue>, which set_priority turns into
+    # --inherit-priority-from. Callers test this value for emptiness to mean
+    # "nothing to inherit", so the sentinel must be non-empty.
+    if _board_is_cloud; then
+        if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+            echo "  ERROR: get_issue_priority_option_id: issue_number '$issue_number' is not digits-only" >&2
+            return 1
+        fi
+        printf 'CLOUD_INHERIT:%s\n' "$issue_number"
+        return 0
+    fi
+
     local owner repo
     owner="$(_resolve_owner)"
     repo="$(_resolve_repo)"
@@ -548,6 +744,21 @@ set_priority() {
     local option_id="$2"
     local project_id="${PROJECT_ID:?PROJECT_ID required, set via repo-config .project.id}"
     local priority_field_id="${PRIORITY_FIELD_ID:?PRIORITY_FIELD_ID required, set via repo-config .project.fields.priority.id}"
+
+    # Cloud session — see move_to_status. Two sentinels can arrive here: the item
+    # is a CLOUD:/CLOUD_NOCREATE: handle, and the option may be
+    # CLOUD_INHERIT:<issue> when get_issue_priority_option_id could not read the
+    # source issue's Priority (that read is a Projects v2 query, blocked too).
+    # In that case the runner resolves the inheritance itself.
+    local -a board_argv=()
+    if _board_sentinel_argv "$item_id"; then
+        if [[ "${option_id#CLOUD_INHERIT:}" != "$option_id" ]]; then
+            _board_op "${board_argv[@]}" --inherit-priority-from "${option_id#CLOUD_INHERIT:}"
+            return $?
+        fi
+        _board_op "${board_argv[@]}" --priority "$option_id"
+        return $?
+    fi
 
     local query='mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
         updateProjectV2ItemFieldValue(input: {

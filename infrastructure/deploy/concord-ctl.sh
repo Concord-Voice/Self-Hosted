@@ -8100,8 +8100,8 @@ else:
     DEADLINE=$(( $(date +%s) + TIMEOUT ))
     # Single assignment so the blue/green colour flip (#3108) has ONE line to
     # make colour-aware rather than one per probe site. Every HTTP probe in this
-    # file targets 127.0.0.1, never `localhost`: the self-host overlay binds 8080
-    # and 3000 to 127.0.0.1 only, so [::1] is free for any local user to answer a
+    # file targets 127.0.0.1, never `localhost`: the self-host and managed production
+    # overlays bind 8080 (and 3000) to 127.0.0.1 only, so [::1] is free for any local user to answer a
     # `localhost` probe (curl tries it first) and fake readiness (#3538).
     # With the control-plane blue-green rail on, the port is the live vhost's
     # (8080 or 8081); a vhost that cannot be read fails the gate.

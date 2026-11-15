@@ -1,5 +1,5 @@
 #!/bin/bash
-# protect-applied-migrations.sh — PreToolUse hook for Edit
+# protect-applied-migrations.sh — PreToolUse hook for Edit|Write
 #
 # Blocks edits to existing migration files in the migrations directory (default
 # migrations/; override via .claude/repo-config.json's .migrations.dir — same
@@ -8,9 +8,9 @@
 # corresponding down migration and you never modify a shipped migration in
 # place; you add a new one instead.
 #
-# Write (for brand-new migration files) is intentionally NOT blocked — only
-# Edit on existing files. Use the Write tool to create NNNNNN_*.up.sql and
-# NNNNNN_*.down.sql with the next sequential number.
+# Write is allowed only for a migration file that does not exist yet, so a new
+# NNNNNN_*.up.sql / NNNNNN_*.down.sql can be created; Write onto an existing one
+# is an overwrite and is blocked like Edit.
 #
 # Fails closed: any parsing failure blocks the tool invocation.
 
@@ -56,6 +56,7 @@ FILE_PATHS=$(printf '%s' "$INPUT" | jq -r '
     | .[]
 ')
 PATCH_COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
+TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
 
 if [ -n "$PATCH_COMMAND" ]; then
     if [[ "$PATCH_COMMAND" != '*** Begin Patch'* || "$PATCH_COMMAND" != *'*** End Patch' ]]; then
@@ -103,9 +104,13 @@ while IFS= read -r FILE_PATH; do
         exit 2
     fi
 
+    # A Write that creates a brand-new file is how new migrations are added.
+    if [[ "$TOOL_NAME" = "Write" ]] && [[ ! -e "$CANONICAL_PATH" ]] && [[ ! -L "$CANONICAL_PATH" ]]; then
+        continue
+    fi
     if [[ "$(dirname "$CANONICAL_PATH")" == "$MIGRATIONS_DIR" && "$(basename "$CANONICAL_PATH")" =~ ^[0-9]{6}_.*\.(up|down)\.sql$ ]]; then
         cat >&2 <<EOF
-BLOCKED: Cannot Edit an existing migration file:
+BLOCKED: Cannot ${TOOL_NAME:-Edit} an existing migration file:
     $FILE_PATH
 
 Migrations are immutable once written (.claude/rules/migrations.md). To change

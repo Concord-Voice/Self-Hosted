@@ -638,11 +638,24 @@ PY
       bad "$label"
     fi
   }
+  # Pin: the home control plane's 8080 is published on loopback only, never on all
+  # interfaces, in both the managed production and the self-host selection.
+  expect_cp_ports() { # RENDER_JSON LABEL — exactly one tcp 8080 binding, host_ip 127.0.0.1
+    if jq -e '.services["control-plane"].ports
+        | length == 1 and .[0].host_ip == "127.0.0.1" and (.[0].published|tostring) == "8080"
+          and .[0].target == 8080 and .[0].protocol == "tcp"' "$1" >/dev/null 2>&1; then
+      ok "$2"
+    else
+      bad "$2"
+    fi
+  }
   if render "$WORK/real-with-overlay.json" -f docker-compose.selfhost.yml; then
     expect_rc "real render with overlay (Compose $HAVE_COMPOSE) exits $WANT_WITH_OVERLAY" \
       --rendered "$WANT_WITH_OVERLAY" "$WORK/real-with-overlay.json"
     expect_media_capacity "$WORK/real-with-overlay.json" 2 \
       "real selfhost media CPU quota and worker count are both 2"
+    expect_cp_ports "$WORK/real-with-overlay.json" \
+      "real selfhost render publishes control-plane 8080 on 127.0.0.1 only"
   else
     bad "real render with overlay failed to produce a config"
   fi
@@ -651,6 +664,8 @@ PY
       --rendered 1 "$WORK/real-no-overlay.json" "posture:"
     expect_media_capacity "$WORK/real-no-overlay.json" 3 \
       "real managed production media CPU quota and worker count remain 3"
+    expect_cp_ports "$WORK/real-no-overlay.json" \
+      "real managed production render publishes control-plane 8080 on 127.0.0.1 only"
   else
     bad "real render without overlay failed to produce a config"
   fi

@@ -139,8 +139,10 @@ class ProtectedSonarWorkflowTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("protected_pr_caller", source)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        self.assertGreater(module.MAX_POLLS * 10 / 60, int(child["timeout-minutes"]))
-        self.assertGreater(int(caller["timeout-minutes"]), module.MAX_POLLS * 10 / 60 + 10)
+        self.assertGreater(module.MAX_POLLS * module.POLL_SECONDS / 60, int(child["timeout-minutes"]))
+        # The caller job must outlast the script's wall-clock cap, with time for its other steps.
+        self.assertGreater(int(caller["timeout-minutes"]),
+                           (module.MAX_POLLS * module.POLL_SECONDS + module.DEADLINE_SLACK) / 60 + 2)
 
 
 if __name__ == "__main__":

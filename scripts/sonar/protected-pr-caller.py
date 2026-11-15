@@ -4,7 +4,9 @@
 import argparse
 import base64
 import binascii
+import contextlib
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -38,12 +40,44 @@ OIDC_HOST = re.compile(r"(?:[a-z0-9-]+\.)+actions\.githubusercontent\.com\Z")
 MAX_INPUT = 24 * 1024
 MAX_PROOF = 64 * 1024
 MAX_RESPONSE = 64 * 1024
-MAX_POLLS = 270  # 45 minutes at 10 seconds; the child scanner may run for 40.
+MAX_POLLS = 270  # Poll slots: 45 minutes at POLL_SECONDS; the child scanner may run for 40.
+POLL_SECONDS = 10
+NOT_VISIBLE_POLLS = 6  # A 404 in the first six polls, before the run is seen, is it not being visible yet.
+RETRY_AFTER_MAX = 120
+# Consecutive transient poll errors tolerated before failing: at least 5 minutes at
+# POLL_SECONDS; Retry-After or slow calls stretch it, up to the wall-clock deadline.
+MAX_TRANSIENT_RUN = 30
+# Wall-clock cap beyond the poll budget (55 min in all), inside the caller job's
+# `timeout-minutes: 60` in required-pr-build.yml; slow or retried calls must not outrun it.
+DEADLINE_SLACK = 600
 RESULTS = {"success", "failure", "cancelled", "skipped"}
 
 
 class Invalid(Exception):
     pass
+
+
+class ApiError(Exception):
+    """An API call failed. `reason` is a fixed class string; no request or response content."""
+
+    def __init__(self, reason, status=None, retry_after=None):
+        super().__init__(reason)
+        self.reason = reason
+        self.status = status
+        self.retry_after = retry_after
+
+
+def http_class(status):
+    if status in (404, 429):
+        return str(status)
+    if 500 <= status <= 599:
+        return "5xx"
+    return "4xx" if 400 <= status <= 499 else "other"
+
+
+def retry_after(headers):
+    value = (headers.get("Retry-After") if headers is not None else None) or ""
+    return int(value) if value.isascii() and value.isdigit() and len(value) <= 6 else None
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -143,16 +177,26 @@ def validate_payload(payload):
     return payload
 
 
-def request_json(url, token, *, data=None, expected=200, limit=MAX_RESPONSE):
+def request_json(url, token, *, call, data=None, expected=200, limit=MAX_RESPONSE):
     headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
                "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "Concord-Voice-protected-sonar"}
     if data is not None:
         headers["Content-Type"] = "application/json"
     request = Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
-    with urlopen(request, timeout=20) as response:
-        if response.status != expected:
-            raise Invalid("unexpected API response status")
-        raw = response.read(limit + 1)
+    try:
+        with urlopen(request, timeout=20) as response:
+            if response.status != expected:
+                raise Invalid("unexpected API response status")
+            raw = response.read(limit + 1)
+    except HTTPError as exc:
+        # A non-int code is not trusted: class it "other" (never retried) and never format it.
+        code = exc.code if type(exc.code) is int else 0
+        error = ApiError(f"{call}_http_{http_class(code)}", code, retry_after(exc.headers))
+        with contextlib.suppress(OSError):
+            exc.close()  # Cleanup only; never let it mask the status class.
+        raise error from None
+    except (OSError, HTTPException):
+        raise ApiError(f"{call}_network") from None
     if not raw or len(raw) > limit:
         raise Invalid("API response size invalid")
     value = decode(raw)
@@ -177,7 +221,7 @@ def oidc_token(payload_bytes):
         raise Invalid("OIDC request audience already set")
     query = parts.query + ("&" if parts.query else "") + urlencode({"audience": audience})
     url = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
-    result = request_json(url, bearer, limit=MAX_PROOF)
+    result = request_json(url, bearer, call="oidc", limit=MAX_PROOF)
     token = result.get("value")
     if not isinstance(token, str) or len(token) > 24 * 1024 or not JWT.fullmatch(token):
         raise Invalid("OIDC response invalid")
@@ -241,25 +285,58 @@ def dispatch_watch(args):
     if not token:
         raise Invalid("GitHub token unavailable")
     inputs = {key: str(payload[key]) for key in IDS[:5]}
-    response = request_json(DISPATCH, token, data=canonical({"ref": "main", "inputs": inputs}))
+    # One attempt only: a retried POST could start a second child run.
+    response = request_json(DISPATCH, token, call="dispatch",
+                            data=canonical({"ref": "main", "inputs": inputs}))
     child_id = response.get("workflow_run_id")
     if not positive(child_id):
         raise Invalid("dispatch child ID missing")
     write_private(args.out, canonical({"workflow_run_id": child_id, "run_attempt": 1}))
     url = f"{API}/actions/runs/{child_id}"
+    deadline = time.monotonic() + MAX_POLLS * POLL_SECONDS + DEADLINE_SLACK
+    transient_run = 0
+    seen = False  # Once the run has been seen, a 404 means it is gone, not "not yet visible".
     for attempt in range(MAX_POLLS):
-        run = request_json(url, token)
-        if (run.get("id") != child_id or run.get("run_attempt") != 1
-                or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "main"):
-            raise Invalid("dispatch child identity invalid")
-        if run.get("status") == "completed":
-            if run.get("conclusion") != "success":
-                raise Invalid("dispatch child failed")
-            return
-        if run.get("status") not in ("queued", "in_progress", "requested", "waiting", "pending"):
-            raise Invalid("dispatch child status invalid")
+        if time.monotonic() > deadline:
+            break
+        delay = POLL_SECONDS
+        try:
+            run = request_json(url, token, call="poll")
+        except ApiError as exc:
+            # Transient only: network, 429, 5xx, and a 404 while the new run is not yet visible.
+            # Anything else (403, 401, a 404 late or after the run was seen) fails at once.
+            # Each retry spends a poll slot.
+            if not (exc.status is None or exc.status == 429 or 500 <= exc.status <= 599
+                    or (exc.status == 404 and not seen and attempt < NOT_VISIBLE_POLLS)):
+                raise
+            transient_run += 1
+            if transient_run > MAX_TRANSIENT_RUN:
+                raise  # A persistent fault (TLS, DNS, outage) fails with its reason class.
+            # The reason is a fixed class string, so it is safe to print.
+            print(f"protected Sonar caller: transient poll error [{exc.reason}]; retrying",
+                  file=sys.stderr)
+            delay = max(delay, min(exc.retry_after or 0, RETRY_AFTER_MAX))
+            run = None
+        if run is not None:
+            transient_run = 0
+            # type() rather than ==, so True or 777.0 can never pass for 1 or 777.
+            if (type(run.get("id")) is not int or run.get("id") != child_id
+                    or type(run.get("run_attempt")) is not int or run.get("run_attempt") != 1
+                    or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "main"):
+                raise Invalid("dispatch child identity invalid")
+            seen = True
+            if run.get("status") == "completed":
+                if run.get("conclusion") != "success":
+                    raise Invalid("dispatch child failed")
+                return
+            if run.get("status") not in ("queued", "in_progress", "requested", "waiting", "pending"):
+                raise Invalid("dispatch child status invalid")
         if attempt < MAX_POLLS - 1:
-            time.sleep(10)
+            # Clamp to the time left, so no retry sleep runs past the wall-clock cap.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(delay, remaining))
     raise Invalid("dispatch child timed out")
 
 
@@ -282,12 +359,13 @@ def main():
         # Invalid messages are fixed strings, never request or response content.
         print(f"protected Sonar caller failed: {exc}", file=sys.stderr)
         return 1
-    except HTTPError as exc:
-        # Report only the numeric status; the exception also carries private
-        # request URL, headers, and response body.
-        code = exc.code
-        status = str(code) if type(code) is int and 100 <= code <= 599 else "unknown"
-        print(f"protected Sonar caller failed: HTTP status {status}", file=sys.stderr)
+    except ApiError as exc:
+        # `reason` is one of a fixed set of class strings, so it is safe to print.
+        # A gateway 5xx can arrive after GitHub accepted the dispatch, like a dropped connection.
+        note = (" (a child run may have started)"
+                if exc.reason in ("dispatch_network", "dispatch_http_5xx") else "")
+        print(f"protected Sonar caller failed; inspect local input and API status [{exc.reason}]{note}",
+              file=sys.stderr)
         return 1
     except (OSError, UnicodeError, TypeError, ValueError, OverflowError, RecursionError):
         print("protected Sonar caller failed; inspect local input and API status", file=sys.stderr)

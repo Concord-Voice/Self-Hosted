@@ -1,0 +1,24 @@
+{
+  "name": "registries-off-registry",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "registries-off-registry",
+      "dependencies": {
+        "left-pad": "^1.3.0",
+        "is-number": "^7.0.0"
+      }
+    },
+    "node_modules/is-number": {
+      "version": "7.0.0",
+      "resolved": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+      "integrity": "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="
+    },
+    "node_modules/left-pad": {
+      "version": "1.3.0",
+      "resolved": "https://npm.example.invalid/left-pad/-/left-pad-1.3.0.tgz",
+      "integrity": "sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQEHx7xeW3/9wY6O2C7AyVkQO1uvKKeJP4ifbYWdJ1oYsYtg=="
+    }
+  }
+}

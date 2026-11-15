@@ -9,8 +9,7 @@ allowed-tools:
   - Read
   - Grep
   - Glob
-  - mcp__sonarqube__quality_gate_status
-  - mcp__sonarqube__quality_gate
+  - mcp__sonarqube__get_project_quality_gate_status
 ---
 
 # Verify Quality Gate
@@ -51,8 +50,36 @@ Args: $0 — optional flags
 Read every knob once, up front. Absent file or absent keys fall back to the
 documented defaults, so this step never errors.
 
+The gate's commands come from config, so read it from the default branch, never from this
+checkout: on a PR branch both `scripts/repo-config.sh` and `.claude/repo-config.json` are the
+PR's to edit. A gate change takes effect once it merges.
+
 ```bash
-source scripts/repo-config.sh
+RC_REF="refs/remotes/origin/$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"   # the API is the authority; origin/HEAD goes stale after a rename
+[ "$RC_REF" != refs/remotes/origin/ ] || RC_REF="$(git symbolic-ref --quiet refs/remotes/origin/HEAD || echo refs/remotes/origin/main)"
+case "$RC_REF" in refs/remotes/origin/HEAD) RC_REF= ;; refs/remotes/origin/?*) ;; *) RC_REF= ;; esac
+RC_OID="$([ -n "$RC_REF" ] && git show-ref --verify --hash "$RC_REF" 2>/dev/null)"   # exact refname, no DWIM: a same-named branch or tag cannot stand in
+case "$([ -n "$RC_OID" ] && git ls-tree "$RC_OID" -- scripts/repo-config.sh | cut -d' ' -f1)" in
+  100644|100755) ;;
+  *) echo "FATAL: ${RC_REF:-the default branch} is not fetched or has no regular scripts/repo-config.sh" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+RC_SRC="$(git show "$RC_OID:scripts/repo-config.sh")" || { echo "FATAL: could not read the default-branch helper" >&2; return 1 2>/dev/null || exit 1; }
+eval "$RC_SRC"   # the commit that was checked; the checkout's copy is never sourced
+unset RC_TRUSTED_STATE RC_TRUSTED_CFG   # nothing carries over from an earlier run in this shell
+# Presence comes from the tree, not from a read: a blob that is listed but cannot be read is an
+# error, never "absent". RC_TRUSTED_STATE: absent = no config on the default branch; present = read.
+RC_ENT="$(git ls-tree "$RC_OID" -- .claude/repo-config.json)" || { echo "FATAL: could not list the default-branch tree" >&2; return 1 2>/dev/null || exit 1; }
+case "${RC_ENT%% *}" in
+  "") RC_TRUSTED_STATE=absent ;;
+  100644|100755)
+    RC_TRUSTED_CFG="$(git show "$RC_OID:.claude/repo-config.json")" && [ -n "$RC_TRUSTED_CFG" ] \
+      || { echo "FATAL: could not read the default-branch .claude/repo-config.json" >&2; return 1 2>/dev/null || exit 1; }
+    RC_TRUSTED_STATE=present ;;
+  *) echo "FATAL: the default-branch .claude/repo-config.json is not a regular file" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+DEFAULT_BRANCH="${RC_REF#refs/remotes/origin/}"
+RC_FILE="$(mktemp)"   # rc_get now reads the default branch's config
+if [ -n "$RC_TRUSTED_CFG" ]; then printf '%s' "$RC_TRUSTED_CFG" > "$RC_FILE"; else rm -f "$RC_FILE"; fi   # absent config: rc_get's [ -f ] guard returns the defaults
 QG_ENABLED="$(rc_get '.quality_gate.enabled' false)"
 COVERAGE_MIN="$(rc_get '.quality_gate.coverage_min' 80)"
 BLOCKERS_MAX="$(rc_get '.quality_gate.blockers_max' 0)"
@@ -118,7 +145,9 @@ this session. If either is missing, print `not configured` for this row and do
 not treat it as a failure.
 
 For `sonarqube`:
-1. Call `mcp__sonarqube__quality_gate_status` for the current branch.
+1. Call `mcp__sonarqube__get_project_quality_gate_status`, passing `branch`
+   explicitly (the server's branch-vs-pullRequest contract: use `branch` for a
+   long- or short-lived branch, `pullRequest` for a PR analysis key, never both).
 2. If the gate is `ERROR`, enumerate the failing conditions with metric key,
    threshold, and actual value.
 3. If the gate is `WARN` or `OK`, report the conditions closest to their

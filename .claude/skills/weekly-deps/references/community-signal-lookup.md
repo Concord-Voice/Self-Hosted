@@ -102,7 +102,7 @@ gh pr view $PR --json body --jq '.body' > /tmp/pr-body.txt
 grep -iE '\b(yanked|do[[:space:]]+not[[:space:]]+upgrade|do[[:space:]]+not[[:space:]]+use|critical[[:space:]]+bug|hotfix[[:space:]]+(needed|required)|reverted[[:space:]]+in[[:space:]]+v?[0-9])' /tmp/pr-body.txt
 
 # Medium negative signals (any match → LOW confidence; these are also unambiguous markers)
-grep -iE '(\bCVE-[0-9]{4}-[0-9]+\b|\bGHSA-[a-z0-9-]{15,}\b|security[[:space:]]+vulnerability|security[[:space:]]+advisory)' /tmp/pr-body.txt
+grep -iE '(\bCVE-[0-9]{4}-[0-9]+\b|\bGHSA(-[23456789cfghjmpqrvwx]{4}){3}\b|security[[:space:]]+vulnerability|security[[:space:]]+advisory)' /tmp/pr-body.txt
 ```
 
 **DO NOT scan for bare `BREAKING`, `MAJOR`, `deprecated`, or `regression`** — those are too common in normal release notes to produce useful signal:

@@ -9,6 +9,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
 
@@ -73,6 +74,24 @@ type rowQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+func canonicalPermissionIDs(serverID, userID, channelID string) (string, string, string, error) {
+	serverID, err := requestid.Canonical(serverID)
+	if err != nil {
+		return "", "", "", fmt.Errorf("invalid server ID: %w", err)
+	}
+	userID, err = requestid.Canonical(userID)
+	if err != nil {
+		return "", "", "", fmt.Errorf("invalid user ID: %w", err)
+	}
+	if channelID != "" {
+		channelID, err = requestid.Canonical(channelID)
+		if err != nil {
+			return "", "", "", fmt.Errorf("invalid channel ID: %w", err)
+		}
+	}
+	return serverID, userID, channelID, nil
+}
+
 // NewResolver creates a new RBAC resolver
 func NewResolver(db *sql.DB, cache *PermissionCache, log *logger.Logger) *Resolver {
 	return &Resolver{
@@ -117,6 +136,10 @@ func (r *Resolver) HasPermission(ctx context.Context, serverID, userID, channelI
 // It is cache-first. On a miss it computes and publishes with the generations
 // Get read, which were current before the compute began.
 func (r *Resolver) GetEffectivePermissions(ctx context.Context, serverID, userID, channelID string) (Permission, error) {
+	serverID, userID, channelID, err := canonicalPermissionIDs(serverID, userID, channelID)
+	if err != nil {
+		return 0, err
+	}
 	cached, ok, tags := r.cache.Get(ctx, serverID, userID, channelID)
 	if ok {
 		return cached, nil
@@ -144,6 +167,10 @@ func (r *Resolver) GetEffectivePermissions(ctx context.Context, serverID, userID
 // computed before a concurrent change with the generation that change bumped
 // to, and the next cached read would serve it.
 func (r *Resolver) ResolveEffectivePermissionsFresh(ctx context.Context, serverID, userID, channelID string) (Permission, error) {
+	serverID, userID, channelID, err := canonicalPermissionIDs(serverID, userID, channelID)
+	if err != nil {
+		return 0, err
+	}
 	var tags GenTags
 	if r.cache != nil {
 		tags = r.cache.Generations(ctx, serverID, userID)
@@ -172,6 +199,10 @@ func (r *Resolver) runAfterCompute() {
 // The channel arm returns ResolveEffectivePermissionsForChannelsFresh's value,
 // which that entry point has already masked; only the server arm masks here.
 func (r *Resolver) ResolveEffectivePermissionsUncached(ctx context.Context, serverID, userID, channelID string) (Permission, error) {
+	serverID, userID, channelID, err := canonicalPermissionIDs(serverID, userID, channelID)
+	if err != nil {
+		return 0, err
+	}
 	if channelID != "" {
 		permsByChannel, err := r.ResolveEffectivePermissionsForChannelsFresh(ctx, serverID, userID, []string{channelID})
 		if err != nil {
@@ -217,6 +248,10 @@ func (r *Resolver) ResolveEffectivePermissionsUncached(ctx context.Context, serv
 func (r *Resolver) ResolveServerPermissionsTx(
 	ctx context.Context, q rowQuerier, serverID, userID string,
 ) (Permission, error) {
+	serverID, userID, _, err := canonicalPermissionIDs(serverID, userID, "")
+	if err != nil {
+		return 0, err
+	}
 	raw, _, mask, err := r.resolveServerPermissions(ctx, q, serverID, userID)
 	if err != nil {
 		return 0, err
@@ -230,6 +265,10 @@ func (r *Resolver) ResolveServerPermissionsTx(
 func (r *Resolver) ResolveChannelPermissionsTx(
 	ctx context.Context, tx *sql.Tx, serverID, userID, channelID string,
 ) (Permission, error) {
+	serverID, userID, channelID, err := canonicalPermissionIDs(serverID, userID, channelID)
+	if err != nil {
+		return 0, err
+	}
 	basePerms, isOwner, mask, err := r.resolveServerPermissions(ctx, tx, serverID, userID)
 	if err != nil {
 		return 0, err
@@ -253,7 +292,26 @@ func (r *Resolver) ResolveChannelPermissionsTx(
 // ResolveEffectivePermissionsForChannelsFresh resolves a member's effective
 // permissions for channels from one server in one fresh database pass. It keeps
 // per-channel SBAC allow/deny semantics while avoiding an N+1 preflight loop.
+// Result keys are canonical UUID strings, even when input spellings differ.
 func (r *Resolver) ResolveEffectivePermissionsForChannelsFresh(ctx context.Context, serverID, userID string, channelIDs []string) (map[string]Permission, error) {
+	var err error
+	serverID, userID, _, err = canonicalPermissionIDs(serverID, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(channelIDs))
+	canonicalChannelIDs := make([]string, 0, len(channelIDs))
+	for _, channelID := range channelIDs {
+		channelID, err = requestid.Canonical(channelID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid channel ID: %w", err)
+		}
+		if _, duplicate := seen[channelID]; !duplicate {
+			seen[channelID] = struct{}{}
+			canonicalChannelIDs = append(canonicalChannelIDs, channelID)
+		}
+	}
+	channelIDs = canonicalChannelIDs
 	permsByChannel := make(map[string]Permission, len(channelIDs))
 	if len(channelIDs) == 0 {
 		return permsByChannel, nil
@@ -1033,9 +1091,17 @@ func (r *Resolver) CheckHierarchyTx(ctx context.Context, q rowQuerier, serverID,
 }
 
 func (r *Resolver) checkHierarchy(ctx context.Context, q rowQuerier, serverID, actorID, targetID string) error {
+	serverID, actorID, targetID, err := canonicalPermissionIDs(serverID, actorID, targetID)
+	if err != nil {
+		return fmt.Errorf(errMsgHierarchyCheckFailed, err)
+	}
 	// Server owner bypasses hierarchy — owner can moderate anyone
 	var ownerID string
 	if err := q.QueryRowContext(ctx, `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
+		return fmt.Errorf(errMsgHierarchyCheckFailed, err)
+	}
+	ownerID, err = requestid.Canonical(ownerID)
+	if err != nil {
 		return fmt.Errorf(errMsgHierarchyCheckFailed, err)
 	}
 	if actorID == ownerID {

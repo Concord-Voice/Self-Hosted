@@ -56,7 +56,7 @@ gh issue view $0 --json body --jq '.body' | grep -oE '#[0-9]+' | sort -u
 
 ## Step 4: Identify subissues
 
-Children are attached as native sub-issues (REST `/sub_issues`, per `.claude/rules/release-tracking-epics.md`). Fetch those first:
+Children are attached as native sub-issues (REST `/sub_issues`; see `.claude/rules/release-tracking-epics.md` where the repo installs it). Fetch those first:
 
 ```bash
 gh api "repos/{owner}/{repo}/issues/$0/sub_issues?per_page=100" --jq '.[] | "\(.number)\t\(.state)\t\(.title)"'

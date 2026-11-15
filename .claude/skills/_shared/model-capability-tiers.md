@@ -40,10 +40,13 @@ receive real-file copies via `scripts/sync-shared.sh` (same mechanism as
 
 ## Model-ID → profile mapping table
 
-Prefix match against the decoration-stripped model ID. First matching row wins.
+Prefix match against the decoration-stripped model ID, except the four GPT-6 rows and the
+`gemini-3.8-flash` row: those require equality with the entire stripped ID. First matching
+row wins.
 
-| Model-ID evidence (prefix) | Profile | Notes |
+| Model-ID evidence (match) | Profile | Notes |
 |---|---|---|
+| `claude-mythos-5` | `fable-5` | Prefix match (covers Mythos 5.x, e.g. `claude-mythos-5-1`); frontier model, nearest profile |
 | `claude-fable-5` | `fable-5` | |
 | `claude-opus-5` | `opus-5` | |
 | `claude-sonnet-5` | `sonnet-5` | |
@@ -51,12 +54,21 @@ Prefix match against the decoration-stripped model ID. First matching row wins.
 | `claude-opus-4-7` | `opus-5` | nearest profile |
 | `claude-opus-4-6` | `opus-5` | nearest profile |
 | `claude-haiku-` | `generic` | explicit; Haiku-class must not orchestrate a lifecycle run |
+| `gpt-6-astra` | `fable-5` | Exact match; GPT-6 frontier role fit, provisional, not a benchmark equivalence |
+| `gpt-6.1-sol` | `sonnet-5` | Exact match; GPT-6.1 daily coding workhorse role fit |
+| `gpt-6-sol` | `opus-5` | Exact match; GPT-6 coding workhorse and cyber baseline role fit, provisional |
+| `gpt-6-luna` | `sonnet-5` | Exact match; GPT-6 fast, affordable role fit, provisional |
 | `gpt-5-6-sol` / `gpt-5.6-sol` | `fable-5` | cross-vendor equivalence — see table below |
 | `gpt-5-6-terra` / `gpt-5.6-terra` | `opus-5` | |
 | `gpt-5-6-luna` / `gpt-5.6-luna` | `sonnet-5` | |
 | `gpt-5-5` / `gpt-5.5` | `generic` | Haiku-class equivalent; must not orchestrate |
+| `gemini-3.8-flash` | `sonnet-5` | Exact match; flash-class worker model, so it must not inherit the pro-variant row below |
 | `gemini-3` | `opus-5` | nearest profile; provisional, pro variants |
 | *anything else / no evidence* | `generic` | + WARN when an ID was present but unmapped |
+
+For example, `gpt-6-sol` resolves `opus-5`, while `gpt-6-solar` and
+`gpt-6-astra-preview-unsafe` resolve `generic` + WARN. Do not infer a tier from
+the shared start of an unknown GPT-6 ID.
 
 ### Cross-vendor equivalence (Claude ↔ OpenAI / Codex)
 
@@ -64,29 +76,35 @@ Consumer repos are read by more than one runner (Claude Code, Codex, Copilot). T
 serves **three distinct questions**, and they do not always give the same answer — read the
 column you actually need:
 
-- **Capability equivalence** — which non-Claude model is in the same capability class. Prose
-  and reasoning only; never emit this value into a config file.
+- **Capability equivalence** — an operational role fit inferred from the model catalog,
+  not a measured cross-vendor benchmark. Prose only; never emit this value into a config file.
 - **Codex agent model** — the literal value a translator writes as `model` in a
   `.codex/agents/*.toml` profile. This column is authoritative for translation.
 - **Tier profile** — the internal profile used to resolve orchestration capability.
 
 | Claude pin | Capability equivalence | Codex agent model (authoritative for translation) | Tier profile |
 |---|---|---|---|
-| Fable 5 | GPT-5.6 **Sol** | `gpt-5.6-sol` | `fable-5` |
-| Opus 5 | GPT-5.6 **Terra** | `gpt-5.6-terra` | `opus-5` |
-| Sonnet 5 | GPT-5.6 **Luna** | `gpt-5.6-luna` | `sonnet-5` |
-| Haiku 4.5 | GPT-5.5 | `gpt-5.6-luna` — **upgrade** | `generic` |
+| Mythos 5.1 | None in the GPT-6 catalog | *None* — Claude-only; no Codex profile is generated | `fable-5` |
+| Fable 5 | GPT-6 **Astra** | `gpt-6-astra` | `fable-5` |
+| Opus 5 | GPT-6 **Astra** | `gpt-6-astra` | `opus-5` |
+| Sonnet 5 | GPT-6.1 **Sol** | `gpt-6.1-sol` | `sonnet-5` |
+| Haiku 4.5 | GPT-5.5 | `gpt-6-luna` — **upgrade** | `generic` |
+
+The GPT-6 rows in the Model-ID table classify a **running orchestrator** when the harness
+supplies its exact model ID. A bare `GPT-6` family label remains `generic`. The GPT-5.6
+rows remain for older orchestrator sessions; generated agent profiles now use the GPT-6
+translation above. The source Claude pins and Codex-only role overrides remain in force.
 
 **Haiku is the row where the columns diverge, deliberately.** GPT-5.5 is the honest capability
-equivalence, but it is not a member of the GPT-5.6 agent-profile family, so there is no Codex
+equivalence, but it is not a member of the GPT-6 agent-profile family, so there is no Codex
 agent model at Haiku's class to translate *into* — a `haiku`-pinned agent upgrades to
-`gpt-5.6-luna` rather than falling back to whatever a translator's default happens to be.
+`gpt-6-luna` rather than falling back to whatever a translator's default happens to be.
 
 **The upgrade cannot leak into tier resolution, because an agent's pinned model is not a tier
 input at all.** Per the 2026-07-24 scope narrowing above, tier calibrates the **orchestrator
 only** — the model the harness reports for the running main loop. A dispatched subagent's
 pinned model, translated or otherwise, never feeds the detection procedure, so translating
-`haiku` → `gpt-5.6-luna` cannot promote anything out of `generic`. The Tier-profile column
+`haiku` → `gpt-6-luna` cannot promote anything out of `generic`. The Tier-profile column
 above describes what a **session running as that model** resolves to, not what a subagent
 pinned to it becomes.
 
@@ -96,6 +114,20 @@ would have needed such plumbing (subagent model selection) was retired in the sa
 narrowing. An earlier revision of this section instructed readers to "never derive the tier
 from the translated model," which was unimplementable as written — the detector has only the
 runtime model ID and no way to comply. The instruction was removed rather than satisfied.
+
+#### Codex-only role overrides
+
+After the general pin translation above, Codex applies role-specific assignments:
+
+| Agent | Claude pin (unchanged) | Codex agent model |
+|---|---|---|
+| `red-team` | Opus | `gpt-6-sol` |
+
+GPT-6 Sol is an explicitly pinned security baseline that replaces the phased-out `gpt-daybreak-blue-latest` assignment. It is not a new capability equivalence or orchestrator tier, so it does not change the Model-ID → profile rows above and is never passed as a dispatch-time override. The translator applies these assignments only while generating `.codex/agents/*.toml`; the `.claude/agents/*.md` source pins stay untouched.
+
+The cyber baseline covers only the adversarial role. Other Opus-pinned agents, including `security-reviewer` and any repo-local domain reviewers, are not in it: no override has been decided for them, so they follow the default Opus mapping (`gpt-6-astra`).
+
+An agent pinned to a Claude-only model (e.g. Mythos) is never an override row, because it gets no Codex profile at all: the translator skips it, and must fail rather than fall back to a default model for it.
 
 ### Effort-level equivalence
 
@@ -108,7 +140,7 @@ a ceiling. Values in the Codex column are the literal `model_reasoning_effort` w
 
 | Claude | OpenAI / Codex | Notes |
 |---|---|---|
-| *ultracode* | `ultra` | Not an `effort` value — a session posture (above-max reasoning + automated multi-agent parallelization). Governs orchestration breadth, not one agent's depth. **Never emitted into an agent profile**, and the model catalog does not offer it for `gpt-5.6-luna` at all |
+| *ultracode* | `ultra` | Not an `effort` value — a session posture (above-max reasoning + automated multi-agent parallelization). Governs orchestration breadth, not one agent's depth. **Never emitted into an agent profile**, and the model catalog does not offer it for `gpt-6-luna` at all |
 | `max` | `xhigh` | Codex `max` is deliberately skipped; ultracode owns the rung above `xhigh` |
 | `xhigh` | `high` | |
 | `high` | `medium` | |
@@ -118,8 +150,8 @@ a ceiling. Values in the Codex column are the literal `model_reasoning_effort` w
 **There is no Codex "Light".** An earlier revision of this table mapped `low` → Light; that
 value appears in no model's `supported_reasoning_levels` and is not accepted in
 `config.toml`. The floor is `low`. The verified Codex ladder is
-`low < medium < high < xhigh < max < ultra`, and `ultra` is present only for `gpt-5.6-sol`
-and `gpt-5.6-terra`.
+`low < medium < high < xhigh < max < ultra`. In the GPT-6 family, `ultra` is available on
+`gpt-6-astra` and `gpt-6-sol`, but not `gpt-6-luna`.
 
 **Governance:** adding or changing a row requires Repo Admin approval — same governance as
 dispatch-catalog entries and labels (file an issue titled `Catalog proposal: tier-mapping
@@ -171,3 +203,18 @@ No tier, in any mode, may alter:
 
 A tier profile that appears to authorize crossing any of these is a catalog bug — the
 invariant wins, and the discrepancy should be fixed in this file via normal PR review.
+
+**Invariant 7 vs. escalation (clarified 2026-08-26).** `lifecycle-agent-dispatch.md`
+defines criteria (E1-E4) under which a repo-local escalation agent — a higher-pinned
+agent that owns both producer surfaces — takes a task instead of a lower-pinned
+producer. That is **agent selection**, which the dispatch tables have always owned,
+and it does not touch invariant 7: the escalation agent runs on its own pin, and the producer it
+replaced still runs on its own pin whenever it *is* dispatched. No `model` override
+is passed at any point.
+
+Escalation is also **not a tier input, in either direction**. Tier calibrates the
+orchestrator only (see the 2026-07-24 narrowing above); it neither gates nor relaxes
+E1-E4, and a `generic`-tier orchestrator evaluates them identically to a `fable-5`
+one. The one tier-adjacent interaction lives in the dispatch table, not here: under
+`Automated End-to-End` a *borderline* E1/E3 call resolves toward escalation — and
+that is keyed on the **mode**, which is risk authority, not on the tier.
