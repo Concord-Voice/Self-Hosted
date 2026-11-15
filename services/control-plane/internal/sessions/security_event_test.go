@@ -279,11 +279,15 @@ func (r securityEventFamilyRig) requireCommittedOwner(t *testing.T) {
 	require.Equal(t, 1, count, "committed refresh revocation must have its exact sealed durable family owner")
 }
 
-type revokeMFAVerifier struct{ enabled bool }
+type revokeMFAVerifier struct {
+	enabled   bool
+	valid     bool
+	verifyErr error
+}
 
 func (v revokeMFAVerifier) IsEnabled(context.Context, string) bool { return v.enabled }
-func (revokeMFAVerifier) VerifyCode(context.Context, string, stepup.Purpose, string) (bool, error) {
-	return false, nil
+func (v revokeMFAVerifier) VerifyCode(context.Context, string, stepup.Purpose, string) (bool, error) {
+	return v.valid, v.verifyErr
 }
 func (revokeMFAVerifier) GetEnabledMethods(context.Context, string) ([]string, error) {
 	return []string{"totp"}, nil
@@ -299,12 +303,18 @@ func (methodsFaultMFAVerifier) GetEnabledMethods(context.Context, string) ([]str
 // client the account has no factor to offer.
 func TestAuthenticateForRevoke_MethodsReadFailureIs500(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	h := NewHandler(nil, nil, logger.New("test"), testDisconnector{}, methodsFaultMFAVerifier{revokeMFAVerifier{enabled: true}})
+	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	require.NoError(t, err)
+	db := sql.OpenDB(execConnector{passwordHash: passwordHash})
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	rdb := redis.NewClient(&redis.Options{Addr: miniredis.RunT(t).Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, methodsFaultMFAVerifier{revokeMFAVerifier{enabled: true}})
 	response := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(response)
 	c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/sessions/revocation-mode", nil)
 
-	require.True(t, h.authenticateForRevoke(context.Background(), c, privacyUserID, "", "", revocationModeSetAction))
+	require.True(t, h.authenticateForRevoke(context.Background(), c, privacyUserID, privacyPassword, "", revocationModeSetAction))
 	require.Equal(t, http.StatusInternalServerError, response.Code)
 	require.Contains(t, response.Body.String(), errMsgMFAVerificationFailed)
 	require.NotContains(t, response.Body.String(), "auth_required")
@@ -348,11 +358,11 @@ func TestAuthenticateForRevokeEmitsCredentialSpecificRefusalEvents(t *testing.T)
 			}}, passwordRecorder.events)
 			require.True(t, middleware.NightwatchHandled(passwordContext))
 
-			mfaHandler := NewHandler(db, nil, logger.New("test"), testDisconnector{}, revokeMFAVerifier{enabled: true})
+			mfaHandler := NewHandler(db, lockoutRedis, logger.New("test"), testDisconnector{}, revokeMFAVerifier{enabled: true})
 			mfaRecorder := &securityEventRecorder{}
 			mfaHandler.SetSecurityEvents(mfaRecorder)
 			mfaContext, mfaResponse := newContext()
-			require.True(t, mfaHandler.authenticateForRevoke(context.Background(), mfaContext, privacyUserID, "", "bad-code", test.action))
+			require.True(t, mfaHandler.authenticateForRevoke(context.Background(), mfaContext, privacyUserID, privacyPassword, "bad-code", test.action))
 			require.Equal(t, http.StatusForbidden, mfaResponse.Code)
 			require.Equal(t, []securityevent.Event{{
 				EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied,
@@ -367,6 +377,147 @@ func TestAuthenticateForRevokeEmitsCredentialSpecificRefusalEvents(t *testing.T)
 			require.False(t, middleware.NightwatchHandled(noCredentialContext))
 		})
 	}
+}
+
+func TestAuthenticateForRevoke_MFARequiresPasswordAndUsesSharedBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	require.NoError(t, err)
+	db := sql.OpenDB(execConnector{passwordHash: passwordHash})
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, revokeMFAVerifier{enabled: true})
+
+	request := func(password, code string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(response)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+		require.True(t, h.authenticateForRevoke(context.Background(), c, privacyUserID, password, code, revokeAllSessionsAction))
+		return response
+	}
+
+	// The three revocation endpoints share the account-wide budget. Exercise
+	// distinct action descriptors here so a future route-local key cannot hide
+	// behind the common helper.
+	actions := []revokeAction{revokeSessionAction, revokeAllSessionsAction, revocationModeSetAction}
+	for i := 0; i < stepup.BudgetLimit; i++ {
+		action := actions[i%len(actions)]
+		response := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(response)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+		require.True(t, h.authenticateForRevoke(context.Background(), c, privacyUserID, privacyPassword, "bad-code", action))
+		require.Equal(t, http.StatusForbidden, response.Code)
+	}
+	denied := request(privacyPassword, "bad-code") // sixth request, different from the final loop action
+	require.Equal(t, http.StatusTooManyRequests, denied.Code)
+	require.NotEmpty(t, denied.Header().Get("Retry-After"))
+	require.Contains(t, denied.Body.String(), "step_up_budget_exhausted")
+
+	passwordOnly := request(privacyPassword, "")
+	require.Equal(t, http.StatusForbidden, passwordOnly.Code)
+	require.NotContains(t, passwordOnly.Body.String(), "step_up_budget")
+	count, err := rdb.Get(context.Background(), stepup.DangerousActionBudget(rdb).Key(privacyUserID)).Int()
+	require.NoError(t, err)
+	require.Equal(t, stepup.BudgetLimit+1, count, "a correct password without MFA must not clear or charge the MFA budget")
+}
+
+func TestAuthenticateForRevoke_MFABudgetUnavailableIs503(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	require.NoError(t, err)
+	db := sql.OpenDB(execConnector{passwordHash: passwordHash})
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	rdb.AddHook(revokeBudgetIncrFaultHook{key: stepup.DangerousActionBudget(rdb).Key(privacyUserID)})
+	h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, revokeMFAVerifier{enabled: true})
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+
+	require.True(t, h.authenticateForRevoke(context.Background(), c, privacyUserID, privacyPassword, "bad-code", revokeAllSessionsAction))
+	require.Equal(t, http.StatusServiceUnavailable, response.Code)
+	require.Contains(t, response.Body.String(), "step_up_budget_unavailable")
+}
+
+func TestAuthenticateForRevoke_VerifierResultControlsRevocation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name       string
+		verifier   revokeMFAVerifier
+		wantStatus int
+		blocked    bool
+		verified   bool
+	}{
+		{name: "valid factor", verifier: revokeMFAVerifier{enabled: true, valid: true}, wantStatus: http.StatusOK, verified: true},
+		{name: "verifier fault", verifier: revokeMFAVerifier{enabled: true, verifyErr: errors.New("verification unavailable")}, wantStatus: http.StatusInternalServerError, blocked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := sql.OpenDB(execConnector{passwordHash: passwordHash})
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			mini := miniredis.RunT(t)
+			rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+			t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+			h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, tc.verifier)
+			response := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(response)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+			blocked, verified := h.authenticateForRevokeWithMFA(context.Background(), c, privacyUserID, privacyPassword, "123456", revokeAllSessionsAction)
+			require.Equal(t, tc.blocked, blocked)
+			require.Equal(t, tc.verified, verified)
+			require.Equal(t, tc.wantStatus, response.Code)
+		})
+	}
+}
+
+func TestUpdateRevocationMode_ValidMFAClearsSharedBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	require.NoError(t, err)
+	db := sql.OpenDB(execConnector{passwordHash: passwordHash, rows: 1})
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	key := stepup.DangerousActionBudget(rdb).Key(privacyUserID)
+	require.NoError(t, rdb.Set(context.Background(), key, "4", stepup.BudgetWindow).Err())
+	h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, revokeMFAVerifier{enabled: true, valid: true})
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/sessions/revocation-mode", strings.NewReader(`{"mode":"simple","password":"`+privacyPassword+`","mfa_code":"123456"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user_id", privacyUserID)
+	h.UpdateRevocationMode(c)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.False(t, mini.Exists(key), "successful password-and-MFA update clears the shared budget")
+}
+
+type revokeBudgetIncrFaultHook struct{ key string }
+
+func (revokeBudgetIncrFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h revokeBudgetIncrFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "incr" {
+			if args := cmd.Args(); len(args) >= 2 {
+				if key, ok := args[1].(string); ok && key == h.key {
+					err := errors.New("forced session MFA budget failure")
+					cmd.SetErr(err)
+					return err
+				}
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (revokeBudgetIncrFaultHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 type testDisconnector struct{}

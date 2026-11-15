@@ -54,6 +54,29 @@ const mfaEnforcementLockTimeout = `SET LOCAL lock_timeout = '3s'`
 // setting changed.
 const updateMFAEnforcementSQL = `UPDATE servers SET enforce_mfa_dangerous_actions = $2 WHERE id = $1`
 
+// mfaEnforcementAnnouncementRecipientsSQL mirrors authorizeMFAEnforcement's
+// owner-or-raw-Administrator boundary. The roles join is server-qualified so a
+// damaged or pre-composite-FK member_roles row cannot import authority from a
+// role in another server.
+const mfaEnforcementAnnouncementRecipientsSQL = `
+	SELECT user_id
+	FROM (
+		SELECT s.owner_id AS user_id
+		FROM servers s
+		WHERE s.id = $1
+
+		UNION
+
+		SELECT mr.user_id
+		FROM member_roles mr
+		INNER JOIN roles r ON r.id = mr.role_id AND r.server_id = mr.server_id
+		WHERE mr.server_id = $1
+		GROUP BY mr.user_id
+		HAVING (COALESCE(BIT_OR(r.permissions), 0) & $2) <> 0
+	) AS recipients
+	ORDER BY user_id
+`
+
 const (
 	// errMsgMFAEnforcementForbidden is byte-identical to the body
 	// rbac.RequirePermission writes, so a member who may not read or change
@@ -81,8 +104,8 @@ const (
 // broadcast (#3456). It runs on the request goroutine after the commit, so an
 // unbounded send on a saturated hub queue would hang a PUT whose change has
 // already committed. One second rather than rbac's ten: rbac's events are
-// revocations, while this one only asks members to re-read what the server
-// still enforces on every request.
+// revocations, while this one only asks authorized setting viewers to re-read
+// what the server still enforces on every request.
 const serverPermissionsChangedTimeout = time.Second
 
 // errMFAEnforcementForbidden is the authorization refusal: neither the owner
@@ -398,12 +421,12 @@ func (h *Handler) respondMFAEnforcementError(c *gin.Context, err error) {
 }
 
 // refreshMFAEnforcementViews bumps the server's permission generation so the
-// next read on any member is fresh (I6), then tells the server's subscribers to
-// make that read (#3456). Both are detached from the request, because a client
-// that hangs up must not leave either undone. Both callers reach it only after
-// the transaction's outcome is settled or unknowable: after a clean commit, or
-// after a commit error (see applyMFAEnforcement). Neither a no-op request nor a
-// refusal reaches it.
+// next read on any member is fresh (I6), then tells only users authorized to
+// read the setting to make that read (#3456). Both are detached from the
+// request, because a client that hangs up must not leave either undone. Both
+// callers reach it only after the transaction's outcome is settled or
+// unknowable: after a clean commit, or after a commit error (see
+// applyMFAEnforcement). Neither a no-op request nor a refusal reaches it.
 //
 // The bump runs FIRST and the announcement follows whatever it returned: a
 // member that re-read on the event before the bump could be served, or could
@@ -418,12 +441,13 @@ func (h *Handler) refreshMFAEnforcementViews(ctx context.Context, serverID strin
 	h.announceServerPermissionsChanged(ctx, serverID)
 }
 
-// announceServerPermissionsChanged sends server_permissions_changed to every
-// subscriber of the server. The frame carries the server id and nothing else
-// (F12): it says THAT the setting may have changed, never in which direction,
-// and nothing about anyone's enrollment. The id is re-rendered from its parsed
-// form, so the wire always carries the canonical lowercase spelling whatever
-// spelling the request used. A failure logs one line that carries no
+// announceServerPermissionsChanged sends server_permissions_changed only to
+// the owner and raw-bit Administrators, matching the setting's read boundary.
+// Ordinary members receive no timing signal. The frame carries the server id
+// and nothing else: it says THAT the setting may have changed, never in which
+// direction, and nothing about anyone's enrollment. The id is re-rendered from
+// its parsed form, so the wire always carries the canonical lowercase spelling
+// whatever spelling the request used. A failure logs one line that carries no
 // identifier and no direction (I7), byte-identical to the user event's in
 // internal/api. A nil hub is skipped: only tests build a handler without one.
 func (h *Handler) announceServerPermissionsChanged(ctx context.Context, serverID string) {
@@ -433,12 +457,53 @@ func (h *Handler) announceServerPermissionsChanged(ctx context.Context, serverID
 	delivered := false
 	if server, err := uuid.Parse(serverID); err == nil {
 		broadcastCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), serverPermissionsChangedTimeout)
-		delivered = h.hub.BroadcastToServerContext(broadcastCtx, server, serverPermissionsChangedMessage(server))
+		recipients, recipientErr := h.mfaEnforcementAnnouncementRecipients(broadcastCtx, server)
+		if recipientErr == nil {
+			delivered = true
+			message := serverPermissionsChangedMessage(server)
+			for _, recipient := range recipients {
+				if !h.hub.BroadcastToUserContext(broadcastCtx, recipient, message) {
+					delivered = false
+					break
+				}
+			}
+		}
 		cancel()
 	}
 	if !delivered {
 		h.log.Error("Failed to announce a permission change", "failure_class", failureClassPermChangeBroadcast)
 	}
+}
+
+func (h *Handler) mfaEnforcementAnnouncementRecipients(
+	ctx context.Context, serverID uuid.UUID,
+) (recipients []uuid.UUID, err error) {
+	rows, err := h.db.QueryContext(
+		ctx,
+		mfaEnforcementAnnouncementRecipientsSQL,
+		serverID,
+		int64(rbac.PermAdministrator),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query announcement recipients: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close announcement recipients: %w", closeErr))
+		}
+	}()
+
+	for rows.Next() {
+		var recipient uuid.UUID
+		if err := rows.Scan(&recipient); err != nil {
+			return nil, fmt.Errorf("scan announcement recipient: %w", err)
+		}
+		recipients = append(recipients, recipient)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate announcement recipients: %w", err)
+	}
+	return recipients, nil
 }
 
 // serverPermissionsChangedMessage is the server_permissions_changed frame:

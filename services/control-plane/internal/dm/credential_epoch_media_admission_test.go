@@ -280,7 +280,7 @@ func TestDMDeclineCommitFailureRestoresDeclinedUser(t *testing.T) {
 	second := ts.CreateTestUser(t, "decline_commit_failure_second")
 	convID := ts.CreateGroupDMConversation(t, caller.ID, first.ID, second.ID)
 	for _, userID := range []string{caller.ID, first.ID, second.ID} {
-		ts.Hub.MarkUserOnlineForTest(uuid.MustParse(userID))
+		markDMUserVisible(t, ts, userID)
 	}
 	ringForTest(t, ts, caller, convID)
 	h := crossStoreVoiceHandler(ts)

@@ -1218,7 +1218,7 @@ class AcceptanceRunner:
         if (not _VERSION_RE.fullmatch(self.tool_versions["docker"])
                 or not _VERSION_RE.fullmatch(self.tool_versions["compose"])
                 or not _version_at_least(self.tool_versions["docker"], (29, 8, 2))
-                or not _version_at_least(self.tool_versions["compose"], (2, 24, 5))):
+                or not _version_at_least(self.tool_versions["compose"], (2, 33, 1))):
             _fail("TOOL_VERSION_INVALID")
         self._run(["logrotate", "--version"])
         info_text = self._run(["docker", "info", "--format", "{{json .}}"] ).stdout

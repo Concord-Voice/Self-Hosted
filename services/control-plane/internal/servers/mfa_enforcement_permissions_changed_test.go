@@ -4,7 +4,7 @@ package servers_test
 // the real router. Each test names the mutant that kills it.
 //
 //   - server_permissions_changed: PUT /servers/:id/mfa-enforcement, through
-//     refreshMFAEnforcementViews, to the server's subscribers.
+//     refreshMFAEnforcementViews, to the owner and raw-bit Administrators.
 //   - permissions_changed: a committed inline-factor change, through the
 //     notifier internal/api wires into the MFA handler, to the actor only.
 //
@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/lib/pq"
 	"github.com/pquerna/otp/totp"
@@ -31,8 +32,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/servers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	concordws "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 )
 
 const (
@@ -175,29 +178,56 @@ func serverFrame(serverID string) string {
 }
 
 // The frame's bytes are the contract with ServerPermissionsChangedSchema, and
-// the set of changed PUTs is the contract with the desktop's refresh: one frame
-// for each committed change, in either direction, and the two directions are
-// byte-identical (the frame says THAT the setting may have changed, never which
-// way).
+// the set of changed PUTs is the contract with the desktop's refresh: the owner
+// and raw-bit Administrators get one frame for each committed change, while an
+// ordinary member gets none. The two directions are byte-identical (the frame
+// says THAT the setting may have changed, never which way).
 //
 // Kills: the announcement removed from refreshMFAEnforcementViews (no frame),
-// sent twice (two frames), a key added to Data (a direction or an enrollment
-// flag), the type renamed, and the server id spelled other than canonically.
-func TestServerPermissionsChanged_OneFramePerChangedPut(t *testing.T) {
+// sent twice (two frames), sent to an ordinary member, a key added to Data (a
+// direction or an enrollment flag), the type renamed, and the server id spelled
+// other than canonically.
+func TestServerPermissionsChanged_OneFramePerChangedPutForAuthorizedViewers(t *testing.T) {
 	env := setupMFAEnforcementEnv(t)
 	f := newMFAFixture(t, env, "spc1", false)
 	enrollMFATOTP(t, env, f.owner.ID)
-	frames := dialPermFrames(t, env.ts, f.member, f.serverID)
+	admin := env.ts.CreateTestUser(t, "spc1-admin")
+	env.ts.AddMemberToServer(t, f.serverID, admin.ID, "member")
+	adminRole := env.ts.CreateTestRole(t, f.serverID, "spc1-admin", 10, int64(rbac.PermAdministrator))
+	env.ts.AssignRoleToUser(t, f.serverID, admin.ID, adminRole)
+	ownerFrames := dialPermFrames(t, env.ts, f.owner, f.serverID)
+	adminFrames := dialPermFrames(t, env.ts, admin, f.serverID)
+	memberFrames := dialPermFrames(t, env.ts, f.member, f.serverID)
 	want := serverFrame(f.serverID)
+	proveMemberObserver := func() {
+		t.Helper()
+		require.True(t, env.ts.Hub.BroadcastToUserContext(
+			t.Context(),
+			uuid.MustParse(f.member.ID),
+			concordws.OutgoingMessage{
+				Type: serverPermsChangedType,
+				Data: map[string]interface{}{"server_id": f.serverID},
+			},
+		))
+		memberFrames.expectOne(t, serverPermsChangedType, want,
+			"the ordinary member observer is live and recognizes the protected frame")
+	}
 
 	on := putMFA(env, f.owner, f.serverID, bodyOn())
 	require.Equal(t, http.StatusOK, on.Code, on.Body.String())
-	frames.expectOne(t, serverPermsChangedType, want, "an ON flip emits exactly one frame")
+	ownerFrames.expectOne(t, serverPermsChangedType, want, "an ON flip reaches the owner exactly once")
+	adminFrames.expectOne(t, serverPermsChangedType, want, "an ON flip reaches a raw-bit Administrator exactly once")
+	assert.Empty(t, memberFrames.drain(serverPermsChangedType), "an ON flip is not disclosed to an ordinary member")
+	proveMemberObserver()
 
 	off := putMFA(env, f.owner, f.serverID, bodyOff(mfaBackupCode))
 	require.Equal(t, http.StatusOK, off.Code, off.Body.String())
-	frames.expectOne(t, serverPermsChangedType, want,
-		"an OFF flip emits exactly one frame, byte-identical to the ON frame")
+	ownerFrames.expectOne(t, serverPermsChangedType, want,
+		"an OFF flip reaches the owner once, byte-identical to the ON frame")
+	adminFrames.expectOne(t, serverPermsChangedType, want,
+		"an OFF flip reaches a raw-bit Administrator once, byte-identical to the ON frame")
+	assert.Empty(t, memberFrames.drain(serverPermsChangedType), "an OFF flip is not disclosed to an ordinary member")
+	proveMemberObserver()
 
 	// The request spells the id in capitals; the frame must not. The URL
 	// spelling is not the wire's: the server re-renders the parsed id.
@@ -205,12 +235,12 @@ func TestServerPermissionsChanged_OneFramePerChangedPut(t *testing.T) {
 	require.NotEqual(t, f.serverID, upper)
 	again := putMFA(env, f.owner, upper, bodyOn())
 	require.Equal(t, http.StatusOK, again.Code, again.Body.String())
-	frames.expectOne(t, serverPermsChangedType, want,
+	ownerFrames.expectOne(t, serverPermsChangedType, want,
 		"the frame carries the lowercase canonical uuid whatever spelling the URL used")
 }
 
-// A request that changes nothing, or is refused, must not make every member
-// re-read: each such frame is a cold permission resolve per member.
+// A request that changes nothing, or is refused, must not make authorized
+// viewers re-read: each such frame is a cold permission resolve per viewer.
 //
 // Kills: the announcement moved out of the changed-only path (the no-op or any
 // refusal then emits), and the announcement moved above the authorization or
@@ -219,7 +249,7 @@ func TestServerPermissionsChanged_OneFramePerChangedPut(t *testing.T) {
 func TestServerPermissionsChanged_NoFrameForNoOpOrRefusal(t *testing.T) {
 	env := setupMFAEnforcementEnv(t)
 	f := newMFAFixture(t, env, "spc2", false)
-	frames := dialPermFrames(t, env.ts, f.member, f.serverID)
+	frames := dialPermFrames(t, env.ts, f.owner, f.serverID)
 
 	// The owner is not enrolled yet: turning ON is refused.
 	w := putMFA(env, f.owner, f.serverID, bodyOn())
@@ -252,10 +282,11 @@ func TestServerPermissionsChanged_NoFrameForNoOpOrRefusal(t *testing.T) {
 }
 
 // A Commit() error does not prove a rollback (spec correction C-3), so a PUT
-// whose UPDATE ran refreshes every member's view whatever Commit returned: the
-// change may have applied, and the members' caches are stale if it did. The
-// frame, like the bump, is sent; the Nightwatch success event is not (covered
-// by TestMFAEnforcement_LostCommitAckStillRefreshesPermissions).
+// whose UPDATE ran refreshes every member's cached view whatever Commit
+// returned: the change may have applied, and the members' caches are stale if
+// it did. The frame is sent only to authorized setting viewers; the Nightwatch
+// success event is not (covered by
+// TestMFAEnforcement_LostCommitAckStillRefreshesPermissions).
 //
 // Kills: the announcement skipped on the commit-error path (the lost-ack arm
 // sees no frame), sent from both the error path and the clean path (two
@@ -265,7 +296,7 @@ func TestServerPermissionsChanged_CommitErrorPaths(t *testing.T) {
 		env := setupMFAEnforcementEnv(t)
 		f := newMFAFixture(t, env, "spc3", false)
 		enrollMFATOTP(t, env, f.owner.ID)
-		frames := dialPermFrames(t, env.ts, f.member, f.serverID)
+		frames := dialPermFrames(t, env.ts, f.owner, f.serverID)
 		servers.SetMFAEnforcementCommitForTest(t, func(tx *sql.Tx) error {
 			if err := tx.Commit(); err != nil {
 				return err
@@ -283,7 +314,7 @@ func TestServerPermissionsChanged_CommitErrorPaths(t *testing.T) {
 		env := setupMFAEnforcementEnv(t)
 		f := newMFAFixture(t, env, "spc4", false)
 		enrollMFATOTP(t, env, f.owner.ID)
-		frames := dialPermFrames(t, env.ts, f.member, f.serverID)
+		frames := dialPermFrames(t, env.ts, f.owner, f.serverID)
 		servers.SetMFAEnforcementCommitForTest(t, func(tx *sql.Tx) error {
 			_, poisonErr := tx.Exec(`SELECT 1/0`)
 			require.Error(t, poisonErr)
@@ -301,7 +332,7 @@ func TestServerPermissionsChanged_CommitErrorPaths(t *testing.T) {
 		env := setupMFAEnforcementEnv(t)
 		f := newMFAFixture(t, env, "spc5", true)
 		enrollMFATOTP(t, env, f.owner.ID)
-		frames := dialPermFrames(t, env.ts, f.member, f.serverID)
+		frames := dialPermFrames(t, env.ts, f.owner, f.serverID)
 		servers.SetMFAEnforcementCommitForTest(t, func(tx *sql.Tx) error {
 			if err := tx.Commit(); err != nil {
 				return err
@@ -315,14 +346,14 @@ func TestServerPermissionsChanged_CommitErrorPaths(t *testing.T) {
 	})
 }
 
-// The bump runs before the announcement: a member that re-read on the frame
+// The bump runs before the announcement: a viewer that re-read on the frame
 // before the bump could be served, or could recompute and cache, the value the
 // bump is about to retire.
 //
 // The test stalls the bump deterministically. The commit seam commits for
 // real and then pauses every Redis write for a fixed window, so the bump's
 // write cannot complete until the window ends. If the bump precedes the
-// announcement, no frame can reach the member before then; if it follows, the
+// announcement, no frame can reach the viewer before then; if it follows, the
 // frame arrives within milliseconds. The assertion is a lower bound only, so
 // it cannot flake on a slow machine.
 //
@@ -334,7 +365,7 @@ func TestServerPermissionsChanged_FollowsTheBump(t *testing.T) {
 	env := setupMFAEnforcementEnv(t)
 	f := newMFAFixture(t, env, "spc6", false)
 	enrollMFATOTP(t, env, f.owner.ID)
-	frames := dialPermFrames(t, env.ts, f.member, f.serverID)
+	frames := dialPermFrames(t, env.ts, f.owner, f.serverID)
 
 	var committedAt time.Time
 	servers.SetMFAEnforcementCommitForTest(t, func(tx *sql.Tx) error {
@@ -353,7 +384,7 @@ func TestServerPermissionsChanged_FollowsTheBump(t *testing.T) {
 	assert.Equal(t, serverFrame(f.serverID), got)
 	require.False(t, committedAt.IsZero(), "the commit seam must have run before the frame")
 	assert.GreaterOrEqual(t, arrived.Sub(committedAt), lowerBound,
-		"the frame reached the member while the bump was still blocked: the announcement ran before the bump")
+		"the frame reached the viewer while the bump was still blocked: the announcement ran before the bump")
 
 	select {
 	case w := <-done:

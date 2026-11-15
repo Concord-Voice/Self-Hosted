@@ -25,6 +25,14 @@ fails=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; fails=$((fails + 1)); }
 
+if [[ $(grep -c 'gw_priority: 1' "$ROOT/docker-compose.yml" || true) == 2 ]] \
+  && ! grep -Eq 'TRUSTED_PROXIES: "172\.|TRUSTED_PROXY_CIDRS:.*172\.19\.0\.0/16' \
+       "$ROOT/docker-compose.production.yml" "$ROOT/docker-compose.yml"; then
+  pass "both published application services select a pinned gateway and no broad production proxy default remains"
+else
+  fail "Compose lacks a pinned application gateway or retains a broad proxy default"
+fi
+
 # Every command is redirected before a copied wrapper/helper can run. No test
 # executes from the real repository root or loads its default environment.
 SIMPLE_ROOT="$STUB/wrapper-root"
@@ -39,6 +47,11 @@ if [[ ! -f "$STORAGE_HELPER" ]]; then
 fi
 cp "$STORAGE_HELPER" "$SIMPLE_ROOT/infrastructure/deploy/selfhost-storage.sh"
 cp "$AUTHORITY_HELPER" "$SIMPLE_ROOT/infrastructure/deploy/selfhost-authority.sh"
+if ( source "$STORAGE_HELPER"; TRUSTED_PROXIES=198.51.100.0/24; export TRUSTED_PROXIES; selfhost_storage_scrub_environment; [[ ! -v TRUSTED_PROXIES ]] ); then
+  pass "self-host Compose ignores ambient trusted media proxy override"
+else
+  fail "self-host Compose can inherit ambient TRUSTED_PROXIES"
+fi
 printf 'INSTANCE_TYPE=self-hosted\nAUTHORITY_DIR=%s/no-authority\n' "$SIMPLE_ROOT" >"$SIMPLE_ROOT/.env"
 touch "$SIMPLE_ROOT/docker-compose.yml" "$SIMPLE_ROOT/docker-compose.production.yml" \
   "$SIMPLE_ROOT/docker-compose.selfhost.yml"
@@ -502,6 +515,18 @@ mkdir -p "$BEHAVIOR_ROOT/infrastructure/deploy" "$BEHAVIOR_STUB"
 cp "$SOURCE_TARGET" "$BEHAVIOR_ROOT/infrastructure/deploy/concord-selfhost"
 cp "$STORAGE_HELPER" "$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-storage.sh"
 cp "$AUTHORITY_HELPER" "$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-authority.sh"
+# This legacy wrapper/controller suite stubs the dedicated proxy boundary;
+# test-selfhost-proxy-gateway.sh exercises the real Docker provenance helper.
+cat >"$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-proxy.sh" <<'PROXY_FIXTURE'
+selfhost_prepare_trusted_proxy_provenance() { return 0; }
+selfhost_proxy_live_check() { return 0; }
+selfhost_proxy_restart_preflight() {
+  [[ "${STUB_PROXY_MISMATCH:-}" != 1 ]] || {
+    echo 'selfhost-proxy: restart proxy route differs from live bridge' >&2
+    return 1
+  }
+}
+PROXY_FIXTURE
 SELFHOST_LOCK_PARENT="$STUB/selfhost-lock-parent"
 lock_declaration='DEPLOY_TRANSACTION_LOCK_PATH="/var/lib/concord/deploy-transaction.lock"'
 lock_parent_probe='if [[ ! -d /var/lib/concord ]]; then'
@@ -1135,7 +1160,7 @@ reset_selfhost_behavior() {
     STUB_VERSION_FAIL STUB_ENGINE_EXIT STUB_ENGINE_END STUB_PS_FAIL STUB_INSPECT_FAIL STUB_RENDER_FAIL STUB_LOG_MODEL_FAIL STUB_RENDER_NAME \
     STUB_PROJECT_NAME STUB_STOPPED_IDS STUB_CONFIG_CODE STUB_ENGINE_VERSION \
     STUB_NETWORKS_JSON STUB_NETWORK_INSPECT_FAIL STUB_NETWORK_INSPECT_PARTIAL_OK \
-    STUB_INSPECT_NETIDS_FAIL STUB_PGREP_MATCH STUB_MEDIA_PRESENT STUB_MEDIA_ENV_JSON
+    STUB_INSPECT_NETIDS_FAIL STUB_PGREP_MATCH STUB_MEDIA_PRESENT STUB_MEDIA_ENV_JSON STUB_PROXY_MISMATCH
   chmod 600 "$SELFHOST_DOCKER_DAEMON_JSON" 2>/dev/null || true
   rm -f "$SELFHOST_DOCKER_DAEMON_JSON"
   rm -rf "$SELFHOST_VOICE_STATE" && mkdir -p "$SELFHOST_VOICE_STATE"
@@ -1785,11 +1810,25 @@ export STUB_PROJECT_IDS=$'cp1\npg1' STUB_INSPECT_JSON
 run_selfhost health
 if [[ $selfhost_rc -eq 0 ]] \
   && grep -q 'curl .*127\.0\.0\.1:8080/api/v1/client/config' "$SELFHOST_DOCKER_LOG" \
+  && grep -qF 'proxy gateway provenance verified' <<<"$selfhost_output" \
   && ! grep -q 'T2-SENTINEL' <<<"$selfhost_output"; then
   pass "health passes when every live binding is inside the posture"
 else
   fail "health failed a clean live set (rc=$selfhost_rc): $selfhost_output"
 fi
+
+reset_selfhost_behavior false 1 '' ''
+export STUB_PROXY_MISMATCH=1
+run_selfhost health --json
+if [[ $selfhost_rc -ne 0 ]] \
+  && grep -qF 'restart proxy route differs from live bridge' <<<"$selfhost_output" \
+  && grep -qF '"name":"proxy_provenance","ok":false' <<<"$selfhost_output" \
+  && grep -qF '"ok":false}' <<<"$selfhost_output"; then
+  pass 'health --json refuses a mismatched live proxy gateway and reports proxy_provenance false'
+else
+  fail "health accepted a mismatched live proxy gateway (rc=$selfhost_rc): $selfhost_output"
+fi
+unset STUB_PROXY_MISMATCH
 
 STUB_INSPECT_JSON="$(live_inspect '{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5432"}]}')"
 export STUB_INSPECT_JSON
@@ -3112,9 +3151,9 @@ PYLIFECYCLE_ARGS
 }
 
 # ── Installer-owned interpolation authority (#4197915622) ─────────────
-# These 19 fields come from the installer's durable writer. Keep this list
+# These 20 fields come from the installer's durable writer. Keep this list
 # independent of the producer's scrub list so an omitted field remains visible.
-SELFHOST_INSTALLER_KEYS='ENVIRONMENT DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET MFA_ENCRYPTION_KEY TURN_SECRET TURN_REALM TRUSTED_PROXY_CIDRS SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT WS_EVENT_BUDGET_ENABLED WS_EVENT_BUDGET_SCALE_PERCENT'
+SELFHOST_INSTALLER_KEYS='ENVIRONMENT DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET MFA_ENCRYPTION_KEY TURN_SECRET TURN_REALM TRUSTED_PROXY_CIDRS TRUSTED_PROXIES SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT WS_EVENT_BUDGET_ENABLED WS_EVENT_BUDGET_SCALE_PERCENT'
 INSTALLER_AUTHORITY_CONTROLS='SELFHOST_STORAGE_MODE STORAGE_BACKEND STORAGE_ENDPOINT STORAGE_REGION STORAGE_ACCESS_KEY STORAGE_SECRET_KEY STORAGE_USE_SSL STORAGE_BUCKET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_USE_SSL MINIO_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE COMPOSE_OVERRIDE INSTANCE_TYPE ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND COTURN_CERTS_DIR SELFHOST_STORAGE_TRUSTED_IMAGE RESEND_API_KEY'
 
 installer_authority_invoke() { # wrapper|controller|checkpoint, ambient|clean|smtp-alias
@@ -3134,7 +3173,7 @@ installer_authority_invoke() { # wrapper|controller|checkpoint, ambient|clean|sm
     if [[ "$inheritance" == ambient ]]; then
       for key in $SELFHOST_INSTALLER_KEYS; do export "$key=fixture-ambient-$key"; done
       export ENVIRONMENT=development DOMAIN=ambient.example.invalid PUBLIC_IP=198.51.100.42 \
-        TURN_REALM=ambient.example.invalid TRUSTED_PROXY_CIDRS=10.24.0.0/16 \
+        TURN_REALM=ambient.example.invalid TRUSTED_PROXY_CIDRS=10.24.0.0/16 TRUSTED_PROXIES=10.24.0.0/16 \
         SMTP_HOST=smtp.ambient.example.invalid SMTP_PORT=587 \
         SMTP_FROM=fixture@ambient.example.invalid FEEDBACK_REPO=selfhost/ambient \
         WS_EVENT_BUDGET_ENABLED=true WS_EVENT_BUDGET_SCALE_PERCENT=400
@@ -3234,7 +3273,7 @@ run_installer_authority_matrix() { # bundled|byo-s3
         ENVIRONMENT) value=production ;;
         DOMAIN|TURN_REALM) value=durable.example.invalid ;;
         PUBLIC_IP) value=203.0.113.42 ;;
-        TRUSTED_PROXY_CIDRS) value=10.23.0.0/16 ;;
+        TRUSTED_PROXY_CIDRS|TRUSTED_PROXIES) value=172.28.0.1/32 ;;
         SMTP_HOST) value=smtp.durable.example.invalid ;;
         SMTP_PORT) value=2525 ;;
         SMTP_FROM) value=fixture@durable.example.invalid ;;

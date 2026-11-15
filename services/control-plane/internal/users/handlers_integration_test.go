@@ -87,6 +87,9 @@ func TestGetPublicProfileSuccess(t *testing.T) {
 	ts := setupTS(t)
 	viewer := ts.CreateTestUser(t, "profileviewer")
 	target := ts.CreateTestUser(t, "profiletarget")
+	_, err := ts.DB.Exec(`INSERT INTO privacy_settings (user_id, searchable_by_username) VALUES ($1, TRUE)
+		ON CONFLICT (user_id) DO UPDATE SET searchable_by_username = TRUE`, target.ID)
+	require.NoError(t, err)
 
 	w := ts.DoRequest("GET", pathPublicProfile(target.ID), nil, testhelpers.AuthHeaders(viewer.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -114,6 +117,41 @@ func TestGetPublicProfileUnauthorized(t *testing.T) {
 	ts := setupTS(t)
 	w := ts.DoRequest("GET", pathPublicProfile("someid"), nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// Security #171: direct profile URLs must obey the same discoverability and
+// block boundary as search, while a user may always read their own profile.
+func TestSecurity171_PublicProfileAudienceAndBlockBoundary(t *testing.T) {
+	ts := setupTS(t)
+	viewer := ts.CreateTestUser(t, "profileaudienceviewer")
+	target := ts.CreateTestUser(t, "profileaudiencetarget")
+
+	t.Run("self remains readable without discoverability opt in", func(t *testing.T) {
+		w := ts.DoRequest("GET", pathPublicProfile(viewer.ID), nil, testhelpers.AuthHeaders(viewer.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("nonsearchable stranger is indistinguishable from missing", func(t *testing.T) {
+		w := ts.DoRequest("GET", pathPublicProfile(target.ID), nil, testhelpers.AuthHeaders(viewer.AccessToken))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	_, err := ts.DB.Exec(`INSERT INTO privacy_settings (user_id, searchable_by_username) VALUES ($1, TRUE)
+		ON CONFLICT (user_id) DO UPDATE SET searchable_by_username = TRUE`, target.ID)
+	require.NoError(t, err)
+
+	t.Run("searchable unblocked target is readable", func(t *testing.T) {
+		w := ts.DoRequest("GET", pathPublicProfile(target.ID), nil, testhelpers.AuthHeaders(viewer.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	for _, blocked := range [][2]string{{viewer.ID, target.ID}, {target.ID, viewer.ID}} {
+		_, err := ts.DB.Exec(`DELETE FROM friendships WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)`, viewer.ID, target.ID)
+		require.NoError(t, err)
+		ts.CreateFriendship(t, blocked[0], blocked[1], "blocked")
+		w := ts.DoRequest("GET", pathPublicProfile(target.ID), nil, testhelpers.AuthHeaders(viewer.AccessToken))
+		assert.Equal(t, http.StatusNotFound, w.Code, "a block in either direction must hide the profile")
+	}
 }
 
 // ── UpdateMe (extended) ──────────────────────────────────────────────────────
