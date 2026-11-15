@@ -2752,26 +2752,23 @@ var purgeFenceStepUpCopy = stepup.Copy{
 	CredentialRequired: "Current password required to turn off purge verification",
 }
 
-// purgeFenceStepUpPrefix keys the purge fence's attempt budget. The bound,
-// the fail-closed posture (a nil or erroring Redis DENIES with a 503, never a
-// 429 that blames the user) and the clear-after-verified-commit rule are
-// internal/stepup's Budget, shared with the MFA-settings routes so the two
-// cannot drift apart again.
+// The purge fence's attempt budget is the shared dangerous-action budget
+// (stepup.DangerousActionBudget), not one of its own. Turning the fence off is
+// what lets DM purge and Clear run with no code at all, so a separate budget
+// handed a stolen session five more MFA guesses at the one change that removes
+// the next gate. The bound, the fail-closed posture (a nil or erroring Redis
+// DENIES with a 503, never a 429 that blames the user) and the
+// clear-after-verified-commit rule are internal/stepup's Budget.
 //
 // The route's own limiter stays fail-OPEN by design — it protects twelve
 // innocuous fields — so without this budget a Redis outage would remove every
 // bound from a path that verifies passwords.
-const purgeFenceStepUpPrefix = "stepup:privacy_purge_fence:"
-
-func (h *Handler) purgeFenceStepUpBudget() stepup.Budget {
-	return stepup.NewBudget(h.redis, purgeFenceStepUpPrefix)
-}
 
 // allowPurgeFenceStepUp consumes the fail-closed attempt budget before the
 // transaction begins. It writes the budget's 429 (exhausted) or 503 (cannot
 // be evaluated) and returns false when the budget does not admit the request.
 func (h *Handler) allowPurgeFenceStepUp(ctx context.Context, c *gin.Context, userID string) bool {
-	e := h.purgeFenceStepUpBudget().Consume(ctx, userID)
+	e := stepup.DangerousActionBudget(h.redis).Consume(ctx, userID)
 	if e == nil {
 		return true
 	}
@@ -2818,7 +2815,7 @@ func (h *Handler) reservePurgeFencePassword(
 func (h *Handler) clearPurgeFenceStepUpAttempts(ctx context.Context, userID string) {
 	ctx, cancel := stepup.SettleContext(ctx)
 	defer cancel()
-	if err := h.purgeFenceStepUpBudget().Clear(ctx, userID); err != nil {
+	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, userID); err != nil {
 		h.log.Warn("Could not reset the purge-fence step-up budget after a successful disable",
 			"user_id", userID, "error", err)
 	}
