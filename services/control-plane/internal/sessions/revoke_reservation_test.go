@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"strconv"
 	"sync"
@@ -181,4 +182,54 @@ func TestDetermineAuthRequired_RedisDownRequiresPassword(t *testing.T) {
 	needsPassword, _, reservation := handler.determineAuthRequired(context.Background(), rig.user, rig.sid)
 	require.True(t, needsPassword, "a failed reservation must require step-up")
 	require.Empty(t, reservation)
+}
+
+func deadRedisClient(t *testing.T) *redis.Client {
+	t.Helper()
+	dead := redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: 100 * time.Millisecond,
+		MaxRetries:  -1,
+	})
+	t.Cleanup(func() { require.NoError(t, dead.Close()) })
+	return dead
+}
+
+// A Redis outage after the database effect must not change the response:
+// a failed release keeps the reservation, which fails closed, and a failed
+// record of a non-free revoke is reported, not hidden.
+func TestExecuteRevocation_RedisDownKeepsDatabaseOutcome(t *testing.T) {
+	rig := newSecurityEventFamilyRig(t)
+	handler := NewHandler(rig.db, deadRedisClient(t), logger.New("test"), &securityEventDisconnector{}, nil)
+	rig.router.DELETE("/api/v1/sessions/:id", func(c *gin.Context) {
+		handler.executeRevocation(c.Request.Context(), c, c.GetString("user_id"), c.Param("id"), c.Query("reservation"))
+	})
+
+	missing := rig.request(http.MethodDelete, "/api/v1/sessions/"+uuid.NewString()+"?reservation=123.000001", "")
+	require.Equal(t, http.StatusNotFound, missing.Code, missing.Body.String())
+	require.JSONEq(t, `{"error":"Session not found"}`, missing.Body.String())
+
+	revoked := rig.request(http.MethodDelete, "/api/v1/sessions/"+rig.sid, "")
+	require.Equal(t, http.StatusOK, revoked.Code, revoked.Body.String())
+
+	err := handler.recordRevoke(context.Background(), rig.user, rig.sid)
+	require.ErrorContains(t, err, "record session revoke")
+}
+
+func TestDetermineAuthRequired_SessionCountFailureRequiresPassword(t *testing.T) {
+	mini := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	db, err := sql.Open("postgres", "postgres://closed.invalid/unused")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	handler := NewHandler(db, client, logger.New("test"), &securityEventDisconnector{}, nil)
+
+	needsPassword, mode, reservation := handler.determineAuthRequired(context.Background(), uuid.NewString(), uuid.NewString())
+	require.True(t, needsPassword)
+	require.Equal(t, "secure", mode)
+	require.Empty(t, reservation)
+	keys, err := client.Keys(context.Background(), "*").Result()
+	require.NoError(t, err)
+	require.Empty(t, keys, "no reservation may be made when sessions cannot be counted")
 }
