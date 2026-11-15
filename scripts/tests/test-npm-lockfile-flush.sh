@@ -97,6 +97,10 @@ case "$NPM_STUB_MODE" in
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.1.0"}}}\n' > package-lock.json ;;
   rehoist)  [ "$PWD" = "$NPM_STUB_ROOT/client/admin" ] && \
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.0.0"},"node_modules/b/node_modules/x":{"version":"3.1.0"}}}\n' > package-lock.json ;;
+  nested)   [ "$PWD" = "$NPM_STUB_ROOT/client/admin" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.5.0"},"node_modules/a/node_modules/x":{"version":"2.3.3"}}}\n' > package-lock.json ;;
+  moved)    [ "$PWD" = "$NPM_STUB_ROOT/client/admin" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.3.0"},"node_modules/b/node_modules/x":{"version":"2.5.0"}}}\n' > package-lock.json ;;
   zero)     [ "$PWD" = "$NPM_STUB_ROOT" ] && \
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/s":{"version":"0.27.0"}}}\n' > package-lock.json ;;
   zeropatch) [ "$PWD" = "$NPM_STUB_ROOT" ] && \
@@ -173,6 +177,20 @@ run_refresh rehoist "" 'node_modules/x:3.1.0 node_modules/a/node_modules/x:2.0.0
 [ "$RC" -eq 0 ] && [ "$OUTPUTS" = "has_changes=true" ] \
   && ok "a re-hoist that leaves the newer copy at a nested path passes" \
   || bad "a pure re-hoist must not count as a downgrade" "rc=$RC outputs=$OUTPUTS"$'\n'"$OUT"
+
+# A nested copy goes down inside its line while a newer copy of that line stays
+# at another path. The highest copy is unchanged, so only a per-path check sees it.
+run_refresh nested "" 'node_modules/x:2.5.0 node_modules/a/node_modules/x:2.3.4'
+[ "$RC" -ne 0 ] && grep -q 'client/admin/package-lock.json: node_modules/a/node_modules/x 2.3.4 -> 2.3.3' <<<"$OUT" \
+  && ok "a nested copy that goes down inside its line fails the run" \
+  || bad "a nested same-line downgrade must fail the run" "rc=$RC"$'\n'"$OUT"
+
+# A re-hoist inside one line: both versions are still in the lock, at swapped
+# paths. Nothing was lost, so it must pass.
+run_refresh moved "" 'node_modules/x:2.5.0 node_modules/a/node_modules/x:2.3.0'
+[ "$RC" -eq 0 ] && [ "$OUTPUTS" = "has_changes=true" ] \
+  && ok "a same-line re-hoist that keeps both versions passes" \
+  || bad "a same-line re-hoist must not count as a downgrade" "rc=$RC"$'\n'"$OUT"
 
 # 0.x: a minor is a major under ^, so 0.28 -> 0.27 is a line change, not a
 # downgrade within a line. A patch inside one 0.x line still is.
