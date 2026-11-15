@@ -197,7 +197,7 @@ func (s *AuthorizerStore) read() (authorizerFile, error) {
 	if err := dec.Decode(&doc); err != nil {
 		return authorizerFile{}, fmt.Errorf("decode authorizer file: %w", err)
 	}
-	if err := dec.Decode(new(any)); err != io.EOF {
+	if dec.Decode(new(any)) != io.EOF {
 		return authorizerFile{}, errors.New("trailing authorizer data")
 	}
 	if err := validateAuthorizerFile(doc); err != nil {

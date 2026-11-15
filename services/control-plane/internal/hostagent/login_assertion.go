@@ -36,38 +36,9 @@ func (s *AuthorizationStore) verifyLoginAssertion(adminID string, session webaut
 	if err != nil {
 		return ErrAuthorizerUnavailable
 	}
-	if session.RelyingPartyID != doc.RPID {
-		return ErrAuthorizationDenied
-	}
-	if session.Origin != "" {
-		trusted := false
-		for _, origin := range doc.Origins {
-			trusted = trusted || session.Origin == origin
-		}
-		if !trusted {
-			return ErrAuthorizationDenied
-		}
-	}
-	allowed := false
-	for _, id := range session.AllowedCredentialIDs {
-		allowed = allowed || bytes.Equal(id, parsed.RawID)
-	}
-	if !allowed {
-		return ErrAuthorizationDenied
-	}
-	var selected *authorizerRecord
-	for i := range doc.Authorizers {
-		id, _ := decodeAuthorizerField(doc.Authorizers[i].CredentialID, maxAuthorizerIDBytes)
-		if bytes.Equal(id, parsed.RawID) {
-			selected = &doc.Authorizers[i]
-			break
-		}
-	}
-	if selected == nil {
-		return errAuthorizerNotImported
-	}
-	if selected.AdminID != adminID {
-		return ErrAuthorizationDenied
+	selected, err := selectLoginAuthorizer(doc, session, parsed.RawID, adminID)
+	if err != nil {
+		return err
 	}
 	key, _ := decodeAuthorizerField(selected.PublicKey, maxAuthorizerKeyBytes)
 	user := &mfa.WebAuthnUser{
@@ -88,6 +59,43 @@ func (s *AuthorizationStore) verifyLoginAssertion(adminID string, session webaut
 		return ErrAuthorizerUnavailable
 	}
 	return nil
+}
+
+func selectLoginAuthorizer(doc authorizerFile, session webauthn.SessionData, credentialID []byte, adminID string) (*authorizerRecord, error) {
+	if session.RelyingPartyID != doc.RPID {
+		return nil, ErrAuthorizationDenied
+	}
+	if session.Origin != "" {
+		trusted := false
+		for _, origin := range doc.Origins {
+			trusted = trusted || session.Origin == origin
+		}
+		if !trusted {
+			return nil, ErrAuthorizationDenied
+		}
+	}
+	allowed := false
+	for _, id := range session.AllowedCredentialIDs {
+		allowed = allowed || bytes.Equal(id, credentialID)
+	}
+	if !allowed {
+		return nil, ErrAuthorizationDenied
+	}
+	var selected *authorizerRecord
+	for i := range doc.Authorizers {
+		id, _ := decodeAuthorizerField(doc.Authorizers[i].CredentialID, maxAuthorizerIDBytes)
+		if bytes.Equal(id, credentialID) {
+			selected = &doc.Authorizers[i]
+			break
+		}
+	}
+	if selected == nil {
+		return nil, errAuthorizerNotImported
+	}
+	if selected.AdminID != adminID {
+		return nil, ErrAuthorizationDenied
+	}
+	return selected, nil
 }
 
 func (s *Server) handleLoginAssertion(w http.ResponseWriter, r *http.Request) {
