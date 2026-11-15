@@ -90,10 +90,12 @@ out=$(printf '%s' "$data" | jq -r --arg n "$PR" --arg sfx "$suffix" '
   # A thread reply is filed as an empty COMMENTED review; it counts only with a body or a
   # top-level (not in-reply-to) inline comment of its own.
   [ .review_comments[]? | select(.in_reply_to_id == null) | .pull_request_review_id ] as $roots |
-  def substantive: .state != "COMMENTED" or ((.body // "") | test("\\S"))
+  # Format characters (zero-width space, word joiner, BOM) and blank-looking fillers are not a body.
+  def substantive: .state != "COMMENTED"
+    or ((.body // "") | gsub("[\\p{Cf}\\x{3164}\\x{2800}]"; "") | test("\\S"))
     or (.id as $i | $i != null and any($roots[]; . == $i));
   if ((.reviews | type) != "array" or (.comments | type) != "array"
-      or ((.review_comments // []) | type) != "array") then "BADDATA"
+      or ((.review_comments // []) | type) != "array" or $author == "") then "BADDATA"
   elif ($h | test("^[0-9a-f]{40}$") | not) then "BADSHA" else
   [ .reviews[]? | select(trusted and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")) and substantive) ] as $trev
   | [ $trev[] | select(.commit_id == $h) | "\(.user.login) (\(.state))" ] as $rev
@@ -119,7 +121,7 @@ nl='
 case "$out" in
   *"$nl"*|'') unknown "unexpected output for #$PR" ;;
   BADSHA) unknown "PR #$PR has no readable head SHA" ;;
-  BADDATA) unknown "reviews or comments for #$PR are not arrays" ;;
+  BADDATA) unknown "PR #$PR has no readable author, or its reviews or comments are not arrays" ;;
   "#$PR @"*" covered: "*) echo "$out"; exit 0 ;;
   "#$PR @"*" ZERO coverage"*) echo "$out"; exit 1 ;;
   *) unknown "unexpected output for #$PR: $out" ;;

@@ -41,6 +41,7 @@ run "allowlisted bot's reply-only review no"       1 "[$(rev "$CP" "$H" COMMENTE
 run "empty COMMENTED with no comments no"          1 "[$(rev alice "$H" COMMENTED MEMBER User '' 9)]" '[]'
 run "empty COMMENTED with inline comment counts"   0 "[$(rev alice "$H" COMMENTED MEMBER User '' 9)]" '[]' "" "alice (COMMENTED)" "" '[{"pull_request_review_id":9,"in_reply_to_id":null}]'
 run "empty-body APPROVED review counts"            0 "[$(rev alice "$H" APPROVED MEMBER User '' 9)]" '[]'
+run "invisible-only COMMENTED body does not count" 1 "[$(rev alice "$H" COMMENTED MEMBER User '\u200b\u2060' 9)]" '[]'
 # COLLABORATOR also covers read and triage access.
 run "COLLABORATOR review does not count"          1 "[$(rev alice "$H" APPROVED COLLABORATOR)]" '[]'
 run "COLLABORATOR record does not count"          1 '[]' "[$(rec mark COLLABORATOR "$H" mark)]"
@@ -83,6 +84,7 @@ fx() {
 }
 fx "empty fixture is UNKNOWN" ''
 fx "fixture without reviews/comments is UNKNOWN" "{\"pr\":$PRJ}"
+fx "PR with no author login is UNKNOWN" "{\"pr\":{\"head\":{\"sha\":\"$H\"}},\"reviews\":[$(rev alice "$H" APPROVED MEMBER)],\"comments\":[]}"
 fx "two JSON documents is UNKNOWN" "{\"pr\":$PRJ,\"reviews\":[],\"comments\":[]}{\"pr\":$PRJ,\"reviews\":[],\"comments\":[]}"
 fx "stray fixture variable on a real PR is UNKNOWN" "{\"pr\":$PRJ,\"reviews\":[$(rev "$CP" "$H" COMMENTED NONE Bot)],\"comments\":[]}" 7
 
