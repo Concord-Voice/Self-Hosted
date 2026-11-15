@@ -3652,9 +3652,24 @@ func (h *Handler) CompleteRecovery(c *gin.Context, userID, verifiedFactor string
 		return false
 	}
 
+	// An MFA-backed completion arrives here from the MFA challenge, not from
+	// RecoveryVerifyCode, so it clears the address's email-code budget itself.
+	// Recovery begins only from the primary address, which keys that budget.
+	var budgetEmail string
+	if verifiedFactor != "email" {
+		if err := tx.QueryRowContext(c.Request.Context(),
+			`SELECT LOWER(email) FROM users WHERE id = $1`, userID).Scan(&budgetEmail); err != nil {
+			h.log.Warn("Failed to read recovery address for budget clear", "error", err, "user_id", userID)
+			budgetEmail = ""
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errRecoveryVerificationFailed})
 		return false
+	}
+	if budgetEmail != "" {
+		h.clearRecoveryFailureBudget(c, recoveryFailureKeyPrefix+budgetEmail)
 	}
 	h.addVerifyCodeHints(resp, userID)
 
