@@ -69,7 +69,7 @@ func TestEnroll_HappyPath_RegistersKeyAndActivates(t *testing.T) {
 	tokenKey := "admin_enroll:" + hex.EncodeToString(sum[:])
 	boundID, err := rdb.Get(context.Background(), tokenKey).Result()
 	require.NoError(t, err)
-	require.Equal(t, adminID, boundID, "test setup token must bind to pending admin")
+	require.JSONEq(t, `{"admin_id":"`+adminID+`","credential_generation":1}`, boundID, "test setup token must bind to pending admin generation")
 	engine, _ := adminEnrollEngine(t, db, rdb)
 
 	// Begin.
@@ -185,7 +185,7 @@ func TestEnroll_TokenIsSingleUse(t *testing.T) {
 	tokenKey := "admin_enroll:" + hex.EncodeToString(sum[:])
 	boundID, err := rdb.Get(context.Background(), tokenKey).Result()
 	require.NoError(t, err)
-	require.Equal(t, adminID, boundID, "test setup token must bind to pending admin")
+	require.JSONEq(t, `{"admin_id":"`+adminID+`","credential_generation":1}`, boundID, "test setup token must bind to pending admin generation")
 	got, err := admin.NewAdminRepo(db).GetByUsername(context.Background(), username)
 	require.NoError(t, err)
 	ok, err := auth.VerifyPassword(adminTestPassword, got.PasswordHash)
