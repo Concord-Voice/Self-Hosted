@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -77,11 +79,17 @@ func setupRecoverySMTPFailureTS(t *testing.T) (*testhelpers.TestServer, <-chan s
 		releaseOnce.Do(func() { close(release) })
 	}
 	go func() {
-		conn, acceptErr := ln.Accept()
-		if acceptErr == nil {
-			close(accepted)
-			<-release
-			_ = conn.Close()
+		var acceptedOnce sync.Once
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			acceptedOnce.Do(func() { close(accepted) })
+			go func() {
+				<-release
+				_ = conn.Close()
+			}()
 		}
 	}()
 
@@ -209,18 +217,17 @@ func TestRecoveryBeginKeepsLiveRecord(t *testing.T) {
 	before, err := ts.Redis.Get(context.Background(), key).Result()
 	require.NoError(t, err)
 
+	logs := ts.CaptureLogs(t)
 	w := ts.DoRequest("POST", pathRecoveryBegin, map[string]string{"email": user.Email}, nil)
 	require.Equal(t, http.StatusOK, w.Code)
-	// Begin returns before the worker runs. A second account's record shows
-	// the workers have picked up the queue; the live record must then stay
-	// unchanged while the first job completes.
-	other := ts.CreateTestUser(t, "recoveryliveother")
-	ts.DoRequest("POST", pathRecoveryBegin, map[string]string{"email": other.Email}, nil)
-	waitForRecoveryRecord(t, ts, recoveryCodeKeyPrefix+other.Email)
-	assert.Never(t, func() bool {
-		after, getErr := ts.Redis.Get(context.Background(), key).Result()
-		return getErr != nil || after != before
-	}, 500*time.Millisecond, 10*time.Millisecond, "a live recovery record must retain its code and attempt count")
+	// Begin returns before the worker runs; wait until the job has seen the
+	// live record before comparing it.
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "Recovery code already pending")
+	}, 5*time.Second, 10*time.Millisecond)
+	after, err := ts.Redis.Get(context.Background(), key).Result()
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a live recovery record must retain its code and attempt count")
 }
 
 func TestRecoveryAccountBudgetRejectsEleventhGuess(t *testing.T) {
@@ -269,6 +276,37 @@ func TestRecoveryAccountBudgetClearsAfterCorrectCode(t *testing.T) {
 	exists, err := ts.Redis.Exists(context.Background(), "recovery_fail:"+user.Email).Result()
 	require.NoError(t, err)
 	assert.Zero(t, exists)
+}
+
+// Delivery runs off the shared recovery workers, so mail stalled for existing
+// accounts cannot delay a later queued address and reveal that the earlier
+// addresses have accounts.
+func TestRecoveryBeginDeliveryDoesNotHoldWorkers(t *testing.T) {
+	ts, smtpAccepted, _, _ := setupRecoverySMTPFailureTS(t)
+	// More existing accounts than the recovery worker pool. The fake SMTP
+	// server never answers, so every delivery stalls.
+	const accounts = 8
+	addrs := make([]string, 0, accounts)
+	for i := range accounts {
+		addrs = append(addrs, ts.CreateTestUser(t, fmt.Sprintf("recoveryhold%d", i)).Email)
+	}
+	for i, addr := range addrs {
+		w := ts.DoRequest("POST", pathRecoveryBegin, map[string]string{"email": addr}, nil)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.NoError(t, ts.Redis.Del(context.Background(), "ratelimit:ip:192.0.2.1:POST:"+pathRecoveryBegin).Err())
+		if i == 0 {
+			select {
+			case <-smtpAccepted:
+			case <-time.After(2 * time.Second):
+				t.Fatal("recovery delivery did not reach SMTP")
+			}
+		}
+	}
+	// A worker held through delivery would leave the last addresses unstored
+	// until the fake server is released at cleanup.
+	for _, addr := range addrs {
+		waitForRecoveryRecord(t, ts, recoveryCodeKeyPrefix+addr)
+	}
 }
 
 func TestRecoveryBeginSMTPFailureKeepsGenericResponseAndClearsCode(t *testing.T) {

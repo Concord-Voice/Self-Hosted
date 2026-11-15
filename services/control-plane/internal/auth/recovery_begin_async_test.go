@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,6 +73,8 @@ func TestRecoveryBeginRejectsInvalidBodyWithoutQueueing(t *testing.T) {
 	h.RecoveryBegin(c)
 
 	require.Equal(t, http.StatusBadRequest, response.Code)
+	// Drain first so a wrongly queued job has run before the check.
+	h.CloseRecoveryJobs()
 	select {
 	case <-processed:
 		t.Fatal("invalid recovery body reached the queue")
@@ -89,7 +92,12 @@ func TestRecoveryBeginQueueSaturationAndClose(t *testing.T) {
 		releaseOnce.Do(func() { close(release) })
 		h.CloseRecoveryJobs()
 	})
-	h.recoveryProcess = func(string) {
+	var processedMu sync.Mutex
+	processed := map[string]int{}
+	h.recoveryProcess = func(addr string) {
+		processedMu.Lock()
+		processed[addr]++
+		processedMu.Unlock()
 		select {
 		case started <- struct{}{}:
 		default:
@@ -117,4 +125,57 @@ func TestRecoveryBeginQueueSaturationAndClose(t *testing.T) {
 	h.CloseRecoveryJobs()
 	h.CloseRecoveryJobs()
 	h.enqueueRecoveryBegin("after-close@example.test")
+
+	processedMu.Lock()
+	defer processedMu.Unlock()
+	require.Zero(t, processed["overflow@example.test"], "a saturated queue must drop the address")
+	require.Zero(t, processed["after-close@example.test"], "a closed queue must not accept work")
+	require.Equal(t, recoveryWorkerCount+recoveryQueueCapacity,
+		processed["worker@example.test"]+processed["queued@example.test"])
+}
+
+// A stalled drain must give up so later shutdown stages keep their budget, and
+// a job still queued at that point must not run.
+func TestCloseRecoveryJobsAbandonsStalledDrain(t *testing.T) {
+	var logs bytes.Buffer
+	h := NewHandler(nil, nil, logger.NewWithWriter(&logs), "test", nil)
+	h.recoveryDrainTimeout = 50 * time.Millisecond
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorkers := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseWorkers)
+	started := make(chan struct{}, recoveryWorkerCount+1)
+	var processed atomic.Int32
+	h.recoveryProcess = func(string) {
+		processed.Add(1)
+		started <- struct{}{}
+		<-release
+	}
+
+	for range recoveryWorkerCount + 1 {
+		h.enqueueRecoveryBegin("stalled@example.test")
+	}
+	for range recoveryWorkerCount {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("recovery worker did not start")
+		}
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		h.CloseRecoveryJobs()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery drain did not give up on stalled jobs")
+	}
+	require.Contains(t, logs.String(), "recovery_drain_abandoned")
+
+	releaseWorkers()
+	h.recoveryWorkers.Wait()
+	require.Equal(t, int32(recoveryWorkerCount), processed.Load(), "a job still queued at abandonment must be skipped")
 }

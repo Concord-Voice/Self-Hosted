@@ -190,6 +190,10 @@ type Handler struct {
 	recoveryQueue             chan string
 	recoveryQueueMu           sync.RWMutex
 	recoveryWorkers           sync.WaitGroup
+	recoveryDeliveries        sync.WaitGroup
+	recoveryCtx               context.Context
+	recoveryCancel            context.CancelFunc
+	recoveryDrainTimeout      time.Duration
 	recoveryWorkersOnce       sync.Once
 	recoveryQueueClosed       bool
 	recoveryProcess           func(string)
@@ -356,6 +360,8 @@ func NewHandlerForInstance(db *sql.DB, redisClient *redis.Client, log *logger.Lo
 		recoveryQueue:  make(chan string, recoveryQueueCapacity),
 	}
 	h.recoveryProcess = h.processRecoveryBegin
+	h.recoveryCtx, h.recoveryCancel = context.WithCancel(context.Background())
+	h.recoveryDrainTimeout = recoveryDrainTimeout
 	return h
 }
 
@@ -3248,6 +3254,9 @@ const (
 	recoveryQueueCapacity = 64
 	recoveryWorkerCount   = 4
 	recoveryStoreTimeout  = 5 * time.Second
+	// recoveryDrainTimeout caps the shutdown drain. Later shutdown stages share
+	// one budget, so a stalled database or mail server must not consume it.
+	recoveryDrainTimeout = 5 * time.Second
 )
 
 // generateRecoveryCode produces a cryptographically random 6-digit numeric code.
@@ -3318,6 +3327,9 @@ func (h *Handler) startRecoveryWorkers() {
 			go func() {
 				defer h.recoveryWorkers.Done()
 				for addr := range h.recoveryQueue {
+					if h.recoveryContext().Err() != nil {
+						continue // drain abandoned: skip what is still queued
+					}
 					h.recoveryProcess(addr)
 				}
 			}()
@@ -3325,7 +3337,10 @@ func (h *Handler) startRecoveryWorkers() {
 	})
 }
 
-// CloseRecoveryJobs stops new recovery dispatches and drains accepted jobs.
+// CloseRecoveryJobs stops new recovery dispatches and drains accepted jobs
+// and their deliveries for up to recoveryDrainTimeout. After that it cancels
+// in-flight lookups, skips jobs still queued, and returns; a delivery already
+// talking to SMTP ends at its own connection deadline.
 // Call it after HTTP drain and before closing the handler's database or Redis.
 func (h *Handler) CloseRecoveryJobs() {
 	h.recoveryQueueMu.Lock()
@@ -3334,11 +3349,33 @@ func (h *Handler) CloseRecoveryJobs() {
 		close(h.recoveryQueue)
 	}
 	h.recoveryQueueMu.Unlock()
-	h.recoveryWorkers.Wait()
+	drained := make(chan struct{})
+	go func() {
+		h.recoveryWorkers.Wait()
+		h.recoveryDeliveries.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(h.recoveryDrainTimeout):
+		h.log.Warn("Recovery drain abandoned", "failure_class", "recovery_drain_abandoned")
+	}
+	if h.recoveryCancel != nil {
+		h.recoveryCancel()
+	}
+}
+
+// recoveryContext is the parent of every recovery job. CloseRecoveryJobs
+// cancels it when the drain gives up.
+func (h *Handler) recoveryContext() context.Context {
+	if h.recoveryCtx == nil {
+		return context.Background()
+	}
+	return h.recoveryCtx
 }
 
 func (h *Handler) processRecoveryBegin(addr string) {
-	ctx, cancel := context.WithTimeout(context.Background(), recoveryStoreTimeout)
+	ctx, cancel := context.WithTimeout(h.recoveryContext(), recoveryStoreTimeout)
 	defer cancel()
 
 	// Look up user by email
@@ -3392,7 +3429,20 @@ func (h *Handler) processRecoveryBegin(addr string) {
 		return
 	}
 
-	// Send code via email
+	// Deliver off the shared workers. Only an existing account reaches SMTP,
+	// so a worker held through delivery would delay the next queued address
+	// only when an earlier one has an account. The SMTP dial timeout and
+	// connection deadline bound each delivery, and CloseRecoveryJobs drains it.
+	h.recoveryDeliveries.Add(1)
+	go func() {
+		defer h.recoveryDeliveries.Done()
+		h.deliverRecoveryCode(addr, code, data)
+	}()
+}
+
+// deliverRecoveryCode emails a stored recovery code and clears the code if the
+// send fails.
+func (h *Handler) deliverRecoveryCode(addr, code string, data []byte) {
 	var sendErr error
 	if h.emailSvc == nil {
 		sendErr = email.ErrDeliveryNotConfigured
