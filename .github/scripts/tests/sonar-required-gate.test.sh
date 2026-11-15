@@ -377,7 +377,7 @@ assert unit_smoke["jobs"]["dev-checks"]["if"] == "${{ inputs.dev-checks-relevant
 advisory_families = ["go_toolchain", "openapi", "spa_env", "deployment", "selfhost",
     "feature_wiring", "adr_numbers", "secrets_contract", "dispatch_trust",
     "go_test_contracts", "review_contracts", "tooling_mirrors", "graphify_contracts",
-    "native_ioc", "sonar_profile", "changelog"]
+    "native_ioc", "changelog"]
 step_conditions = [step.get("if", "") for job in pr_ci["jobs"].values()
                    for step in job.get("steps", [])]
 for family in advisory_families:

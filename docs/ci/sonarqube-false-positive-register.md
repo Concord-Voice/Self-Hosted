@@ -13,6 +13,10 @@ This file is the canonical record of SonarQube false-positive decisions for the 
 
 The register exists because the `mcp__sonarqube__change_sonar_issue_status` tool used by Claude Code cannot attach justification comments to the marked issue in SonarQube — the tool only flips the status. Without this register, FP decisions would live silently in SonarQube's state with no discoverable reasoning.
 
+> **Reverted (2026-11-15):** SonarCloud runs the full stock profiles again, so
+> the taint rules are active. The history below is kept for the FP decisions
+> made under it.
+>
 > **Security-signal re-homing (2026-06-11, #1426 / ADR-0017):** SAST security
 > detection is re-homing from SonarQube's security sensors to per-tool GitHub
 > Code Scanning (CodeQL #1424, Semgrep #1426 — categories `semgrep-custom` /
@@ -443,29 +447,13 @@ alignment guard passes, and it now also checks that build-time version
 assertion. This records the new pin's evidence; no SonarCloud finding status or
 historical decision was changed.
 
-## Recreation-recovery / drift-guard (ADR-0017 narrowed profile)
+## Recreation-recovery / drift-guard (retired 2026-11-15)
 
-The **2026-06-14 SonarCloud project recreation** (see the Section 2 banner) did
-more than invalidate issue keys: a freshly-recreated project reverts to the
-stock **`Sonar way`** quality profiles, silently undoing the ADR-0017 narrowing
-(the deactivation of the `injection`-tagged VULNERABILITY taint rules in the
-custom `Concord way (<lang>) — ADR-0017 narrowed` profiles). With the narrowing
-reverted, SonarCloud's JS/TS/Go security sensors run again — re-introducing both
-the #1381 timeout and a duplicate SAST signal that ADR-0017 deliberately re-homed
-to CodeQL + Semgrep.
-
-A CI **drift-guard** now detects that regression:
-[`scripts/sonar/check-narrowed-profile.sh`](../../scripts/sonar/check-narrowed-profile.sh)
-(read-only) asserts, per language (js/ts/go), that (1) the profile *assigned to
-the project* is the narrowed one, and (2) it has **zero active**
-injection-tagged VULNERABILITY rules — querying `rules/search` scoped with
-`qprofile=<key>&activation=true` (an org-wide query would always find injection
-rules in the catalog and false-positive forever). In Concord-Voice-Alpha it
-runs as an advisory step of the `sonar-profile-drift` job; this repo's CI does
-not run it yet (Sonar CI wiring is #36). The restore op
-(`scripts/sonar/narrow-security-profiles.sh --apply`) stays in Alpha, which
-manages the shared org profiles. The hermetic self-test
-(`scripts/sonar/test-check-narrowed-profile.sh`) is in this repo.
+The narrowed-profile drift guard (`scripts/sonar/check-narrowed-profile.sh` and
+its self-test) was deleted when the ADR-0017 narrowing was reverted. A recreated
+project now gets the stock profiles, which is the intended state. A recreation
+still issues new issue keys (see the Section 2 banner), so FP decisions are
+re-registered after one.
 
 ## Schema Rules
 

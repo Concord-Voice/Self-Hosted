@@ -376,7 +376,7 @@ run_policy_case guard-go-test-contracts semgrep_community scripts/check-no-unsco
 run_policy_case verifier-gate all-scanners .github/scripts/verify-pr-scan-results.py
 run_policy_case wrapper-gate all-scanners .github/workflows/required-pr-build.yml
 run_policy_case desktop-input-package desktop-input packages/e2ee-client/src/example.ts
-run_policy_case guard-sonar-profile semgrep_community,sonar scripts/sonar/check-narrowed-profile.sh scripts/sonar/test-check-narrowed-profile.sh
+run_policy_case sonar-scripts semgrep_community,sonar scripts/sonar/verify-protected-sonar-result.py scripts/sonar/tests/test_verify_protected_sonar_result.py
 run_policy_case guard-changelog semgrep_community .github/scripts/verify-changelog.sh .github/scripts/tests/verify-changelog.test.sh
 run_policy_case guard-dev-checks semgrep_community scripts/concord-dev.sh scripts/tests/test-concord-dev-args.sh
 run_delete_case delete-in-scope codeql_go,govulncheck,osv,semgrep_custom,semgrep_community,sonar services/control-plane/internal/example/deleted.go
@@ -441,7 +441,7 @@ const filterNames = matcherLines.flatMap((line, i) => {
 });
 const requiredFilterKeys = ['go_toolchain','openapi','spa_env','deployment','selfhost_guard','feature_wiring','workflow_lint',
   'adr_numbers','secrets_contract','dispatch_trust','go_test_contracts','review_contracts',
-  'tooling_mirrors','graphify_contracts','native_ioc','sonar_profile','changelog','dev_checks',
+  'tooling_mirrors','graphify_contracts','native_ioc','changelog','dev_checks',
   'worker_apple','worker_invite','license_desktop','license_media','license_admin','license_go'];
 for (const key of requiredFilterKeys)
   assert.ok(filterNames.includes(key), `complete matcher filter set includes ${key}`);
