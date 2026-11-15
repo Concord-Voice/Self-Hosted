@@ -7,13 +7,13 @@ import (
 
 const (
 	// MaxWrappedPrivateKeyEncoded caps the base64 transport envelope.
-	MaxWrappedPrivateKeyEncoded = 16384
+	MaxWrappedPrivateKeyEncoded = 43692
 	// MaxWrappedPrivateKeyDecoded caps the opaque encrypted private key.
-	MaxWrappedPrivateKeyDecoded = 12288
+	MaxWrappedPrivateKeyDecoded = 32 * 1024
 	// MaxKeyDerivationSaltEncoded caps the base64 transport salt.
-	MaxKeyDerivationSaltEncoded = 1024
+	MaxKeyDerivationSaltEncoded = 88
 	// MaxKeyDerivationSaltDecoded caps the decoded KDF salt.
-	MaxKeyDerivationSaltDecoded = 768
+	MaxKeyDerivationSaltDecoded = 64
 )
 
 var (

@@ -10,6 +10,8 @@ import (
 )
 
 func TestRegistrationKeyMaterialLimit(t *testing.T) {
+	require.Equal(t, 32*1024, auth.MaxWrappedPrivateKeyDecoded)
+	require.Equal(t, 64, auth.MaxKeyDerivationSaltDecoded)
 	wrappedExact := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("w", auth.MaxWrappedPrivateKeyDecoded)))
 	saltExact := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", auth.MaxKeyDerivationSaltDecoded)))
 	require.Len(t, wrappedExact, auth.MaxWrappedPrivateKeyEncoded)

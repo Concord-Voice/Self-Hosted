@@ -460,7 +460,7 @@ func TestCompleteRegistrationKeyMaterialLimitPreservesToken(t *testing.T) {
 		{"wrapped encoded", "wrapped_private_key", strings.Repeat("A", auth.MaxWrappedPrivateKeyEncoded+1)},
 		{"wrapped decoded", "wrapped_private_key", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("w", auth.MaxWrappedPrivateKeyDecoded+1)))},
 		{"salt encoded", "key_derivation_salt", strings.Repeat("A", auth.MaxKeyDerivationSaltEncoded+1)},
-		{"salt decoded", "key_derivation_salt", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", auth.MaxKeyDerivationSaltDecoded+1)))},
+		{"salt decoded above password-registration cap", "key_derivation_salt", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", 65)))},
 		{"malformed", "wrapped_private_key", "not-base64"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -34,7 +34,8 @@ WebSocket event budgets are ready for self-hosted operators and stay off
 until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
 Android. SSO account linking now requires current account policy and MFA,
-and SSO initiation is bound to the Desktop flow that started it.
+SSO initiation is bound to the Desktop flow that started it, and backup-code
+readers accept the versioned formats needed for a later storage migration.
 
 **22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
 
@@ -43,6 +44,7 @@ and SSO initiation is bound to the Desktop flow that started it.
 - **Operations:** Added a default-off control-plane blue-green rail to `concord-ctl.sh` (`CONTROL_PLANE_DEPLOY_PROFILE=control-plane-bluegreen`, managed production and staging only, never self-host) that rebuilds the control plane without 502s when no migration is pending, plus a read-only `control-plane migrations status` subcommand and a `MIGRATIONS_MODE=verify` startup setting that refuses to start on a schema that is not current. Do not turn the rail on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 ship.
 - **Authentication:** Added `authority-ceremony`, an operator tool that signs account-key authority delegations and successions with two hardware keys, or with two key files on a self-hosted install (`--key-file`, `--yes`). It also writes a realm's anchors file (`make-anchors`) and prints a trust file's current delegation window (`show-trust`). Nothing runs it yet.
 - **Authentication:** Added dormant checks to the account-key authority contract that refuse a delegation or succession before it is signed when clients would ignore it, halt on it, or see its cutover or supersession move backward. Nothing calls them yet.
+- **Self-host:** Added `concord-selfhost authority renew --rotate-tls`, which also gives the account-key authority a new TLS key. The new delegation lists the old and new keys together, the authority switches to the new one, and the next renew drops the old one. Renew also refuses to run when the key in use is not the last one listed, or when a file from a failed rollback is left behind.
 - **Self-host:** Added `concord-selfhost authority upgrade --export-dir DIR`, which sets up the account-key authority on an install that already has accounts, as init does on a new one. Upgrade never seals, because sealing existing accounts needs the control plane's side, which ships with the client integration. Init now also counts accounts again just before the seal and does not seal if one has appeared. Once either verb has finished, `concord-selfhost up`, `stop` and `down` manage the authority too, and `up` (and so `update`) rebuilds it and runs its database migrations. An authority failure there is a warning while nothing calls the authority.
 - **Self-host:** Added `concord-selfhost authority renew`, which signs the account-key authority's next delegation with new signing keys and a new 180-day window, then restarts the authority. If the authority does not start on the new delegation, renew keeps it and tells you to fix the cause, because the authority may already have installed it. `concord-selfhost health` and the host agent's `/v1/health` now warn from 21 days before the delegation expires, and health fails once it has.
 - **Self-host:** Added `concord-selfhost authority init --export-dir DIR`, which sets up the account-key authority once on an installed stack: its keys, the first delegation and its database. It writes the two recovery keys only to DIR, encrypted with a passphrase you type twice, and never to the host's disk. It refuses an install that already has accounts. Nothing uses the authority yet.
@@ -67,6 +69,10 @@ and SSO initiation is bound to the Desktop flow that started it.
 - **Self-hosting:** Operators can set separate minimum app versions for iOS and Android with `CLIENT_MIN_VERSION_IOS` and `CLIENT_MIN_VERSION_ANDROID`. `CLIENT_MIN_VERSION` still sets the desktop minimum. API: mobile clients send `X-Concord-Client-Platform` (`ios` or `android`), or `client_platform` on the WebSocket; any other value gets a 400.
 - **Self-hosting:** Each self-host release now carries a CycloneDX JSON SBOM, `concord-selfhost-v<version>.cdx.json`, as an attested release asset. It lists every npm package and Go module the bundle's lockfiles and `go.mod` files pin, dev dependencies included.
 - **Self-hosting:** Pushing a `v<VERSION>` tag now builds the self-host bundle (`concord-selfhost-<version>.tar.gz`, its manifest and `SHA256SUMS`) from the tagged tree in this repository and attests each file's build provenance. The release pipeline verifies the attestations and opens an unsigned draft. A release is not a supported install until it passes fresh-host acceptance.
+
+### Security
+
+- **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed
 
@@ -97,8 +103,12 @@ and SSO initiation is bound to the Desktop flow that started it.
 
 ### Security
 
+- **Authentication:** Backup-code verification and status reads now accept only exact bare SHA-256, `v1$` SHA-256, or bounded `v2$` Argon2id hashes, and fail closed on malformed stored values. New codes still use the bare format until all serving replicas have this reader; the v2 writer and database migration follow in a separate rollout ([#290](https://github.com/Concord-Voice/Self-Hosted/pull/290)).
+- **Registration:** New account requests now reject bodies over 64 KiB and oversized decoded key material before password hashing, and check existing email and username conflicts before expensive work ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
+- **WebSocket:** When client attestation is required, JWT fallback upgrades now validate the session's attestation proof before admitting the socket; the single-use ticket path remains unchanged ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
 - **Authentication:** **BREAKING** SSO account linking now completes only after any enrolled MFA factor is verified and current password policy is rechecked. Apple and Google initiation require the Desktop client-binding header, reject provider-wide bursts above 600 per minute, and stop allocating state on Redis errors; the six public cookie-creating auth routes require JSON and reject cross-site requests. Registration caps encoded and decoded E2EE wrapped keys and salts, while provider JWKS refreshes replace withdrawn keys and bound unknown-key fetches. In-flight SSO attempts must restart after upgrade, and older Desktop builds cannot initiate SSO once server enforcement is deployed ([#299](https://github.com/Concord-Voice/Self-Hosted/pull/299)).
+- **Accounts:** WebAuthn sign-in and inline confirmation now atomically advance authenticator counters and reject clone warnings before granting access, while credential registration enforces the ten-key limit again when the final write commits ([#288](https://github.com/Concord-Voice/Self-Hosted/pull/288)).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
 - **Accounts:** **BREAKING** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. Wrong passwords there, and when changing your password, resetting your encryption keys or changing your sign-in security settings, now count toward the same lockout as sign-in: five lock the account. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401, a locked account gets 423 `account_locked`, and an account with no password gets 400 `no_password`.

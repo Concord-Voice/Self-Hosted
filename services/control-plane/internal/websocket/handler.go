@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -23,11 +25,13 @@ import (
 
 // Handler handles WebSocket connections
 type Handler struct {
-	hub            *Hub
-	db             *sql.DB
-	redis          *redis.Client
-	jwtSecret      string
-	allowedOrigins []string
+	hub                *Hub
+	db                 *sql.DB
+	redis              *redis.Client
+	jwtSecret          string
+	allowedOrigins     []string
+	requireAttestation bool
+	attestationLog     *logger.Logger
 	// clientMinimums is optional: empty values preserve the existing admission path.
 	clientMinimums middleware.ClientMinimums
 	// fence enforces the per-user credential epoch on both WS auth paths
@@ -85,6 +89,12 @@ func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret strin
 	return h
 }
 
+// SetAttestation configures the JWT fallback's admission proof requirement.
+func (h *Handler) SetAttestation(required bool, log *logger.Logger) {
+	h.requireAttestation = required
+	h.attestationLog = log
+}
+
 // SetClientMinimums configures the optional per-platform client-version admission floors.
 func (h *Handler) SetClientMinimums(minimums middleware.ClientMinimums) {
 	h.clientMinimums = minimums
@@ -113,6 +123,9 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 	// Authenticate: prefer ticket-based auth, fall back to JWT for backward compat
 	userID, sessionID, err := h.authenticateWebSocket(c)
 	if err != nil {
+		if c.IsAborted() {
+			return // Attestation already wrote its fixed 403/503 response.
+		}
 		status, message := webSocketAuthFailure(err)
 		c.JSON(status, gin.H{"error": message})
 		return
@@ -437,6 +450,17 @@ func (h *Handler) authenticateViaJWT(c *gin.Context, tokenString string) (uuid.U
 	verified, err := h.validateAccessToken(c.Request.Context(), tokenString)
 	if err != nil {
 		return uuid.Nil, "", err
+	}
+	if h.requireAttestation {
+		c.Set("user_id", verified.UserID.String())
+		c.Set(middleware.JWTClaimsContextKey, jwt.MapClaims{"sid": verified.SessionID})
+		if subtle.ConstantTimeCompare([]byte(verified.SessionID), []byte(c.GetHeader("X-Session-ID"))) != 1 {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "X-Session-ID does not match the access token"})
+			return uuid.Nil, "", errors.New("attestation session mismatch")
+		}
+		if !middleware.ValidateAttestation(c, h.redis, h.attestationLog) {
+			return uuid.Nil, "", errors.New("attestation rejected")
+		}
 	}
 	c.Set(wsFamilyContextKey, verified.FamilyID)
 	c.Set(wsCredEpochContextKey, verified.CredEpoch)
