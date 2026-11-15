@@ -988,12 +988,30 @@ func (h *Handler) verificationCodeTTL(ctx context.Context, pendingID string) tim
 	return ttl
 }
 
+// revertResendReservation returns a failed send's reservation. A reservation
+// that changed first (a later resend) is left in place, and both outcomes are
+// logged with the pending id so a lost refund is visible.
+func (h *Handler) revertResendReservation(ctx context.Context, op, pendingID string, count int, reservedAt time.Time) {
+	reverted, err := h.pending.RevertResendIfCurrent(ctx, pendingID, count, reservedAt)
+	if err != nil {
+		h.log.Error(op+": failed to revert resend", "pending_id", pendingID, "error", err)
+		return
+	}
+	if !reverted {
+		h.log.Warn(op+": resend reservation changed before its revert; left in place", "pending_id", pendingID)
+	}
+}
+
 func (h *Handler) clearVerificationCode(ctx context.Context, pendingID string) {
-	_ = h.redis.Del(ctx, redisKey(pendingID), redisKeyTestOnly+pendingID, verificationAttemptsKey(pendingID)).Err()
+	if err := h.redis.Del(ctx, redisKey(pendingID), redisKeyTestOnly+pendingID, verificationAttemptsKey(pendingID)).Err(); err != nil {
+		h.log.Warn("Failed to clear verification code state", "pending_id", pendingID, "error", err)
+	}
 }
 
 func (h *Handler) clearVerificationCodeMaterial(ctx context.Context, pendingID string) {
-	_ = h.redis.Del(ctx, redisKey(pendingID), redisKeyTestOnly+pendingID).Err()
+	if err := h.redis.Del(ctx, redisKey(pendingID), redisKeyTestOnly+pendingID).Err(); err != nil {
+		h.log.Warn("Failed to clear verification code", "pending_id", pendingID, "error", err)
+	}
 }
 
 func (h *Handler) exhaustVerificationCode(ctx context.Context, pendingID string, expiry ...time.Duration) {
@@ -1001,7 +1019,9 @@ func (h *Handler) exhaustVerificationCode(ctx context.Context, pendingID string,
 	if len(expiry) > 0 && expiry[0] > ttl {
 		ttl = expiry[0]
 	}
-	_ = h.redis.Set(ctx, verificationAttemptsKey(pendingID), MaxCodeAttempts, ttl).Err()
+	if err := h.redis.Set(ctx, verificationAttemptsKey(pendingID), MaxCodeAttempts, ttl).Err(); err != nil {
+		h.log.Warn("Failed to record exhausted verification attempts", "pending_id", pendingID, "error", err)
+	}
 	h.clearVerificationCodeMaterial(ctx, pendingID)
 }
 
@@ -1093,9 +1113,7 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 	h.clearVerificationCodeMaterial(ctx, pending.ID)
 	codeExpires, err := h.sendInitialCode(ctx, pending.ID, pending.Email)
 	if err != nil {
-		if _, revertErr := h.pending.RevertResendIfCurrent(ctx, pending.ID, newCount, reservedAt); revertErr != nil {
-			h.log.Error("resend: failed to revert resend", "error", revertErr)
-		}
+		h.revertResendReservation(ctx, "resend", pending.ID, newCount, reservedAt)
 		if errors.Is(err, ErrPendingExpired) {
 			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
 			return
@@ -1155,9 +1173,7 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 	newEmailLower := strings.ToLower(strings.TrimSpace(req.NewEmail))
 	codeExpires, err := h.sendInitialCode(ctx, req.PendingID, newEmailLower)
 	if err != nil {
-		if _, revertErr := h.pending.RevertResendIfCurrent(ctx, req.PendingID, reservedCount, reservedAt); revertErr != nil {
-			h.log.Error("change-email: failed to revert resend", "error", revertErr)
-		}
+		h.revertResendReservation(ctx, "change-email", req.PendingID, reservedCount, reservedAt)
 		if errors.Is(err, ErrPendingExpired) {
 			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
 			return
@@ -3405,12 +3421,23 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
+	// The budget is cleared only once recovery has completed: a consumed code
+	// whose completion was refused or failed proved nothing that should
+	// return the address's failed attempts.
+	if h.recoveryPolicyAllowsEmailCompletion(ctx, c, record.UserID) && h.CompleteRecovery(c, record.UserID, "email") {
+		h.clearRecoveryFailureBudget(c, budgetKey)
+	}
+}
+
+// clearRecoveryFailureBudget resets the address's recovery failure budget
+// after a completed recovery, on a context detached from the request so a
+// client hang-up cannot cancel it. Best-effort: a failure fails toward more
+// limiting.
+func (h *Handler) clearRecoveryFailureBudget(c *gin.Context, budgetKey string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
+	defer cancel()
 	if err := h.redis.Del(ctx, budgetKey).Err(); err != nil {
 		h.log.Warn("Failed to clear recovery attempt budget", "error", err)
-	}
-
-	if h.recoveryPolicyAllowsEmailCompletion(ctx, c, record.UserID) {
-		h.CompleteRecovery(c, record.UserID, "email")
 	}
 }
 
