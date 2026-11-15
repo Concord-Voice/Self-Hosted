@@ -626,3 +626,62 @@ func TestUpdatePrivacy_P1StaleFlagsStillRequireCode(t *testing.T) {
 	require.Equal(t, []interface{}{"totp"}, body["methods"])
 	require.True(t, storedPurgeFence(t, ts, user.ID), "a password alone must not lower the fence of a TOTP account")
 }
+
+// The purge fence charges the shared dangerous-action budget, not one of its
+// own: one correct guess there turns the fence off, after which DM purge and
+// Clear ask for no code, so it must not hand a stolen session five more MFA
+// guesses than every other step-up.
+func TestUpdatePrivacy_PurgeFenceSharesTheDangerousActionBudget(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "purgefencesharedbudget")
+	materializePrivacyRow(t, ts, user)
+	code := enableTOTP(t, ts, user)
+	key := stepup.DangerousActionBudget(ts.Redis).Key(user.ID)
+	require.NoError(t, ts.Redis.Set(context.Background(), key, stepup.BudgetLimit, 0).Err())
+
+	w := patchPrivacy(t, ts, user.AccessToken, map[string]interface{}{
+		keyRequireAuthBeforePurge: false,
+		keyCurrentPassword:        testhelpers.TestAuthPlaintext,
+		keyMFACode:                code(),
+	})
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "step_up_budget_exhausted")
+	require.True(t, storedPurgeFence(t, ts, user.ID), "an exhausted shared budget must keep the fence up")
+}
+
+// A disable request with no MFA code guesses nothing at the second factor, so
+// it must leave the shared MFA budget untouched, whether the password is
+// wrong, right, or the account has MFA and the code was left out. Charging it
+// would let a session holder lock the user out of every MFA step-up route.
+func TestUpdatePrivacy_PurgeFenceWithoutCodeLeavesTheSharedBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mfa      bool
+		password string
+		want     int
+	}{
+		{"no MFA, wrong password", false, "NotTheRightValue123!", http.StatusForbidden},
+		{"no MFA, right password", false, testhelpers.TestAuthPlaintext, http.StatusOK},
+		{"MFA account, code left out", true, testhelpers.TestAuthPlaintext, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := setupTS(t)
+			user := ts.CreateTestUser(t, "purgefencenocode"+strings.ReplaceAll(tc.name[:6], " ", ""))
+			materializePrivacyRow(t, ts, user)
+			if tc.mfa {
+				enableTOTP(t, ts, user)
+			}
+			key := stepup.DangerousActionBudget(ts.Redis).Key(user.ID)
+			require.NoError(t, ts.Redis.Set(context.Background(), key, 3, 0).Err())
+
+			w := patchPrivacy(t, ts, user.AccessToken, map[string]interface{}{
+				keyRequireAuthBeforePurge: false,
+				keyCurrentPassword:        tc.password,
+			})
+			require.Equal(t, tc.want, w.Code, w.Body.String())
+			n, err := ts.Redis.Get(context.Background(), key).Int()
+			require.NoError(t, err)
+			require.Equal(t, 3, n, "a request without a code must neither charge nor clear the shared budget")
+		})
+	}
+}

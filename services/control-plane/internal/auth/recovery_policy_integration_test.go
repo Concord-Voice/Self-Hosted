@@ -148,3 +148,45 @@ func TestRecoveryPolicyTighteningInvalidatesPriorEmailAuthority(t *testing.T) {
 	}, nil)
 	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
 }
+
+// A recovery that finishes through the reserved-factor challenge never returns
+// to RecoveryVerifyCode, so CompleteRecovery itself must clear the address's
+// email-code budget: earlier wrong codes must not outlive a successful recovery.
+func TestRecoveryPolicyReservedFactorCompletionClearsEmailBudget(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverclearsbudget")
+	keyring, err := mfa.ParseKeyring(strings.Repeat("0", 64), 1, "")
+	require.NoError(t, err)
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: "Concord Test", AccountName: user.Email})
+	require.NoError(t, err)
+	sealed, nonce, version, err := keyring.Seal([]byte(key.Secret()))
+	require.NoError(t, err)
+	_, hashes, err := mfa.GenerateBackupCodes()
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(`INSERT INTO user_mfa_totp (user_id, totp_secret_enc, totp_secret_nonce, key_version, enabled, confirmed, backup_codes_hash, backup_codes_used)
+	 VALUES ($1, $2, $3, $4, TRUE, TRUE, $5, $6)`, user.ID, sealed, nonce, version, pq.Array(hashes), pq.Array(make([]bool, len(hashes))))
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(`UPDATE users SET recovery_only_methods = '{totp}' WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+
+	budgetKey := "recovery_fail:" + strings.ToLower(user.Email)
+	require.NoError(t, ts.Redis.Set(context.Background(), budgetKey, 9, time.Hour).Err())
+	seedRecoveryCode(t, ts, user.Email, testRecoveryCode, user.ID)
+	w := ts.DoRequest(http.MethodPost, pathRecoveryVerifyCode, map[string]string{"email": user.Email, "code": testRecoveryCode}, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var challenge map[string]interface{}
+	testhelpers.ParseJSON(t, w, &challenge)
+	token := testhelpers.JSONField[string](t, challenge, "mfa_challenge_token")
+	exists, err := ts.Redis.Exists(context.Background(), budgetKey).Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), exists, "the budget stays until recovery completes")
+
+	code, err := totp.GenerateCode(key.Secret(), time.Now())
+	require.NoError(t, err)
+	w = ts.DoRequest(http.MethodPost, "/api/v1/auth/mfa/verify", map[string]string{"mfa_challenge_token": token, "method": "totp", "code": code}, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	exists, err = ts.Redis.Exists(context.Background(), budgetKey).Result()
+	require.NoError(t, err)
+	require.Zero(t, exists, "a completed MFA-backed recovery clears the email-code budget")
+}
