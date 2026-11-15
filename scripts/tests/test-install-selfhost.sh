@@ -554,7 +554,7 @@ ORDER
   grep -qF 'External storage has not been checked.' "$STATE/entry-output"
 }
 wizard_input() {
-  printf '%s\n' example.com letsencrypt example.com 203.0.113.10 byo-s3 \
+  printf '%s\n' example.com letsencrypt direct example.com 203.0.113.10 byo-s3 \
     objects.example.invalid true concord-media '' synthetic-access synthetic-secret \
     smtp.example.invalid 587 synthetic-user synthetic-smtp-password operator@example.invalid \
     '' '' no >"$STATE/stdin"
@@ -938,7 +938,7 @@ PTY
 wizard_bundled_contract() {
   source "$TARGET"
   detect_public_ip() { printf '%s' 203.0.113.10; }
-  printf '%s\n' example.com letsencrypt example.com 203.0.113.10 '' smtp.example.invalid \
+  printf '%s\n' example.com letsencrypt direct example.com 203.0.113.10 '' smtp.example.invalid \
     587 synthetic-user synthetic-password operator@example.invalid '' '' no >"$STATE/stdin"
   collect_config <"$STATE/stdin" || return 1
   [[ ${CFG_STORAGE_MODE:-} == bundled && $CFG_SMTP_HOST == smtp.example.invalid
@@ -946,7 +946,7 @@ wizard_bundled_contract() {
 }
 wizard_eof_contract() {
   source "$TARGET"; detect_public_ip() { printf '%s' 203.0.113.10; }
-  head -n 9 "$STATE/stdin" >"$STATE/truncated"
+  head -n 10 "$STATE/stdin" >"$STATE/truncated"
   local status=0
   collect_config <"$STATE/truncated" >"$STATE/eof-output" 2>&1 || status=$?
   [[ $status -ne 0 && ! -e "$FIX/.env" && ! -e "$STATE/rendered" && ! -e "$STATE/tls" ]]
@@ -1082,7 +1082,7 @@ UDP_PRIVILEGED
     printf '%s\n' "${answers[@]}" >"$STATE/udp-answers"
     (main --env-file "$STATE/udp-answers") >"$STATE/udp-output" 2>&1 || status=$?
   else
-    wizard=(example.com local example.com 203.0.113.10 "$storage")
+    wizard=(example.com local direct example.com 203.0.113.10 "$storage")
     if [[ $storage == byo-s3 ]]; then
       wizard+=(objects.example.invalid true concord-media '' udp-owned-access udp-owned-secret)
     fi
@@ -2581,20 +2581,20 @@ IPPRIVILEGED
     main --env-file "$STATE/ip-answers" >"$STATE/ip-entry-output" 2>&1 || status=$?
     [[ ! -e "$STATE/ip-detection-calls" ]] || return 1
   else
-    wizard_values=("$domain" local example.com "$ip" "$storage_mode")
+    wizard_values=("$domain" local direct example.com "$ip" "$storage_mode")
     if [[ $storage_mode == byo-s3 ]]; then
       wizard_values+=("$storage_endpoint" "$storage_tls" "$bucket" '' "$byo_access" "$byo_auth")
       storage_prompt_count=6
     fi
     wizard_values+=("$smtp_host" 587 fixture-user fixture-password "$smtp_from" '' '' "$feedback_enabled")
-    [[ $setting != feedback-default ]] || wizard_values[$((12 + storage_prompt_count))]=''
+    [[ $setting != feedback-default ]] || wizard_values[$((13 + storage_prompt_count))]=''
     if [[ $feedback_enabled == yes ]]; then wizard_values+=("$feedback_repo" "$feedback_pat"); fi
     # An omitted interactive answer is EOF at its actual prompt; blank cells
     # keep the rest of the otherwise-valid wizard input complete.
     case $setting in
-      smtp-missing) wizard_values=("${wizard_values[@]:0:$((5 + storage_prompt_count))}") ;;
-      feedback-repo-missing) wizard_values=("${wizard_values[@]:0:$((13 + storage_prompt_count))}") ;;
-      feedback-pat-missing) wizard_values=("${wizard_values[@]:0:$((14 + storage_prompt_count))}") ;;
+      smtp-missing) wizard_values=("${wizard_values[@]:0:$((6 + storage_prompt_count))}") ;;
+      feedback-repo-missing) wizard_values=("${wizard_values[@]:0:$((14 + storage_prompt_count))}") ;;
+      feedback-pat-missing) wizard_values=("${wizard_values[@]:0:$((15 + storage_prompt_count))}") ;;
     esac
     printf '%s\n' "${wizard_values[@]}" >"$STATE/ip-stdin"
     input_path="$STATE/ip-stdin"

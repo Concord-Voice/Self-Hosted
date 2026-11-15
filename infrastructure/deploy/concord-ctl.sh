@@ -7667,8 +7667,7 @@ else:
         [[ -e "$entry" && ! -L "$entry" ]] || return 1
         owner="$(stat -Lc %u -- "$entry" 2>/dev/null || stat -f %u "$entry" 2>/dev/null)" || return 1
         mode="$(stat -Lc %a -- "$entry" 2>/dev/null || stat -f %Lp "$entry" 2>/dev/null)" || return 1
-        [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
-        (( (8#$mode & 022) == 0 )) || return 1
+        [[ "$owner" == 0 && "$mode" =~ ^[0-7]{1,2}[0145][0145]$ ]] || return 1
       done
       openssl x509 -in "$path" -noout -checkend 0 >/dev/null 2>&1
     }
