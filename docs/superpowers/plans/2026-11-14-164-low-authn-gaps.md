@@ -1,10 +1,10 @@
-# Security #164 Low Authentication Gaps Implementation Plan
+# Low Authentication Gaps Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close Security #164's six owned low-severity authentication gaps while verifying, but not duplicating, Security #39's refresh-machine fix.
+**Goal:** Close six low-severity authentication gaps while verifying the separate refresh-machine binding fix without duplicating it.
 
-**Architecture:** Patch the existing ownership seams as three workstreams: WebAuthn, MFA storage/input, and registration/WebSocket admission. The MFA storage workstream is deliberately split into B1 compatible-reader and B2 migration/writer PRs. Each merged source PR is then imported to Hosted through a separate reviewed mirror PR. No new framework, route, dependency, or configuration variable is added.
+**Architecture:** Patch the existing ownership seams as three workstreams: WebAuthn, MFA storage/input, and registration/WebSocket admission. The MFA storage workstream is deliberately split into B1 compatible-reader and B2 migration/writer PRs. Each merged source PR is then mirrored to the hosted deployment through a separate reviewed PR. No new framework, route, dependency, or configuration variable is added.
 
 **Tech Stack:** Go 1.27, Gin, PostgreSQL 16, Redis/go-redis, go-webauthn v0.18.2, `golang.org/x/crypto/argon2`, OpenAPI YAML.
 
@@ -12,11 +12,11 @@
 
 ## Global Constraints
 
-- Security #39 owns VULN-009. #164 records exact-head proof and makes no duplicate refresh-machine production edit.
-- Self-Hosted is source for `services/**` and `docs/api/**`; no Hosted hand-port starts before the corresponding source PR merges.
+- The separate refresh-machine binding work owns VULN-009. This plan records exact-head proof without duplicating its production fix.
+- Self-Hosted is source for `services/**` and `docs/api/**`; no hosted-deployment mirror starts before the corresponding source PR merges.
 - Every integration test uses an explicitly isolated `DATABASE_URL` and `REDIS_URL`; never use the shared `concord` database.
 - Keep shared default Go caches. Do not set `GOCACHE`, `GOMODCACHE`, or `GOLANGCI_LINT_CACHE`.
-- Preserve #35's conditional backup-code consumption and #36's Redis `GETDEL` ceremony consumption.
+- Preserve existing conditional backup-code consumption and Redis `GETDEL` ceremony consumption.
 - Backup v2 is exactly Argon2id v19, `m=8192,t=1,p=1`, 16-byte salt, 32-byte digest. Reject any other stored v2 tuple before hashing.
 - B1 reads exact bare/v1/v2 entries but writes only bare legacy SHA-256. B2 retains those reads and switches generation to v2. No migration or v2 writer may activate while any B0 replica can access the database.
 - Registration limits are: body 64 KiB, decoded RSA public key 1 KiB, decoded wrapped private key 32 KiB, decoded KDF salt 64 bytes.
@@ -24,7 +24,7 @@
 - `recovery-only` methods are a unique subset of `totp,webauthn,email,sms` with raw length ≤4. `email-sms/setup` is a unique non-empty subset of `email,sms` with raw length ≤2.
 - JWT WebSocket attestation uses the shared HTTP validator only when `REQUIRE_CLIENT_ATTESTATION` is enabled. The ticket redemption rail is unchanged.
 - Each PR updates `[Prerelease]` and the contract docs it changes.
-- Before writing migration files, re-resolve the next free number. `000195` Self-Hosted and `000198` Hosted are inspected-head reservations only.
+- Before writing migration files, re-resolve the next free number. `000195` Self-Hosted and `000198` for the hosted deployment are inspected-head reservations only.
 
 ## File map and PR boundaries
 
@@ -40,20 +40,20 @@
 
 - **CloneWarning is checked after sign-count persistence.** Expected: check immediately after library success and before every DB write or authority mint. Pinned in Task 1.
 - **Backup hash parser accepts attacker-sized Argon parameters from a damaged DB row.** Expected: exact parameter/length checks precede `argon2.IDKey`. Pinned in Tasks 3A and 3B.
-- **The migration or v2 writer reaches an old B0 replica.** Expected: B1 reader is deployed everywhere and zero B0 is proven before B2; Hosted never uses direct rolling B0-to-B2. Pinned in Tasks 3A, 3B, and 8.
+- **The migration or v2 writer reaches an old B0 replica.** Expected: B1 reader is deployed everywhere and zero B0 is proven before B2; the hosted deployment never uses direct rolling B0-to-B2. Pinned in Tasks 3A, 3B, and 8.
 - **Credential cap is still a begin-time check.** Expected: count and insert occur after the same users-row lock. Pinned by the concurrent test in Task 2.
 - **A JWT WebSocket is attested twice or a ticket is newly attested.** Expected: shared validator runs only on JWT fallback; ticket regression stays unchanged. Pinned in Task 6.
 - **Registration's 413 path still reaches password hashing.** Expected: body/field bounds and cheap conflicts precede the `HashPassword` AST call site, plus runtime 413 tests. Pinned in Task 5.
 
 ---
 
-## Dependency gate: VULN-009 / Security #39
+## Dependency gate: VULN-009 refresh-machine binding
 
-- [ ] **Step 1: Refresh Security #39 and its implementation PR.** Record issue state, PR URL, exact head SHA, review state, and CI state. If no reviewed fix exists, mark VULN-009 blocked on #39; do not implement it on #164.
+- [ ] **Step 1: Refresh the separate refresh-machine binding issue and its implementation PR.** Record issue state, PR URL, exact head SHA, review state, and CI state. If no reviewed fix exists, mark VULN-009 blocked on that issue; do not implement it here.
 
-- [ ] **Step 2: Verify the exact head.** Run #39's focused missing-`X-Machine-Id` regression against isolated services and confirm a bound refresh token is rejected with no successor row/cookie. Record the command and result in #164's PR/issue evidence.
+- [ ] **Step 2: Verify the exact head.** Run the separate fix's focused missing-`X-Machine-Id` regression against isolated services and confirm a bound refresh token is rejected with no successor row/cookie. Record the command and result in this work's review evidence.
 
-- [ ] **Step 3: Preserve ownership.** Add no #164 production or test diff under the refresh machine-binding functions unless #39's own lifecycle explicitly assigns it here.
+- [ ] **Step 3: Preserve ownership.** Add no production or test diff under the refresh machine-binding functions unless the owning lifecycle explicitly assigns it here.
 
 ## PR A — WebAuthn
 
@@ -154,7 +154,7 @@
 - Create: `services/control-plane/migrations/000195_backup_code_hash_versions.down.sql` (re-resolve number)
 - Modify: `services/control-plane/migrations/TEST_MIGRATIONS.md`
 
-- [ ] **Step 1: Prove the deployment prerequisite.** For Hosted, record both blue/green pools and background workers on B1-or-newer with zero B0 replicas. For a one-shot Self-Hosted upgrade, record that all B0 processes are stopped and database-fenced. A source merge or green CI run is not this proof.
+- [ ] **Step 1: Prove the deployment prerequisite.** For the hosted deployment, record both blue/green pools and background workers on B1-or-newer with zero B0 replicas. For a one-shot Self-Hosted upgrade, record that all B0 processes are stopped and database-fenced. A source merge or green CI run is not this proof.
 
 - [ ] **Step 2: Write B2 codec tests.** Assert generated entries use exact v2, all eight salts are distinct and 16 bytes, digests are 32 bytes, and the B2 reader continues accepting bare/v1/v2.
 
@@ -164,7 +164,7 @@
 
 - [ ] **Step 5: Implement B2.** Retain the B1 reader unchanged, switch only generation to v2, and add the migration pair. Preserve the conditional consume mutation and verification-error behavior.
 
-- [ ] **Step 6: Verify and document.** Run focused/race MFA tests and migration tests. Document the B1/B2 order, Hosted zero-B0 gate, Self-Hosted full-stop alternative, and why application rollback uses B1 without running the destructive down migration.
+- [ ] **Step 6: Verify and document.** Run focused/race MFA tests and migration tests. Document the B1/B2 order, the hosted deployment zero-B0 gate, Self-Hosted full-stop alternative, and why application rollback uses B1 without running the destructive down migration.
 
 - [ ] **Step 7: Commit the B2 storage portion.** Commit code/tests (`fix(mfa): salt backup code hashes`) and migration/docs as required. Task 4 lands in the same B2 PR; run the combined B2 gate only after both tasks are complete.
 
@@ -249,7 +249,7 @@
 **Interfaces:**
 - Extract: `func ValidateAttestation(c *gin.Context, rdb *redis.Client, log *logger.Logger) bool` from the enabled branch of `RequireAttestation`.
 - Extend `websocket.NewHandler` with `requireAttestation bool` and `log *logger.Logger`; store both on the handler.
-- `authenticateViaJWT` sets verified `user_id` plus `JWTClaimsContextKey` carrying the server-verified `sid`, calls `ValidateAttestation` only when enabled, and returns a generic auth error if it fails. Do not add a JWT/header session-binding comparison here; Security #44 owns authoritative namespace binding.
+- `authenticateViaJWT` sets verified `user_id` plus `JWTClaimsContextKey` carrying the server-verified `sid`, calls `ValidateAttestation` only when enabled, and returns a generic auth error if it fails. Do not add a JWT/header session-binding comparison here; the separate namespace-binding work owns authoritative namespace binding.
 
 - [ ] **Step 1: Write middleware parity tests.** Calling the extracted function directly and through `RequireAttestation(true,...)` must produce the same success, 403, and Redis-failure 503 outcomes.
 
@@ -263,17 +263,17 @@
 
 - [ ] **Step 6: Extract the existing validator without changing behavior.** The HTTP middleware's enabled branch delegates to the exported function. Preserve constant-time token comparison, revocation, user binding, fixed error bodies, and Redis fail-closed behavior.
 
-- [ ] **Step 7: Wire JWT only.** Pass the existing flag/logger into the WebSocket handler. After access-token validation, set `user_id` and `JWTClaimsContextKey` with the verified `sid`, then call the shared validator. Do not call it in `authenticateViaTicket`, do not move `/ws` under `authRequired`, and do not preempt Security #44's namespace-binding change.
+- [ ] **Step 7: Wire JWT only.** Pass the existing flag/logger into the WebSocket handler. After access-token validation, set `user_id` and `JWTClaimsContextKey` with the verified `sid`, then call the shared validator. Do not call it in `authenticateViaTicket`, do not move `/ws` under `authRequired`, and do not preempt the separate namespace-binding change.
 
 - [ ] **Step 8: Docs and verification.** Document the JWT header requirement and ticket exemption in OpenAPI/architecture. Run focused tests, `go test -race ./internal/middleware ./internal/websocket ./internal/api -count=1`, scoped lint, OpenAPI contract/YAML checks, and diff check.
 
 - [ ] **Step 9: Commit.** Commit: `fix(websocket): enforce attestation on JWT fallback`.
 
-- [ ] **Step 10: PR C gate.** Run security/red-team/e2ee/code/test/docs/scope review, quality gate, PR CI, and bot windows. Rebase on #44 if it lands; preserve its authoritative-sid namespace. Stop at Phase 9 for explicit merge approval.
+- [ ] **Step 10: PR C gate.** Run security/red-team/e2ee/code/test/docs/scope review, quality gate, PR CI, and bot windows. Rebase on that namespace-binding work if it lands; preserve its authoritative-sid namespace. Stop at Phase 9 for explicit merge approval.
 
 ## Task 7: Source-wide acceptance after all four PRs
 
-- [ ] **Step 1: Run the six finding regressions plus #39 proof on the exact source heads.** Report each finding independently; an unrelated 403 does not prove its intended control.
+- [ ] **Step 1: Run the six finding regressions plus separate refresh-machine binding proof on the exact source heads.** Report each finding independently; an unrelated 403 does not prove its intended control.
 
 - [ ] **Step 2: Run package and repository gates.** At minimum: affected package race tests, scoped golangci-lint, migration up/down suite, OpenAPI contract/YAML parse, changelog guard, `git diff --check`, and configured pre-commit hooks.
 
@@ -281,23 +281,23 @@
 
 - [ ] **Step 4: Confirm formal gate evidence.** Each PR must show 0 new blocker/critical issues, 0 new high-confidence security hotspots, and ≥80% new-code coverage, plus its repository-required checks.
 
-## Task 8: Reviewed Hosted mirrors and rollout gates
+## Task 8: Reviewed hosted-deployment mirrors and rollout gates
 
-**Files:** Import each merged Self-Hosted PR's shared `services/control-plane/**`, `docs/api/openapi.yaml`, and applicable architecture/changelog text. Rename the migration pair to the next free Hosted number; do not change its semantics.
+**Files:** Import each merged Self-Hosted PR's shared `services/control-plane/**`, `docs/api/openapi.yaml`, and applicable architecture/changelog text. Rename the migration pair to the next free hosted-deployment number; do not change its semantics.
 
-**Interfaces:** Source commit is the mirror input. Hosted CI/review/Phase 9 is independent evidence.
+**Interfaces:** Source commit is the mirror input. The hosted deployment has independent CI, review, and Phase 9 evidence.
 
 - [ ] **Step 1: Start only from the merged Self-Hosted commit.** Compare shared-file checksums/diffs and identify intentional repository-local differences before applying.
 
-- [ ] **Step 2: Re-resolve migration number.** At the inspected Hosted head the candidate is `000198`; use the actual next free number at mirror time and update references/tests.
+- [ ] **Step 2: Re-resolve migration number.** At the inspected hosted-deployment head the candidate is `000198`; use the actual next free number at mirror time and update references/tests.
 
 - [ ] **Step 3: Mirror and deploy B1 first.** The B1 mirror contains no migration and no v2 writer. Complete its independent Phase 9 approval, deploy it through both blue/green pools and all workers, and record deployment inventory showing zero B0 before B2 migration admission.
 
-- [ ] **Step 4: Prove overlap compatibility.** In an isolated Hosted blue-green rehearsal, keep one B1 pool while introducing B2. Before/after the prefix migration, prove both pools verify bare/v1/v2 fixtures and the B1 pool can consume a code generated by B2.
+- [ ] **Step 4: Prove overlap compatibility.** In an isolated hosted blue-green rehearsal, keep one B1 pool while introducing B2. Before/after the prefix migration, prove both pools verify bare/v1/v2 fixtures and the B1 pool can consume a code generated by B2.
 
-- [ ] **Step 5: Admit B2 only after the gate.** Run the Hosted migration, then roll out the v2 writer. Abort if any B0 replica reappears. A B2 application rollback targets B1 and leaves the database up; do not run down after v2 exists.
+- [ ] **Step 5: Admit B2 only after the gate.** Run the hosted-deployment migration, then roll out the v2 writer. Abort if any B0 replica reappears. A B2 application rollback targets B1 and leaves the database up; do not run down after v2 exists.
 
-- [ ] **Step 6: Run Hosted's independent focused tests, hooks, lint, migration checks, OpenAPI contract, PR CI, security/specialist reviews, and bot windows.** Never use the shared `concord` database; source green status is not mirror proof.
+- [ ] **Step 6: Run the hosted deployment's independent focused tests, hooks, lint, migration checks, OpenAPI contract, PR CI, security/specialist reviews, and bot windows.** Never use the shared `concord` database; source green status is not mirror proof.
 
 - [ ] **Step 7: Stop each mirror PR at Phase 9.** Obtain separate explicit merge approval. Deployment inventory and overlap proof are separate operational gates; do not infer them from merge.
 
@@ -307,4 +307,4 @@
 - Type consistency: backup verifier, method normalizer, registration binder, and attestation validator have one signature each across tasks.
 - Review focus: all five listed failure classes have a named regression in their owning task.
 - Proportion: the plan specifies interfaces, tests, commands, and gates without transcribing production bodies.
-- Out of scope preserved: no #35/#36/#39/#44/#53 redesign, no Desktop change, no new dependency/config/route.
+- Out of scope preserved: no redesign of backup-code atomicity, ceremony consumption, refresh-machine binding, attestation namespace binding, or WebSocket capacity; no Desktop change, dependency, config, or route.
