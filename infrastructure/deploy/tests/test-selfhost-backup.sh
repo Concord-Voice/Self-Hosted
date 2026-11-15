@@ -17,7 +17,7 @@ fail() { echo "FAIL: $1"; fails=$((fails + 1)); }
 fixture() {
   ROOT="$WORK/root-$RANDOM$RANDOM"
   mkdir -p "$ROOT"
-  printf 'POSTGRES_PASSWORD=x\n' >"$ROOT/.env"
+  printf 'POSTGRES_PASSWORD=x\nJWT_SECRET=archive-jwt-secret\n' >"$ROOT/.env"
   printf 'v9.9.9\n' >"$ROOT/VERSION"
   : >"$WORK/calls"
   STUB_MODE="$1"
@@ -92,7 +92,7 @@ PY
 
 # ── restore round trip ────────────────────────────────────────────────
 : >"$WORK/calls"
-run_fn verb_restore "$archive" --confirm >/dev/null 2>&1; rc=$?
+restore_output="$(run_fn verb_restore "$archive" --confirm 2>&1)"; rc=$?
 order="$(grep -E '^(compose|docker|main) ' "$WORK/calls" | grep -v pg_isready | sed -E 's/^(compose|docker|main) ([a-z-]+( -[a-zA-Z]+)?( [a-z_-]+)?).*/\1 \2/' | tr '\n' '|')"
 if [[ $rc -eq 0 && "$order" == 'compose stop|compose up -d postgres|compose exec -T postgres|docker run --rm|main up|main health|' ]]; then
   pass "restore stops, restores postgres then MinIO, then runs up and health"
@@ -101,6 +101,23 @@ else
 fi
 [[ "$(cat "$WORK/restored.dump")" == PGDUMP-DATA && "$(cat "$WORK/restored.minio")" == MINIO-DATA ]] \
   && pass "restore feeds the archived dump and MinIO data back" || fail "restored data differs"
+restored_jwt="$(awk -F= '$1 == "JWT_SECRET" { print $2 }' "$ROOT/.env")"
+if [[ $rc -eq 0 && "$restored_jwt" =~ ^[[:xdigit:]]{64}$ && "$restored_jwt" != archive-jwt-secret \
+  && "$(awk -F= '$1 != "JWT_SECRET" { print }' "$ROOT/.env")" == 'POSTGRES_PASSWORD=x' \
+  && "$(stat -c %a "$ROOT/.env")" == 600 && "$restore_output" != *archive-jwt-secret* ]]; then
+  pass "restore rotates only JWT_SECRET without exposing it and preserves .env mode"
+else
+  fail "restore did not safely rotate JWT_SECRET rc=$rc env=$(sed 's/JWT_SECRET=.*/JWT_SECRET=<redacted>/' "$ROOT/.env")"
+fi
+: >"$WORK/calls"
+retry_output="$(run_fn verb_restore "$archive" --confirm 2>&1)"; rc=$?
+retry_jwt="$(awk -F= '$1 == "JWT_SECRET" { print $2 }' "$ROOT/.env")"
+if [[ $rc -eq 0 && "$retry_jwt" =~ ^[[:xdigit:]]{64}$ && "$retry_jwt" != "$restored_jwt" \
+  && "$retry_output" != *archive-jwt-secret* ]]; then
+  pass "restore retry accepts the prior rotation and rotates JWT_SECRET again"
+else
+  fail "restore retry did not rotate JWT_SECRET safely rc=$rc"
+fi
 
 # ── restore refusals: nothing is stopped ──────────────────────────────
 refuse_case() { # LABEL ARCHIVE
@@ -111,6 +128,17 @@ refuse_case() { # LABEL ARCHIVE
 }
 repack() { # DIR OUT
   tar -C "$1" -czf "$2" .
+}
+refresh_env_checksum() { # DIR — make an intentionally altered test archive internally consistent.
+  python3 - "$1" <<'PY'
+import hashlib, json, os, sys
+d = sys.argv[1]
+p = os.path.join(d, "manifest.json")
+m = json.load(open(p))
+m["parts"]["env"] = hashlib.sha256(open(os.path.join(d, "env"), "rb").read()).hexdigest()
+with open(p, "w") as out:
+    json.dump(m, out, sort_keys=True, separators=(",", ":"))
+PY
 }
 cp -r "$WORK/x1" "$WORK/x2"; printf 'tampered' >"$WORK/x2/postgres.dump"; repack "$WORK/x2" "$WORK/tampered.tar.gz"
 refuse_case "a checksum mismatch" "$WORK/tampered.tar.gz"
@@ -123,7 +151,16 @@ refuse_case "a different release" "$archive"
 printf 'v9.9.9\n' >"$ROOT/VERSION"
 printf 'POSTGRES_PASSWORD=other\n' >"$ROOT/.env"
 refuse_case "a different .env" "$archive"
+printf 'POSTGRES_PASSWORD=x\nJWT_SECRET=archive-jwt-secret\n' >"$ROOT/.env"
+cp -r "$WORK/x1" "$WORK/x-jwt-missing"; printf 'POSTGRES_PASSWORD=x\n' >"$WORK/x-jwt-missing/env"
+refresh_env_checksum "$WORK/x-jwt-missing"; repack "$WORK/x-jwt-missing" "$WORK/jwt-missing.tar.gz"
+refuse_case "an archive missing JWT_SECRET" "$WORK/jwt-missing.tar.gz"
+cp -r "$WORK/x1" "$WORK/x-jwt-duplicate"; printf 'JWT_SECRET=duplicate\n' >>"$WORK/x-jwt-duplicate/env"
+refresh_env_checksum "$WORK/x-jwt-duplicate"; repack "$WORK/x-jwt-duplicate" "$WORK/jwt-duplicate.tar.gz"
+refuse_case "an archive with duplicate JWT_SECRET values" "$WORK/jwt-duplicate.tar.gz"
 printf 'POSTGRES_PASSWORD=x\n' >"$ROOT/.env"
+refuse_case "an install missing JWT_SECRET" "$archive"
+printf 'POSTGRES_PASSWORD=x\nJWT_SECRET=archive-jwt-secret\n' >"$ROOT/.env"
 STUB_MODE=byo-s3 refuse_case "a storage-mode mismatch" "$archive"
 printf 'not a tarball' >"$WORK/junk.tar.gz"
 refuse_case "a non-archive" "$WORK/junk.tar.gz"

@@ -188,8 +188,66 @@ _restore_run() {
   return "$rc"
 }
 
+# _restore_stage_jwt_secret ARCHIVED_ENV CURRENT_ENV STAGED_ENV — the archive may predate
+# a recovery-token use, so preserving its signing secret would revive that token
+# when Redis is empty. Every other .env byte must still match exactly.
+_restore_stage_jwt_secret() {
+  local archived_env="$1" current_env="$2" staged_env="$3" env_dir secret_file=''
+  [[ -f "$archived_env" && -f "$current_env" && ! -L "$current_env" && -f "$staged_env" ]] || {
+    _backup_fail 'restore environment refused'
+    return 1
+  }
+  env_dir="$(dirname "$current_env")" || return 1
+  secret_file="$(umask 077; mktemp "$env_dir/.jwt.restore.XXXXXX")" || {
+    _backup_fail 'cannot generate a new signing secret'
+    return 1
+  }
+  if ! openssl rand -hex 32 >"$secret_file"; then
+    rm -f -- "$secret_file"
+    _backup_fail 'cannot generate a new signing secret'
+    return 1
+  fi
+  if ! python3 - "$archived_env" "$current_env" "$staged_env" "$secret_file" <<'PY'
+import os, sys
+archived_path, current_path, staged_path, secret_path = sys.argv[1:]
+secret = open(secret_path, "rb").read().strip()
+if len(secret) != 64 or any(byte not in b"0123456789abcdef" for byte in secret):
+    raise SystemExit(1)
+try:
+    archived = open(archived_path, "rb").read()
+    current = open(current_path, "rb").read()
+    def replace(text, value):
+        lines = text.splitlines(keepends=True)
+        indexes = [index for index, line in enumerate(lines) if line.startswith(b"JWT_SECRET=")]
+        if len(indexes) != 1:
+            raise ValueError()
+        index = indexes[0]
+        ending = b"\r\n" if lines[index].endswith(b"\r\n") else b"\n" if lines[index].endswith(b"\n") else b""
+        lines[index] = b"JWT_SECRET=" + value + ending
+        return b"".join(lines)
+    if replace(archived, b"<JWT_SECRET>") != replace(current, b"<JWT_SECRET>"):
+        raise ValueError()
+    with open(staged_path, "wb") as output:
+        output.write(replace(current, secret))
+        source = os.stat(current_path)
+        os.fchown(output.fileno(), source.st_uid, source.st_gid)
+        os.fchmod(output.fileno(), 0o600)
+except (OSError, ValueError):
+    raise SystemExit(1)
+PY
+  then
+    rm -f -- "$secret_file"
+    _backup_fail 'the backup .env differs from this install outside JWT_SECRET'
+    return 1
+  fi
+  rm -f -- "$secret_file" || {
+    _backup_fail 'cannot remove the staged signing secret'
+    return 1
+  }
+}
+
 _restore_body() {
-  local archive="$1" stage="$2" release="$3" i
+  local archive="$1" stage="$2" release="$3" i staged_env=''
   # One read of the archive: only a top-level directory and the known parts as
   # regular files are accepted, and each is written by name, never by path.
   python3 - "$archive" "$stage" <<'PY' || { _backup_fail 'archive is not a Concord backup'; return 1; }
@@ -212,14 +270,21 @@ except (OSError, tarfile.TarError, EOFError):
     sys.exit(1)
 PY
   _restore_verify "$stage" "$release" "$SELFHOST_STORAGE_MODE_RESOLVED" || return 1
-  # Secrets in .env must match: a restored database under different keys breaks.
-  cmp -s -- "$stage/env" "$PROJECT_ROOT/.env" || {
-    _backup_fail 'the backup .env differs from this install; put the backup env in place as .env (0600) first'
+  staged_env="$(umask 077; mktemp "$PROJECT_ROOT/.env.restore.XXXXXX")" || {
+    _backup_fail 'cannot stage the restored environment'
+    return 1
+  }
+  _restore_stage_jwt_secret "$stage/env" "$PROJECT_ROOT/.env" "$staged_env" || {
+    rm -f -- "$staged_env"
     return 1
   }
 
   echo 'Stopping the stack...'
-  compose stop || { _backup_fail 'stop failed; nothing was restored'; return 1; }
+  compose stop || { rm -f -- "$staged_env"; _backup_fail 'stop failed; nothing was restored'; return 1; }
+  echo 'Rotating the signing secret...'
+  mv -f -- "$staged_env" "$PROJECT_ROOT/.env" \
+    || { rm -f -- "$staged_env"; _restore_stopped 'cannot install the new signing secret'; return 1; }
+  staged_env=''
   echo 'Restoring the database...'
   compose up -d "$BACKUP_PG_SERVICE" || { _restore_stopped 'cannot start postgres; nothing was restored'; return 1; }
   for ((i = 0; ; i++)); do
