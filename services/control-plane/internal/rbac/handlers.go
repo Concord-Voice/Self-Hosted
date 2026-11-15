@@ -14,6 +14,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -1936,14 +1937,14 @@ func roleGuardError(ctx context.Context, tx *sql.Tx, serverID string, guardErr e
 // AssignRole assigns a role to a member
 func (h *Handler) AssignRole(c *gin.Context) {
 	actorID := c.GetString("user_id")
-	serverID := c.Param("id")
-	targetUserID := c.Param("user_id")
+	serverID, err := requestid.Param(c, "id")
 
-	if _, err := uuid.Parse(serverID); err != nil {
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
-	if _, err := uuid.Parse(targetUserID); err != nil {
+	targetUserID, err := requestid.Param(c, "user_id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
@@ -1952,6 +1953,11 @@ func (h *Handler) AssignRole(c *gin.Context) {
 		RoleID string `json:"role_id" binding:"required,uuid"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
+		return
+	}
+	req.RoleID, err = requestid.Canonical(req.RoleID)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
@@ -2094,19 +2100,19 @@ func (h *Handler) loadUnassignableRole(c *gin.Context, roleID, serverID string) 
 // UnassignRole removes a role from a member
 func (h *Handler) UnassignRole(c *gin.Context) {
 	actorID := c.GetString("user_id")
-	serverID := c.Param("id")
-	targetUserID := c.Param("user_id")
-	roleID := c.Param("role_id")
+	serverID, err := requestid.Param(c, "id")
 
-	if _, err := uuid.Parse(serverID); err != nil {
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
-	if _, err := uuid.Parse(targetUserID); err != nil {
+	targetUserID, err := requestid.Param(c, "user_id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
-	if _, err := uuid.Parse(roleID); err != nil {
+	roleID, err := requestid.Param(c, "role_id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRoleID})
 		return
 	}
