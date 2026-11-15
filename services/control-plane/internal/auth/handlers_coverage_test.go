@@ -468,6 +468,27 @@ func TestRefreshNoMachineIDOnEitherSide(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+func TestCompleteLoginLogOmitsMachineID(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "loginlogprivacy")
+	machineID := uuid.NewString()
+
+	headers := http.Header{}
+	headers.Set(ctHeader, ctJSON)
+	headers.Set(headerXMachineID, machineID)
+	logs := ts.CaptureLogs(t)
+	w := ts.DoRequest("POST", pathAuthLogin, map[string]interface{}{
+		"email":    user.Email,
+		"password": testhelpers.TestAuthPlaintext,
+	}, headers)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	loginLog := findLogLine(logs.String(), "CompleteLogin: storing refresh token")
+	require.NotEmpty(t, loginLog)
+	assert.NotContains(t, loginLog, machineID)
+	assert.NotContains(t, loginLog, "machine_id")
+}
+
 func TestRefreshDifferentMachineIDSameIP(t *testing.T) {
 	ts := setupTS(t)
 
@@ -484,6 +505,10 @@ func TestRefreshDifferentMachineIDSameIP(t *testing.T) {
 	suspiciousLog := findLogLine(logs.String(), "Refresh from different machine_id but same IP")
 	require.NotEmpty(t, suspiciousLog)
 	assert.NotContains(t, suspiciousLog, "192.0.2.1")
+	assert.NotContains(t, suspiciousLog, originalMachineID)
+	assert.NotContains(t, suspiciousLog, differentMachineID)
+	assert.NotContains(t, suspiciousLog, "stored_machine_id")
+	assert.NotContains(t, suspiciousLog, "request_machine_id")
 }
 
 // ── Grace Period Refresh ───────────────────────────────────────────────────
@@ -1569,6 +1594,7 @@ func TestRecoveryBeginStoresCodeInRedisWithTTL(t *testing.T) {
 	}, nil)
 
 	key := recoveryCodeKeyPfx + user.Email
+	waitForRecoveryRecord(t, ts, key)
 	ttl := ts.Redis.TTL(context.Background(), key).Val()
 	assert.Greater(t, ttl, time.Duration(0))
 	assert.LessOrEqual(t, ttl, 10*time.Minute)
@@ -1861,6 +1887,10 @@ func TestRefreshSuspiciousMachineIDWithMFA(t *testing.T) {
 	suspiciousLog := findLogLine(logs.String(), "Suspicious refresh: different machine_id, same IP")
 	require.NotEmpty(t, suspiciousLog)
 	assert.NotContains(t, suspiciousLog, "192.0.2.1")
+	assert.NotContains(t, suspiciousLog, originalMachineID)
+	assert.NotContains(t, suspiciousLog, differentMachineID)
+	assert.NotContains(t, suspiciousLog, "stored_machine_id")
+	assert.NotContains(t, suspiciousLog, "request_machine_id")
 }
 
 // ── CompleteLogin via MFA Verify ────────────────────────────────────────────
@@ -1941,8 +1971,7 @@ func TestRecoveryBeginNormalizesEmail(t *testing.T) {
 
 	// Code should be stored under lowercase key
 	key := recoveryCodeKeyPfx + strings.ToLower(user.Email)
-	val, err := ts.Redis.Get(context.Background(), key).Result()
-	require.NoError(t, err)
+	val := waitForRecoveryRecord(t, ts, key)
 	assert.NotEmpty(t, val)
 }
 

@@ -3339,8 +3339,10 @@ func NewRouter(
 	opsRuntime := wireOpsMetricsRuntimeWithSecurityEvents(db, natsClient, hub, opsCounters, cfg.OpsMetrics, log, securityEvents)
 	// Start only after every dependency, observer, and route has been injected.
 	go hub.Run()
-	// Fold the readiness prober's cancel into the presence closer IN PLACE,
-	// rather than returning a differently-named closure. The return statement
+	// Fold the readiness stop and recovery queue drain into the presence closer
+	// IN PLACE, rather than returning a differently-named closure. Presence drains
+	// first so a slow mail server cannot starve their fail-closed disconnects.
+	// The return statement
 	// below is pinned by TestNewRouterActivityHistoryWiringOrderIsSingleAndFinal,
 	// which matches its literal text — renaming the value silently breaks that
 	// wiring-order guard, which is exactly the kind of assertion that should
@@ -3349,6 +3351,7 @@ func NewRouter(
 	closePresenceWorkers = func() {
 		readinessProber.Stop()
 		presenceCloser()
+		authHandler.CloseRecoveryJobs()
 	}
 
 	return router, hub, natsClient, opsRuntime, voicePermEnforcer, presenceRecheckExecutor, closePresenceWorkers, activePlanRail, activePlanReconciler, ownershipHandler.CompleteExpiredTransfers, nil

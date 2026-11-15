@@ -813,8 +813,8 @@ paths:
       tags:
       - Auth
       summary: Begin account recovery
-      description: 'Send a 6-digit recovery code to the account email. Always returns 200 to prevent email
-        enumeration.
+      description: 'Queue a 6-digit recovery code for delivery to the account email. Returns before account
+        resolution or delivery and always uses the same 200 response to prevent email enumeration.
 
         Rate limit: 3 requests per 15 minutes (IP-based).
 

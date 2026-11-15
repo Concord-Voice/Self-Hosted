@@ -5,10 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,7 +49,18 @@ func seedRecoveryCode(t *testing.T, ts *testhelpers.TestServer, email, code, use
 	require.NoError(t, err)
 }
 
-func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhelpers.TestServer {
+func waitForRecoveryRecord(t *testing.T, ts *testhelpers.TestServer, key string) string {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		value, err := ts.Redis.Get(context.Background(), key).Result()
+		return err == nil && value != ""
+	}, 5*time.Second, 10*time.Millisecond)
+	value, err := ts.Redis.Get(context.Background(), key).Result()
+	require.NoError(t, err)
+	return value
+}
+
+func setupRecoverySMTPFailureTS(t *testing.T) (*testhelpers.TestServer, <-chan struct{}, func(), *testhelpers.SyncBuffer) {
 	t.Helper()
 	t.Setenv("CONCORD_ENV", "test")
 
@@ -58,10 +70,17 @@ func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhel
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseSMTP := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
 	go func() {
 		conn, acceptErr := ln.Accept()
 		if acceptErr == nil {
-			time.Sleep(closeDelay)
+			close(accepted)
+			<-release
 			_ = conn.Close()
 		}
 	}()
@@ -100,13 +119,14 @@ func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhel
 		redisCleanup()
 		dbCleanup()
 	})
+	var logs testhelpers.SyncBuffer
 	router, hub, natsClient, opsRuntime, permissionEnforcer, _, closePresence, _, _, _, err := api.NewRouter(
 		t.Context(),
 		db,
 		redisClient,
 		cfg,
 		nil,
-		logger.NewWithWriter(io.Discard),
+		logger.NewWithWriter(&logs),
 		api.RouterDependencies{PresenceHistory: presenceHistoryService},
 	)
 	require.NoError(t, err)
@@ -119,6 +139,9 @@ func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhel
 	// Registered after the hub so it runs BEFORE it: the presence drains
 	// disconnect through the hub (#2738).
 	t.Cleanup(closePresence)
+	// Registered last so a failing assertion releases the blocked SMTP worker
+	// before closePresence drains the recovery queue.
+	t.Cleanup(releaseSMTP)
 
 	return &testhelpers.TestServer{
 		Router:          router,
@@ -126,7 +149,7 @@ func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhel
 		DB:              db,
 		Redis:           redisClient,
 		PresenceHistory: presenceHistoryService,
-	}
+	}, accepted, releaseSMTP, &logs
 }
 
 // --- RecoveryBegin Tests ---
@@ -169,9 +192,7 @@ func TestRecoveryBeginStoresCodeInRedis(t *testing.T) {
 
 	// Verify a recovery code was stored in Redis
 	key := recoveryCodeKeyPrefix + user.Email
-	val, err := ts.Redis.Get(context.Background(), key).Result()
-	require.NoError(t, err)
-	assert.NotEmpty(t, val)
+	val := waitForRecoveryRecord(t, ts, key)
 
 	var record map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(val), &record))
@@ -181,21 +202,48 @@ func TestRecoveryBeginStoresCodeInRedis(t *testing.T) {
 }
 
 func TestRecoveryBeginSMTPFailureKeepsGenericResponseAndClearsCode(t *testing.T) {
-	ts := setupRecoverySMTPFailureTS(t, 6*time.Second)
+	ts, smtpAccepted, releaseSMTP, logs := setupRecoverySMTPFailureTS(t)
 	user := ts.CreateTestUser(t, "recoverysmtpfail")
 
-	w := ts.DoRequest("POST", pathRecoveryBegin, map[string]interface{}{
-		"email": user.Email,
-	}, nil)
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response <- ts.DoRequest("POST", pathRecoveryBegin, map[string]interface{}{
+			"email": user.Email,
+		}, nil)
+	}()
+
+	select {
+	case <-smtpAccepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery worker did not reach SMTP")
+	}
+
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-response:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery response waited for SMTP")
+	}
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Contains(t, body["message"], "If an account exists")
 
-	exists, err := ts.Redis.Exists(context.Background(), recoveryCodeKeyPrefix+user.Email).Result()
+	key := recoveryCodeKeyPrefix + user.Email
+	exists, err := ts.Redis.Exists(context.Background(), key).Result()
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists)
+	require.Equal(t, int64(1), exists)
+
+	releaseSMTP()
+	require.Eventually(t, func() bool {
+		exists, existsErr := ts.Redis.Exists(context.Background(), key).Result()
+		return existsErr == nil && exists == 0
+	}, 5*time.Second, 10*time.Millisecond)
+	failureLog := findLogLine(logs.String(), "Failed to send recovery code email")
+	require.NotEmpty(t, failureLog)
+	assert.NotContains(t, failureLog, user.Email)
+	assert.Contains(t, failureLog, "failure_class=recovery_email_delivery")
 
 	missing := ts.DoRequest("POST", pathRecoveryBegin, map[string]interface{}{
 		"email": "smtp-missing@test.concord.chat",

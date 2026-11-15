@@ -135,6 +135,10 @@ func (s *Service) sendMail(from, to, msg string) error {
 	if err != nil {
 		return fmt.Errorf("dial SMTP: %w", err)
 	}
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("set SMTP deadline: %w", err)
+	}
 
 	client, err := smtp.NewClient(conn, s.host)
 	if err != nil {

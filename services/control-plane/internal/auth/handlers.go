@@ -187,6 +187,12 @@ type Handler struct {
 	securityEvents            securityevent.Emitter
 	theftRetryMu              sync.Mutex
 	theftRetries              map[string][]*tokenTheftRetryTask
+	recoveryQueue             chan string
+	recoveryQueueMu           sync.RWMutex
+	recoveryWorkers           sync.WaitGroup
+	recoveryWorkersOnce       sync.Once
+	recoveryQueueClosed       bool
+	recoveryProcess           func(string)
 }
 
 type tokenTheftRetryTask struct {
@@ -337,7 +343,7 @@ func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSe
 // NewHandlerForInstance creates a new authentication handler with the
 // deployment mode used for native login policy and JWT tier claims.
 func NewHandlerForInstance(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSecret string, hub SessionDisconnector, instanceType string) *Handler {
-	return &Handler{
+	h := &Handler{
 		db:             db,
 		redis:          redisClient,
 		log:            log,
@@ -347,7 +353,10 @@ func NewHandlerForInstance(db *sql.DB, redisClient *redis.Client, log *logger.Lo
 		pending:        NewPendingRepo(db),
 		entCache:       entitlements.NewCacheForInstance(redisClient, db, instanceType),
 		securityEvents: securityevent.Discard,
+		recoveryQueue:  make(chan string, recoveryQueueCapacity),
 	}
+	h.recoveryProcess = h.processRecoveryBegin
+	return h
 }
 
 // SetPresenceHistory injects the concrete service shared with users writers,
@@ -625,7 +634,7 @@ func (h *Handler) Register(c *gin.Context) {
 		if _, delErr := h.pending.Delete(c.Request.Context(), pendingID); delErr != nil {
 			h.log.Error("Failed to roll back pending after email send error", "error", delErr)
 		}
-		h.log.Error("Failed to send verification code", "error", err)
+		h.log.Error("Failed to send verification code", "failure_class", "registration_initial_email_delivery")
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": "Failed to send verification code; please retry",
 		})
@@ -1064,7 +1073,7 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
 			return
 		}
-		h.log.Error("resend: email send failed", "error", err)
+		h.log.Error("resend: email send failed", "failure_class", "registration_resend_email_delivery")
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": "Failed to send verification code; please retry",
 		})
@@ -1118,7 +1127,7 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
 			return
 		}
-		h.log.Error("change-email: send failed", "error", err)
+		h.log.Error("change-email: send failed", "failure_class", "registration_change_email_delivery")
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": "Failed to send verification code to new email",
 		})
@@ -1677,7 +1686,6 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool, 
 	h.log.Info("CompleteLogin: storing refresh token",
 		"request_id", c.GetString(middleware.RequestIDContextKey),
 		"remember_me", rememberMe,
-		"machine_id", machineID,
 		"user_id", userID,
 	)
 
@@ -1998,7 +2006,7 @@ func (h *Handler) checkMachineIDTheft(c *gin.Context, token models.RefreshToken,
 	if ipKnown && !ipOk {
 		return h.handleTokenTheft(c, token)
 	}
-	return h.handleSuspiciousMachineID(c, token, requestMachineID)
+	return h.handleSuspiciousMachineID(c, token)
 }
 
 // handleTokenTheft handles the case where both machine ID and IP differ — high risk token theft.
@@ -2175,11 +2183,10 @@ func (h *Handler) rejectPendingTheftInRefreshTx(c *gin.Context, tx *sql.Tx, user
 
 // handleSuspiciousMachineID handles same-IP but different machine ID — suspicious but not theft.
 // Returns true if the response was written (MFA challenge sent), false to allow.
-func (h *Handler) handleSuspiciousMachineID(c *gin.Context, token models.RefreshToken, requestMachineID string) bool {
+func (h *Handler) handleSuspiciousMachineID(c *gin.Context, token models.RefreshToken) bool {
 	if h.mfaChecker == nil {
 		h.log.Warn("Refresh from different machine_id but same IP (no MFA: allowing)",
-			"user_id", token.UserID, "stored_machine_id", token.MachineID,
-			"request_machine_id", requestMachineID)
+			"user_id", token.UserID)
 		return false
 	}
 
@@ -2193,8 +2200,7 @@ func (h *Handler) handleSuspiciousMachineID(c *gin.Context, token models.Refresh
 	}
 	if len(loginMethods) == 0 {
 		h.log.Warn("Refresh from different machine_id but same IP (no MFA: allowing)",
-			"user_id", token.UserID, "stored_machine_id", token.MachineID,
-			"request_machine_id", requestMachineID)
+			"user_id", token.UserID)
 		return false
 	}
 	if _, methodsErr := h.mfaChecker.GetEnabledMethods(ctx, token.UserID); methodsErr != nil {
@@ -2226,8 +2232,7 @@ func (h *Handler) handleSuspiciousMachineID(c *gin.Context, token models.Refresh
 	}
 
 	h.log.Warn("Suspicious refresh: different machine_id, same IP — MFA required",
-		"user_id", token.UserID, "stored_machine_id", token.MachineID,
-		"request_machine_id", requestMachineID)
+		"user_id", token.UserID)
 
 	resp, respErr := h.buildMFAChallengeResponse(ctx, "suspicious_session_mfa", "Session verification required", challengeToken, token.UserID, jti)
 	if respErr != nil {
@@ -3073,6 +3078,12 @@ type recoveryRecord struct {
 	Attempts int    `json:"attempts"`
 }
 
+const (
+	recoveryQueueCapacity = 64
+	recoveryWorkerCount   = 4
+	recoveryStoreTimeout  = 5 * time.Second
+)
+
 // generateRecoveryCode produces a cryptographically random 6-digit numeric code.
 func generateRecoveryCode() (string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
@@ -3093,7 +3104,7 @@ func recoveryRedisKey(email string) string {
 	return fmt.Sprintf("recovery_code:%s", strings.ToLower(email))
 }
 
-// RecoveryBegin initiates account recovery by sending a verification code to the user's email.
+// RecoveryBegin accepts account recovery without waiting for account resolution or delivery.
 func (h *Handler) RecoveryBegin(c *gin.Context) {
 	var req struct {
 		Email string `json:"email" binding:"required"`
@@ -3103,25 +3114,78 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 		return
 	}
 
-	email := strings.ToLower(strings.TrimSpace(req.Email))
+	addr := strings.ToLower(strings.TrimSpace(req.Email))
 
-	// Always return 200 to prevent email enumeration
+	// Every accepted input takes the same bounded queue path. Account lookup,
+	// Redis, and SMTP happen only on a worker, so none can affect response timing.
+	h.enqueueRecoveryBegin(addr)
+
+	// Always return 200 to prevent email enumeration.
 	successMsg := gin.H{"message": "If an account exists with that email, a recovery code has been sent"}
+	c.JSON(http.StatusOK, successMsg)
+}
+
+func (h *Handler) enqueueRecoveryBegin(addr string) {
+	h.startRecoveryWorkers()
+
+	h.recoveryQueueMu.RLock()
+	defer h.recoveryQueueMu.RUnlock()
+	if h.recoveryQueueClosed {
+		return
+	}
+	select {
+	case h.recoveryQueue <- addr:
+	default:
+		h.log.Warn("Recovery queue saturated", "failure_class", "recovery_queue_saturated")
+	}
+}
+
+func (h *Handler) startRecoveryWorkers() {
+	h.recoveryWorkersOnce.Do(func() {
+		h.recoveryQueueMu.RLock()
+		defer h.recoveryQueueMu.RUnlock()
+		if h.recoveryQueueClosed {
+			return
+		}
+		h.recoveryWorkers.Add(recoveryWorkerCount)
+		for range recoveryWorkerCount {
+			go func() {
+				defer h.recoveryWorkers.Done()
+				for addr := range h.recoveryQueue {
+					h.recoveryProcess(addr)
+				}
+			}()
+		}
+	})
+}
+
+// CloseRecoveryJobs stops new recovery dispatches and drains accepted jobs.
+// Call it after HTTP drain and before closing the handler's database or Redis.
+func (h *Handler) CloseRecoveryJobs() {
+	h.recoveryQueueMu.Lock()
+	if !h.recoveryQueueClosed {
+		h.recoveryQueueClosed = true
+		close(h.recoveryQueue)
+	}
+	h.recoveryQueueMu.Unlock()
+	h.recoveryWorkers.Wait()
+}
+
+func (h *Handler) processRecoveryBegin(addr string) {
+	ctx, cancel := context.WithTimeout(context.Background(), recoveryStoreTimeout)
+	defer cancel()
 
 	// Look up user by email
 	var userID string
-	err := h.db.QueryRow(
-		`SELECT id FROM users WHERE LOWER(email) = LOWER($1)`, email,
+	err := h.db.QueryRowContext(ctx,
+		`SELECT id FROM users WHERE LOWER(email) = LOWER($1)`, addr,
 	).Scan(&userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// User not found — return success anyway (prevent enumeration)
-			c.JSON(http.StatusOK, successMsg)
 			return
 		}
-		// Real DB error — log it but still return 200 to prevent enumeration
+		// The caller already received the generic response.
 		h.log.Error("Failed to look up user for recovery", "error", err)
-		c.JSON(http.StatusOK, successMsg)
 		return
 	}
 
@@ -3129,8 +3193,6 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 	code, err := generateRecoveryCode()
 	if err != nil {
 		h.log.Error("Failed to generate recovery code", "error", err)
-		// Fall through to generic 200 — recovery won't proceed but attacker can't distinguish
-		c.JSON(http.StatusOK, successMsg)
 		return
 	}
 
@@ -3143,33 +3205,32 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 	data, err := json.Marshal(record)
 	if err != nil {
 		h.log.Error("Failed to marshal recovery record", "error", err)
-		c.JSON(http.StatusOK, successMsg)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-	defer cancel()
-
-	if err := h.redis.Set(ctx, recoveryRedisKey(email), data, recoveryCodeTTL).Err(); err != nil {
+	if err := h.redis.Set(ctx, recoveryRedisKey(addr), data, recoveryCodeTTL).Err(); err != nil {
 		h.log.Error("Failed to store recovery code in Redis", "error", err)
-		c.JSON(http.StatusOK, successMsg)
 		return
 	}
 
 	// Send code via email
-	if err := h.emailSvc.SendRecoveryCode(email, code); err != nil {
-		h.log.Error("Failed to send recovery code email", "error", err, "email", email)
+	var sendErr error
+	if h.emailSvc == nil {
+		sendErr = email.ErrDeliveryNotConfigured
+	} else {
+		sendErr = h.emailSvc.SendRecoveryCode(addr, code)
+	}
+	if sendErr != nil {
+		h.log.Error("Failed to send recovery code email", "failure_class", "recovery_email_delivery")
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		if delErr := h.redis.Del(cleanupCtx, recoveryRedisKey(email)).Err(); delErr != nil {
+		if delErr := h.redis.Del(cleanupCtx, recoveryRedisKey(addr)).Err(); delErr != nil {
 			h.log.Warn("Failed to clear unsent recovery code", "error", delErr)
 		}
-		c.JSON(http.StatusOK, successMsg)
 		return
 	}
 
-	h.log.Info("Recovery code sent", "email", email)
-	c.JSON(http.StatusOK, successMsg)
+	h.log.Info("Recovery code sent")
 }
 
 // validateRecoveryCodeFormat normalises and validates a 6-digit recovery code.
