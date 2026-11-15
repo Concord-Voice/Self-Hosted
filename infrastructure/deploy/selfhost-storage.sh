@@ -319,7 +319,7 @@ selfhost_storage_scrub_environment() {
   unset ENVIRONMENT DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD \
     JWT_SECRET MFA_ENCRYPTION_KEY MFA_ENCRYPTION_KEY_VERSION MFA_ENCRYPTION_KEYS_RETIRED \
     WS_EVENT_BUDGET_ENABLED WS_EVENT_BUDGET_SCALE_PERCENT \
-    TURN_SECRET TURN_REALM TRUSTED_PROXY_CIDRS \
+    TURN_SECRET TURN_REALM TRUSTED_PROXY_CIDRS TRUSTED_PROXIES \
     SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT \
     RESEND_API_KEY || return 1
   unset SELFHOST_STORAGE_MODE STORAGE_BACKEND STORAGE_ENDPOINT STORAGE_REGION \
@@ -449,6 +449,15 @@ selfhost_storage_compose() {
   (
     selfhost_storage_scrub_environment || exit 1
     cd -- "$SELFHOST_STORAGE_PROJECT_ROOT" || exit 1
+    if [[ "${1:-}" == config ]] \
+      && ! grep -q '^TRUSTED_PROXIES=' "$SELFHOST_STORAGE_PROJECT_ROOT/.env"; then
+      # Legacy installs have only TRUSTED_PROXY_CIDRS. Permit read-only model
+      # admission before the locked gateway migrator writes both exact keys.
+      # Never apply these placeholders to a container mutation.
+      TRUSTED_PROXY_CIDRS=127.0.0.1/32
+      TRUSTED_PROXIES=127.0.0.1/32
+      export TRUSTED_PROXY_CIDRS TRUSTED_PROXIES
+    fi
     if [[ -n "$SELFHOST_STORAGE_TRUSTED_IMAGE" ]]; then
       CONTROL_PLANE_IMAGE="$SELFHOST_STORAGE_TRUSTED_IMAGE"
       export CONTROL_PLANE_IMAGE
