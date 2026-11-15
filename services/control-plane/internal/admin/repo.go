@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/lib/pq"
 )
@@ -19,6 +20,10 @@ var (
 	// the attestation reused a credential ID that is already registered. That is the
 	// client's input, not a storage fault, so enrollment answers it as a rejection.
 	ErrDuplicateCredential = errors.New("admin: credential already registered")
+	// ErrEnrollmentStateChanged is returned when an enrollment ceremony is stale.
+	ErrEnrollmentStateChanged = errors.New("admin: enrollment state changed")
+	// ErrAdminAuthenticationStateChanged is returned when login state is stale.
+	ErrAdminAuthenticationStateChanged = errors.New("admin: authentication state changed")
 )
 
 // pgUniqueViolation is the Postgres SQLSTATE for a unique-constraint violation.
@@ -44,13 +49,15 @@ func (r *AdminRepo) CreatePending(ctx context.Context, username, passwordHash st
 	const q = `
 		INSERT INTO admin_users (username, password_hash, status)
 		VALUES ($1, $2, $3)
-		RETURNING id, username, password_hash, status, created_at, updated_at, disabled_at
+		RETURNING id, username, password_hash, status, credential_generation, session_generation,
+		          created_at, updated_at, disabled_at
 	`
 	var u AdminUser
 	var status string
 	var disabledAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, q, username, passwordHash, string(StatusPending)).Scan(
-		&u.ID, &u.Username, &u.PasswordHash, &status, &u.CreatedAt, &u.UpdatedAt, &disabledAt,
+		&u.ID, &u.Username, &u.PasswordHash, &status, &u.CredentialGeneration, &u.SessionGeneration,
+		&u.CreatedAt, &u.UpdatedAt, &disabledAt,
 	)
 	if err != nil {
 		var pqErr *pq.Error
@@ -69,14 +76,16 @@ func (r *AdminRepo) CreatePending(ctx context.Context, username, passwordHash st
 // GetByUsername returns the admin with the given username, or ErrAdminNotFound.
 func (r *AdminRepo) GetByUsername(ctx context.Context, username string) (*AdminUser, error) {
 	const q = `
-		SELECT id, username, password_hash, status, created_at, updated_at, disabled_at
+		SELECT id, username, password_hash, status, credential_generation, session_generation,
+		       created_at, updated_at, disabled_at
 		FROM admin_users WHERE username = $1
 	`
 	var u AdminUser
 	var status string
 	var disabledAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, q, username).Scan(
-		&u.ID, &u.Username, &u.PasswordHash, &status, &u.CreatedAt, &u.UpdatedAt, &disabledAt,
+		&u.ID, &u.Username, &u.PasswordHash, &status, &u.CredentialGeneration, &u.SessionGeneration,
+		&u.CreatedAt, &u.UpdatedAt, &disabledAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAdminNotFound
@@ -89,6 +98,20 @@ func (r *AdminRepo) GetByUsername(ctx context.Context, username string) (*AdminU
 		u.DisabledAt = &disabledAt.Time
 	}
 	return &u, nil
+}
+
+// ActiveSessionGeneration returns the durable generation for an active admin.
+func (r *AdminRepo) ActiveSessionGeneration(ctx context.Context, adminID string) (int64, error) {
+	const q = `SELECT session_generation FROM admin_users WHERE id = $1 AND status = $2`
+	var generation int64
+	err := r.db.QueryRowContext(ctx, q, adminID, string(StatusActive)).Scan(&generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrAdminNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get active admin session generation: %w", err)
+	}
+	return generation, nil
 }
 
 // SetStatus updates an admin's status (and touches updated_at). Returns
@@ -120,6 +143,14 @@ func (r *AdminRepo) Disable(ctx context.Context, adminID string) error {
 // AddCredential persists a registered WebAuthn credential for an admin and
 // returns the stored row (with its generated id + created_at).
 func (r *AdminRepo) AddCredential(ctx context.Context, c AdminCredential) (AdminCredential, error) {
+	return addCredential(ctx, r.db, c)
+}
+
+type adminCredentialQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func addCredential(ctx context.Context, queryer adminCredentialQueryer, c AdminCredential) (AdminCredential, error) {
 	const q = `
 		INSERT INTO admin_webauthn_credentials
 			(admin_id, credential_id, public_key, aaguid, sign_count, credential_name, transports)
@@ -130,7 +161,7 @@ func (r *AdminRepo) AddCredential(ctx context.Context, c AdminCredential) (Admin
 	if c.CredentialName != "" {
 		name = sql.NullString{String: c.CredentialName, Valid: true}
 	}
-	err := r.db.QueryRowContext(ctx, q,
+	err := queryer.QueryRowContext(ctx, q,
 		c.AdminID, c.CredentialID, c.PublicKey, c.AAGUID, c.SignCount, name, pq.Array(c.Transports),
 	).Scan(&c.ID, &c.CreatedAt)
 	if err != nil {
@@ -143,6 +174,133 @@ func (r *AdminRepo) AddCredential(ctx context.Context, c AdminCredential) (Admin
 	return c, nil
 }
 
+// CompleteEnrollment adds a credential and activates a still-current ceremony.
+func (r *AdminRepo) CompleteEnrollment(ctx context.Context, expectedGeneration int64, c AdminCredential) (stored AdminCredential, retErr error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AdminCredential{}, fmt.Errorf("begin complete admin enrollment: %w", err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			retErr = errors.Join(retErr, fmt.Errorf("rollback complete admin enrollment: %w", rollbackErr))
+		}
+	}()
+	var status string
+	var generation int64
+	err = tx.QueryRowContext(ctx, `SELECT status, credential_generation FROM admin_users WHERE id = $1 FOR UPDATE`, c.AdminID).Scan(&status, &generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AdminCredential{}, ErrAdminNotFound
+	}
+	if err != nil {
+		return AdminCredential{}, fmt.Errorf("lock admin enrollment state: %w", err)
+	}
+	if AdminStatus(status) != StatusPending || generation != expectedGeneration {
+		return AdminCredential{}, ErrEnrollmentStateChanged
+	}
+	stored, err = addCredential(ctx, tx, c)
+	if err != nil {
+		return AdminCredential{}, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE admin_users SET status = $2, updated_at = now() WHERE id = $1`, c.AdminID, string(StatusActive))
+	if err != nil {
+		return AdminCredential{}, fmt.Errorf("activate enrolled admin: %w", err)
+	}
+	if err := requireOneRow(res); err != nil {
+		return AdminCredential{}, fmt.Errorf("activate enrolled admin: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return AdminCredential{}, fmt.Errorf("commit complete admin enrollment: %w", err)
+	}
+	return stored, nil
+}
+
+// ResetEnrollment atomically revokes credentials and advances both authority fences.
+func (r *AdminRepo) ResetEnrollment(ctx context.Context, adminID string) (revoked int64, previousGeneration int64, newGeneration int64, retErr error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("begin reset admin enrollment: %w", err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			retErr = errors.Join(retErr, fmt.Errorf("rollback reset admin enrollment: %w", rollbackErr))
+		}
+	}()
+	err = tx.QueryRowContext(ctx, `
+		UPDATE admin_users
+		SET status = $2, credential_generation = credential_generation + 1,
+		    session_generation = session_generation + 1, updated_at = now()
+		WHERE id = $1
+		RETURNING credential_generation - 1, credential_generation
+	`, adminID, string(StatusPending)).Scan(&previousGeneration, &newGeneration)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, 0, ErrAdminNotFound
+	}
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("advance admin credential generation: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("delete admin credentials: %w", err)
+	}
+	revoked, err = res.RowsAffected()
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("count revoked admin credentials: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, 0, fmt.Errorf("commit reset admin enrollment: %w", err)
+	}
+	return revoked, previousGeneration, newGeneration, nil
+}
+
+// FinalizeWebAuthnLogin persists a verified assertion before issuing its session.
+func (r *AdminRepo) FinalizeWebAuthnLogin(ctx context.Context, sessions *SessionStore, adminID string, credentialID []byte, signCount int64) (_ string, retErr error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin admin login finalization: %w", err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			retErr = errors.Join(retErr, fmt.Errorf("rollback admin login finalization: %w", rollbackErr))
+		}
+	}()
+	var activeAdminID string
+	var sessionGeneration int64
+	err = tx.QueryRowContext(ctx, `SELECT id, session_generation FROM admin_users WHERE id = $1 AND status = $2 FOR UPDATE`, adminID, string(StatusActive)).Scan(&activeAdminID, &sessionGeneration)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrAdminAuthenticationStateChanged
+	}
+	if err != nil {
+		return "", fmt.Errorf("lock active admin for login: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE admin_webauthn_credentials
+		SET sign_count = $1, last_used_at = now()
+		WHERE credential_id = $2 AND admin_id = $3
+		  AND (sign_count = 0 OR $1 > sign_count)
+	`, signCount, credentialID, activeAdminID)
+	if err != nil {
+		return "", fmt.Errorf("persist login credential state: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("persist login credential state rows: %w", err)
+	}
+	if rows != 1 {
+		return "", ErrAdminAuthenticationStateChanged
+	}
+	sid, err := sessions.Mint(ctx, activeAdminID, sessionGeneration)
+	if err != nil {
+		return "", fmt.Errorf("mint admin session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		revokeErr := sessions.Revoke(cleanupCtx, sid)
+		cancel()
+		return "", errors.Join(fmt.Errorf("commit admin login finalization: %w", err), revokeErr)
+	}
+	return sid, nil
+}
+
 // UpdateCredentialSignCount persists the authenticator's advanced sign counter
 // after a successful assertion, and bumps last_used_at. The sign count is
 // WebAuthn's clone-detection signal: go-webauthn validates each assertion's
@@ -150,7 +308,12 @@ func (r *AdminRepo) AddCredential(ctx context.Context, c AdminCredential) (Admin
 // a cloned authenticator replaying a stale counter is never detected (#1688,
 // Gitar finding). Keyed by the unique credential_id.
 func (r *AdminRepo) UpdateCredentialSignCount(ctx context.Context, credentialID []byte, signCount int64) error {
-	const q = `UPDATE admin_webauthn_credentials SET sign_count = $1, last_used_at = now() WHERE credential_id = $2`
+	const q = `
+		UPDATE admin_webauthn_credentials
+		SET sign_count = $1, last_used_at = now()
+		WHERE credential_id = $2
+		  AND (sign_count = 0 OR $1 > sign_count)
+	`
 	res, err := r.db.ExecContext(ctx, q, signCount, credentialID)
 	if err != nil {
 		return fmt.Errorf("update credential sign count: %w", err)
@@ -206,10 +369,9 @@ func (r *AdminRepo) ListCredentials(ctx context.Context, adminID string) ([]Admi
 	return creds, nil
 }
 
-// DeleteCredentials removes ALL WebAuthn credentials bound to an admin. It is
-// the break-glass revocation primitive used by `adminctl reset-enrollment`
-// (#1688 §9): a lost or compromised hardware key set is cleared so the admin
-// must re-enrol a fresh key. Returns the number of rows removed (0 when the
+// DeleteCredentials removes ALL WebAuthn credentials bound to an admin.
+// `adminctl reset-enrollment` does not use it: ResetEnrollment removes the
+// credentials in the same transaction that advances both generations. Returns the number of rows removed (0 when the
 // admin already had no credentials — not an error).
 func (r *AdminRepo) DeleteCredentials(ctx context.Context, adminID string) error {
 	const q = `DELETE FROM admin_webauthn_credentials WHERE admin_id = $1`

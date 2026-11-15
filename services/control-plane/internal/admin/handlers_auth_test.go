@@ -62,10 +62,10 @@ func enrolledAdmin(t *testing.T, db *sql.DB, _ *redis.Client) (adminID, username
 
 	_, err = admin.FinishAdminRegistration(ctx, svc, repo, admin.AdminRegistrationInput{
 		User: user, Session: *session, Request: httpReq(regBody),
-		AdminID: created.ID, AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "primary",
+		AdminID: created.ID, CredentialGeneration: created.CredentialGeneration,
+		AllowedAAGUIDs: []string{testAllowedAAGID}, CredentialName: "primary",
 	})
 	require.NoError(t, err)
-	require.NoError(t, repo.SetStatus(ctx, created.ID, admin.StatusActive))
 
 	return created.ID, username, va
 }
@@ -202,6 +202,13 @@ func TestWebAuthnLogin_HappyPath_MintsSession(t *testing.T) {
 	require.NotEmpty(t, setCookie, "WebAuthn step must mint a session cookie")
 	assert.Contains(t, setCookie, "__Host-cv_admin_sid=")
 	assert.Contains(t, setCookie, "HttpOnly")
+	sid := sessionIDFromSetCookie(t, setCookie)
+	sess, err := admin.NewSessionStore(rdb, nil).Get(context.Background(), sid)
+	require.NoError(t, err)
+	storedAdmin, err := admin.NewAdminRepo(db).GetByUsername(context.Background(), username)
+	require.NoError(t, err)
+	assert.Equal(t, storedAdmin.SessionGeneration, sess.SessionGeneration,
+		"successful login must bind the administrator's current generation")
 
 	// The advanced authenticator sign count must be persisted (Gitar #1703 fix):
 	// clone-detection is defeated if the stored counter never moves.
@@ -209,6 +216,82 @@ func TestWebAuthnLogin_HappyPath_MintsSession(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(context.Background(),
 		`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&storedCount))
 	assert.Equal(t, int64(va.signCount), storedCount, "login must persist the advanced sign count")
+}
+
+// TestWebAuthnLogin_MintsSessionWithGenerationCurrentAtFinalization proves a
+// password challenge cannot carry an obsolete session generation through the
+// WebAuthn step. Finalization must read it while holding the admin row lock.
+func TestWebAuthnLogin_MintsSessionWithGenerationCurrentAtFinalization(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	adminID, username, va := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngine(t, db, rdb)
+	ctx := context.Background()
+
+	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{"username": username, "password": adminTestPassword})
+	require.Equal(t, http.StatusOK, pwRec.Code, pwRec.Body.String())
+	var pwResp struct {
+		Handle    string                        `json:"handle"`
+		PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
+
+	_, err := db.ExecContext(ctx,
+		`UPDATE admin_users SET session_generation = session_generation + 1 WHERE id = $1`, adminID)
+	require.NoError(t, err)
+	current, err := admin.NewAdminRepo(db).GetByUsername(ctx, username)
+	require.NoError(t, err)
+
+	va.signCount++
+	assertionBody := va.assertionResponse(t, testAdminRPID, pwResp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
+	waRec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{"handle": pwResp.Handle, "assertion": json.RawMessage(assertionBody)})
+	require.Equal(t, http.StatusOK, waRec.Code, waRec.Body.String())
+
+	sid := sessionIDFromSetCookie(t, waRec.Header().Get("Set-Cookie"))
+	sess, err := admin.NewSessionStore(rdb, nil).Get(ctx, sid)
+	require.NoError(t, err)
+	assert.Equal(t, current.SessionGeneration, sess.SessionGeneration,
+		"the minted session must use the generation locked at finalization, not the password challenge")
+}
+
+// TestWebAuthnLogin_AdminStateChanged_NoSession verifies that a valid in-flight
+// ceremony cannot mint a session after the administrator becomes pending.
+func TestWebAuthnLogin_AdminStateChanged_NoSession(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	adminID, username, va := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngine(t, db, rdb)
+	ctx := context.Background()
+
+	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{"username": username, "password": adminTestPassword})
+	require.Equal(t, http.StatusOK, pwRec.Code, pwRec.Body.String())
+	var pwResp struct {
+		Handle    string                        `json:"handle"`
+		PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
+
+	var initialCount int64
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&initialCount))
+	require.NoError(t, admin.NewAdminRepo(db).SetStatus(ctx, adminID, admin.StatusPending))
+
+	va.signCount++
+	assertionBody := va.assertionResponse(t, testAdminRPID, pwResp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
+	waRec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{"handle": pwResp.Handle, "assertion": json.RawMessage(assertionBody)})
+	require.Equal(t, http.StatusUnauthorized, waRec.Code, waRec.Body.String())
+	assert.Empty(t, waRec.Header().Get("Set-Cookie"), "changed admin state must not mint a session")
+
+	var storedCount int64
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&storedCount))
+	assert.Equal(t, initialCount, storedCount, "rejected login must not persist the assertion counter")
 }
 
 // TestWebAuthnLogin_LockedAfterHandleIssued_Returns429 covers the Gitar #1703 fix:
@@ -406,7 +489,7 @@ func TestLogout_RevokeFailurePreservesSessionAndCookie(t *testing.T) {
 	t.Cleanup(rCleanup)
 
 	store := admin.NewSessionStore(rdb, nil)
-	sid, err := store.Mint(context.Background(), "admin-revoke-retry")
+	sid, err := store.Mint(context.Background(), "admin-revoke-retry", 0)
 	require.NoError(t, err)
 	engine := adminAuthEngine(t, db, rdb)
 
