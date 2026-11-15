@@ -3,9 +3,11 @@ package sessions
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"strings"
@@ -95,6 +97,9 @@ const (
 	revokeReservationCleanupTimeout = 2 * time.Second
 	simpleAuthWindowTTL             = 5 * time.Minute
 	freeRevokeSessionThreshold      = 3 // Must have >= 3 active sessions for a free revoke
+	// freeRevokeReservationFractions is the count of non-zero microsecond
+	// fractions a free revoke reservation score can take.
+	freeRevokeReservationFractions = 999999
 )
 
 // maskIPAddress masks the last octet of an IPv4 address (e.g., "192.168.1.x")
@@ -198,7 +203,10 @@ func (h *Handler) recordRevoke(ctx context.Context, userID, sessionID string) er
 		pipe.Expire(ctx, key, revokeTrackingTTL)
 		return nil
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("record session revoke: %w", err)
+	}
+	return nil
 }
 
 // hasSimpleAuthWindow checks if the user has an active 5-minute authentication window (Simple mode).
@@ -475,12 +483,16 @@ func (h *Handler) determineAuthRequired(ctx context.Context, uid, sessionID stri
 	}
 
 	now := time.Now()
-	// Non-free revokes use integer Unix scores. The half-second score gives this
-	// reservation an exact cleanup range that cannot remove a concurrent record.
-	reservationScore = fmt.Sprintf("%d.5", now.Unix())
-	claimed, err := reserveFreeRevokeScript.Run(ctx, h.redis, []string{revokeTrackingKey(uid)},
-		now.Add(-revokeWindowDuration).Unix(), reservationScore, "free:"+sessionID, int64(revokeTrackingTTL/time.Second)).Int()
+	reservationScore, err = newFreeRevokeReservationScore(now)
 	if err != nil {
+		h.log.Error("Failed to draw free revoke reservation score, requiring password", "error", err)
+		return true, mode, ""
+	}
+	claimed, err := reserveFreeRevokeScript.Run(ctx, h.redis, []string{revokeTrackingKey(uid)},
+		now.Add(-revokeWindowDuration).Unix(), reservationScore, "free:"+sessionID+":"+uuid.NewString(), int64(revokeTrackingTTL/time.Second)).Int()
+	if err != nil {
+		// The script may have run even though its reply was lost. An orphaned
+		// claim then blocks the free revoke for one window, which fails closed.
 		h.log.Error("Redis error reserving free revoke, requiring password", "error", err)
 		return true, mode, ""
 	}
@@ -488,6 +500,20 @@ func (h *Handler) determineAuthRequired(ctx context.Context, uid, sessionID stri
 		return true, mode, ""
 	}
 	return false, mode, reservationScore
+}
+
+// newFreeRevokeReservationScore returns the request's Unix second plus a random
+// non-zero microsecond fraction. Non-free revokes use integer scores, so an
+// exact-score release never removes them, and the random fraction keeps a
+// stale or retried release from removing another request's reservation made
+// in the same second. Doubles near 1.8e9 resolve about 2.4e-7, so each
+// six-digit fraction stays distinct.
+func newFreeRevokeReservationScore(now time.Time) (string, error) {
+	fraction, err := rand.Int(rand.Reader, big.NewInt(freeRevokeReservationFractions))
+	if err != nil {
+		return "", fmt.Errorf("draw free revoke reservation score: %w", err)
+	}
+	return fmt.Sprintf("%d.%06d", now.Unix(), fraction.Int64()+1), nil
 }
 
 // authenticateForRevoke verifies the user's identity via MFA or password for session revocation.
@@ -580,7 +606,9 @@ func (h *Handler) executeRevocation(ctx context.Context, c *gin.Context, uid, se
 	if err != nil {
 		var familyErr *loginfamily.Error
 		commitUnknown := errors.As(err, &familyErr) && familyErr.Reason() == loginfamily.ReasonCommitUnknown
-		if freeRevokeReservationScore != "" && !commitUnknown {
+		// Release only a conclusive no-effect failure: no commit ambiguity and
+		// no committed family owners to fence.
+		if freeRevokeReservationScore != "" && !commitUnknown && len(result.Owners) == 0 {
 			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), revokeReservationCleanupTimeout)
 			releaseErr := h.redis.ZRemRangeByScore(cleanupCtx, revokeTrackingKey(uid),
 				freeRevokeReservationScore, freeRevokeReservationScore).Err()

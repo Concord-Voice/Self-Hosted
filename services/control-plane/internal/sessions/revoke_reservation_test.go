@@ -6,13 +6,18 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
+
+const reservationFixtureKey = "session_revokes:reservation-fixture"
 
 func TestFreeRevokeReservation_ConcurrentClaimsAllowExactlyOne(t *testing.T) {
 	mini := miniredis.RunT(t)
@@ -28,7 +33,6 @@ func TestFreeRevokeReservation_ConcurrentClaimsAllowExactlyOne(t *testing.T) {
 	results := make(chan claimResult, contenders)
 	var workers sync.WaitGroup
 	for i := 0; i < contenders; i++ {
-		i := i
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -53,15 +57,57 @@ func TestFreeRevokeReservation_ConcurrentClaimsAllowExactlyOne(t *testing.T) {
 	require.EqualValues(t, 1, tracked)
 }
 
-func TestExecuteRevocation_ReleasesReservationAfterConclusiveFailure(t *testing.T) {
+// The script prunes entries at or before the cutoff, so only entries newer
+// than the cutoff block a claim; any surviving entry, free or not, blocks it.
+func TestFreeRevokeReservation_WindowBoundary(t *testing.T) {
+	const cutoff = 1000
+	tests := []struct {
+		name        string
+		seed        []redis.Z
+		wantClaimed int
+		wantMembers []string
+	}{
+		{name: "empty window claims", wantClaimed: 1, wantMembers: []string{"free:new"}},
+		{name: "entry at cutoff is pruned", seed: []redis.Z{{Score: cutoff, Member: "old"}}, wantClaimed: 1, wantMembers: []string{"free:new"}},
+		{name: "non-free entry after cutoff blocks", seed: []redis.Z{{Score: cutoff + 1, Member: "paid"}}, wantClaimed: 0, wantMembers: []string{"paid"}},
+		{name: "free entry after cutoff blocks", seed: []redis.Z{{Score: cutoff + 1, Member: "free:earlier"}}, wantClaimed: 0, wantMembers: []string{"free:earlier"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mini := miniredis.RunT(t)
+			client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+			t.Cleanup(func() { require.NoError(t, client.Close()) })
+			ctx := context.Background()
+			if len(tt.seed) > 0 {
+				require.NoError(t, client.ZAdd(ctx, reservationFixtureKey, tt.seed...).Err())
+			}
+
+			claimed, err := reserveFreeRevokeScript.Run(ctx, client, []string{reservationFixtureKey},
+				cutoff, cutoff+10, "free:new", 90000).Int()
+			require.NoError(t, err)
+			require.Equal(t, tt.wantClaimed, claimed)
+			members, err := client.ZRange(ctx, reservationFixtureKey, 0, -1).Result()
+			require.NoError(t, err)
+			require.Equal(t, tt.wantMembers, members)
+			if tt.wantClaimed == 1 {
+				require.Equal(t, 90000*time.Second, mini.TTL(reservationFixtureKey), "a claim must refresh the tracking TTL")
+			}
+		})
+	}
+}
+
+func TestExecuteRevocation_ReleasesOnlyOwnReservationAfterConclusiveFailure(t *testing.T) {
 	rig := newSecurityEventFamilyRig(t)
 	target := uuid.NewString()
-	reservation := "free:" + target
-	const reservationScore = "123.5"
+	reservation := "free:" + target + ":" + uuid.NewString()
+	const reservationScore = "123.000001"
 	ctx := context.Background()
-	require.NoError(t, rig.redis.ZAdd(ctx, revokeTrackingKey(rig.user), redis.Z{
-		Score: 123.5, Member: reservation,
-	}).Err())
+	require.NoError(t, rig.redis.ZAdd(ctx, revokeTrackingKey(rig.user),
+		redis.Z{Score: 123.000001, Member: reservation},
+		redis.Z{Score: 123.000002, Member: "free:other-request"},
+		redis.Z{Score: 123, Member: "paid-revoke"},
+		redis.Z{Score: 124, Member: "later-paid-revoke"},
+	).Err())
 	rig.router.DELETE("/api/v1/sessions/:id", func(c *gin.Context) {
 		rig.handler.executeRevocation(c.Request.Context(), c, c.GetString("user_id"), c.Param("id"), reservationScore)
 	})
@@ -69,18 +115,32 @@ func TestExecuteRevocation_ReleasesReservationAfterConclusiveFailure(t *testing.
 	response := rig.request(http.MethodDelete, "/api/v1/sessions/"+target, "")
 	require.Equal(t, http.StatusNotFound, response.Code, response.Body.String())
 	require.JSONEq(t, `{"error":"Session not found"}`, response.Body.String())
-	tracked, err := rig.redis.ZCard(ctx, revokeTrackingKey(rig.user)).Result()
+	members, err := rig.redis.ZRange(ctx, revokeTrackingKey(rig.user), 0, -1).Result()
 	require.NoError(t, err)
-	require.Zero(t, tracked, "a conclusive no-effect failure must restore the free allowance")
+	require.ElementsMatch(t, []string{"free:other-request", "paid-revoke", "later-paid-revoke"}, members,
+		"a conclusive no-effect failure must release only its own reservation")
+}
+
+func TestNewFreeRevokeReservationScore_IsNonIntegerInRequestSecond(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	seen := map[string]bool{}
+	for range 64 {
+		score, err := newFreeRevokeReservationScore(now)
+		require.NoError(t, err)
+		require.Regexp(t, `^1800000000\.[0-9]{6}$`, score)
+		require.NotEqual(t, "1800000000.000000", score, "an integer score could release a non-free revoke")
+		seen[score] = true
+	}
+	require.Greater(t, len(seen), 1, "reservation scores must vary within one second")
 }
 
 func TestExecuteRevocation_RetainsReservationAfterUnknownCommit(t *testing.T) {
 	rig := newSecurityEventFamilyRig(t)
-	reservation := "free:" + rig.sid
-	const reservationScore = "123.5"
+	reservation := "free:" + rig.sid + ":" + uuid.NewString()
+	const reservationScore = "123.000001"
 	ctx := context.Background()
 	require.NoError(t, rig.redis.ZAdd(ctx, revokeTrackingKey(rig.user), redis.Z{
-		Score: 123.5, Member: reservation,
+		Score: 123.000001, Member: reservation,
 	}).Err())
 	rig.router.DELETE("/api/v1/sessions/:id", func(c *gin.Context) {
 		rig.handler.executeRevocation(c.Request.Context(), c, c.GetString("user_id"), c.Param("id"), reservationScore)
@@ -94,4 +154,31 @@ func TestExecuteRevocation_RetainsReservationAfterUnknownCommit(t *testing.T) {
 	members, err := rig.redis.ZRange(ctx, revokeTrackingKey(rig.user), 0, -1).Result()
 	require.NoError(t, err)
 	require.Equal(t, []string{reservation}, members, "an ambiguous commit must keep the allowance consumed")
+}
+
+// With enough sessions for a free revoke, a Redis outage must not skip the
+// reservation: the request has to fall back to step-up.
+func TestDetermineAuthRequired_RedisDownRequiresPassword(t *testing.T) {
+	rig := newSecurityEventFamilyRig(t)
+	const secret = "security-event-family-test-signing-secret" // pragma: allowlist secret
+	minter := auth.NewHandler(rig.db, rig.redis, logger.New("test"), secret, testDisconnector{})
+	for i := 1; i < freeRevokeSessionThreshold; i++ {
+		_, _, _, err := minter.IssueAccessAndRefresh(context.Background(), rig.user)
+		require.NoError(t, err)
+	}
+	active, err := rig.handler.countActiveSessions(context.Background(), rig.user)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, active, freeRevokeSessionThreshold, "fixture must qualify for a free revoke")
+
+	dead := redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: 100 * time.Millisecond,
+		MaxRetries:  -1,
+	})
+	t.Cleanup(func() { require.NoError(t, dead.Close()) })
+	handler := NewHandler(rig.db, dead, logger.New("test"), &securityEventDisconnector{}, nil)
+
+	needsPassword, _, reservation := handler.determineAuthRequired(context.Background(), rig.user, rig.sid)
+	require.True(t, needsPassword, "a failed reservation must require step-up")
+	require.Empty(t, reservation)
 }
