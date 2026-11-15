@@ -236,6 +236,10 @@ func TestAdminRepo_Credentials(t *testing.T) {
 		assert.Equal(t, 1, n)
 	})
 
+	t.Run("UpdateCredentialSignCount permits a counterless authenticator", func(t *testing.T) {
+		require.NoError(t, repo.UpdateCredentialSignCount(ctx, credID, 0))
+	})
+
 	t.Run("FinalizeWebAuthnLogin permits counterless authenticators", func(t *testing.T) {
 		require.NoError(t, repo.SetStatus(ctx, u.ID, admin.StatusActive))
 		first, err := repo.FinalizeWebAuthnLogin(ctx, admin.NewSessionStore(rdb, nil), u.ID, credID, 0)
@@ -248,6 +252,15 @@ func TestAdminRepo_Credentials(t *testing.T) {
 
 	t.Run("UpdateCredentialSignCount advances the stored counter (clone-detection)", func(t *testing.T) {
 		require.NoError(t, repo.UpdateCredentialSignCount(ctx, credID, 42))
+		var got int64
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT sign_count FROM admin_webauthn_credentials WHERE credential_id = $1`, credID).Scan(&got))
+		assert.Equal(t, int64(42), got)
+	})
+
+	t.Run("UpdateCredentialSignCount rejects repeated and lower nonzero counters", func(t *testing.T) {
+		assert.Error(t, repo.UpdateCredentialSignCount(ctx, credID, 42))
+		assert.Error(t, repo.UpdateCredentialSignCount(ctx, credID, 41))
 		var got int64
 		require.NoError(t, db.QueryRowContext(ctx,
 			`SELECT sign_count FROM admin_webauthn_credentials WHERE credential_id = $1`, credID).Scan(&got))

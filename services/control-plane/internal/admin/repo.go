@@ -308,7 +308,12 @@ func (r *AdminRepo) FinalizeWebAuthnLogin(ctx context.Context, sessions *Session
 // a cloned authenticator replaying a stale counter is never detected (#1688,
 // Gitar finding). Keyed by the unique credential_id.
 func (r *AdminRepo) UpdateCredentialSignCount(ctx context.Context, credentialID []byte, signCount int64) error {
-	const q = `UPDATE admin_webauthn_credentials SET sign_count = $1, last_used_at = now() WHERE credential_id = $2`
+	const q = `
+		UPDATE admin_webauthn_credentials
+		SET sign_count = $1, last_used_at = now()
+		WHERE credential_id = $2
+		  AND (sign_count = 0 OR $1 > sign_count)
+	`
 	res, err := r.db.ExecContext(ctx, q, signCount, credentialID)
 	if err != nil {
 		return fmt.Errorf("update credential sign count: %w", err)
