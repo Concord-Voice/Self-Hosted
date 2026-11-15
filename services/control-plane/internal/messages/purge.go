@@ -21,6 +21,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 )
@@ -122,7 +123,11 @@ func (r purgeRequest) stepUp() stepup.Input {
 //   - Neither → 403, zero rows deleted, no audit row.
 func (h *Handler) PurgeChannel(c *gin.Context) {
 	userID := c.GetString("user_id")
-	channelID := c.Param("id")
+	channelID, err := requestid.Param(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		return
+	}
 	req, rangeFrom, ok := bindPurgeRequest(c, channelID, "Invalid channel ID")
 	if !ok {
 		return
@@ -485,7 +490,11 @@ func purgeSpecProvenance(ds purge.DeleteSpec, actorID string, a *deleteAdmission
 // path through purgeServerCore must never reach it.
 func (h *Handler) PurgeServer(c *gin.Context) {
 	userID := c.GetString("user_id")
-	serverID := c.Param("id")
+	serverID, err := requestid.Param(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		return
+	}
 	req, rangeFrom, ok := bindPurgeRequest(c, serverID, "Invalid server ID")
 	if !ok {
 		return

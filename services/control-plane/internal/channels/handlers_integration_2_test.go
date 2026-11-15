@@ -1050,6 +1050,25 @@ func TestValidateEpochsAllPaths(t *testing.T) {
 		revocation := testhelpers.JSONElem[map[string]interface{}](t, revocations, 0)
 		assert.Equal(t, float64(1), revocation["revoked_epoch"])
 		assert.Equal(t, float64(3), revocation["successor_epoch"])
+
+		alias := ts.DoRequest("POST", pathValidateEpochs, map[string]interface{}{
+			"epochs": map[string]int{channelID: 2, "{" + channelID + "}": 1},
+		}, testhelpers.AuthHeaders(user.AccessToken))
+		require.Equal(t, http.StatusOK, alias.Code)
+		testhelpers.ParseJSON(t, alias, &body)
+		revocations = testhelpers.JSONField[[]interface{}](t, body, "revocations")
+		require.Len(t, revocations, 1, "aliases must validate once at the oldest cached epoch")
+		assert.Equal(t, float64(1), testhelpers.JSONElem[map[string]interface{}](t, revocations, 0)["revoked_epoch"])
+		for _, badEpoch := range []int{0, -1} {
+			alias = ts.DoRequest("POST", pathValidateEpochs, map[string]interface{}{
+				"epochs": map[string]int{channelID: 1, "{" + channelID + "}": badEpoch},
+			}, testhelpers.AuthHeaders(user.AccessToken))
+			require.Equal(t, http.StatusOK, alias.Code)
+			testhelpers.ParseJSON(t, alias, &body)
+			revocations = testhelpers.JSONField[[]interface{}](t, body, "revocations")
+			require.Len(t, revocations, 1, "nonpositive alias epochs must not hide a valid revocation")
+			assert.Equal(t, float64(1), testhelpers.JSONElem[map[string]interface{}](t, revocations, 0)["revoked_epoch"])
+		}
 	})
 
 	t.Run("BadBody", func(t *testing.T) {
@@ -1064,18 +1083,18 @@ func TestValidateEpochsAllPaths(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
 
-	t.Run("InvalidChannelIDSkipped", func(t *testing.T) {
+	t.Run("MalformedKeySkippedButValidKeyProcessed", func(t *testing.T) {
 		w := ts.DoRequest("POST", pathValidateEpochs, map[string]interface{}{
 			"epochs": map[string]int{
-				notAUUID: 1,
+				notAUUID:              1,
+				channelID:             1,
+				"{" + channelID + "}": 2,
 			},
-		}, testhelpers.AuthHeaders(user.AccessToken))
-		assert.Equal(t, http.StatusOK, w.Code)
-
+		}, testhelpers.AuthHeaders(outsider.AccessToken))
+		require.Equal(t, http.StatusOK, w.Code)
 		var body map[string]interface{}
 		testhelpers.ParseJSON(t, w, &body)
-		revocations := testhelpers.JSONField[[]interface{}](t, body, "revocations")
-		assert.Empty(t, revocations)
+		assert.Equal(t, []interface{}{channelID}, body["access_lost"])
 	})
 
 	t.Run("NoAccessChannelSkipped", func(t *testing.T) {
@@ -1091,6 +1110,21 @@ func TestValidateEpochsAllPaths(t *testing.T) {
 		revocations := testhelpers.JSONField[[]interface{}](t, body, "revocations")
 		assert.Empty(t, revocations)
 		assert.Equal(t, []interface{}{channelID}, body["access_lost"])
+	})
+
+	t.Run("UppercaseNoAccessReturnsCanonicalAccessLost", func(t *testing.T) {
+		w := ts.DoRequest("POST", pathValidateEpochs, map[string]interface{}{
+			"epochs": map[string]int{
+				strings.ToUpper(channelID): 1,
+			},
+		}, testhelpers.AuthHeaders(outsider.AccessToken))
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var body map[string]interface{}
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Empty(t, body["revocations"])
+		assert.Equal(t, []interface{}{channelID}, body["access_lost"],
+			"accepted UUID aliases must not reappear in access_lost")
 	})
 
 	t.Run("UnknownChannelUsesTheSameAccessLostShape", func(t *testing.T) {
@@ -1181,7 +1215,7 @@ func TestGetUnifiedKeysAllPaths(t *testing.T) {
 	ts, user, serverID, channelID := setupEncryptedChannel(t)
 
 	t.Run("ChannelSuccess", func(t *testing.T) {
-		w := ts.DoRequest("GET", pathE2EEKeys+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
+		w := ts.DoRequest("GET", pathE2EEKeys+strings.ToUpper(channelID), nil, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusOK, w.Code)
 
 		var body map[string]interface{}
