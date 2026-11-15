@@ -104,6 +104,7 @@ later storage migration.
 
 ### Security
 
+- **Self-host:** Restore now rotates the JWT signing secret, revokes restored refresh tokens, and clears old opaque authorization state from Redis before startup, invalidating captured credentials that an older backup could otherwise revive ([#308](https://github.com/Concord-Voice/Self-Hosted/pull/308)).
 - **Privacy:** Invisible presence now stays indistinguishable from offline in server counts, member timestamps, and group-DM calls. Member `last_seen` is available only on your own row. Profile and transfer details reach only people allowed to see them, and blocking a stranger no longer notifies them.
 - **Authentication:** Backup-code verification and status reads now accept only exact bare SHA-256, `v1$` SHA-256, or bounded `v2$` Argon2id hashes, and fail closed on malformed stored values. New codes still use the bare format until all serving replicas have this reader; the v2 writer and database migration follow in a separate rollout ([#290](https://github.com/Concord-Voice/Self-Hosted/pull/290)).
 - **Registration:** New account requests now reject bodies over 64 KiB and oversized decoded key material before password hashing, and check existing email and username conflicts before expensive work ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
