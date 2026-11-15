@@ -115,9 +115,8 @@ export const serverApi = {
   },
 };
 
-// Write actions (#188). Stop, restart, update and restore need a fresh
-// security-key assertion; the control plane checks it and the host agent
-// re-checks every argument.
+// Every host write needs an agent-issued, action-bound WebAuthn assertion.
+// The host agent re-checks the action and its arguments when it spends it.
 export const WRITE_ACTIONS = [
   "start",
   "stop",
@@ -127,12 +126,6 @@ export const WRITE_ACTIONS = [
   "restore",
 ] as const;
 export type WriteAction = (typeof WRITE_ACTIONS)[number];
-export const STEP_UP_ACTIONS: ReadonlySet<WriteAction> = new Set([
-  "stop",
-  "restart",
-  "update",
-  "restore",
-]);
 // The same shapes the control plane and agent accept.
 export const UPDATE_TAG = /^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/;
 const ARCHIVE = /^concord-backup-\d{8}T\d{6}Z\.tar\.gz$/;
@@ -154,6 +147,11 @@ export interface ServerBackup {
   name: string;
   size: number;
   modified: string;
+}
+
+export interface ServerActionArguments {
+  tag?: string;
+  archive?: string;
 }
 
 // A refused request with the reason the server gave, if it gave a known one.
@@ -260,9 +258,9 @@ export const serverWriteApi = {
     }).then(parseServerJob),
   backups: (signal?: AbortSignal) =>
     send("/admin/api/v1/server/backups", { signal }).then(parseServerBackups),
-  async stepUp(action: WriteAction) {
+  async stepUp(action: WriteAction, arguments_: ServerActionArguments) {
     const value = await send("/admin/api/v1/server/stepup", {
-      body: { action },
+      body: { action, ...arguments_ },
     });
     ensure(
       isRecord(value) &&

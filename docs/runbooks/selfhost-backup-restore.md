@@ -19,6 +19,22 @@ MinIO data is copied while MinIO runs. The copy is crash-consistent, but the sta
 
 With `--json`, stdout carries `{"schema":1,"ok":true,"archive":"<file name>"}` on success and `{"schema":1,"ok":false}` on failure. Progress goes to stderr.
 
+## Backup admission
+
+Before it creates staging data, runs `pg_dump`, copies storage, or removes
+anything, backup checks the destination. It refuses when there are already 24
+regular `concord-backup-<UTC>.tar.gz` archives there, when it cannot determine
+the source or free-space size, or when free space is less than twice the
+database plus bundled-MinIO source size, with an additional 1 GiB reserve.
+BYO object storage has no bundled-MinIO source size. Backup never prunes old
+archives to make room; move or delete a verified old archive yourself before
+retrying.
+
+When the Admin Console starts a backup through the Host Agent, the agent also
+persists admission before it creates the job. One admission is allowed per
+rolling hour, including when the prior backup later fails or the agent
+restarts. A second request receives 429 `backup_rate_limited`.
+
 ## Restore
 
 `concord-selfhost restore ARCHIVE --confirm [--json]` **replaces the database** and, in bundled mode, **all stored files**. Before it stops anything, it refuses an archive when any of these is true:

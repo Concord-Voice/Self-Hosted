@@ -31,8 +31,12 @@ const (
 	setupMaxBody       = 64 << 10
 	setupMaxOutput     = 256 << 10
 	setupInstallBudget = 10 * time.Minute
-	setupMaxFailures   = 10
-	setupFailureWindow = 10 * time.Minute
+	// setupInstallWriteTimeout gives the installer its complete execution
+	// budget plus time to serialize the result after the server's default
+	// write deadline has been replaced for this route.
+	setupInstallWriteTimeout = 11 * time.Minute
+	setupMaxFailures         = 10
+	setupFailureWindow       = 10 * time.Minute
 )
 
 // answerKeys are the installer's --env-file fields (INSTALLER_ANSWER_KEYS in
@@ -220,6 +224,11 @@ func (s *Setup) install(w http.ResponseWriter, r *http.Request) {
 	file, ok := answersFile(answers)
 	if !ok {
 		refuse(w, http.StatusBadRequest, "invalid_answers")
+		return
+	}
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(setupInstallWriteTimeout)); err != nil {
+		log.Printf("concord-agent: setup: cannot extend install response deadline: %v", err)
+		refuse(w, http.StatusServiceUnavailable, "install_deadline_unavailable")
 		return
 	}
 	// used is checked again here: a request authorized while another install

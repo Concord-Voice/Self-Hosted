@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,8 +29,11 @@ func TestListenPermissions(t *testing.T) {
 
 	for i := range 2 { // second pass replaces the stale socket
 		if i == 1 {
-			// A token file left by a crash must not stop the agent starting.
+			// Files the agent maintains across runs must not stop it starting.
 			if err := os.WriteFile(filepath.Join(filepath.Dir(sock), setupTokenFile), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(filepath.Dir(sock), backupAdmissionFile), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -69,6 +73,7 @@ func TestListenPermissions(t *testing.T) {
 	// A shared directory (like /run) is refused before its mode is touched.
 	_ = os.Remove(sock)
 	_ = os.Remove(filepath.Join(filepath.Dir(sock), setupTokenFile))
+	_ = os.Remove(filepath.Join(filepath.Dir(sock), backupAdmissionFile))
 	other := filepath.Join(filepath.Dir(sock), "other")
 	if err := os.WriteFile(other, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -90,6 +95,73 @@ func TestRunRefusesUntrustedCLI(t *testing.T) {
 	t.Setenv("CONCORD_AGENT_CLI", "")
 	if run() != 1 {
 		t.Fatal("empty cli accepted")
+	}
+}
+
+func TestExpectedControlPlaneUIDRejectsRootAndInvalidValues(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int
+	}{
+		{value: "10006", want: 10006},
+		{value: "", want: 10006},
+		{value: "0"},
+		{value: "-1"},
+		{value: "10006 "},
+		{value: "4294967296"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("CONCORD_AGENT_CONTROL_PLANE_UID", tc.value)
+			got, err := expectedControlPlaneUID()
+			if tc.want == 0 {
+				if err == nil {
+					t.Fatalf("accepted invalid UID %q: %d", tc.value, got)
+				}
+			} else if err != nil || got != tc.want {
+				t.Fatalf("UID %q: got %d, %v; want %d", tc.value, got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestConfigureWriteAccessRejectsUnknownApplianceAndKeepsAuditlessAgentReadOnly(t *testing.T) {
+	agent := hostagent.NewServer(hostagent.ExecRunner{})
+	if err := configureWriteAccess(agent, "", "", "", false, false, "unknown"); err == nil {
+		t.Fatal("unknown appliance accepted")
+	}
+	if err := configureWriteAccess(agent, "", "", "", false, false, ""); err != nil {
+		t.Fatalf("auditless agent failed instead of remaining read-only: %v", err)
+	}
+}
+
+func TestConfigureAuthorizerTrustMissingProjectionKeepsAgentReadOnly(t *testing.T) {
+	agent := hostagent.NewServer(hostagent.ExecRunner{})
+	if configureAuthorizerTrust(agent, filepath.Join(t.TempDir(), "missing.json")) {
+		t.Fatal("missing authorizer projection enabled trust")
+	}
+	if err := configureWriteAccess(agent, "", "", "", true, false, ""); err != nil {
+		t.Fatalf("missing authorizer trust failed startup: %v", err)
+	}
+}
+
+func TestWriteTokenFileCreatesPrivateFileAndRefusesOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), setupTokenFile)
+	if err := writeTokenFile(path, "one-time-token\n"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("token mode %v, want 0600", info.Mode())
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is created in the test temp directory
+	if err != nil || string(data) != "one-time-token\n" {
+		t.Fatalf("token content %q, err %v", data, err)
+	}
+	if err := writeTokenFile(path, "replacement"); err == nil {
+		t.Fatal("existing token file was overwritten")
 	}
 }
 
@@ -127,6 +199,11 @@ func TestRunServesAndStopsOnSIGTERM(t *testing.T) {
 	t.Setenv("CONCORD_AGENT_CLI", cli)
 	t.Setenv("CONCORD_AGENT_GROUP", grp.Name)
 	t.Setenv("CONCORD_AGENT_SOCKET", sock)
+	uid := os.Getuid()
+	if uid == 0 {
+		uid = 10006
+	}
+	t.Setenv("CONCORD_AGENT_CONTROL_PLANE_UID", strconv.Itoa(uid))
 
 	done := make(chan int, 1)
 	go func() { done <- run() }()
@@ -146,7 +223,11 @@ func TestRunServesAndStopsOnSIGTERM(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"schema":1`) {
+	wantStatus := http.StatusForbidden
+	if runtime.GOOS == "linux" && os.Getuid() != 0 {
+		wantStatus = http.StatusOK
+	}
+	if resp.StatusCode != wantStatus || wantStatus == http.StatusOK && !strings.Contains(string(body), `"schema":1`) {
 		t.Fatalf("got %d %s", resp.StatusCode, body)
 	}
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
@@ -210,6 +291,13 @@ func TestStartSetupSkipsAnInstalledHost(t *testing.T) {
 	}
 	if _, err := os.Lstat(tokenFile); !os.IsNotExist(err) {
 		t.Fatalf("stale token file kept: %v", err)
+	}
+}
+
+func TestNewSetupServerSetsWriteTimeout(t *testing.T) {
+	server := newSetupServer(http.NotFoundHandler())
+	if server.WriteTimeout != setupWriteTimeout {
+		t.Fatalf("write timeout %v, want %v", server.WriteTimeout, setupWriteTimeout)
 	}
 }
 

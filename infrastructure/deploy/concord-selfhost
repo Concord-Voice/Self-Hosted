@@ -89,6 +89,67 @@ guarded_ctl() {
     "$CONCORD_CTL" "$@"
 }
 
+require_root() {
+  if (( EUID != 0 )); then
+    echo 'concord-selfhost: admin reset-enrollment requires root' >&2
+    return 1
+  fi
+}
+
+trusted_root_path() {
+  local candidate="$1" owner mode
+  while :; do
+    [[ ! -L "$candidate" ]] || return 1
+    read -r owner mode < <(stat -c '%u %a' "$candidate" 2>/dev/null) || return 1
+    [[ "$owner" == 0 && "$mode" =~ ^[0-7]{1,2}[0145][0145]$ ]] || return 1
+    [[ "$candidate" == / ]] && return 0
+    candidate="${candidate%/*}"
+    [[ -n "$candidate" ]] || candidate=/
+  done
+}
+
+find_agent_binary() {
+  local path
+  for path in "$@"; do
+    if [[ -f "$path" && -x "$path" ]] && trusted_root_path "$path"; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  echo 'concord-selfhost: installed concord-agent binary is missing' >&2
+  return 1
+}
+
+safe_empty_authorizer_projection() {
+  local file="$1" dir="${1%/*}"
+  [[ -d "$dir" && ! -e "$file" && ! -L "$file" ]] && trusted_root_path "$dir"
+}
+
+verb_admin() {
+  if [[ $# -ne 3 || "$1" != reset-enrollment || "$2" != --username || -z "$3" ]]; then
+    echo 'concord-selfhost: expected admin reset-enrollment --username <handle>' >&2
+    return 1
+  fi
+  require_root || return 1
+  local username="$3" admin_id agent_bin
+  if ! admin_id="$(compose exec -T control-plane ./main admin lookup-id --username "$username")"; then
+    echo 'concord-selfhost: admin ID lookup failed; enrollment unchanged' >&2
+    return 1
+  fi
+  if [[ ! "$admin_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    echo 'concord-selfhost: admin ID lookup returned an invalid UUID; enrollment unchanged' >&2
+    return 1
+  fi
+  if ! safe_empty_authorizer_projection /etc/concord-voice/agent-authorizers/authorizers.json; then
+    agent_bin="$(find_agent_binary /usr/libexec/concord-agent /usr/local/libexec/concord-agent)" || return 1
+    if ! "$agent_bin" authorizer revoke --admin-id "$admin_id"; then
+      echo 'concord-selfhost: Host Agent revocation failed; enrollment unchanged' >&2
+      return 1
+    fi
+  fi
+  compose exec -T control-plane ./main admin reset-enrollment --username "$username"
+}
+
 # require_security_log_boundary — refuse `up` before Docker's opaque "bind source
 # path does not exist". Checks the ROOT only: it is root:concord-security-writers
 # 0750 and the operator is never in that group, so the per-service directories
@@ -161,6 +222,10 @@ Verbs:
                if the authority does not stay up, keep it and fix the cause.
                --rotate-tls also gives the authority a new TLS key, listed
                beside the old one, which the next renew drops
+  admin reset-enrollment --username HANDLE
+               as root: resolve the admin ID, revoke its Host Agent authorizer,
+               then reset its enrollment in the control plane; any failure
+               before reset leaves enrollment unchanged
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.
@@ -464,6 +529,7 @@ main() {
       source "$SCRIPT_DIR/selfhost-authority.sh" || return 1
       shift; verb_authority "$@"
       ;;
+    admin) shift; verb_admin "$@" ;;
     --help|-h|"") usage ;;
     *)
       echo -e "${RED}unknown verb: $1${NC}" >&2

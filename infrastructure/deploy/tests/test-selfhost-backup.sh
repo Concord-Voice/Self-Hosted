@@ -38,6 +38,7 @@ run_fn() {
       printf 'compose %s\n' "$*" >>"$WORK/calls"
       case "$*" in
         'exec -T postgres pg_dump '*) printf 'PGDUMP-DATA' ;;
+        *' psql '*) printf '%s\n' "${STUB_PG_BYTES:-1}" ;;
         'exec -T postgres pg_restore '*) cat >"$WORK/restored.dump" ;;
       esac
       return "${STUB_COMPOSE_RC:-0}"
@@ -45,10 +46,12 @@ run_fn() {
     docker() {
       printf 'docker %s\n' "$*" >>"$WORK/calls"
       case "$*" in
+        *'--entrypoint du '*) printf '%s /data\n' "${STUB_MINIO_BYTES:-1}" ;;
         *':/data:ro '*) printf 'MINIO-DATA' ;;
         *) cat >"$WORK/restored.minio"; return "${STUB_DOCKER_RC:-0}" ;;
       esac
     }
+    df() { printf 'Filesystem 1B-blocks Used Available Use%% Mounted on\nstub 1 0 %s 0%% /stub\n' "${STUB_AVAILABLE_BYTES:-1073741828}"; }
     main() { printf 'main %s\n' "$*" >>"$WORK/calls"; }
     "$@"
   )
@@ -62,6 +65,53 @@ run_fn verb_backup --bogus 2>/dev/null; rc=$?
 run_fn verb_restore "$WORK/x.tar.gz" 2>/dev/null; rc=$?
 [[ $rc -eq 1 && ! -s "$WORK/calls" ]] && pass "restore without --confirm refuses before any call" \
   || fail "restore without --confirm rc=$rc calls=$(cat "$WORK/calls")"
+
+# ── backup admission refuses before staging or copies ─────────────────
+fixture bundled
+admit_out="$WORK/admit"
+mkdir -m 700 "$admit_out"
+for i in $(seq 1 24); do touch "$admit_out/concord-backup-20261114T01$(printf '%04d' "$i")Z.tar.gz"; done
+STUB_AVAILABLE_BYTES=999999999999 run_fn verb_backup --out "$admit_out" >/dev/null 2>&1; rc=$?
+[[ $rc -ne 0 && ! -s "$WORK/calls" && -z "$(find "$admit_out" -name '.staging*')" ]] \
+  && pass "24 regular archives refuse before probes or staging" || fail "24 archives rc=$rc calls=$(cat "$WORK/calls")"
+touch "$admit_out/concord-backup-20261114T011111Z.tar.gz"
+STUB_AVAILABLE_BYTES=999999999999 run_fn verb_backup --out "$admit_out" >/dev/null 2>&1; rc=$?
+[[ $rc -ne 0 && ! -s "$WORK/calls" ]] && pass "25 regular archives also refuse" || fail "25 archives rc=$rc"
+
+fixture bundled
+admit_out="$WORK/admit-links"
+mkdir -m 700 "$admit_out"
+for i in $(seq 1 23); do touch "$admit_out/concord-backup-20261114T02$(printf '%04d' "$i")Z.tar.gz"; done
+ln -s /etc/passwd "$admit_out/concord-backup-20261114T021111Z.tar.gz"
+mkdir "$admit_out/concord-backup-20261114T021112Z.tar.gz"
+count="$(run_fn _backup_archive_count "$admit_out")"
+[[ "$count" == 23 ]] && pass "only exact regular archives count toward the limit" || fail "archive count=$count"
+
+fixture bundled
+admit_out="$WORK/admit-space"
+mkdir -m 700 "$admit_out"
+STUB_PG_BYTES=5 STUB_MINIO_BYTES=7 STUB_AVAILABLE_BYTES=1073741848 run_fn verb_backup --out "$admit_out" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 0 && "$(grep -c -- '--entrypoint du' "$WORK/calls")" == 1 ]] && pass "bundled backup includes MinIO bytes in exact space admission" || fail "bundled exact rc=$rc calls=$(cat "$WORK/calls")"
+
+fixture byo-s3
+admit_out="$WORK/admit-byo"
+mkdir -m 700 "$admit_out"
+STUB_PG_BYTES=5 STUB_MINIO_BYTES=bad STUB_AVAILABLE_BYTES=1073741834 run_fn verb_backup --out "$admit_out" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 0 ]] && ! grep -q -- '--entrypoint du' "$WORK/calls" && pass "BYO S3 excludes bundled storage from admission" || fail "BYO admission rc=$rc calls=$(cat "$WORK/calls")"
+
+fixture bundled
+admit_out="$WORK/admit-refuse"
+mkdir -m 700 "$admit_out"
+for bad in bad 999999999999999999999999999999999999; do
+  : >"$WORK/calls"
+  STUB_PG_BYTES="$bad" STUB_AVAILABLE_BYTES=999999999999 run_fn verb_backup --out "$admit_out" >/dev/null 2>&1; rc=$?
+  [[ $rc -ne 0 && -z "$(find "$admit_out" -name '.staging*')" ]] && ! grep -Eq 'pg_dump|entrypoint tar' "$WORK/calls" \
+    && pass "invalid or overflow source size refuses before copy" || fail "bad source=$bad rc=$rc calls=$(cat "$WORK/calls")"
+done
+: >"$WORK/calls"
+STUB_PG_BYTES=5 STUB_MINIO_BYTES=7 STUB_AVAILABLE_BYTES=1073741847 run_fn verb_backup --out "$admit_out" >/dev/null 2>&1; rc=$?
+[[ $rc -ne 0 && -z "$(find "$admit_out" -name '.staging*')" ]] && ! grep -Eq 'pg_dump|entrypoint tar' "$WORK/calls" \
+  && pass "insufficient free space refuses before staging" || fail "low space rc=$rc calls=$(cat "$WORK/calls")"
 
 # ── bundled backup ────────────────────────────────────────────────────
 fixture bundled

@@ -6,9 +6,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/protocol"
@@ -82,15 +87,69 @@ func postJSON(engine *gin.Engine, path string, body any) *httptest.ResponseRecor
 
 // adminAuthEngine wires PasswordLogin / WebAuthnLogin / Logout on a bare engine.
 func adminAuthEngine(t *testing.T, db *sql.DB, rdb *redis.Client) *gin.Engine {
+	return adminAuthEngineWithAgent(t, db, rdb, "")
+}
+
+func adminAuthEngineWithAgent(t *testing.T, db *sql.DB, rdb *redis.Client, sock string) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	h, err := admin.NewHandler(db, rdb, logger.NewWithWriter(&bytes.Buffer{}), authHandlerCfg())
 	require.NoError(t, err)
+	if sock != "" {
+		admin.UseServerAgentForTest(h, sock)
+	}
 	r := gin.New()
 	r.POST("/admin/api/v1/auth/password", h.PasswordLogin)
 	r.POST("/admin/api/v1/auth/webauthn", h.WebAuthnLogin)
 	r.POST("/admin/api/v1/auth/logout", h.Logout)
 	return r
+}
+
+type importedAssertionCall struct {
+	Path        string          `json:"-"`
+	Method      string          `json:"-"`
+	AdminID     string          `json:"admin_id"`
+	Assertion   json.RawMessage `json:"assertion"`
+	SessionData json.RawMessage `json:"session_data"`
+}
+
+func importedAssertionAgent(t *testing.T, status int) (string, func() []importedAssertionCall) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "agent")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(dir)) })
+	sock := filepath.Join(dir, "agent.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	var (
+		mu    sync.Mutex
+		calls []importedAssertionCall
+	)
+	srv := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var call importedAssertionCall
+		call.Path = r.URL.Path
+		call.Method = r.Method
+		if err := json.NewDecoder(r.Body).Decode(&call); err != nil {
+			http.Error(w, "invalid", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		calls = append(calls, call)
+		mu.Unlock()
+		if status == http.StatusNotFound {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"authorizer_not_imported"}`))
+			return
+		}
+		w.WriteHeader(status)
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { require.NoError(t, srv.Close()) })
+	return sock, func() []importedAssertionCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]importedAssertionCall(nil), calls...)
+	}
 }
 
 func TestPasswordLogin_HappyPath_ReturnsChallengeNoCookie(t *testing.T) {
@@ -209,6 +268,173 @@ func TestWebAuthnLogin_HappyPath_MintsSession(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(context.Background(),
 		`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&storedCount))
 	assert.Equal(t, int64(va.signCount), storedCount, "login must persist the advanced sign count")
+}
+
+func TestWebAuthnLoginImportedCredentialFailsClosedBeforeSessionMint(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		agentStatus int
+		unavailable bool
+		wantStatus  int
+	}{
+		// The root counter is ahead of the DB counter, so a stale clone assertion
+		// that the DB accepted must still be refused by the root trust boundary.
+		{name: "root counter ahead", agentStatus: http.StatusForbidden, wantStatus: http.StatusUnauthorized},
+		{name: "root unavailable", unavailable: true, wantStatus: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, dbCleanup := testhelpers.SetupTestDB(t)
+			t.Cleanup(dbCleanup)
+			rdb, rCleanup := testhelpers.SetupTestRedis(t)
+			t.Cleanup(rCleanup)
+			adminID, username, va := enrolledAdmin(t, db, rdb)
+			t.Setenv("HOST_AGENT_AUTHORIZER_PROJECTION", "1")
+
+			var calls func() []importedAssertionCall
+			sock := filepath.Join(t.TempDir(), "missing-agent.sock")
+			if !tc.unavailable {
+				sock, calls = importedAssertionAgent(t, tc.agentStatus)
+			}
+			engine := adminAuthEngineWithAgent(t, db, rdb, sock)
+			pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{
+				"username": username,
+				"password": adminTestPassword,
+			})
+			require.Equal(t, http.StatusOK, pwRec.Code, pwRec.Body.String())
+			var pwResp struct {
+				Handle    string                        `json:"handle"`
+				PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+			}
+			require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
+			va.signCount++
+			assertionBody := va.assertionResponse(t, testAdminRPID, pwResp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
+
+			waRec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{
+				"handle":    pwResp.Handle,
+				"assertion": json.RawMessage(assertionBody),
+			})
+			require.Equal(t, tc.wantStatus, waRec.Code, waRec.Body.String())
+			assert.Empty(t, waRec.Header().Get("Set-Cookie"), "agent-gated login must not mint a session")
+			sessions, err := rdb.Keys(context.Background(), "admin_session:*").Result()
+			require.NoError(t, err)
+			assert.Empty(t, sessions)
+			if tc.unavailable {
+				return
+			}
+			got := calls()
+			require.Len(t, got, 1)
+			assert.Equal(t, http.MethodPost, got[0].Method)
+			assert.Equal(t, "/v1/authorizers/login-assertion", got[0].Path)
+			assert.Equal(t, adminID, got[0].AdminID)
+			assert.JSONEq(t, string(assertionBody), string(got[0].Assertion))
+			assert.True(t, json.Valid(got[0].SessionData), "agent must receive the CP session data")
+		})
+	}
+}
+
+func TestWebAuthnLoginUnimportedCredentialKeepsDBOnlyPath(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+	adminID, username, va := enrolledAdmin(t, db, rdb)
+	t.Setenv("HOST_AGENT_AUTHORIZER_PROJECTION", "1")
+	sock, calls := importedAssertionAgent(t, http.StatusNotFound)
+	engine := adminAuthEngineWithAgent(t, db, rdb, sock)
+	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{"username": username, "password": adminTestPassword})
+	require.Equal(t, http.StatusOK, pwRec.Code, pwRec.Body.String())
+	var pwResp struct {
+		Handle    string                        `json:"handle"`
+		PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
+	va.signCount++
+	assertionBody := va.assertionResponse(t, testAdminRPID, pwResp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
+	waRec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{"handle": pwResp.Handle, "assertion": json.RawMessage(assertionBody)})
+	require.Equal(t, http.StatusOK, waRec.Code, waRec.Body.String())
+	require.NotEmpty(t, waRec.Header().Get("Set-Cookie"))
+	require.Len(t, calls(), 1)
+	var storedCount int64
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&storedCount))
+	assert.Equal(t, int64(va.signCount), storedCount)
+}
+
+func TestWebAuthnLoginImportedTombstonedCredentialKeepsRootCounterGate(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+	adminID, username, va := enrolledAdmin(t, db, rdb)
+	t.Setenv("HOST_AGENT_AUTHORIZER_PROJECTION", "1")
+	// A 200 models a valid assertion for a retained, revoked root record: it no
+	// longer authorizes host writes, but its durable counter still gates login.
+	sock, calls := importedAssertionAgent(t, http.StatusOK)
+	engine := adminAuthEngineWithAgent(t, db, rdb, sock)
+	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{"username": username, "password": adminTestPassword})
+	require.Equal(t, http.StatusOK, pwRec.Code, pwRec.Body.String())
+	var pwResp struct {
+		Handle    string                        `json:"handle"`
+		PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
+	va.signCount++
+	assertionBody := va.assertionResponse(t, testAdminRPID, pwResp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
+	waRec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{"handle": pwResp.Handle, "assertion": json.RawMessage(assertionBody)})
+	require.Equal(t, http.StatusOK, waRec.Code, waRec.Body.String())
+	require.NotEmpty(t, waRec.Header().Get("Set-Cookie"))
+	got := calls()
+	require.Len(t, got, 1)
+	assert.Equal(t, adminID, got[0].AdminID)
+	assert.JSONEq(t, string(assertionBody), string(got[0].Assertion))
+	var storedCount int64
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&storedCount))
+	assert.Equal(t, int64(va.signCount), storedCount)
+}
+
+func TestWebAuthnLogin_CloneWarningRejectsWithoutSessionOrCounterUpdate(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	adminID, username, va := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngine(t, db, rdb)
+
+	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{
+		"username": username,
+		"password": adminTestPassword,
+	})
+	require.Equal(t, http.StatusOK, pwRec.Code, pwRec.Body.String())
+	var pwResp struct {
+		Handle    string                        `json:"handle"`
+		PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
+
+	// Registration persisted signCount 1. Reusing it yields a valid assertion
+	// with a clone warning from go-webauthn, which must never mint a session.
+	assertionBody := va.assertionResponse(t, testAdminRPID, pwResp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
+	successesBefore := auditRows(t, db, username, admin.EventLoginSuccess, admin.AuditSuccess)
+	failuresBefore := auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure)
+
+	waRec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{
+		"handle":    pwResp.Handle,
+		"assertion": json.RawMessage(assertionBody),
+	})
+	require.Equal(t, http.StatusUnauthorized, waRec.Code, waRec.Body.String())
+	assert.Empty(t, waRec.Header().Get("Set-Cookie"))
+	assert.Equal(t, successesBefore, auditRows(t, db, username, admin.EventLoginSuccess, admin.AuditSuccess))
+	assert.Equal(t, failuresBefore+1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure))
+
+	var storedCount int64
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&storedCount))
+	assert.Equal(t, int64(va.signCount), storedCount)
+	sessions, err := rdb.Keys(context.Background(), "admin_session:*").Result()
+	require.NoError(t, err)
+	assert.Empty(t, sessions)
 }
 
 // TestWebAuthnLogin_LockedAfterHandleIssued_Returns429 covers the Gitar #1703 fix:

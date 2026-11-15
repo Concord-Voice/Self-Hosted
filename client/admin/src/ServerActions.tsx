@@ -3,11 +3,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiContractError, ApiError } from "./api";
 import {
   APPLIANCES,
-  STEP_UP_ACTIONS,
   ServerRequestError,
   UPDATE_TAG,
   serverWriteApi,
   type Appliance,
+  type ServerActionArguments,
   type ServerBackup,
   type ServerJob,
   type WriteAction,
@@ -35,6 +35,18 @@ const REFUSALS: Record<string, string> = {
   write_in_progress: "Another action is still running. Wait for it to finish.",
   stepup_required: "This action needs your security key.",
   stepup_failed: "The security key check failed. Try again.",
+  authorization_denied:
+    "The host agent rejected this admin's security key proof. Start again; if this persists, ask a host-root operator to import this admin's authorizer with concord-agent authorizer import.",
+  authorizer_unavailable:
+    "The host agent cannot load its trusted authorizers. Ask a host-root operator to check the authorizer file and import it with concord-agent authorizer import.",
+  peer_forbidden:
+    "The host agent rejected the control-plane connection. Check the service identity and agent socket permissions on the host.",
+  authorization_busy:
+    "Another host authorization is in progress. Wait for it to finish, then start again.",
+  invalid_authorization:
+    "The host agent did not accept this authorization request. Reload the console and start again.",
+  backup_rate_limited:
+    "Backups are limited to one attempt per hour. Wait until the hour has passed before trying again.",
   stepup_unavailable:
     "Your account has no security key this server can check, so this action is not available.",
   audit_unavailable:
@@ -214,28 +226,23 @@ export function ServerActions({
     }
   }, [running, current, follow]);
 
-  const run = async (
-    action: WriteAction,
-    args: Record<string, string> = {},
-  ) => {
+  const run = async (action: WriteAction, args: ServerActionArguments = {}) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
       const body: Record<string, unknown> = { ...args };
-      if (STEP_UP_ACTIONS.has(action)) {
-        setStatus("Touch your security key to confirm");
-        const challenge = await serverWriteApi.stepUp(action);
-        const credential = await navigator.credentials.get({
-          publicKey: decodeRequestOptions(challenge.publicKey),
-        });
-        if (!credential)
-          throw new DOMException("no credential", "NotAllowedError");
-        body.stepup = {
-          handle: challenge.handle,
-          assertion: encodeAssertion(credential as PublicKeyCredential),
-        };
-      }
+      setStatus("Touch your security key to confirm");
+      const challenge = await serverWriteApi.stepUp(action, args);
+      const credential = await navigator.credentials.get({
+        publicKey: decodeRequestOptions(challenge.publicKey),
+      });
+      if (!credential)
+        throw new DOMException("no credential", "NotAllowedError");
+      body.stepup = {
+        handle: challenge.handle,
+        assertion: encodeAssertion(credential as PublicKeyCredential),
+      };
       setStatus(`${ACTION_LABELS[action]} started`);
       const job = await serverWriteApi.run(action, body);
       setCurrent(job);
@@ -290,8 +297,8 @@ export function ServerActions({
         <div>
           <h2 id="server-actions-title">Actions</h2>
           <p>
-            One action runs at a time. Stop, restart, update and restore ask for
-            your security key. Every attempt is audited.
+            One action runs at a time. Every action asks for your security key
+            and is audited.
           </p>
         </div>
       </div>
