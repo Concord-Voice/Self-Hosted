@@ -12,7 +12,8 @@
 #     a code-scanning bot's review is an alert, not a review — and neither does a drive-by
 #     account's review on a public repo. A COMMENTED review counts only with a body or a
 #     top-level inline comment: GitHub files every thread reply as its own empty COMMENTED
-#     review at the head of that moment, and a reply is not a review;
+#     review at the head of that moment, and a reply is not a review. A bot review whose body
+#     says it could not review the PR is a status notice and does not count either;
 #   - a first-party coverage record: a PR conversation comment with, on a line of its own,
 #       <!-- cv-review-coverage: sha=<40-hex head SHA> reviewer=<login> suite=<skill> -->
 #     posted BY <login> (the reviewer's identity is the poster's GitHub identity), a human
@@ -97,7 +98,11 @@ out=$(printf '%s' "$data" | jq -r --arg n "$PR" --arg sfx "$suffix" '
   if ((.reviews | type) != "array" or (.comments | type) != "array"
       or ((.review_comments // []) | type) != "array" or $author == "") then "BADDATA"
   elif ($h | test("^[0-9a-f]{40}$") | not) then "BADSHA" else
-  [ .reviews[]? | select(trusted and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")) and substantive) ] as $trev
+  # A bot review that says it could not review the PR (Copilot: "was not able to review any
+  # files") is a status notice, not a review. (No apostrophes here: this is a quoted string.)
+  def declined: (.user.type // "") == "Bot"
+    and ((.body // "") | test("(was not|wasn.t|were not|weren.t) able to review|unable to review"; "i"));
+  [ .reviews[]? | select(trusted and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")) and substantive and (declined | not)) ] as $trev
   | [ $trev[] | select(.commit_id == $h) | "\(.user.login) (\(.state))" ] as $rev
   # Records count from human posters only: an allowlisted bot covers a PR by
   # submitting a review, never by echoing a marker into a comment.
