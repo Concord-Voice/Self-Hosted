@@ -4,7 +4,7 @@
 
 **Goal:** Revalidate admin authority at use time and make the root host agent independently require a fresh, single-use WebAuthn authorization for every write.
 
-**Architecture:** The control plane keeps console identity and durable admin state; Security#41 supplies session-generation revocation. The host agent owns a root-only credential store, WebAuthn ceremony, peer-UID gate, sign-counter persistence, and audit, so control-plane socket access alone cannot execute root actions. Existing libraries and audit/storage patterns are reused; no SQL migration or new dependency is added.
+**Architecture:** The control plane keeps console identity and durable admin state; the session-generation dependency supplies revocation. The host agent owns a root-only credential store, WebAuthn ceremony, peer-UID gate, sign-counter persistence, and audit, so control-plane socket access alone cannot execute root actions. Existing libraries and audit/storage patterns are reused; no SQL migration or new dependency is added.
 
 **Tech Stack:** Go 1.25, Gin, PostgreSQL, Redis/go-redis, go-webauthn, `golang.org/x/sync/singleflight`, React/Vite/Vitest, Bash deploy fixtures, systemd, Unix sockets.
 
@@ -12,14 +12,14 @@
 
 ## Global constraints
 
-- Start only after Security#41's session-generation contract is merged or rebased into this branch. Do not duplicate its generation/index.
-- Security#60 owns attestation provenance. This plan only rejects `CloneWarning`.
+- Start only after the session-generation contract is merged or rebased into this branch. Do not duplicate its generation/index.
+- Separate attestation-provenance work owns that boundary. This plan only rejects `CloneWarning`.
 - All root writes—`start`, `stop`, `restart`, `backup`, `update`, `restore`—require agent-local authorization.
 - Agent trust comes only from the root-owned authorizer file. PostgreSQL credentials cannot grant root authority.
 - Every authorization is UV-required, two minutes, single-use, and bound to exact normalized action arguments.
 - No new dependency and no SQL migration.
 - Use shared Go caches. Integration tests require isolated `DATABASE_URL` and `REDIS_URL`, never the shared `concord` database.
-- Self-Hosted is the source. Mirror only shared admin/middleware changes to Hosted after source merge and run independent gates.
+- This source repository is the implementation source. Mirror only shared admin/middleware changes to the managed deployment after source merge and run independent gates.
 
 ## Review focus
 
@@ -41,13 +41,13 @@
 - Modify: `infrastructure/deploy/tests/test-selfhost-backup.sh`
 
 **Interfaces:**
-- Consumes: current vulnerable handlers and Security-repo VULN-137/139/142 evidence.
+- Consumes: current vulnerable handlers and VULN-137/139/142 evidence.
 - Produces: retained red tests and a command/caller census; no production change.
 
 - [ ] **Step 1: Record every production caller.** Census `AdminAuthRequired`, `SessionStore.Get`, enrollment/action challenge stores, every `FinishLoginWithBytes`, host-agent action dispatch, setup listener construction, JWKS refresh, and direct/agent backup entry points in the SDD ledger.
 - [ ] **Step 2: Add the three exploit-shaped tests.** Name assertions for stale session after pending status, create-admin without step-up, and expected-UID socket request without agent authorization. Assert no handler/row/job mutation.
 - [ ] **Step 3: Add low-finding red tests.** Pin logout-vs-slide recreation, clone warning, unknown-KID fetch flood, setup source monopolization, and second backup admission.
-- [ ] **Step 4: Run the focused tests.** Expect the new tests to fail for their named security reason; unrelated baseline tests pass. Run the original Security overlays where their imports still match and record any acceptance mismatch rather than rewriting the evidence.
+- [ ] **Step 4: Run the focused tests.** Expect the new tests to fail for their named security reason; unrelated baseline tests pass. Run the original exploit overlays where their imports still match and record any acceptance mismatch rather than rewriting the evidence.
 - [ ] **Step 5: Commit tests only.** Commit `test: reproduce admin and host-agent authority gaps`.
 
 ### Task 2: Session active-state validation and logout-safe slide
@@ -61,7 +61,7 @@
 - Modify: `services/control-plane/internal/admin/routes_test.go`
 
 **Interfaces:**
-- Consumes: Security#41 generation-aware `SessionStore.Get(ctx, sid)`; `AdminRepo.GetByID(ctx, adminID)`.
+- Consumes: the session-generation dependency's `SessionStore.Get(ctx, sid)`; `AdminRepo.GetByID(ctx, adminID)`.
 - Produces: `AdminAuthRequired(sessions *SessionStore, repo *AdminRepo) gin.HandlerFunc`; compare-and-slide session semantics.
 
 - [ ] **Step 1: Extend red middleware cases.** Active proceeds; pending, disabled, missing, and repository error all abort before the handler. Assert no identifier in logs.
@@ -70,7 +70,7 @@
 - [ ] **Step 4: Wire the repository into middleware.** Load by session admin ID, require `StatusActive`, then set context. Update all constructors/tests.
 - [ ] **Step 5: Verify and commit.** Run `go test -race ./internal/admin -run 'Test(AdminAuthRequired|Session)' -count=1`; commit `fix(admin): revalidate live admin sessions`.
 
-### Task 3: Reset-time handle revocation and #41 integration
+### Task 3: Reset-time handle revocation and session-generation integration
 
 **Files:**
 - Modify: `services/control-plane/internal/admin/enrollment.go`
@@ -81,13 +81,13 @@
 - Modify: `services/control-plane/internal/admin/server_stepup_test.go`
 
 **Interfaces:**
-- Consumes: Security#41 `SessionStore.RevokeAdmin(ctx, adminID)` or its exact merged generation-bump name; Task 4's read-only authorizer projection.
+- Consumes: `SessionStore.RevokeAdmin(ctx, adminID)` from the merged session-generation dependency, or its exact generation-bump name; Task 4's read-only authorizer projection.
 - Produces: atomic `storeIndexedHandle`, `consumeIndexedHandle`, `revokeIndexedHandles` helpers for enrollment and control-plane action handles.
 
 - [ ] **Step 1: Add handle lifetime/race tests.** Store multiple enrollment and action handles for two admins; reset one; assert only that admin's handles fail. Race consume with reset and prove no handle survives.
 - [ ] **Step 2: Add reset-order tests.** A target still present in the root authorizer projection refuses before generation/credential/token mutation. Redis or generation failure produces no token output.
 - [ ] **Step 3: Implement indexed handle scripts.** Atomically set/index, get-delete/deindex, and delete all indexed members. Bound handle count and TTL; malformed index members fail reset closed.
-- [ ] **Step 4: Integrate the safe reset order.** Authorizer-absence check, Security#41 generation revocation, indexed-handle deletion, credential/status change, then token mint/output.
+- [ ] **Step 4: Integrate the safe reset order.** Authorizer-absence check, session-generation revocation, indexed-handle deletion, credential/status change, then token mint/output.
 - [ ] **Step 5: Verify and commit.** Run focused admin race tests against isolated Redis/PostgreSQL; commit `fix(admin): revoke reset enrollment authority`.
 
 ### Task 4: Root-owned authorizer store and management commands
@@ -272,8 +272,8 @@
 - Modify API/client contract documentation touched by Tasks 7–8.
 
 **Interfaces:**
-- Consumes: exact implemented paths, limits, errors, rollout ordering, and Security#41/#60 ownership.
-- Produces: operator trust-import/reset/recovery runbook and Hosted mirror manifest.
+- Consumes: exact implemented paths, limits, errors, rollout ordering, and session-generation/attestation-provenance ownership.
+- Produces: operator trust-import/reset/recovery runbook and managed-deployment mirror manifest.
 
 - [ ] **Step 1: Document the trust boundary.** Exact authorizer path/modes, import fingerprint, explicit trust after enrollment, reset order, fail-closed errors, two audit streams, and residual malicious-UI risk.
 - [ ] **Step 2: Document backup limits.** One/hour, 24 archives, no pruning, free-space formula, and operator recovery.
@@ -281,12 +281,12 @@
 - [ ] **Step 4: Run focused and package tests.** Admin, middleware, hostagent, concord-agent race suites; admin client tests; backup/deb/deploy fixtures; original exploit overlays.
 - [ ] **Step 5: Run repo gates.** `golangci-lint`, TypeScript lint/type-check, `git diff --check`, `./scripts/update-claude-md-counts.sh`, and the repo quality gate. Record the quality gate as UNVERIFIED if the trusted repo config declares none.
 - [ ] **Step 6: Run required reviews.** Red team with executable PoCs, security, code, silent-failure, test quality, deployment config, frontend, docs, and scope review. Resolve every blocking finding and rerun affected tests.
-- [ ] **Step 7: Prepare the Hosted mirror manifest.** List only shared `internal/admin` and `internal/middleware` commits/files; exclude hostagent, cmd/concord-agent, Self-Hosted deploy/unit/client differences unless independently present. Open and gate the mirror only after Self-Hosted source merge.
+- [ ] **Step 7: Prepare the managed-deployment mirror manifest.** List only shared `internal/admin` and `internal/middleware` commits/files; exclude hostagent, cmd/concord-agent, source-repository deploy/unit/client differences unless independently present. Open and gate the mirror only after the source merge.
 - [ ] **Step 8: Commit docs.** Commit `docs: describe admin and host-agent authorization`.
 
 ## Self-review result
 
-- Spec coverage: every #165 finding is assigned; #41 and #60 remain explicit dependencies rather than duplicate implementations.
+- Spec coverage: every scoped finding is assigned; session-generation and attestation-provenance remain explicit dependencies rather than duplicate implementations.
 - Type consistency: Task 4 authorizer interfaces feed Task 5, Task 5 feeds Task 6, and Task 7 preserves browser paths while changing the agent trust owner.
 - Review-focus tests appear in their owning tasks.
 - No migration, second signer, generic notification framework, automatic backup pruning, or new dependency was added.

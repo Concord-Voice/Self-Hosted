@@ -1,6 +1,6 @@
 # Admin authority and host-agent write authorization — design
 
-**Issue:** Concord-Voice/Security#165 · **Parent:** #151 · **Date:** 2026-11-14 · **Status:** ready for implementation planning
+**Status:** ready for implementation planning · **Date:** 2026-11-14
 
 Line numbers and counts in the issue are leads. Implementers must find each site by symbol at the implementation head.
 
@@ -10,7 +10,7 @@ An admin session is useful only while its admin remains active. Enrollment reset
 
 The root host agent independently authorizes every write. A process that can connect to the shared Unix socket cannot start, stop, restart, back up, update, or restore the instance without a fresh assertion for the exact action and arguments. The agent trusts only a root-owned authorizer file, consumes each ceremony once, checks the peer UID, and writes its own audit event before starting a job.
 
-The remaining #165 findings close without taking ownership from Security#41 (admin session generation) or Security#60 (attestation provenance).
+The remaining scoped findings close without taking ownership from the admin session-generation or attestation-provenance dependencies.
 
 ## 2. Problem statement
 
@@ -30,13 +30,13 @@ The current control-plane session middleware resolves an opaque Redis session an
 - Bounded Cloudflare Access JWKS refresh and response parsing.
 - Setup-listener write timeout and per-source connection cap.
 - Backup step-up, hourly agent admission, 24-archive refusal, and conservative free-space admission.
-- Self-Hosted docs and the reviewed Hosted mirror of shared admin/middleware code.
+- Source-repository docs and the reviewed managed-deployment mirror of shared admin/middleware code.
 
 ### Owned elsewhere
 
-- Security#41 owns the per-admin session generation and reset-time generation bump. #165 depends on it and does not add a competing session index.
-- Security#60 owns attestation-chain/FIDO metadata provenance. #165 rejects go-webauthn's runtime `CloneWarning`; it does not treat AAGUID as provenance or change enrollment attestation policy.
-- The host-agent packages, setup listener, backup script, unit, and trust-store operations remain Self-Hosted only.
+- The session-generation dependency owns the per-admin session generation and reset-time generation bump. This work depends on it and does not add a competing session index.
+- The attestation-provenance dependency owns attestation-chain/FIDO metadata provenance. This work rejects go-webauthn's runtime `CloneWarning`; it does not treat AAGUID as provenance or change enrollment attestation policy.
+- The host-agent packages, setup listener, backup script, unit, and trust-store operations remain source-repository only.
 
 ### Non-goals
 
@@ -44,7 +44,7 @@ The current control-plane session middleware resolves an opaque Redis session an
 - Automatically trusting every credential in `admin_webauthn_credentials`.
 - Automatically deleting old backups.
 - Protecting an operator from a fully malicious admin SPA that lies about the action being approved. The assertion is cryptographically bound to the action and arguments, but WebAuthn authenticators display RP identity, not Concord's semantic action text.
-- Solving #60's attestation provenance gap.
+- Solving the attestation-provenance gap.
 
 ## 4. Governing constraints
 
@@ -78,11 +78,11 @@ The existing control plane consumes the assertion and sends plain action argumen
 
 ### 6.3 Conflict: session cleanup ownership
 
-Security#41 already specifies a per-admin session generation. That design wins for sessions. #165 adds the hot-path `status == active` database check and handle cleanup. It neither scans `admin_session:*` nor adds another session index.
+The session-generation dependency already specifies a per-admin session generation. That design wins for sessions. This work adds the hot-path `status == active` database check and handle cleanup. It neither scans `admin_session:*` nor adds another session index.
 
 ### 6.4 Conflict: AAGUID handling
 
-Security#60 remains the provenance owner. #165 checks `CloneWarning` everywhere an admin assertion finishes and leaves AAGUID policy unchanged.
+The attestation-provenance dependency remains the provenance owner. This work checks `CloneWarning` everywhere an admin assertion finishes and leaves AAGUID policy unchanged.
 
 ### 6.5 Backup retention
 
@@ -94,7 +94,7 @@ No automatic pruning. Deleting the wrong backup is materially worse than returni
 
 `AdminAuthRequired` receives both `SessionStore` and `AdminRepo`. After `SessionStore.Get` resolves the session and before setting `admin_id`, it loads the admin by ID and requires `StatusActive`. Missing, pending, disabled, or database-error states return 401 and do not call the handler. A database error is logged with a fixed class and no identifier.
 
-Security#41's generation comparison remains inside `SessionStore.Get`. The status read is still required because activation state is durable authority, and because a missed or delayed Redis revocation must not authorize a pending admin.
+The session-generation dependency's comparison remains inside `SessionStore.Get`. The status read is still required because activation state is durable authority, and because a missed or delayed Redis revocation must not authorize a pending admin.
 
 ### 7.2 Logout-safe sliding
 
@@ -119,8 +119,8 @@ Store and index happen atomically, and the index expires no earlier than its lon
 The host-agent authorizer is revoked first by the root reset wrapper. The authorizer directory is mounted read-only into the control-plane container; direct `control-plane admin reset-enrollment` refuses while the target admin remains in that root-owned projection. This makes the safe order enforceable for supported operations:
 
 1. root agent removes the admin's authorizer entries;
-2. Security#41 bumps the session generation;
-3. #165 deletes enrollment/action handles;
+2. the session-generation dependency bumps the session generation;
+3. this work deletes enrollment/action handles;
 4. credentials are deleted and status becomes pending;
 5. a new enrollment token is minted and printed.
 
@@ -227,16 +227,16 @@ Retain the global 16-connection cap and add a listener wrapper allowing at most 
 - Server write UI still calls `/admin/api/v1/server/stepup`; the control plane now proxies the begin request, including normalized action arguments, to the agent.
 - Final server-action requests still carry a `stepup` object, but its handle is agent-owned and the assertion is passed through. The agent uses stored arguments, so old clients that omit arguments at begin fail closed and must update with the backend.
 - Create-admin callers must perform the new step-up. This is an intentional fail-closed API change.
-- Shared admin/session/JWKS changes are mirrored to Hosted after Self-Hosted merges and pass a separate Hosted review/CI/merge gate. Host-agent, setup, backup, unit, and trust-store changes are not mirrored.
+- Shared admin/session/JWKS changes are mirrored to the managed deployment after the source merge and pass a separate review/CI/merge gate. Host-agent, setup, backup, unit, and trust-store changes are not mirrored.
 
 ## 12. Rollout and recovery
 
-1. Land Security#41 first or rebase #165 on its exact merged session-generation contract.
+1. Land the session-generation dependency first or rebase this work on its exact merged contract.
 2. Ship agent binary, systemd/unit packaging, root trust commands, read-only authorizer mount, and control-plane/client changes together.
 3. On upgrade, reads remain available and writes fail closed until a root operator imports at least one authorizer.
 4. Exercise import/list/revoke and a non-destructive backup in staging.
 5. Enable no compatibility flag: partial rollout is unsafe, so the control plane reports `authorizer_unavailable` until the new agent is ready.
-6. Mirror shared files to Hosted only after source merge.
+6. Mirror shared files to the managed deployment only after source merge.
 
 Rollback must preserve the root authorizer and audit files. Rolling back to an old agent reopens VULN-142 and is not an acceptable steady state; recover forward.
 
@@ -244,7 +244,7 @@ Rollback must preserve the root authorizer and audit files. Rolling back to an o
 
 | Area | Required proof |
 |---|---|
-| VULN-137 | Original exploit fails; pending/disabled/missing admin session is 401; pre-reset enrollment/action handles fail; Security#41's two-session and generation race tests remain green. |
+| VULN-137 | Original exploit fails; pending/disabled/missing admin session is 401; pre-reset enrollment/action handles fail; the session-generation dependency's two-session and generation race tests remain green. |
 | VULN-139 | No/mismatched/replayed/clone-warning step-up creates no row; valid exact action creates one row, one token, one audit event, and one visible notice. |
 | VULN-142 | Real socket wrong UID fails; expected UID without/mismatched/replayed authorization starts no job; valid exact assertion starts one job; both agent audit outcomes are present. |
 | VULN-135/136 | Clone warning mints no session/action; concurrent logout wins over sliding Get and the key stays absent. |
@@ -254,19 +254,19 @@ Rollback must preserve the root authorizer and audit files. Rolling back to an o
 | Trust store | Wrong owner/mode, symlink, duplicate ID, malformed schema, unconfirmed import, failed atomic write, reset-before-revoke all fail closed. |
 | UI/docs | Security notice is accessible and sanitized; server action passes arguments at begin; runbooks match exact limits and recovery. |
 
-The Security-repo exploit overlays are acceptance evidence, not substitutes for retained regressions in Self-Hosted.
+The exploit overlays are acceptance evidence, not substitutes for retained regressions in the source repository.
 
 ## 14. Acceptance criteria
 
 | Criterion | Required result |
 |---|---|
-| Security findings | Every #165 exploit/regression listed above is red on the vulnerable baseline and green after the fix. |
+| Security findings | Every listed exploit/regression is red on the vulnerable baseline and green after the fix. |
 | Sonar blocker/critical | **0 new blocker or critical issues.** |
 | Security hotspots | **0 new high-confidence security hotspots.** |
 | New-code coverage | **At least 80%.** |
 | Quality gate | The repo-declared quality gate, lint, type-check, focused race tests, Go tests, admin client tests, deploy shell tests, and packaging tests pass. If no repo quality-gate command is configured, report that signal as UNVERIFIED rather than claiming pass. |
 | Docs to update | `docs/runbooks/selfhost-host-agent.md`, `docs/runbooks/selfhost-backup-restore.md`, `docs/architecture.md`, `CHANGELOG.md`, and any API/client contract docs touched by implementation ship in the same PR. |
-| Mirroring | Shared admin/middleware changes have a separately reviewed Hosted mirror; Self-Hosted-only files do not enter Hosted. |
+| Mirroring | Shared admin/middleware changes have a separately reviewed managed-deployment mirror; source-repository-only files do not enter it. |
 
 ## 15. Predicted Phase-8 routing
 
@@ -296,8 +296,7 @@ No migration reviewer should fire because this design adds no SQL migration. The
 
 ## 17. References
 
-- Concord-Voice/Security#165 and parent #151.
-- Security#41 (session generation) and #60 (attestation provenance).
+- Session-generation and attestation-provenance dependencies.
 - `.claude/rules/domains/backend.md`, `.claude/rules/domains/admin-ui.md`, `.claude/rules/domains/tests.md`.
 - go-webauthn current documentation via Context7: `SessionData`, `WithUserVerification`, and `Authenticator.UpdateCounter` / `CloneWarning`.
 - Current source: `internal/admin/{middleware,session,handlers,server_writes,adminctl}.go`, `internal/hostagent/{server,jobs}.go`, `cmd/concord-agent/main.go`, `internal/middleware/cfaccess_jwks.go`, and `infrastructure/deploy/selfhost-backup.sh`.

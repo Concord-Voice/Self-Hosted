@@ -167,12 +167,12 @@ only receives a read-only projection.
 
 ### Rollout dependencies
 
-Session-generation reset and indexed handle revocation remain owned by
-Security#41. Do not treat an agent authorizer revoke as a substitute for that
-session boundary. Security#60 separately owns attestation provenance; this
-release rejects a WebAuthn clone warning but does not establish provenance.
-Self-Hosted is the source for these changes. Any Hosted mirror follows a
-source merge and its own validation gates.
+Session-generation reset and indexed handle revocation remain separate work.
+Do not treat an agent authorizer revoke as a substitute for that session
+boundary. Attestation provenance is also separate work; this release rejects a
+WebAuthn clone warning but does not establish provenance. This source
+repository is the implementation source. Any managed-deployment mirror follows
+a source merge and its own validation gates.
 
 `concord-selfhost` connects the console to the agent only when both of these
 hold, and otherwise leaves control-plane exactly as before:
