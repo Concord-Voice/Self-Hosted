@@ -477,7 +477,7 @@ func TestEnrollBegin_TokenBoundToDifferentAdmin_Rejected(t *testing.T) {
 	registerAdminCleanup(t, db, adminB.ID)
 
 	enroll := admin.NewEnrollmentStore(rdb)
-	tokenForB, err := enroll.MintEnrollmentToken(ctx, adminB.ID)
+	tokenForB, err := enroll.MintEnrollmentToken(ctx, adminB.ID, adminB.CredentialGeneration)
 	require.NoError(t, err)
 
 	engine, _ := adminEnrollEngine(t, db, rdb)
@@ -612,7 +612,7 @@ func TestAdminCtl_ResetEnrollment_AdminWithNoCredentials(t *testing.T) {
 	token := extractToken(t, stdout.String())
 	require.NotEmpty(t, token)
 	enroll := admin.NewEnrollmentStore(rdb)
-	gotAdminID, err := enroll.ConsumeEnrollmentToken(ctx, token)
+	gotAdminID, _, err := enroll.ConsumeEnrollmentToken(ctx, token)
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, gotAdminID)
 }

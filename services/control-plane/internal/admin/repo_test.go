@@ -236,6 +236,16 @@ func TestAdminRepo_Credentials(t *testing.T) {
 		assert.Equal(t, 1, n)
 	})
 
+	t.Run("FinalizeWebAuthnLogin permits counterless authenticators", func(t *testing.T) {
+		require.NoError(t, repo.SetStatus(ctx, u.ID, admin.StatusActive))
+		first, err := repo.FinalizeWebAuthnLogin(ctx, admin.NewSessionStore(rdb, nil), u.ID, credID, 0)
+		require.NoError(t, err)
+		second, err := repo.FinalizeWebAuthnLogin(ctx, admin.NewSessionStore(rdb, nil), u.ID, credID, 0)
+		require.NoError(t, err)
+		assert.NotEmpty(t, first)
+		assert.NotEmpty(t, second)
+	})
+
 	t.Run("UpdateCredentialSignCount advances the stored counter (clone-detection)", func(t *testing.T) {
 		require.NoError(t, repo.UpdateCredentialSignCount(ctx, credID, 42))
 		var got int64
@@ -276,6 +286,22 @@ func TestAdminRepo_Credentials(t *testing.T) {
 		require.NoError(t, db.QueryRowContext(ctx,
 			`SELECT sign_count FROM admin_webauthn_credentials WHERE credential_id = $1`, credID).Scan(&got))
 		assert.Equal(t, int64(43), got)
+	})
+
+	t.Run("FinalizeWebAuthnLogin rejects a repeated advanced counter before mint", func(t *testing.T) {
+		before, err := rdb.DBSize(ctx).Result()
+		require.NoError(t, err)
+		sid, err := repo.FinalizeWebAuthnLogin(ctx, admin.NewSessionStore(rdb, nil), u.ID, credID, 43)
+		require.ErrorIs(t, err, admin.ErrAdminAuthenticationStateChanged)
+		assert.Empty(t, sid)
+		after, sizeErr := rdb.DBSize(ctx).Result()
+		require.NoError(t, sizeErr)
+		assert.Equal(t, before, after, "a repeated advanced counter must not create a second Redis session")
+
+		var got int64
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT sign_count FROM admin_webauthn_credentials WHERE credential_id = $1`, credID).Scan(&got))
+		assert.Equal(t, int64(43), got, "rejecting a repeated assertion must preserve the advanced counter")
 	})
 
 	t.Run("FinalizeWebAuthnLogin rejects a revoked credential before mint", func(t *testing.T) {

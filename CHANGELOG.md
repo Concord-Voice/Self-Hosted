@@ -71,7 +71,7 @@ later storage migration.
 
 ### Security
 
-- **Admin Console:** Enrollment reset now invalidates earlier enrollment ceremonies and console sessions. WebAuthn sign-in commits the credential counter before issuing a session; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
+- **Admin Console:** Enrollment reset now invalidates earlier enrollment tokens, ceremonies, and console sessions. WebAuthn sign-in persists the credential counter before issuing a session and rejects a stale nonzero counter; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed

@@ -272,7 +272,12 @@ func (r *AdminRepo) FinalizeWebAuthnLogin(ctx context.Context, sessions *Session
 	if err != nil {
 		return "", fmt.Errorf("lock active admin for login: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE admin_webauthn_credentials SET sign_count = $1, last_used_at = now() WHERE credential_id = $2 AND admin_id = $3`, signCount, credentialID, activeAdminID)
+	res, err := tx.ExecContext(ctx, `
+		UPDATE admin_webauthn_credentials
+		SET sign_count = $1, last_used_at = now()
+		WHERE credential_id = $2 AND admin_id = $3
+		  AND (sign_count = 0 OR $1 > sign_count)
+	`, signCount, credentialID, activeAdminID)
 	if err != nil {
 		return "", fmt.Errorf("persist login credential state: %w", err)
 	}

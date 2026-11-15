@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -39,7 +40,7 @@ func pendingAdminWithToken(t *testing.T, db *sql.DB, rdb *redis.Client) (adminID
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, created.ID)
 
-	token, err = enroll.MintEnrollmentToken(ctx, created.ID)
+	token, err = enroll.MintEnrollmentToken(ctx, created.ID, created.CredentialGeneration)
 	require.NoError(t, err)
 	return created.ID, username, token
 }
@@ -105,6 +106,37 @@ func TestEnroll_HappyPath_RegistersKeyAndActivates(t *testing.T) {
 	creds, err := repo.ListCredentials(ctx, adminID)
 	require.NoError(t, err)
 	assert.Len(t, creds, 1)
+}
+
+func TestEnroll_ResetInvalidatesUnspentTokenButFreshTokenBeginsCeremony(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+	ctx := context.Background()
+
+	_, username, preResetToken := pendingAdminWithToken(t, db, rdb)
+	engine, _ := adminEnrollEngine(t, db, rdb)
+	var stdout bytes.Buffer
+	code := admin.RunAdminCtlForTest(ctx, db, rdb, strings.NewReader(""), &stdout, testEnrollBaseURL,
+		[]string{"reset-enrollment", "--username", username})
+	require.Equal(t, 0, code, "stdout: %s", stdout.String())
+
+	stale := postJSON(engine, "/admin/api/v1/enroll/begin", map[string]string{
+		"username": username, "password": adminTestPassword, "token": preResetToken,
+	})
+	assert.Equal(t, http.StatusUnauthorized, stale.Code,
+		"the still-unexpired token issued before reset must not start a ceremony")
+
+	fresh := postJSON(engine, "/admin/api/v1/enroll/begin", map[string]string{
+		"username": username, "password": adminTestPassword, "token": extractToken(t, stdout.String()),
+	})
+	require.Equal(t, http.StatusOK, fresh.Code, fresh.Body.String())
+	var response struct {
+		Handle string `json:"handle"`
+	}
+	require.NoError(t, json.Unmarshal(fresh.Body.Bytes(), &response))
+	assert.NotEmpty(t, response.Handle, "the reset-issued token must begin a new ceremony")
 }
 
 func TestEnroll_WrongPassword_Rejected(t *testing.T) {
@@ -233,7 +265,7 @@ func TestCreateAdmin_ProvisionsPendingAndReturnsTokenOnce(t *testing.T) {
 
 	// The returned token actually consumes against the new admin id.
 	enroll := admin.NewEnrollmentStore(rdb)
-	boundID, err := enroll.ConsumeEnrollmentToken(ctx, resp.EnrollmentToken)
+	boundID, _, err := enroll.ConsumeEnrollmentToken(ctx, resp.EnrollmentToken)
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, boundID)
 }

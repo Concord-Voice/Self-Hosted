@@ -603,13 +603,13 @@ func (h *Handler) EnrollBegin(c *gin.Context) {
 	// A store fault is a 500, not a failed guess: it records no failure. (The
 	// guess itself was counted before the verify, so the fault still costs one
 	// attempt until the next completed enrollment clears the count.)
-	boundAdminID, err := h.enroll.ConsumeEnrollmentToken(ctx, req.Token)
+	boundAdminID, boundGeneration, err := h.enroll.ConsumeEnrollmentToken(ctx, req.Token)
 	if err != nil && !errors.Is(err, ErrEnrollTokenInvalid) {
 		h.log.Error("admin consume enrollment token failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
-	if err != nil || boundAdminID != adminUser.ID {
+	if err != nil || boundAdminID != adminUser.ID || boundGeneration != adminUser.CredentialGeneration {
 		h.failEnroll(c, req.Username, ip)
 		return
 	}
@@ -843,7 +843,7 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		return
 	}
 
-	token, err := h.enroll.MintEnrollmentToken(ctx, created.ID)
+	token, err := h.enroll.MintEnrollmentToken(ctx, created.ID, created.CredentialGeneration)
 	if err != nil {
 		h.log.Error("admin mint enrollment token failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})

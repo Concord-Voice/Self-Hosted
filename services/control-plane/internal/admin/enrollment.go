@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -42,6 +43,11 @@ type EnrollmentStore struct {
 	redis *redis.Client
 }
 
+type enrollmentTokenBinding struct {
+	AdminID              string `json:"admin_id"`
+	CredentialGeneration int64  `json:"credential_generation"`
+}
+
 // NewEnrollmentStore wires an EnrollmentStore against a Redis client.
 func NewEnrollmentStore(rdb *redis.Client) *EnrollmentStore {
 	return &EnrollmentStore{redis: rdb}
@@ -63,9 +69,12 @@ func enrollChallengeIndexKey(adminID string, generation int64) string {
 // (who shows it once to the operator). SetNX guards against the astronomically
 // unlikely hash collision: a duplicate key is treated as an error rather than
 // silently rebinding an existing admin's token.
-func (s *EnrollmentStore) MintEnrollmentToken(ctx context.Context, adminID string) (string, error) {
+func (s *EnrollmentStore) MintEnrollmentToken(ctx context.Context, adminID string, credentialGeneration int64) (string, error) {
 	if adminID == "" {
 		return "", errors.New("admin: MintEnrollmentToken requires an adminID")
+	}
+	if credentialGeneration < 1 {
+		return "", errors.New("admin: MintEnrollmentToken requires a positive credential generation")
 	}
 
 	raw := make([]byte, enrollTokenBytes)
@@ -74,8 +83,12 @@ func (s *EnrollmentStore) MintEnrollmentToken(ctx context.Context, adminID strin
 	}
 	plaintext := hex.EncodeToString(raw)
 
+	binding, err := json.Marshal(enrollmentTokenBinding{AdminID: adminID, CredentialGeneration: credentialGeneration})
+	if err != nil {
+		return "", fmt.Errorf("marshal enrollment token binding: %w", err)
+	}
 	key := enrollKeyPrefix + hashToken(plaintext)
-	ok, err := s.redis.SetNX(ctx, key, adminID, enrollTokenTTL).Result()
+	ok, err := s.redis.SetNX(ctx, key, binding, enrollTokenTTL).Result()
 	if err != nil {
 		return "", fmt.Errorf("store enrollment token: %w", err)
 	}
@@ -85,22 +98,26 @@ func (s *EnrollmentStore) MintEnrollmentToken(ctx context.Context, adminID strin
 	return plaintext, nil
 }
 
-// ConsumeEnrollmentToken atomically reads-and-deletes the token's admin binding
-// (single-use via GETDEL), returning the bound adminID. A second call with the
-// same plaintext — or an unknown/expired token — returns ErrEnrollTokenInvalid.
-func (s *EnrollmentStore) ConsumeEnrollmentToken(ctx context.Context, plaintext string) (string, error) {
+// ConsumeEnrollmentToken atomically reads-and-deletes the token binding
+// (single-use via GETDEL), returning its admin ID and credential generation.
+// Unknown, expired, malformed, and legacy unbound tokens fail closed.
+func (s *EnrollmentStore) ConsumeEnrollmentToken(ctx context.Context, plaintext string) (string, int64, error) {
 	if plaintext == "" {
-		return "", ErrEnrollTokenInvalid
+		return "", 0, ErrEnrollTokenInvalid
 	}
 	key := enrollKeyPrefix + hashToken(plaintext)
-	adminID, err := s.redis.GetDel(ctx, key).Result()
+	raw, err := s.redis.GetDel(ctx, key).Result()
 	if errors.Is(err, redis.Nil) {
-		return "", ErrEnrollTokenInvalid
+		return "", 0, ErrEnrollTokenInvalid
 	}
 	if err != nil {
-		return "", fmt.Errorf("consume enrollment token: %w", err)
+		return "", 0, fmt.Errorf("consume enrollment token: %w", err)
 	}
-	return adminID, nil
+	var binding enrollmentTokenBinding
+	if err := json.Unmarshal([]byte(raw), &binding); err != nil || binding.AdminID == "" || binding.CredentialGeneration < 1 {
+		return "", 0, ErrEnrollTokenInvalid
+	}
+	return binding.AdminID, binding.CredentialGeneration, nil
 }
 
 // DeleteEnrollmentChallenges removes handles bound to a revoked credential generation.

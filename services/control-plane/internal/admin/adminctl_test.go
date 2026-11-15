@@ -58,7 +58,7 @@ func TestAdminCtl_Bootstrap_CreatesPendingAdminAndPrintsToken(t *testing.T) {
 	token := extractToken(t, out)
 	require.NotEmpty(t, token)
 	enroll := admin.NewEnrollmentStore(rdb)
-	gotAdminID, err := enroll.ConsumeEnrollmentToken(ctx, token)
+	gotAdminID, _, err := enroll.ConsumeEnrollmentToken(ctx, token)
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, gotAdminID)
 }
@@ -201,7 +201,7 @@ func TestAdminCtl_ResetEnrollment_RevokesKeysAndMintsToken(t *testing.T) {
 	token := extractToken(t, stdout.String())
 	require.NotEmpty(t, token)
 	enroll := admin.NewEnrollmentStore(rdb)
-	gotAdminID, err := enroll.ConsumeEnrollmentToken(ctx, token)
+	gotAdminID, _, err := enroll.ConsumeEnrollmentToken(ctx, token)
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, gotAdminID)
 }

@@ -237,7 +237,7 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 		return fmt.Errorf("create pending admin: %w", err)
 	}
 
-	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID)
+	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID, adminUser.CredentialGeneration)
 	if err != nil {
 		return fmt.Errorf("mint enrollment token: %w", err)
 	}
@@ -281,7 +281,7 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 	// One transaction advances both fences before removing credentials. A stale
 	// enrollment finish fails closed, and sessions minted before the reset fail
 	// their durable generation check after re-enrollment.
-	revoked, previousGeneration, _, err := deps.repo.ResetEnrollment(ctx, adminUser.ID)
+	revoked, previousGeneration, newGeneration, err := deps.repo.ResetEnrollment(ctx, adminUser.ID)
 	if err != nil {
 		return fmt.Errorf("reset enrollment authority: %w", err)
 	}
@@ -300,7 +300,7 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 		}
 	}
 
-	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID)
+	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID, newGeneration)
 	if err != nil {
 		return fmt.Errorf("mint enrollment token: %w", err)
 	}
