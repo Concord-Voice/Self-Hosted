@@ -296,6 +296,11 @@ PY
   compose exec -T "$BACKUP_PG_SERVICE" pg_restore -U concord -d concord --clean --if-exists \
     --no-owner --single-transaction <"$stage/postgres.dump" \
     || { _restore_stopped 'pg_restore failed; the database is unchanged'; return 1; }
+  # An older backup can revive a refresh token revoked after it was taken.
+  # Use a past timestamp so the 30-second grace-refresh path cannot recover it.
+  compose exec -T "$BACKUP_PG_SERVICE" psql -U concord -d concord -v ON_ERROR_STOP=1 \
+    -c "UPDATE refresh_tokens SET revoked_at = now() - interval '1 hour' WHERE revoked_at IS NULL" >/dev/null \
+    || { _restore_stopped 'cannot revoke restored sessions; re-run restore'; return 1; }
   if [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == bundled ]]; then
     echo 'Restoring bundled MinIO data...'
     # Unpack beside the live data and swap only after tar succeeds, so a bad

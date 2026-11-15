@@ -39,6 +39,7 @@ run_fn() {
       case "$*" in
         'exec -T postgres pg_dump '*) printf 'PGDUMP-DATA' ;;
         'exec -T postgres pg_restore '*) cat >"$WORK/restored.dump" ;;
+        'exec -T postgres psql '*) return "${STUB_REFRESH_REVOKE_RC:-0}" ;;
       esac
       return "${STUB_COMPOSE_RC:-0}"
     }
@@ -94,7 +95,7 @@ PY
 : >"$WORK/calls"
 restore_output="$(run_fn verb_restore "$archive" --confirm 2>&1)"; rc=$?
 order="$(grep -E '^(compose|docker|main) ' "$WORK/calls" | grep -v pg_isready | sed -E 's/^(compose|docker|main) ([a-z-]+( -[a-zA-Z]+)?( [a-z_-]+)?).*/\1 \2/' | tr '\n' '|')"
-if [[ $rc -eq 0 && "$order" == 'compose stop|compose up -d postgres|compose exec -T postgres|docker run --rm|main up|main health|' ]]; then
+if [[ $rc -eq 0 && "$order" == 'compose stop|compose up -d postgres|compose exec -T postgres|compose exec -T postgres|docker run --rm|main up|main health|' ]]; then
   pass "restore stops, restores postgres then MinIO, then runs up and health"
 else
   fail "restore rc=$rc order=$order"
@@ -117,6 +118,39 @@ if [[ $rc -eq 0 && "$retry_jwt" =~ ^[[:xdigit:]]{64}$ && "$retry_jwt" != "$resto
   pass "restore retry accepts the prior rotation and rotates JWT_SECRET again"
 else
   fail "restore retry did not rotate JWT_SECRET safely rc=$rc"
+fi
+
+# A database restore can resurrect a refresh token that was revoked after the
+# backup. Revoke every restored active token before either application plane
+# restarts, and keep the stack stopped if that write fails.
+: >"$WORK/calls"
+run_fn verb_restore "$archive" --confirm >/dev/null 2>&1; rc=$?
+restore_line="$(grep -n '^compose exec -T postgres pg_restore ' "$WORK/calls" | cut -d: -f1)"
+revoke_line="$(grep -n '^compose exec -T postgres psql ' "$WORK/calls" | cut -d: -f1)"
+start_line="$(grep -n '^main up$' "$WORK/calls" | cut -d: -f1)"
+if [[ $rc -eq 0 && -n "$revoke_line" && "$restore_line" -lt "$revoke_line" && "$revoke_line" -lt "$start_line" ]] \
+  && grep -Fq "UPDATE refresh_tokens SET revoked_at = now() - interval '1 hour' WHERE revoked_at IS NULL" "$WORK/calls"; then
+  pass "restore revokes active refresh tokens after PostgreSQL restore and before startup"
+else
+  fail "refresh-token revocation ordering rc=$rc calls=$(cat "$WORK/calls")"
+fi
+
+: >"$WORK/calls"
+err="$(STUB_REFRESH_REVOKE_RC=1 run_fn verb_restore "$archive" --confirm 2>&1 >/dev/null)"; rc=$?
+if [[ $rc -ne 0 ]] && ! grep -q '^main up$' "$WORK/calls"; then
+  pass "refresh-token revocation failure leaves the stack stopped"
+else
+  fail "refresh-token revocation failure rc=$rc err=$err calls=$(cat "$WORK/calls")"
+fi
+
+: >"$WORK/calls"
+run_fn verb_restore "$archive" --confirm >/dev/null 2>&1; rc=$?
+revoke_calls="$(grep -c '^compose exec -T postgres psql ' "$WORK/calls")"
+start_calls="$(grep -c '^main up$' "$WORK/calls")"
+if [[ $rc -eq 0 && "$revoke_calls" -eq 1 && "$start_calls" -eq 1 ]]; then
+  pass "restore retry revokes refresh tokens and starts the stack"
+else
+  fail "refresh-token revocation retry rc=$rc calls=$(cat "$WORK/calls")"
 fi
 
 # ── restore refusals: nothing is stopped ──────────────────────────────
