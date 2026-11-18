@@ -83,9 +83,19 @@ func (rejectedLoginCompleter) CompleteLogin(c *gin.Context, _ string, _ bool, _ 
 	return false
 }
 
+func (rejectedLoginCompleter) CompleteSSOLink(c *gin.Context, _, _, _, _ string) bool {
+	c.Status(http.StatusInternalServerError)
+	return false
+}
+
 type committedLoginCompleter struct{}
 
 func (committedLoginCompleter) CompleteLogin(c *gin.Context, _ string, _ bool, _ string, _ securityevent.AuthMethod) bool {
+	c.Status(http.StatusOK)
+	return true
+}
+
+func (committedLoginCompleter) CompleteSSOLink(c *gin.Context, _, _, _, _ string) bool {
 	c.Status(http.StatusOK)
 	return true
 }
@@ -101,6 +111,10 @@ func (c *recordingLoginCompleter) CompleteLogin(_ *gin.Context, _ string, _ bool
 	c.calls++
 	c.method = method
 	return true
+}
+
+func (c *recordingLoginCompleter) CompleteSSOLink(_ *gin.Context, _, _, _, _ string) bool {
+	return false
 }
 
 func TestCompleteVerifyPurposePreservesSignedPrimaryAuthMethod(t *testing.T) {

@@ -440,9 +440,9 @@ describe('MediaEncryption', () => {
       const ratcheted = await ratchetKey(key);
 
       expect(key.algorithm.name).toBe('AES-GCM');
-      expect((key.algorithm as AesKeyAlgorithm).length).toBe(256);
+      expect(key.algorithm).toHaveProperty('length', 256);
       expect(ratcheted.algorithm.name).toBe('AES-GCM');
-      expect((ratcheted.algorithm as AesKeyAlgorithm).length).toBe(256);
+      expect(ratcheted.algorithm).toHaveProperty('length', 256);
     });
 
     it('initFromKey enables encryptFrame and sets currentKeyId', async () => {

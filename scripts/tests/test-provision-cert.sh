@@ -728,7 +728,7 @@ case "${1:-}" in
     ;;
   inspect)
     [[ "${!#}" == 2504c0ffee11 ]] || exit 94
-    printf '%s\n' '{"Name":"/concordvoice-coturn","Image":"coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e","Project":"concordvoice","Service":"coturn","Status":"running","Running":true,"Paused":false,"Restarting":false}'
+    printf '%s\n' '{"Name":"/concordvoice-coturn","Image":"coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e","Project":"concordvoice","Service":"coturn","Status":"running","Running":true,"Paused":false,"Restarting":false}'
     ;;
   restart)
     [[ "${2:-}" == concordvoice-coturn || "${2:-}" == 2504c0ffee11 ]] || exit 95
