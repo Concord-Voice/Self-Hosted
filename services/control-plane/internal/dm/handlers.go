@@ -1272,10 +1272,8 @@ func (h *Handler) notifyGroupCreated(convID string, memberIDs []string) {
 // GET /dm/conversations/:id
 func (h *Handler) GetConversation(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -1308,10 +1306,8 @@ type AddMemberRequest struct {
 // PATCH /dm/conversations/:id
 func (h *Handler) UpdateConversation(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -1423,10 +1419,8 @@ func (h *Handler) updateConversationTx(ctx context.Context, convID, userID strin
 // POST /dm/conversations/:id/members
 func (h *Handler) AddMember(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -2342,10 +2336,8 @@ func (h *Handler) getParticipantGroupRole(convID, userID string) (bool, string, 
 // GET /dm/conversations/:id/messages
 func (h *Handler) GetMessages(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -2450,10 +2442,8 @@ func (h *Handler) GetMessages(c *gin.Context) {
 // POST /dm/conversations/:id/read
 func (h *Handler) MarkRead(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -2491,10 +2481,8 @@ type dmKeyResponse struct {
 // GET /dm/conversations/:id/keys
 func (h *Handler) GetKeys(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 	actor, err := uuid.Parse(userID)
@@ -2603,6 +2591,18 @@ func (h *Handler) parseUnpausedDMVoiceIDs(c *gin.Context, convID, userID string)
 		return uuid.Nil, uuid.Nil, false
 	}
 	return convUUID, userUUID, true
+}
+
+// conversationIDParam returns the canonical spelling of the :id route
+// parameter so every downstream key, payload, and enforcement subject agrees
+// with the media plane. On failure the 400 has already been written.
+func conversationIDParam(c *gin.Context) (string, bool) {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return "", false
+	}
+	return convID, true
 }
 
 func parseDMVoiceIDs(c *gin.Context, convID, userID string) (uuid.UUID, uuid.UUID, bool) {
@@ -3104,8 +3104,10 @@ func (h *Handler) bindDMVoiceJoinAdmission(c *gin.Context, convUUID, userUUID, c
 // POST /dm/conversations/:id/voice/join
 func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
+	convID, validID := conversationIDParam(c)
+	if !validID {
+		return
+	}
 	convUUID, userUUID, validIDs := h.parseUnpausedDMVoiceIDs(c, convID, userID)
 	if !validIDs {
 		return
@@ -3191,10 +3193,8 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 // GET /dm/conversations/:id/voice/participants
 func (h *Handler) GetVoiceParticipants(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -3646,14 +3646,11 @@ func (h *Handler) updateDMMessageCiphertextAttempt(c *gin.Context, convID, messa
 // written and ok is false.
 func (h *Handler) resolveDMMessageRequest(c *gin.Context) (convID, messageID, userID string, ok bool) {
 	userID = c.GetString("user_id")
-	convID = c.Param("id")
-	messageID = c.Param("message_id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	if convID, ok = conversationIDParam(c); !ok {
 		return "", "", "", false
 	}
-	if _, err := uuid.Parse(messageID); err != nil {
+	messageID, err := requestid.Param(c, "message_id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
 		return "", "", "", false
 	}
@@ -4708,8 +4705,10 @@ func (h *Handler) rejectFailedPendingDMCall(c *gin.Context, convUUID uuid.UUID, 
 // (group follow-up #1219 wires that UX; #1209 returns the metadata anyway).
 func (h *Handler) RingDMCall(c *gin.Context) {
 	callerIDStr := c.GetString("user_id")
-	convIDStr := c.Param("id")
-
+	convIDStr, validID := conversationIDParam(c)
+	if !validID {
+		return
+	}
 	convUUID, callerUUID, validIDs := h.parseUnpausedDMVoiceIDs(c, convIDStr, callerIDStr)
 	if !validIDs {
 		return
@@ -4881,8 +4880,10 @@ func (h *Handler) onRingTimeout(convUUID uuid.UUID, ring *PendingCall) {
 // 409. On failure the HTTP error has already been written and ok is false.
 func (h *Handler) resolvePendingDMRing(c *gin.Context) (ring *PendingCall, convUUID, actorUUID uuid.UUID, tx *sql.Tx, ok bool) {
 	actorIDStr := c.GetString("user_id")
-	convIDStr := c.Param("id")
-
+	convIDStr, validID := conversationIDParam(c)
+	if !validID {
+		return nil, uuid.Nil, uuid.Nil, nil, false
+	}
 	convUUID, err := uuid.Parse(convIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
@@ -5233,8 +5234,10 @@ func (h *Handler) resolveDMVoiceAuthorizeLease(
 // DM room-cap input per ADR-0029) is sourced from here.
 func (h *Handler) AuthorizeDMVoiceForMediaPlane(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
+	convID, validID := conversationIDParam(c)
+	if !validID {
+		return
+	}
 	convUUID, userUUID, validIDs := h.parseUnpausedDMVoiceIDs(c, convID, userID)
 	if !validIDs {
 		return
@@ -5381,8 +5384,10 @@ func nextDMVoiceAuthorizationRevision(ctx context.Context, tx *sql.Tx) (int64, e
 // refuses promoted calls, accepted rings, and successor call IDs.
 func (h *Handler) AbortDMVoiceMediaAuthorization(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
+	convID, validID := conversationIDParam(c)
+	if !validID {
+		return
+	}
 	convUUID, userUUID, validIDs := parseDMVoiceIDs(c, convID, userID)
 	if !validIDs {
 		return
