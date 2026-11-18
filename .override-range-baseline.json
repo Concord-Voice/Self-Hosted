@@ -8,6 +8,12 @@
       "resolved": "11.0.7"
     },
     {
+      "consumer": "node_modules/@microsoft/eslint-formatter-sarif",
+      "dep": "eslint",
+      "range": "^8.9.0",
+      "resolved": "10.14.0"
+    },
+    {
       "consumer": "node_modules/@typescript-eslint/typescript-estree",
       "dep": "minimatch",
       "range": "^10.2.2",

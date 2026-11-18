@@ -8,26 +8,18 @@ credentials, or host data.
 from __future__ import annotations
 
 import importlib.util
-import hashlib
-import io
 import copy
 from collections import Counter
-import ipaddress
 import json
-import math
 import os
-import signal
 import shutil
 import subprocess
-import time
 from types import SimpleNamespace
 from pathlib import Path
 import re
 import sys
 import tempfile
-import tarfile
-import unittest
-from unittest import mock
+import unittest.mock
 
 
 TEST_BASH = shutil.which("bash")
@@ -118,7 +110,7 @@ def live_projection(model: dict | None = None) -> list[dict]:
     model = model or rendered_model()
     images = {"postgres": "concordvoice-postgres:16-alpine",
               "redis": "redis:8-alpine", "nats": "nats:2-alpine",
-              "coturn": "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e",
+              "coturn": "coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e",
               "minio": "ghcr.io/concord-voice/minio@sha256:fixture",
               "ops-agent": "concordvoice-ops-agent:local",
               "control-plane": "concordvoice-control-plane:local",
@@ -2043,7 +2035,7 @@ if name == config["failing"]:
         storage = "infrastructure/deploy/tests/test-selfhost-storage.sh"
         deployment = (*self.DEPLOY_QUEUE_INVENTORY, storage)
         inventory = deployment + self.LIFECYCLE_QUEUE_INVENTORY
-        with mock.patch.object(self, "DEPLOY_QUEUE_INVENTORY", deployment):
+        with unittest.mock.patch.object(self, "DEPLOY_QUEUE_INVENTORY", deployment):
             result, state, expected = self.invoke_static_script_queue(
                 self.QUEUE_STEPS[0], rendezvous=True)
             filtered_result, filtered_state, filtered_expected = self.invoke_static_script_queue(
