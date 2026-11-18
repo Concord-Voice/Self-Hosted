@@ -78,7 +78,7 @@ describe('bufferToBase64url padding trim', () => {
     expect(bufferToBase64url(buffer)).toBe(legacy(buffer));
   });
 
-  it('matches the legacy regex output for every length 0..64 and all byte values', () => {
+  it('matches the legacy regex output for every length 0..64 across sampled byte patterns', () => {
     const all = new Uint8Array(256).map((_, i) => i);
     for (let len = 0; len <= 64; len++) {
       for (let offset = 0; offset < 256; offset += 37) {

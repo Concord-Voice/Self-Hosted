@@ -255,8 +255,8 @@ func (h *Handler) admitRegisteredClient(c *gin.Context, userID uuid.UUID, client
 	// is never swept, and survives until its access token expires (~15m).
 	//
 	// The unbuffered hub.register send in HandleWebSocket (before this helper is
-	// called) blocks until Run receives it, so by here Run has accepted this client and will finish registration before another
-	// disconnect sweep. That gives a total order in both directions:
+	// called) blocks until Run receives it, so by here Run has accepted this client
+	// and will finish registration before another disconnect sweep. That gives a total order in both directions:
 	//   - the reset committed before this check  => we read the new epoch and close;
 	//   - the reset commits after this check     => its disconnectUser send follows our
 	//                                               already-consumed register, so the
