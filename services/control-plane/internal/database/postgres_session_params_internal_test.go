@@ -57,6 +57,24 @@ func TestWithPoolSessionParams(t *testing.T) {
 	})
 }
 
+// lib/pq lets a backslash escape whitespace inside an unquoted key=value
+// value, so a DSN can end in an escaped space. Trimming it would leave the
+// backslash to escape the separator before the appended parameter, folding
+// that parameter into the value and leaving the timeout unset.
+func TestWithPoolSessionParams_EscapedTrailingSpace(t *testing.T) {
+	in := `host=db dbname=concord user=u password=test-pass\ `
+	orig, err := pq.NewConfig(in)
+	require.NoError(t, err)
+	require.Equal(t, "test-pass ", orig.Password, "fixture check: the DSN's password ends in a space")
+
+	out, err := withPoolSessionParams(in)
+	require.NoError(t, err)
+	cfg, err := pq.NewConfig(out)
+	require.NoError(t, err)
+	assert.Equal(t, "test-pass ", cfg.Password, "the password is unchanged")
+	assert.Equal(t, poolIdleInTxValue, cfg.Runtime[poolIdleInTxParam], "the timeout is set")
+}
+
 // TestNew_SetsPoolIdleInTransactionTimeout is the consumer side: a session
 // opened through New reports the bound the server actually applied.
 func TestNew_SetsPoolIdleInTransactionTimeout(t *testing.T) {

@@ -56,7 +56,9 @@ func withPoolSessionParams(databaseURL string) (string, error) {
 		u.RawQuery = q.Encode()
 		return u.String(), nil
 	}
-	return strings.TrimSpace(databaseURL) + " " + poolIdleInTxParam + "=" + poolIdleInTxValue, nil
+	// Appended to as written, never trimmed: a value may end in an escaped
+	// space, and trimming it would leave the backslash to escape our separator.
+	return databaseURL + " " + poolIdleInTxParam + "=" + poolIdleInTxValue, nil
 }
 
 // New creates a new PostgreSQL database connection
