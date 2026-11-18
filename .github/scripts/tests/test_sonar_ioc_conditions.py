@@ -723,13 +723,13 @@ exit "$MOCK_SCAN_EXIT"
                             'chmod +x "$HOME/.local/bin/semgrep"\n')
             fake.chmod(0o755)
 
-            def run(protected, merge_base):
+            def run(protected, merge_base, version="1.0.0"):
                 capture.unlink(missing_ok=True)
                 temp = work / "runner"
                 temp.mkdir(exist_ok=True)
                 env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(work / "home"),
                        "RUNNER_TEMP": str(temp), "GITHUB_PATH": str(work / "github-path"), "CAPTURE": str(capture),
-                       "SEMGREP_VERSION": "1.0.0", "EXTERNAL_VERDICT": protected, "MERGE_BASE_SHA": merge_base}
+                       "SEMGREP_VERSION": version, "EXTERNAL_VERDICT": protected, "MERGE_BASE_SHA": merge_base}
                 return subprocess.run(["bash", "-e", "-c", step["run"]], cwd=repo, env=env, text=True,
                                       capture_output=True)
 
@@ -749,14 +749,125 @@ exit "$MOCK_SCAN_EXIT"
             for label, line in (("index URL", "--index-url https://example.invalid/simple"),
                                 ("find links", "-f https://example.invalid/wheels"), ("editable", "-e ."),
                                 ("URL requirement", "evil @ https://example.invalid/evil.whl \\"),
-                                ("option in a marker", "evil==1 ; os_name == 'x' --global-option=y \\")):
+                                ("option in a marker", "evil==1 ; os_name == 'x' --global-option=y \\"),
+                                ("name read as an option", "-r==x \\")):
                 with self.subTest(case=label):
                     commit(pr_lock + line + "\n", label)
                     result = run("false", "")
                     self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-                    self.assertIn("Only comments, name==version pins and --hash lines", result.stdout)
+                    self.assertIn("Only comments, name==version pins and --hash lines are allowed in "
+                                  ".github/semgrep/requirements.txt;", result.stdout)
                     self.assertFalse(capture.exists(), "nothing may be installed")
+            # pip also ends a line at CR, FF, VT and Unicode separators; grep does not.
+            for label, line in (("carriage return", "ok==1 \\\r--index-url https://example.invalid/simple"),
+                                ("form feed", "ok==1 \\\f-e ."), ("line separator", "ok==1 \\\u2028-e .")):
+                with self.subTest(case=label):
+                    commit(pr_lock + line + "\n", label)
+                    result = run("false", "")
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("may hold printable ASCII lines only", result.stdout)
+                    self.assertFalse(capture.exists(), "nothing may be installed")
+            with self.subTest(case="option line in the protected base copy"):
+                bad_base = commit(base_lock + "--index-url https://example.invalid/simple\n", "bad base")
+                commit(pr_lock, "clean pr")
+                result = run("true", bad_base)
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("(the protected base copy)", result.stdout)
+                self.assertFalse(capture.exists(), "nothing may be installed")
+            with self.subTest(case="pin differs from SEMGREP_VERSION"):
+                result = run("false", "", version="2.0.0")
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("does not pin semgrep==", result.stdout)
+                self.assertFalse(capture.exists(), "nothing may be installed")
+            with self.subTest(case="protected base pins another version than the PR"):
+                other = commit(pr_lock.replace("semgrep==1.0.0", "semgrep==0.9.0"), "older base")
+                commit(pr_lock, "pr again")
+                result = run("true", other)
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("does not pin semgrep==", result.stdout)
+                self.assertFalse(capture.exists(), "the protected run checks the pin of the copy it installs")
+            with self.subTest(case="unreadable lock (grep exit 2)"):
+                target.unlink()
+                target.mkdir()
+                result = run("false", "")
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("could not be read", result.stdout)
+                self.assertFalse(capture.exists(), "nothing may be installed")
         self.assertEqual("${{ inputs.selected-merge-base-sha }}", step.get("env", {}).get("MERGE_BASE_SHA"))
+
+    def test_protected_semgrep_job_keeps_pr_code_off_python_and_caches(self):
+        """#353: no cwd imports, and no PR-writable cache, in the job that produces the trusted SARIF."""
+        root = CHECKER.parents[3]
+        job = yaml.load((root / ".github/workflows/semgrep.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]["semgrep"]
+        self.assertEqual("1", job["env"].get("PYTHONSAFEPATH"))
+        self.assertEqual("", job["env"].get("PYTHONPATH"))
+        self.assertEqual("${{ inputs.external-verdict }}", job["env"].get("EXTERNAL_VERDICT"))
+        caches = [step for step in job["steps"] if "actions/cache" in step.get("uses", "")]
+        self.assertEqual(2, len(caches))
+        for step in caches:
+            with self.subTest(step=step["name"]):
+                self.assertTrue(step["if"].endswith("&& !inputs.external-verdict"), step["if"])
+
+    def test_protected_semgrep_uses_the_base_rules_and_ignore_files(self):
+        """#353: a PR's own .semgrep/ or .semgrepignore change cannot loosen the protected scan."""
+        root = CHECKER.parents[3]
+        steps = yaml.load((root / ".github/workflows/semgrep.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]["semgrep"]["steps"]
+        names = [step.get("name") for step in steps]
+        index = names.index("Use the protected base's rules and ignore files")
+        self.assertEqual("Confirm protected scan checkout", names[index - 1])
+        self.assertLess(index, names.index("Run Semgrep (custom rules)"))
+        step = steps[index]
+        self.assertEqual("inputs.external-verdict", step["if"])
+        self.assertEqual("${{ inputs.selected-merge-base-sha }}", step["env"]["MERGE_BASE_SHA"])
+        scope = ["--", ".semgrep", ":(glob)**/.semgrepignore"]
+        with tempfile.TemporaryDirectory(prefix="semgrep-base-rules-") as tmp:
+            repo = Path(tmp) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid")):
+                git_revision(repo, "config", key, value)
+
+            def write(path, text):
+                (repo / path).parent.mkdir(parents=True, exist_ok=True)
+                (repo / path).write_text(text)
+
+            def commit(message):
+                git_revision(repo, "add", "-A")
+                git_revision(repo, "commit", "-qm", message)
+                return git_revision(repo, "rev-parse", "HEAD")
+
+            write(".semgrep/rule.yml", "rules: [base]\n")
+            write(".semgrepignore", ".semgrep/tests/\n")
+            write("docs/.semgrepignore", "*.md\n")
+            write("app/main.py", "print(1)\n")
+            base = commit("base")
+            write(".semgrep/rule.yml", "rules: []\n")  # PR empties the rules
+            write(".semgrep/extra.yml", "rules: []\n")
+            write(".semgrepignore", "app/\n")  # PR hides its own code
+            (repo / "docs/.semgrepignore").unlink()
+            write("app/.semgrepignore", "*\n")  # nested ignore next to the code
+            write("app/main.py", "eval(input())\n")
+            pr = commit("pr")
+
+            def run(merge_base):
+                return subprocess.run(["bash", "-e", "-c", step["run"]], cwd=repo, text=True, capture_output=True,
+                                      env={**os.environ, "MERGE_BASE_SHA": merge_base})
+
+            for label, merge_base in (("empty", ""), ("not a SHA", "main"), ("unknown", "f" * 40)):
+                with self.subTest(case=label):
+                    result = run(merge_base)
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("is not available", result.stdout)
+                    self.assertEqual(pr, git_revision(repo, "rev-parse", "HEAD"))
+            result = run(base)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual("", git_revision(repo, "status", "--porcelain"), "the diff-aware scan needs a clean tree")
+            self.assertEqual(pr, git_revision(repo, "rev-parse", "HEAD^"))
+            self.assertEqual(0, subprocess.run(["git", "diff", "--quiet", base, "HEAD", *scope], cwd=repo).returncode)
+            self.assertFalse((repo / "app/.semgrepignore").exists(), "a PR-added ignore must not hide a file")
+            self.assertFalse((repo / ".semgrep/extra.yml").exists())
+            self.assertEqual(".semgrep/tests/\n", (repo / ".semgrepignore").read_text())
+            self.assertEqual("*.md\n", (repo / "docs/.semgrepignore").read_text())
+            self.assertEqual("eval(input())\n", (repo / "app/main.py").read_text(), "the PR's code is still scanned")
 
 
 class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):

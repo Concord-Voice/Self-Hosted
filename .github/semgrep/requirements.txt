@@ -8,8 +8,11 @@
 #     1.45.1+ fixes GHSA-mf5v-w3w3-f6cg and GHSA-xcq7-p3pf-p88h)
 #   mcp==1.30.0 (semgrep pins ==1.29.0; 1.30.0 fixes GHSA-5h93-6whr-6q8j, GHSA-84m7-p3x7-pcfv,
 #     GHSA-rwrf-2pqf-9j8j and GHSA-w4fh-qvv9-3v23)
-# The semgrep workflow runs a real scan on every change to this file, so an override that breaks
-# semgrep fails there. Drop an override once a semgrep release pins a fixed version itself.
+# The advisory semgrep run installs the PR's copy of this file and scans with it, so an override
+# that breaks semgrep fails there. The protected run installs main's copy, so a change reaches it
+# only after it merges. Drop an override once a semgrep release pins a fixed version itself.
+# Lines may only be comments, name==version [; marker] pins and --hash lines; the install step
+# refuses any other line in both runs.
 #
 # Regenerate (uv, from the repo root), then re-add this header:
 #   printf '%s\n' opentelemetry-api==1.45.2 opentelemetry-sdk==1.45.2 \
