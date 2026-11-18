@@ -118,6 +118,32 @@ cat >"$WORK/multi-pkg-allowed-last.json" <<'JSON'
     "via": [ { "source": 2, "name": "ws", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] } } }
 JSON
 
+# Scope values that are not exactly "dev" (after trimming and lowercasing).
+cat >"$WORK/allow-ws-scope-space.json" <<'JSON'
+{ "accepted": [ { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "scope": "dev ", "reason": "dev-only build chain", "review_by": "2026-12-31" } ] }
+JSON
+cat >"$WORK/allow-ws-scope-development.json" <<'JSON'
+{ "accepted": [ { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "scope": "development", "reason": "dev-only build chain", "review_by": "2026-12-31" } ] }
+JSON
+# "dеv" with a Cyrillic е (U+0435).
+cat >"$WORK/allow-ws-scope-lookalike.json" <<'JSON'
+{ "accepted": [ { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "scope": "d\u0435v", "reason": "dev-only build chain", "review_by": "2026-12-31" } ] }
+JSON
+
+# One entry per package for a GHSA npm reports for two packages.
+cat >"$WORK/allow-ws-and-other.json" <<'JSON'
+{ "accepted": [
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "reason": "no fix yet", "review_by": "2026-12-31" },
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": "zz-other", "reason": "no fix yet", "review_by": "2026-12-31" } ] }
+JSON
+
+# Two entries for the same (advisory, package), one dev-scoped and one not.
+cat >"$WORK/allow-ws-twice.json" <<'JSON'
+{ "accepted": [
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "scope": "dev", "reason": "dev-only build chain", "review_by": "2026-12-31" },
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "reason": "no fix yet", "review_by": "2026-12-31" } ] }
+JSON
+
 # Production report where the same GHSA reaches production only through
 # zz-other, not through ws.
 cat >"$WORK/prod-other-pkg.json" <<'JSON'
@@ -254,6 +280,19 @@ run_prod "dev-scoped entry passes when advisory is absent from prod graph" \
   "$WORK/high.json" "$WORK/prod-clean.json" "$WORK/allow-ws-devscope.json" 0 "1 accepted, 0 blocking"
 run_prod "dev-scoped entry blocks when advisory IS in the prod graph" \
   "$WORK/high.json" "$WORK/high.json" "$WORK/allow-ws-devscope.json" 1 "reachable in the PRODUCTION dependency graph"
+# One entry per package accepts both; two entries for one package accept none.
+run "one GHSA, one entry per package: both accepted" "$WORK/multi-pkg-allowed-first.json" "$WORK/allow-ws-and-other.json" 0 '2 HIGH/CRITICAL advisory\(ies\); 2 accepted, 0 blocking'
+run "two entries for one (GHSA, package) block" "$WORK/high.json" "$WORK/allow-ws-twice.json" 1 'allowlist has 2 entries for GHSA-96HV-2XVQ-FX4P scoped to package "ws"; keep one'
+# A scope that is not "dev" must not read as no scope. "dev " is trimmed and
+# then verified like "dev"; anything else blocks.
+run_prod "scope \"dev \" is verified like \"dev\" (in prod: blocks)" \
+  "$WORK/high.json" "$WORK/high.json" "$WORK/allow-ws-scope-space.json" 1 "reachable in the PRODUCTION dependency graph"
+run_prod "scope \"dev \" is verified like \"dev\" (absent from prod: accepted)" \
+  "$WORK/high.json" "$WORK/prod-clean.json" "$WORK/allow-ws-scope-space.json" 0 "1 accepted, 0 blocking"
+run_prod "scope \"development\" blocks as unrecognized" \
+  "$WORK/high.json" "$WORK/high.json" "$WORK/allow-ws-scope-development.json" 1 'unrecognized scope "development"'
+run_prod "look-alike scope blocks as unrecognized" \
+  "$WORK/high.json" "$WORK/prod-clean.json" "$WORK/allow-ws-scope-lookalike.json" 1 'unrecognized scope'
 # The prod check is per package too: the GHSA reaching production through
 # zz-other must not void the dev waiver for ws. zz-other blocks on its own
 # record; ws stays accepted (the id-only check printed "0 accepted, 2 blocking").

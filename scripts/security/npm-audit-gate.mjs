@@ -150,9 +150,14 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
   }
   const advisories = extractHighCriticalAdvisories(audit);
 
+  // Entries per advisory id. One GHSA reported for two packages needs one
+  // entry per package, so an id can hold several; each is matched by package.
   const accepted = new Map();
   for (const e of allowlist?.accepted ?? []) {
-    if (e && typeof e.id === 'string') accepted.set(e.id.toUpperCase(), e);
+    if (!e || typeof e.id !== 'string') continue;
+    const id = e.id.toUpperCase();
+    if (!accepted.has(id)) accepted.set(id, []);
+    accepted.get(id).push(e);
   }
 
   // (advisory, package) pairs present in the PRODUCTION-only dependency graph.
@@ -184,25 +189,44 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
   const expired = [];
 
   for (const a of advisories) {
-    const entry = accepted.get(a.id.toUpperCase());
-    if (!entry) {
+    const entries = accepted.get(a.id.toUpperCase());
+    if (!entries) {
       blocked.push(a);
       continue;
     }
     // An entry with no `package` cannot be checked against what npm actually
     // reported, so it does not match anything. Fail closed.
-    if (typeof entry.package !== 'string' || entry.package.trim() === '') {
-      blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} has no "package" field — add "package": "${a.package}" to scope the exception` });
+    const scoped = entries.filter((e) => typeof e.package === 'string' && e.package.trim() !== '');
+    const matches = scoped.filter((e) => normPkg(e.package) === normPkg(a.package));
+    if (matches.length === 0) {
+      const mismatch = scoped.length === 0
+        ? `allowlist entry ${entries[0].id} has no "package" field — add "package": "${a.package}" to scope the exception`
+        : `allowlist entry ${entries[0].id} is scoped to package ${scoped.map((e) => `"${e.package}"`).join(', ')} but npm reported it for "${a.package}"`;
+      blocked.push({ ...a, mismatch });
       continue;
     }
-    if (normPkg(entry.package) !== normPkg(a.package)) {
-      blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} is scoped to package "${entry.package}" but npm reported it for "${a.package}"` });
+    // Two entries for one (advisory, package) leave a reviewer reading one
+    // while the gate applies the other, so neither applies.
+    if (matches.length > 1) {
+      blocked.push({ ...a, mismatch: `allowlist has ${matches.length} entries for ${a.id} scoped to package "${a.package}"; keep one` });
+      continue;
+    }
+    const entry = matches[0];
+    // `scope` is absent or "dev". Any other value (a look-alike character,
+    // "development", a non-string) is a claim the gate cannot verify. Reading
+    // it as no scope would turn a dev-only exception into an unconditional
+    // one, so it blocks.
+    const scope = entry.scope === undefined || entry.scope === null
+      ? ''
+      : (typeof entry.scope === 'string' ? entry.scope.trim().toLowerCase() : null);
+    if (scope !== '' && scope !== 'dev') {
+      blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} has an unrecognized scope ${JSON.stringify(entry.scope)}; only "dev" is supported` });
       continue;
     }
     // A dev-scoped waiver is void the moment npm reports the advisory for the
     // same package in the production graph. With no production report we
     // cannot check the claim, so it blocks rather than passing vacuously.
-    if (String(entry.scope ?? '').toLowerCase() === 'dev') {
+    if (scope === 'dev') {
       if (!prodKeys) {
         const why = prodUsable === 'unusable'
           ? 'the production-only audit report was unusable (npm likely failed), so the claim could not be verified'
