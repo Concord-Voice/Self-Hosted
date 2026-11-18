@@ -18,6 +18,7 @@ several — it splits `scripts/concord-dev.sh` by area:
 - `test-concord-dev-env-drift.sh` — env-file drift detection
 - `test-concord-dev-helpers.sh` — helper functions via source
 - `test-concord-dev-logs.sh` — logs verb
+- `test-concord-dev-npm-ci.sh` — lock-stamped `npm ci` helper used by `up` / `rebuild` (npm stubbed)
 - `test-concord-dev-pid.sh` — PID lifecycle (real fork/kill)
 - `test-concord-dev-preflight.sh` — pre-flight error paths
 
