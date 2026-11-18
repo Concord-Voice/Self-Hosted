@@ -336,8 +336,8 @@ updates:
   # .github/requirements-pyyaml.txt is consumed by ioc-scanning.yml, pr-ci.yml,
   # workflow-validate.yml, selfhost-release-guards.yml and the pin check in
   # required-pr-build.yml, which installs it on the runner's system Python, so it
-  # carries the cp312-cp314 x86_64 wheel hashes. It is the repo's only pip manifest and appears
-  # in the CycloneDX SBOM as the sole pkg:pypi component, so it was the one
+  # carries the cp312-cp314 x86_64 wheel hashes. It was the repo's first pip manifest and
+  # the sole pkg:pypi component in the CycloneDX SBOM, so it was the one
   # ecosystem in the SBOM with no dependabot coverage at all.
   - package-ecosystem: "pip"
     directory: "/.github"
@@ -356,6 +356,31 @@ updates:
     open-pull-requests-limit: 5
     groups:
       python-tooling:
+        patterns:
+          - "*"
+
+  # .github/semgrep/requirements.txt is semgrep.yml's hash lock, installed with
+  # --no-deps because it overrides some of semgrep's own exact pins (see its
+  # header). One grouped PR keeps the set together; the semgrep workflow runs a
+  # real scan on it. A semgrep bump also needs SEMGREP_VERSION in semgrep.yml,
+  # and the install step fails with that hint until it matches.
+  - package-ecosystem: "pip"
+    directory: "/.github/semgrep"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    open-pull-requests-limit: 5
+    groups:
+      semgrep-tooling:
         patterns:
           - "*"
 
