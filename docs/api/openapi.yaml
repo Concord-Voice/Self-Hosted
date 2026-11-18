@@ -23767,6 +23767,9 @@ components:
         user_id:
           type: string
           format: uuid
+        key_version:
+          type: integer
+          description: Present when the request names a key version.
         created_at:
           type: string
           format: date-time
