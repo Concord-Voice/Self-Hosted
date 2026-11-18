@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -3068,11 +3069,50 @@ func strandsSignIn(enabledMethods, recoveryOnlyMethods []string) bool {
 		countLoginEligible(enabledMethods, recoveryOnlyMethods) == 0
 }
 
-// filterValidRecoveryOnly returns only those requested methods that are actually enabled.
+// The closed method sets of the two method-list routes (VULN-028). Each route's
+// raw cap equals its set size: a longer list must repeat a value, so it is
+// refused on its length before any entry is read.
+var (
+	recoveryOnlyMethodSet  = []string{"totp", "webauthn", "email", "sms"}
+	emailSmsSetupMethodSet = []string{"email", "sms"}
+)
+
+const (
+	maxRecoveryOnlyMethods  = 4
+	maxEmailSmsSetupMethods = 2
+
+	errMsgRecoveryOnlyMethods = "methods must be at most 4 of 'totp', 'webauthn', 'email' and 'sms'"
+	errMsgEmailSmsMethods     = "methods must be 'email' and/or 'sms'"
+)
+
+var errEmailSmsMethodSet = errors.New("email/SMS setup methods are not a bounded set")
+
+// normalizeMethodSet bounds a client-supplied MFA method list. It refuses a
+// list longer than maxRaw before reading any entry and any value outside
+// allowed, and returns the first-seen unique values. The result is never nil,
+// so an empty list binds as '{}', not NULL.
+func normalizeMethodSet(raw, allowed []string, maxRaw int) ([]string, bool) {
+	if len(raw) > maxRaw {
+		return nil, false
+	}
+	unique := make([]string, 0, len(raw))
+	for _, m := range raw {
+		if !slices.Contains(allowed, m) {
+			return nil, false
+		}
+		if !slices.Contains(unique, m) {
+			unique = append(unique, m)
+		}
+	}
+	return unique, true
+}
+
+// filterValidRecoveryOnly returns the requested methods that are actually
+// enabled, each once, so the stored list is bounded by the enabled set.
 func filterValidRecoveryOnly(requested []string, enabled map[string]bool) []string {
 	var valid []string
 	for _, m := range requested {
-		if enabled[m] {
+		if enabled[m] && !slices.Contains(valid, m) {
 			valid = append(valid, m)
 		}
 	}
@@ -3105,13 +3145,15 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequest})
 		return
 	}
-
-	if _, ok := h.requirePasswordAndMFA(c, userID, req.mfaStepUpCredentials, recoveryOnlyStepUp); !ok {
+	// Bound the list before step-up spends any budget or touches Redis.
+	requested, valid := normalizeMethodSet(req.Methods, recoveryOnlyMethodSet, maxRecoveryOnlyMethods)
+	if !valid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgRecoveryOnlyMethods})
 		return
 	}
 
-	if req.Methods == nil {
-		req.Methods = []string{}
+	if _, ok := h.requirePasswordAndMFA(c, userID, req.mfaStepUpCredentials, recoveryOnlyStepUp); !ok {
+		return
 	}
 
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -3132,7 +3174,7 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 		return
 	}
 
-	if strandsSignIn(enabledMethods, req.Methods) {
+	if strandsSignIn(enabledMethods, requested) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one MFA method must remain eligible for login"})
 		return
 	}
@@ -3141,7 +3183,7 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 	for _, m := range enabledMethods {
 		enabled[m] = true
 	}
-	validRecoveryOnly := filterValidRecoveryOnly(req.Methods, enabled)
+	validRecoveryOnly := filterValidRecoveryOnly(requested, enabled)
 	// Clearing sends `methods: []`, which filters to a nil slice; pq.Array(nil)
 	// binds SQL NULL and the NOT NULL column refuses it. Clearing stores '{}'.
 	if validRecoveryOnly == nil {
@@ -3223,23 +3265,28 @@ func generateNumericCode(digits int) (string, error) {
 	return fmt.Sprintf("%0*d", digits, n), nil
 }
 
-// validateEmailSmsMethods checks that all requested methods are valid and available.
-// Returns (errorMessage, httpStatusCode). Empty errorMessage means OK.
-func (h *Handler) validateEmailSmsMethods(methods []string) (string, int) {
-	for _, m := range methods {
-		if m == "sms" && !h.devCodesAllowed() {
-			return "SMS MFA is not yet available. Requires SMS provider integration.", http.StatusForbidden
-		}
-		if m != "email" && m != "sms" {
-			return "methods must be 'email' and/or 'sms'", http.StatusBadRequest
-		}
+// validateEmailSmsMethods normalizes the requested methods to at least one of
+// email and SMS, each once, and checks that they are available. It returns the
+// normalized methods, or an error message and HTTP status.
+func (h *Handler) validateEmailSmsMethods(raw []string) ([]string, string, int) {
+	methods, ok := normalizeMethodSet(raw, emailSmsSetupMethodSet, maxEmailSmsSetupMethods)
+	if !ok || len(methods) == 0 {
+		return nil, errMsgEmailSmsMethods, http.StatusBadRequest
 	}
-	return "", 0
+	if slices.Contains(methods, "sms") && !h.devCodesAllowed() {
+		return nil, "SMS MFA is not yet available. Requires SMS provider integration.", http.StatusForbidden
+	}
+	return methods, "", 0
 }
 
 // generateAndStoreEmailSmsCodes generates codes for each method and stores them in Redis.
+// It refuses anything but a bounded set before generating or storing any code.
 func (h *Handler) generateAndStoreEmailSmsCodes(ctx context.Context, userID string, methods []string) (map[string]string, error) {
-	codes := make(map[string]string)
+	methods, ok := normalizeMethodSet(methods, emailSmsSetupMethodSet, maxEmailSmsSetupMethods)
+	if !ok || len(methods) == 0 {
+		return nil, errEmailSmsMethodSet
+	}
+	codes := make(map[string]string, len(methods))
 	for _, method := range methods {
 		code, err := generateNumericCode(6)
 		if err != nil {
@@ -3307,7 +3354,8 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		return
 	}
 
-	if errMsg, status := h.validateEmailSmsMethods(req.Methods); errMsg != "" {
+	methods, errMsg, status := h.validateEmailSmsMethods(req.Methods)
+	if errMsg != "" {
 		c.JSON(status, gin.H{"error": errMsg})
 		return
 	}
@@ -3324,7 +3372,7 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		return
 	}
 
-	for _, method := range req.Methods {
+	for _, method := range methods {
 		if method == "email" && !h.canSendSetupEmail() {
 			h.log.Error("Email MFA setup requested with no email delivery configured")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgEmailNotConfigured})
@@ -3339,7 +3387,7 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		return
 	}
 
-	codes, err := h.generateAndStoreEmailSmsCodes(ctx, userID, req.Methods)
+	codes, err := h.generateAndStoreEmailSmsCodes(ctx, userID, methods)
 	if err != nil {
 		h.log.Error("Failed to prepare email/SMS setup codes", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to prepare verification codes"})
@@ -3353,7 +3401,7 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 	h.clearStepUpAfterSuccess(c, userID)
 	resp := gin.H{
 		"message":    "Verification codes sent",
-		"methods":    req.Methods,
+		"methods":    methods,
 		"expires_in": "10 minutes",
 	}
 	if h.devCodesAllowed() {
