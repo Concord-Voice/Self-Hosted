@@ -21,6 +21,7 @@ import zipfile
 
 
 REPO = "Concord-Voice/Self-Hosted"
+GO_MODULE_PREFIXES = ("github.com/Concord-Voice/Self-Hosted/", "github.com/Concord-Voice/Concord-Voice-Alpha/")
 API = f"https://api.github.com/repos/{REPO}"
 ROOT = Path(__file__).resolve().parents[2]
 GIT_REMOTE = f"https://github.com/{REPO}.git"
@@ -487,10 +488,10 @@ def validate_report(content, component):
             raise Reject("Go coverage empty")
         for path in records:
             safe_path(path)
-            # Self-Hosted's control plane kept Alpha's Go module path through the
-            # split, so `go test` coverage names files under it. Retire this
-            # alternative together with any module rename.
-            if not (path.startswith(prefix + "/") or path.startswith("github.com/Concord-Voice/Concord-Voice-Alpha/" + prefix + "/")):
+            # `go test` coverage names files by Go import path, so a coverage path
+            # may carry the control plane's module path prefix. Both the current
+            # and the previous module paths are accepted while the rename lands.
+            if not (path.startswith(prefix + "/") or any(path.startswith(m + prefix + "/") for m in GO_MODULE_PREFIXES)):
                 raise Reject("Go coverage source outside component")
         return content
     found = 0

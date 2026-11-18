@@ -421,6 +421,18 @@ class PrepareTest(unittest.TestCase):
         self.prepare()
         self.assertFalse((self.root / "analysis/services/control-plane/coverage.out").exists())
 
+    def test_go_coverage_accepts_module_path_prefix(self):
+        self.zips[3] = zipped("coverage.out",
+                              b"mode: atomic\ngithub.com/Concord-Voice/Self-Hosted/services/control-plane/internal/x.go:1.1,2.1 1 1\n")
+        self.prepare()
+        self.assertTrue((self.root / "analysis/services/control-plane/coverage.out").is_file())
+
+    def test_go_coverage_rejects_other_module_prefix(self):
+        self.zips[3] = zipped("coverage.out",
+                              b"mode: atomic\ngithub.com/example/other/services/control-plane/internal/x.go:1.1,2.1 1 1\n")
+        with self.assertRaisesRegex(MODULE.Reject, "outside component"):
+            self.prepare()
+
     def test_go_coverage_rejects_parent_traversal(self):
         self.zips[3] = zipped("coverage.out",
                               b"mode: atomic\nservices/control-plane/../../../../tmp/fictional-secret:1.1,2.1 1 1\n")
