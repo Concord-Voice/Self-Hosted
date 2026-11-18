@@ -26,6 +26,7 @@
     "typescript-eslint": "^8.72.2",
     "vitest": "^5.0.5"
   },
+  "//overrides_security": "minimatch@^11.0.3 (2026-11-18) closes GHSA-g3hv-75wg-m249 (>= 7.0.0, < 11.0.1; no 10.x backport). It forces eslint 10.14.0, @eslint/config-array and @typescript-eslint/typescript-estree past their declared 10.x ranges, recorded in .override-range-baseline.json. eslint 10.15.0 and typescript-eslint 8.73.0 declare minimatch 11 but were inside the 7-day release-age cooldown; remove this override and its baseline rows once those parent bumps land (docs/ci/minimatch-advisory-repair.md). @microsoft/eslint-formatter-sarif > eslint = $eslint removes a nested eslint 8 copy (CVE-2025-50537) that never ran: the formatter loads ESLint with require.main.require('eslint'), so it always used the root eslint. Its baseline row records that skew.",
   "overrides": {
     "@microsoft/eslint-formatter-sarif": {
       "eslint": "$eslint"
