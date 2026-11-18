@@ -735,7 +735,7 @@ func TestOIDCVerifier_ImmutableSubjectPrefix(t *testing.T) {
 	require.Equal(t, immutableSubject, sub)
 
 	rejected := map[string]string{
-		"name-form token":     "repo:Concord-Voice/Self-Hosted:ref:refs/heads/main",
+		"name-form subject":   "repo:Concord-Voice/Self-Hosted:ref:refs/heads/main",
 		"wrong owner id":      "repo:Concord-Voice@999999999/Self-Hosted@1359565266:ref:refs/heads/main",
 		"wrong repo id":       "repo:Concord-Voice@264583090/Self-Hosted@999:ref:refs/heads/main",
 		"repo id with suffix": "repo:Concord-Voice@264583090/Self-Hosted@13595652660:ref:refs/heads/main",
