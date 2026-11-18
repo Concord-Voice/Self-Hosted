@@ -161,7 +161,7 @@ describe('camera layer policy parity (client renderer vs media-plane governor)',
     // The portrait half must actually be in the sweep. The floor above is a
     // product, so dropping PORTRAIT_SIZES and editing the expected count keeps
     // it green — this is what makes that impossible without a visible lie.
-    expect(SIZES.length).toBe(LANDSCAPE_SIZES.length + PORTRAIT_SIZES.length);
+    expect(SIZES).toHaveLength(LANDSCAPE_SIZES.length + PORTRAIT_SIZES.length);
     expect(PORTRAIT_SIZES.every(([w, h]) => h > w)).toBe(true);
   });
 

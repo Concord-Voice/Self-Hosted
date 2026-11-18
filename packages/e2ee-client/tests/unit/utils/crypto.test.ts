@@ -43,14 +43,14 @@ describe('crypto utilities', () => {
       const base64 = arrayBufferToBase64(empty.buffer);
       expect(base64).toBe('');
       const back = new Uint8Array(base64ToArrayBuffer(base64));
-      expect(back.length).toBe(0);
+      expect(back).toHaveLength(0);
     });
   });
 
   describe('generateSalt', () => {
     it('returns 16 bytes', () => {
       const salt = generateSalt();
-      expect(salt.length).toBe(16);
+      expect(salt).toHaveLength(16);
     });
 
     it('returns different salts each time', () => {
@@ -261,7 +261,7 @@ describe('crypto utilities', () => {
     it('parseRecoveryKey strips dashes and decodes to 32 bytes', () => {
       const key = generateRecoveryKey();
       const bytes = parseRecoveryKey(key);
-      expect(bytes.length).toBe(32);
+      expect(bytes).toHaveLength(32);
     });
 
     it('generates unique keys each time', () => {
