@@ -59,7 +59,7 @@ make migrate-version
 1. **Always create both UP and DOWN migrations** - Every migration must be reversible
 2. **Test rollbacks** - Make sure your down migration properly reverses the up migration
 3. **One logical change per migration** - Do not mix unrelated schema changes
-4. **Know the runner's transaction boundary** - The runner uses golang-migrate v4.20.1 with the default PostgreSQL driver configuration. Each file is sent as one simple-query `Exec`; PostgreSQL wraps a multi-statement query in one implicit transaction. Put each `CREATE INDEX CONCURRENTLY` in its own one-statement file, because it cannot run inside a transaction block.
+4. **Know the runner's transaction boundary** - The runner uses golang-migrate v4 (version pinned in `services/control-plane/go.mod`) with the default PostgreSQL driver configuration. Each file is sent as one simple-query `Exec`; PostgreSQL wraps a multi-statement query in one implicit transaction. Put each `CREATE INDEX CONCURRENTLY` in its own one-statement file, because it cannot run inside a transaction block.
 5. **Avoid data migrations in schema migrations** - Consider separate data migration scripts
 6. **Never modify committed migrations** - Create new migrations to fix issues
 7. **Pass squawk** - The `squawk` pre-commit hook and the `migration-lint` PR CI job lint new and changed `*.up.sql` files against `.squawk.toml` (PostgreSQL 16). Run it by hand with `pre-commit run squawk --files <file>`. Suppress a false positive on one statement with `-- squawk-ignore <rule>` and a reason; see `[internal]rules/migrations.md` § Migration linting (squawk)
