@@ -13,6 +13,13 @@
 # is an overwrite and is blocked like Edit.
 #
 # Fails closed: any parsing failure blocks the tool invocation.
+#
+# Threat model: this guards against an automated editing tool changing a shipped
+# migration by accident, including through a path spelling the tool resolves
+# differently from this hook. It is not a security boundary: the Bash tool is not
+# guarded, so an agent set on changing a migration can always do it. Deliberate
+# constructions (a symlink plus a decoy file, rewriting .claude/repo-config.json
+# first, non-ASCII blanks before an apply_patch header) are out of scope.
 
 if ! command -v jq >/dev/null 2>&1 || ! command -v realpath >/dev/null 2>&1; then
     echo "BLOCKED: jq and realpath are required for protect-applied-migrations.sh but are not installed." >&2
@@ -37,49 +44,96 @@ MIGRATIONS_DIR=$(realpath "$REPO_ROOT/${MIGRATIONS_REL%/}") || {
     exit 2
 }
 
+TAB=$'\t'
+
+fail_parse() {
+    echo "BLOCKED: Failed to parse hook input in protect-applied-migrations.sh. Failing closed." >&2
+    exit 2
+}
+
 INPUT=$(cat)
 
-if ! printf '%s' "$INPUT" | jq -e '
+# Path fields must be strings without control characters: a newline would split
+# one path into several harmless-looking entries below.
+printf '%s' "$INPUT" | jq -e '
     type == "object" and
     (.tool_input | type == "object") and
     ([.tool_input.file_path?, .tool_input.path?, .tool_input.command?]
         | map(select(. != null))
-        | all(type == "string"))
-' >/dev/null 2>&1; then
-    echo "BLOCKED: Failed to parse hook input in protect-applied-migrations.sh. Failing closed." >&2
-    exit 2
-fi
+        | all(type == "string")) and
+    ([.tool_input.file_path?, .tool_input.path?]
+        | map(select(. != null))
+        | all(explode | any(. < 32 or . == 127) | not)) and
+    ((.cwd? // "") | type == "string")
+' >/dev/null 2>&1 || fail_parse
 
-FILE_PATHS=$(printf '%s' "$INPUT" | jq -r '
+TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
+PATCH_COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
+# The editing tool resolves a relative path against the session cwd, not the
+# project root, so resolve it the same way.
+HOOK_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty')
+REL_BASE="${HOOK_CWD:-$REPO_ROOT}"
+
+# One "mode<TAB>path" entry per path. A "create" may make a file that does not
+# exist yet; an "edit" must never reach an existing migration.
+if [[ "$TOOL_NAME" = "Write" ]]; then FIELD_MODE=create; else FIELD_MODE=edit; fi
+ENTRIES=$(printf '%s' "$INPUT" | jq -r --arg m "$FIELD_MODE" '
     [.tool_input.file_path?, .tool_input.path?]
     | map(select(. != null))
     | .[]
+    | $m + "\t" + .
 ')
-PATCH_COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
-TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
 
 if [ -n "$PATCH_COMMAND" ]; then
     if [[ "$PATCH_COMMAND" != '*** Begin Patch'* || "$PATCH_COMMAND" != *'*** End Patch' ]]; then
-        echo "BLOCKED: Failed to parse hook input in protect-applied-migrations.sh. Failing closed." >&2
-        exit 2
+        fail_parse
     fi
-    PATCH_PATHS=$(printf '%s\n' "$PATCH_COMMAND" | sed -nE \
-        -e 's/^\*\*\* (Update|Delete) File: (.+)$/\2/p' \
-        -e 's/^\*\*\* Move to: (.+)$/\1/p')
-    FILE_PATHS="${FILE_PATHS}${FILE_PATHS:+$'\n'}${PATCH_PATHS}"
-elif [ -z "$FILE_PATHS" ]; then
-    echo "BLOCKED: Failed to parse hook input in protect-applied-migrations.sh. Failing closed." >&2
-    exit 2
+    # apply_patch trims hunk header lines, so match markers after leading blanks
+    # and regardless of case. Add File overwrites an existing file: check it
+    # like Write.
+    PATCH_ENTRIES=$(printf '%s\n' "$PATCH_COMMAND" | awk '
+        { t = $0; sub(/^[[:space:]]+/, "", t); l = tolower(t) }
+        index(l, "*** add file: ") == 1    { print "create\t" substr(t, 15); next }
+        index(l, "*** update file: ") == 1 { print "edit\t" substr(t, 18); next }
+        index(l, "*** delete file: ") == 1 { print "edit\t" substr(t, 18); next }
+        index(l, "*** move to: ") == 1     { print "create\t" substr(t, 14); next }
+    ')
+    ENTRIES="${ENTRIES}${ENTRIES:+$'\n'}${PATCH_ENTRIES}"
+elif [[ -z "$ENTRIES" ]]; then
+    fail_parse
 fi
 
-[ -z "$FILE_PATHS" ] && exit 0
+[[ -z "$ENTRIES" ]] && exit 0
+
+# Refuse a path that starts or ends with a character an editing tool may trim:
+# the union of JavaScript trim() and Rust trim() (Unicode White_Space plus
+# U+FEFF), and U+200B. One jq call checks every entry by code point, because
+# bash's [[:space:]] depends on the locale and misses U+00A0 and the like.
+printf '%s\n' "$ENTRIES" | jq -Rne '
+    [inputs | sub("^[^\t]*\t"; "") | explode | (.[0], .[-1])
+        | (. != null) and ((. >= 9 and . <= 13) or . == 32 or . == 133 or . == 160 or . == 5760
+            or (. >= 8192 and . <= 8203) or . == 8232 or . == 8233 or . == 8239
+            or . == 8287 or . == 12288 or . == 65279)]
+    | any | not' >/dev/null 2>&1 || {
+    echo "BLOCKED: A hook path starts or ends with a blank the editing tool may trim. Failing closed." >&2
+    exit 2
+}
 
 canonicalize_path() {
-    local raw_path=$1 candidate parent base canonical_parent
+    local raw_path=$1 mode=$2 candidate parent base canonical_parent next_parent segment
+
+    # Refuse spellings the editing tool resolves differently from this hook:
+    # it trims surrounding whitespace and expands a leading ~ to $HOME, and a
+    # control character has no place in a real path.
+    [[ -n "$raw_path" ]] || return 1
+    [[ "$raw_path" != *[[:cntrl:]]* ]] || return 1
+    [[ "$raw_path" != "~"* ]] || return 1
 
     candidate=$raw_path
     if [[ "$candidate" != /* ]]; then
-        candidate="$REPO_ROOT/$candidate"
+        # Only a relative path needs the session cwd; it must be an existing absolute directory.
+        [[ "$REL_BASE" = /* && -d "$REL_BASE" ]] || return 1
+        candidate="$REL_BASE/$candidate"
     fi
 
     if [[ -e "$candidate" || -L "$candidate" ]]; then
@@ -89,6 +143,25 @@ canonicalize_path() {
 
     parent=$(dirname "$candidate")
     base=$(basename "$candidate")
+    # A missing final `.` or `..` names a directory, never a migration file; refuse it too.
+    [[ "$base" != "." && "$base" != ".." ]] || return 1
+    # Only a create can need missing directories (Write makes them). An edit
+    # whose parent is missing cannot be resolved, so it fails closed below.
+    if [[ "$mode" = "create" ]]; then
+        # Refuse ambiguous traversal and broken symlinks in the missing suffix;
+        # otherwise a later mkdir could make a seemingly new path reach an
+        # existing migration through `..` or a symlink.
+        while [[ ! -d "$parent" ]]; do
+            [[ -e "$parent" || -L "$parent" ]] && return 1
+            next_parent=$(dirname "$parent")
+            [[ "$next_parent" != "$parent" ]] || return 1
+            # An [[ ]] test, not a case pattern: Semgrep 1.121's bash parser rejects `.|..)`.
+            segment=$(basename "$parent")
+            [[ "$segment" != "." && "$segment" != ".." ]] || return 1
+            base="$segment/$base"
+            parent=$next_parent
+        done
+    fi
     # GNU realpath permits a missing final component by default and preserves
     # caller-supplied casing on a case-insensitive filesystem. Entering the
     # parent requires it to exist; external /bin/pwd -P then reports its
@@ -98,18 +171,18 @@ canonicalize_path() {
     printf '%s/%s\n' "$canonical_parent" "$base"
 }
 
-while IFS= read -r FILE_PATH; do
-    if ! CANONICAL_PATH=$(canonicalize_path "$FILE_PATH"); then
-        echo "BLOCKED: Failed to resolve hook path '$FILE_PATH'. Failing closed." >&2
-        exit 2
-    fi
+# Same file (device + inode) as a shipped migration, whatever the spelling:
+# covers MIGRATIONS/ vs migrations/ and other case-folded names.
+is_existing_migration() {
+    local target=$1 m
+    for m in "$MIGRATIONS_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9]_*.up.sql "$MIGRATIONS_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9]_*.down.sql; do
+        [[ -e "$m" && "$target" -ef "$m" ]] && return 0
+    done
+    return 1
+}
 
-    # A Write that creates a brand-new file is how new migrations are added.
-    if [[ "$TOOL_NAME" = "Write" ]] && [[ ! -e "$CANONICAL_PATH" ]] && [[ ! -L "$CANONICAL_PATH" ]]; then
-        continue
-    fi
-    if [[ "$(dirname "$CANONICAL_PATH")" == "$MIGRATIONS_DIR" && "$(basename "$CANONICAL_PATH")" =~ ^[0-9]{6}_.*\.(up|down)\.sql$ ]]; then
-        cat >&2 <<EOF
+block() {
+    cat >&2 <<EOF
 BLOCKED: Cannot ${TOOL_NAME:-Edit} an existing migration file:
     $FILE_PATH
 
@@ -122,8 +195,27 @@ Write tool, e.g.:
 If you genuinely need to correct an unreleased migration, make the edit
 directly via your editor (this hook guards automated editing tools).
 EOF
+    exit 2
+}
+
+while IFS= read -r ENTRY; do
+    MODE=${ENTRY%%"$TAB"*}
+    FILE_PATH=${ENTRY#*"$TAB"}
+    if ! CANONICAL_PATH=$(canonicalize_path "$FILE_PATH" "$MODE"); then
+        echo "BLOCKED: Failed to resolve hook path '$FILE_PATH'. Failing closed." >&2
         exit 2
     fi
-done <<< "$FILE_PATHS"
+
+    # A create of a brand-new file is how new migrations are added.
+    if [[ "$MODE" = "create" ]] && [[ ! -e "$CANONICAL_PATH" ]] && [[ ! -L "$CANONICAL_PATH" ]]; then
+        continue
+    fi
+    if [[ -e "$CANONICAL_PATH" ]] && is_existing_migration "$CANONICAL_PATH"; then
+        block
+    fi
+    if [[ "$(dirname "$CANONICAL_PATH")" == "$MIGRATIONS_DIR" && "$(basename "$CANONICAL_PATH")" =~ ^[0-9]{6}_.*\.(up|down)\.sql$ ]]; then
+        block
+    fi
+done <<< "$ENTRIES"
 
 exit 0

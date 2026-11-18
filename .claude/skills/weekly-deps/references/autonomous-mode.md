@@ -48,7 +48,7 @@ This is already encoded in Phase 3.5's conditions in SKILL.md; just confirming i
 
 ### Step P3a: Record review coverage
 
-Run SKILL.md Step 3.7.1 for every PR. Prep records only: zero coverage gets its line in the digest and nothing else, because when Copilot is available it is requested in Step P4 and needs the window until triage; when it is not, triage closes the gap.
+Run SKILL.md Step 3.7.1 for every PR. Prep records only: zero coverage gets its line in the digest and nothing else, because Copilot is requested in Step P4 and needs the window until triage.
 
 ### Step P4: Request Copilot review (idempotent)
 
@@ -56,12 +56,19 @@ Run Phase 3.6 for every LOW / UNKNOWN PR. In autonomous mode there's no develope
 
 ```bash
 for PR in $LOW_PRS; do
-  ALREADY_REQUESTED=$(gh pr view $PR --json reviewRequests \
-    --jq '[.reviewRequests[] | select(.login == "Copilot" or .login == "copilot-pull-request-reviewer")] | length')
-  ALREADY_REVIEWED=$(gh pr view $PR --json reviews \
-    --jq '[.reviews[] | select(.author.login == "copilot-pull-request-reviewer")] | length')
+  # pr_requested is defined in SKILL.md § Reading PR state when the token is limited. It prints
+  # "unknown" when the reviewer list cannot be read; a failed read is not a count of zero.
+  # Read once. Empty, "unknown", or a REST-only list without Copilot cannot rule out a request.
+  REQ=$(pr_requested "$PR")
+  if [ -z "$REQ" ] || [ "$REQ" = unknown ] || { ! grep -qiE '^copilot' <<<"$REQ" && grep -qx 'source: rest' <<<"$REQ"; }; then
+    echo "Copilot state unknown (reviewer list not readable): #$PR"; continue
+  fi
+  ALREADY_REQUESTED=$(grep -ciE '^(copilot|copilot-pull-request-reviewer(\[bot\])?)$' <<<"$REQ")
+  ALREADY_REVIEWED=$(gh pr view $PR -R "$OWNER_REPO" --json reviews \
+    --jq '[.reviews[] | select(.author.login == "copilot-pull-request-reviewer")] | length' 2>/dev/null || echo unknown)
+  [ "$ALREADY_REVIEWED" = unknown ] && { echo "Copilot state unknown (reviews not readable): #$PR"; continue; }
   if [ "$ALREADY_REQUESTED" = "0" ] && [ "$ALREADY_REVIEWED" = "0" ]; then
-    gh pr edit $PR --add-reviewer "@copilot" && echo "Requested: #$PR" || echo "Failed: #$PR"
+    gh pr edit $PR -R "$OWNER_REPO" --add-reviewer "@copilot" && echo "Requested: #$PR" || echo "Failed: #$PR"
   else
     echo "Skipped (already requested or reviewed): #$PR"
   fi
@@ -75,7 +82,7 @@ Failures are logged in the digest under "Copilot review requests" but do not abo
 In autonomous mode, the routine sends `@dependabot rebase` to every CONFLICTING PR. The rebase is server-side and idempotent — dependabot rate-limits its own response, so repeated commands within a short window are no-ops.
 
 ```bash
-CONFLICTING=$(gh pr list \
+CONFLICTING=$(gh pr list -R "$OWNER_REPO" \
   --search "author:app/dependabot is:open" \
   --json number,mergeable \
   --jq '.[] | select(.mergeable == "CONFLICTING") | .number')
@@ -86,7 +93,7 @@ for PR in $CONFLICTING; do
     --jq '[.[] | select(.body | test("@dependabot rebase"; "i")) | .created_at] | last' 2>/dev/null)
   HOUR_AGO=$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
   if [ -z "$LAST_REBASE" ] || [ "$LAST_REBASE" \< "$HOUR_AGO" ]; then
-    gh pr comment $PR --body "@dependabot rebase"
+    gh pr comment $PR -R "$OWNER_REPO" --body "@dependabot rebase"
     echo "Rebase requested: #$PR"
   else
     echo "Skipped (recent rebase): #$PR — last sent $LAST_REBASE"
@@ -178,14 +185,14 @@ Per `pinned-issue-digest.md`, locate the pinned issue, then find the comment for
 For each PR that was in the LOW/UNKNOWN bucket from prep:
 
 ```bash
-COPILOT_REVIEW=$(gh pr view $PR --json reviews --jq \
+COPILOT_REVIEW=$(gh pr view $PR -R "$OWNER_REPO" --json reviews --jq \
   '.reviews[] | select(.author.login == "copilot-pull-request-reviewer") | {state, body, submittedAt}')
 
 COPILOT_COMMENTS=$(gh api "/repos/$OWNER/$REPO/pulls/$PR/comments" --jq \
   '[.[] | select(.user.login | test("copilot"; "i")) | {path, line, body: (.body | .[0:300])}]')
 ```
 
-If the review is still pending (no review object yet, only a `reviewRequests` entry), mark the PR as "awaiting Copilot" in the digest and don't run auto-dismiss. The developer can re-trigger triage manually later if needed.
+If the review is still pending (no review object yet, but Copilot is in the output of `pr_requested`), mark the PR as "awaiting Copilot" in the digest and don't run auto-dismiss. The developer can re-trigger triage manually later if needed.
 
 ### Step T4: Auto-dismiss and surface
 
@@ -196,7 +203,7 @@ Per Phase 4.0 of SKILL.md, apply the auto-dismiss rules:
 - Test-coverage finding on a dev-only (e.g. `devDependencies`) patch → dismiss
 - Behavioral change / deprecation affecting shipped code / breaking-change call-out / supply-chain anomaly → surface
 
-For each PR, count `(dismissed, surfaced)`. For Tier C PRs, do NOT auto-process via the deep-review skill in autonomous mode — its reconciliation and merge decision need the developer. Just summarize Copilot's review state and inline-finding counts; surface to the digest for the developer to act on in the interactive run.
+For each PR, count `(dismissed, surfaced)`. For Tier C PRs, do NOT auto-process via the deep-review skill in autonomous mode — that's a subagent dispatch which should run interactively. Just summarize Copilot's review state and inline-finding counts; surface to the digest for the developer to act on in the interactive run.
 
 ### Step T4a: Re-check review coverage
 
@@ -211,7 +218,7 @@ Per `pinned-issue-digest.md`, edit the prep-run comment in place:
 3. Add the "🤖 Copilot reconciliation" section with the auto-dismiss/surface table
 4. Replace the "🛡 Review coverage" lines with Step T4a's re-checked lines
 
-Keep all prep-run content intact. The triage run is additive, not replacing.
+Keep all other prep-run content intact. The triage run is additive, except that the coverage lines are replaced with Step T4a's re-checked lines rather than appended.
 
 ### Step T6: Exit
 

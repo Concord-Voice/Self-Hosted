@@ -20,7 +20,7 @@ a `model` override to `Agent`/`agent()` — there is no longer any exception.** 
 orchestrator's own model is the dynamic piece; the fleet is fixed.
 
 Cross-vendor mirrors preserve those source pins and translate them through
-[`model-capability-tiers.md`](model-capability-tiers.md). Codex then applies only the cataloged
+[`model-equivalence.md`](model-equivalence.md). Codex then applies only the cataloged
 role override: `@red-team` uses `gpt-6-sol`. This is profile generation, not a
 dispatch-time model choice.
 
@@ -30,11 +30,10 @@ path by which an orchestrator could choose a subagent's model. Where a repo need
 an escalation path, it selects a **different agent**, not a different model for
 the same agent — see § Escalation (E1-E4) below.
 
-That distinction matters against the tier catalog's invariant 7
-(`per-agent model / effort pinning`): choosing an escalation agent over
+That distinction matters against per-agent `model` / `effort` pinning: choosing an escalation agent over
 `@backend-developer` is *agent selection*, which the dispatch tables have always
-owned. It is not a model override, and it does not need — or get — a tier's
-permission.
+owned. It is not a model override, and it needs no
+extra permission.
 
 ### `maxTurns` is the third pin — and it fails silently
 
@@ -73,8 +72,8 @@ Founding incident: five runs across four agents (`architect` ×2,
 their pinned cap and returned only narration; three were Phase-8 reviewers on
 live PRs whose findings were silently discarded. A follow-up re-review confirmed
 the sizing empirically: `security-reviewer` used 11/25 and `docs-reviewer` 10/25,
-while `code-reviewer` — the only `xhigh` agent pinned below 30 — exhausted 20/20
-on the same diff and was raised to 30.
+while `code-reviewer` — then the only `xhigh` agent pinned below 30 — exhausted 20/20
+on the same diff and was raised to 30. Its effort was later lowered to `high`.
 
 ---
 
@@ -299,7 +298,9 @@ one is the exact failure that seat exists to prevent, and it has been a live def
 in a panel script before.
 
 The repo-local implementation lives at `.claude/workflows/design-panel.js` and
-is invoked by name. Each `agent()` call resolves that agent file's pinned model,
+is invoked by name. `install.sh` does not copy it (the source is
+`plugins/core-lifecycle/workflows/design-panel.js`); without it, dispatch the
+seats directly. Each `agent()` call resolves that agent file's pinned model,
 so one panel run has a deterministic, budgetable cost.
 
 ---
