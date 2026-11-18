@@ -89,6 +89,8 @@ canonicalize_path() {
 
     parent=$(dirname "$candidate")
     base=$(basename "$candidate")
+    # A missing final `.` or `..` names a directory, never a migration file; refuse it too.
+    [[ "$base" != "." && "$base" != ".." ]] || return 1
     # Walk to an existing ancestor when Write will create several directories.
     # Refuse ambiguous traversal and broken symlinks in the missing suffix;
     # otherwise a later mkdir could make a seemingly new path reach an existing

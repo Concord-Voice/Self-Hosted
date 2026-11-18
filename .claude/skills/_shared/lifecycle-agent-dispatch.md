@@ -298,7 +298,8 @@ one is the exact failure that seat exists to prevent, and it has been a live def
 in a panel script before.
 
 The repo-local implementation lives at `.claude/workflows/design-panel.js` and
-is invoked by name. Each `agent()` call resolves that agent file's pinned model,
+is invoked by name. `install.sh` does not copy it (the source is
+`plugins/core-lifecycle/workflows/design-panel.js`); without it, dispatch the seats directly. Each `agent()` call resolves that agent file's pinned model,
 so one panel run has a deterministic, budgetable cost.
 
 ---

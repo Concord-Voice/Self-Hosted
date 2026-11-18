@@ -47,7 +47,7 @@ Report exactly these four things:
    no crypto glob. Name each reviewer and the trigger that fires it.
 4. **Count-bearing surfaces** — whether the change touches migrations, API routes,
    Zustand stores, test files, Go packages, or CSS theme blocks, which obliges the
-   `./scripts/update-claude-md-counts.sh` probe at Phase 4.
+   `.docs.counts_script` probe (`.claude/repo-config.json`) at Phase 4, when the repo sets one.
 
 Keep this short. It is a routing artifact, not a design.
 
@@ -73,7 +73,7 @@ reconciled UI/UX approach, produce the **final spec**:
 - Where a specialist found something that invalidates your Mode-2 recommendation,
   say so plainly and adopt the better answer. Being overruled by evidence is the
   point of the panel.
-- Include the mandatory acceptance-criteria table (`docs/ci/quality-gate-definition.md`):
+- Include the mandatory acceptance-criteria table:
   0 new blocker/critical issues, 0 new high-confidence security hotspots, ≥80% new-code coverage.
 - Include a **Docs to update** criterion — docs ship with the code that changed them.
 

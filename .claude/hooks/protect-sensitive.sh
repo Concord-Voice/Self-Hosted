@@ -1848,7 +1848,7 @@ if [ -z "$FILE_PATH" ] && [ -n "$COMMAND" ]; then
   # for an interpreter body elsewhere on the line. The cost is that a git commit
   # message quoting all three indicators now blocks — the repo's standing answer to
   # that class is `-F`/`--body-file`. Do not "tidy" this to $SCAN.
-  if printf '%s' "$COMMAND" | grep -E '\b(python3?|node|ruby|perl)\b'  >/dev/null \
+  if printf '%s' "$COMMAND" | grep -E '\b(python3?|node|ruby|perl)\b' >/dev/null \
      && printf '%s' "$COMMAND" | grep -E 'open\([^)]*,[[:space:]]*(mode[[:space:]]*=[[:space:]]*)?['"'"'"]([wax]|r[bt]*\+)|open\([^)]*,[[:space:]]*['"'"'"]>>?['"'"'"]|writeFile|appendFile|createWriteStream|write_text|write_bytes|File\.write|shutil\.(copy|move)|os\.(replace|rename)|os\.(unlink|remove|rmdir)|unlinkSync|rmSync|rmdirSync|Path\([^)]*\)\.unlink|\.unlink\(\)|File\.(delete|unlink)|FileUtils\.rm' >/dev/null; then
     # `shutil.copy(src, dst)` READS its source; only `move`/`replace`/`rename` and
     # the open-for-write forms consume one. When copy is the ONLY indicator present,
@@ -1856,7 +1856,7 @@ if [ -z "$FILE_PATH" ] && [ -n "$COMMAND" ]; then
     # `shutil.copy("<protected>", "/tmp/x")`, contradicting this file's own rule that
     # copying a protected file outward stays free.
     narrowed=0
-    if printf '%s' "$COMMAND" | grep -E 'shutil\.copy'  >/dev/null \
+    if printf '%s' "$COMMAND" | grep -E 'shutil\.copy' >/dev/null \
        && ! printf '%s' "$COMMAND" | grep -E "${WRITE_API_STRICT}" >/dev/null; then
       # The SECOND argument specifically. Stripping to the last comma isolated the
       # destination only for the two-argument shape: `copytree(src, dst, keyword=…)`

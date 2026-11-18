@@ -2,7 +2,7 @@
 
 Translation tables for generating a non-Claude runner's agent profiles from this repo's
 Claude-native agent pins. Canonical source: Agentic-Dev-Tooling
-`plugins/core-lifecycle/skills/_shared/`. Edit HERE, never in a consumer copy.
+`plugins/core-lifecycle/skills/_shared/`. Edit it there, never in a consumer copy.
 
 **This file never classifies the running orchestrator.** `/dev-lifecycle` has no model gate
 (see its § No model gate): it never reads a model ID, and its defaults are the same on every
