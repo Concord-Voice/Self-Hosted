@@ -854,7 +854,7 @@ a version below the one recorded.
 
 **Rollback floor: PR-1, after the 000183 down.** An image built before 000178
 cannot boot once 000178 is applied: `migrationrunner.Run` calls `m.Up()`, and
-golang-migrate v4.20.1's `readUp` fails `versionExists` for a recorded version
+golang-migrate's `readUp` (checked on v4.20.1 and on the current pin) fails `versionExists` for a recorded version
 the image does not embed (pinned by `TestRun_UpFailureIsReported`). The same
 mechanism stops a PR-1 image (000178–000182) from booting once 000183 is
 recorded. To roll the binary back from PR-2 to PR-1, first run the 000183 down
