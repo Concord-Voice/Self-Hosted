@@ -877,10 +877,40 @@ func LockServerVoiceLifecycleTx(ctx context.Context, tx *sql.Tx, senderID uuid.U
 	return rbac.LockServerVoiceLifecycleTx(ctx, tx, senderID)
 }
 
+// errVoiceParticipantUserMissing is the sentinel every missing-user lock
+// failure wraps. It is presence.ErrActivityUserMissing so the activity bridge
+// classifies the rolled-back mutation as a determined no-op rather than taking
+// its replica-wide fail-closed arm (VULN-108).
+var errVoiceParticipantUserMissing = presence.ErrActivityUserMissing
+
+// voiceParticipantUsersMissingError names the requested users that had no
+// users row when the lock ran. The IDs are for the caller's per-user drop and
+// are never logged.
+type voiceParticipantUsersMissingError struct{ missing []uuid.UUID }
+
+func (e *voiceParticipantUsersMissingError) Error() string {
+	return "voice participant user disappeared during lock"
+}
+
+func (e *voiceParticipantUsersMissingError) Unwrap() error { return errVoiceParticipantUserMissing }
+
+// Missing returns a copy of the sorted user IDs that had no users row.
+func (e *voiceParticipantUsersMissingError) Missing() []uuid.UUID {
+	return append([]uuid.UUID(nil), e.missing...)
+}
+
 // lockVoiceParticipantUsersTx takes the users-side of each participant FK
 // before locking a channel or Private Call scope. The bounded, sorted order
 // composes with credential/key writers which take users before their domain
 // parents.
+//
+// Lock order (spec section 11.2): the server-member removal path
+// (rbac.LockServerVoiceLifecycleTx, then users FOR SHARE, then the
+// server_members row) takes the same per-sender advisory lock first, so this
+// users lock never inverts against it. A requested user with no users row is
+// reported as a *voiceParticipantUsersMissingError wrapping
+// errVoiceParticipantUserMissing; callers drop that user and never treat it as
+// a replica-wide failure.
 func lockVoiceParticipantUsersTx(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -928,19 +958,25 @@ func lockVoiceParticipantUsersTx(
 			returnErr = errors.Join(returnErr, fmt.Errorf("close voice participant user locks: %w", closeErr))
 		}
 	}()
-	locked := 0
+	locked := make(map[uuid.UUID]bool, len(unique))
 	for rows.Next() {
 		var userID uuid.UUID
 		if err := rows.Scan(&userID); err != nil {
 			return fmt.Errorf("scan locked voice participant user: %w", err)
 		}
-		locked++
+		locked[userID] = true
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate locked voice participant users: %w", err)
 	}
-	if locked != len(unique) {
-		return errors.New("voice participant user disappeared during lock")
+	var missing []uuid.UUID
+	for _, userID := range unique {
+		if !locked[userID] {
+			missing = append(missing, userID)
+		}
+	}
+	if len(missing) != 0 {
+		return &voiceParticipantUsersMissingError{missing: missing}
 	}
 	return nil
 }
@@ -6479,6 +6515,12 @@ func (s *NATSSubscriber) handleServerVoiceJoined(
 		s.log.Warn("Deferred server voice join at participant limit", "failure_class", "capacity")
 		return false
 	}
+	if errors.Is(activityErr, errVoiceParticipantUserMissing) {
+		// The sender has no users row: the transaction rolled back before any
+		// write, so this is a determined no-op, never a replica-wide disconnect.
+		s.log.Warn("Dropped voice.joined for a missing user", "failure_class", "user_missing", "count", 1)
+		return false
+	}
 	if errors.Is(activityErr, errVoicePendingAdmissionMismatch) {
 		// The staged peer no longer owns the exact, unexpired A1 reservation.
 		// Its participant transaction rolled back, so eject only that peer.
@@ -8411,6 +8453,13 @@ func (s *NATSSubscriber) refreshServerHeartbeatParticipant(
 	)
 	if errors.Is(activityErr, errServerVoiceParticipantLimit) {
 		s.log.Warn("Deferred server voice heartbeat at participant limit", "failure_class", "capacity")
+		return false, false
+	}
+	if errors.Is(activityErr, errVoiceParticipantUserMissing) {
+		// Each heartbeat participant is locked on its own, so dropping this
+		// user leaves every other listed participant's refresh untouched.
+		s.log.Warn("Dropped voice.heartbeat participant for a missing user",
+			"failure_class", "user_missing", "count", 1)
 		return false, false
 	}
 	if activityErr != nil {

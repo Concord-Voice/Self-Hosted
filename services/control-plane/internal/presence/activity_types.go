@@ -54,6 +54,11 @@ var (
 	// ErrMalformedActivityLifecycle means a voice lifecycle fence failed strict
 	// decoding and was removed so a subsequent authoritative event can recover.
 	ErrMalformedActivityLifecycle = errors.New("malformed rich-presence activity lifecycle")
+	// ErrActivityUserMissing means a lifecycle mutation named a user that has no
+	// users row. The mutation's transaction wrote nothing, so the outcome is a
+	// determined no-op for that user, never a replica-wide fail-closed trigger
+	// (VULN-108). The account-erasure rail owns a deleted user's presence.
+	ErrActivityUserMissing = errors.New("rich-presence activity user missing")
 )
 
 // ActivityState is the server-owned Redis envelope for one current category.

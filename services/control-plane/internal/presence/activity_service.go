@@ -384,6 +384,9 @@ func (s *ActivityService) runRefreshMutation(
 		return applied, nil
 	}
 	primary := fmt.Errorf("mutate %s rich-presence activity: %w", request.category, err)
+	if errors.Is(err, ErrActivityUserMissing) {
+		return false, userMissingMutationError(primary)
+	}
 	if previous.built == nil {
 		return false, errors.Join(primary, s.disconnectAll(ctx))
 	}
@@ -687,6 +690,9 @@ func (s *ActivityService) runClearMutation(
 		return applied, nil
 	}
 	primary := fmt.Errorf("mutate clear %s rich-presence activity: %w", request.category, err)
+	if errors.Is(err, ErrActivityUserMissing) {
+		return false, userMissingMutationError(primary)
+	}
 	if prepared.buildErr != nil {
 		return false, errors.Join(primary, s.disconnectAll(ctx))
 	}
@@ -790,6 +796,14 @@ func validateActivityServiceCall(
 		return errors.New("rich-presence activity service unavailable")
 	}
 	return nil
+}
+
+// userMissingMutationError classifies a mutation that named a user with no
+// users row. Its transaction rolled back before any write, so no generation
+// changed and nothing needs the replica-wide disconnect: a forged event naming a
+// nonexistent user must not reach disconnectAll (VULN-108).
+func userMissingMutationError(primary error) error {
+	return &PolicyError{class: FailureUserMissing, cause: primary}
 }
 
 func runActivityMutation(ctx context.Context, mutation ActivityMutation) (bool, error) {

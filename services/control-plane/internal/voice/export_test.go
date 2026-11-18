@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
@@ -488,4 +490,19 @@ func (s *NATSSubscriber) BroadcastPrivateVoiceLeft(conversationID, senderID, cal
 // BroadcastPrivateVoiceRoomEmpty exposes the DM "room_empty" broadcaster (#4179).
 func (s *NATSSubscriber) BroadcastPrivateVoiceRoomEmpty(channelID, callID string, conversationID uuid.UUID) {
 	s.broadcastPrivateVoiceRoomEmpty(voiceRoomEmptyEvent{ChannelID: channelID, CallID: callID}, conversationID)
+}
+
+// LockVoiceParticipantUsersForTest exposes lockVoiceParticipantUsersTx in share
+// mode, whether its error is the missing-user sentinel, and the IDs it names.
+func LockVoiceParticipantUsersForTest(
+	ctx context.Context,
+	tx *sql.Tx,
+	userIDs []uuid.UUID,
+) (missing []uuid.UUID, isMissing bool, err error) {
+	err = lockVoiceParticipantUsersTx(ctx, tx, userIDs, dmblock.LockShare)
+	var typed *voiceParticipantUsersMissingError
+	if errors.As(err, &typed) {
+		missing = typed.Missing()
+	}
+	return missing, errors.Is(err, errVoiceParticipantUserMissing), err
 }

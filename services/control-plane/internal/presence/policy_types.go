@@ -104,6 +104,9 @@ const (
 	FailureAudienceRead      FailureClass = "audience_read"
 	FailureAuthorizationRead FailureClass = "authorization_read"
 	FailureMinimization      FailureClass = "minimization"
+	// FailureUserMissing marks a mutation that named a user with no users row
+	// (ErrActivityUserMissing). It is a determined no-op, not a fail-closed one.
+	FailureUserMissing FailureClass = "user_missing"
 	// FailureAbsentAudienceUnsupported marks an absent generation whose
 	// category has no nameable audience (Private Call). It fails closed by
 	// design, unlike an invalid input.
