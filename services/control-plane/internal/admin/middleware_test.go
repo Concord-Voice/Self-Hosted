@@ -31,7 +31,7 @@ func (a staticSessionAuthority) ActiveSessionGeneration(context.Context, string)
 
 func adminAuthTestEngine(
 	sessions *admin.SessionStore,
-	authority admin.SessionAuthority,
+	authority admin.SessionGenerationResolver,
 ) (*gin.Engine, *bool, *string) {
 	gin.SetMode(gin.TestMode)
 	reached := false

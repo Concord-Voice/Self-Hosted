@@ -5239,8 +5239,9 @@ func (h *Handler) AuthorizeDMVoiceForMediaPlane(c *gin.Context) {
 	// round-trip. The media-plane uses username/display_name/avatar_url from here
 	// instead of the client-supplied socket.handshake.auth values, closing the
 	// display-identity spoof for DM voice rooms (mirrors the server-channel path).
-	identity, authorized := h.loadDMVoiceAuthorizeIdentity(c, convID, userID)
-	if !authorized {
+	// This unlocked read is a fast-path membership gate; the identity used in the
+	// response is re-read under the DM topology transaction below.
+	if _, authorized := h.loadDMVoiceAuthorizeIdentity(c, convID, userID); !authorized {
 		return
 	}
 
