@@ -29,7 +29,7 @@ TESTS = DEPLOY / "tests"
 DOMAIN = "example.com"
 # Documentation-only advertised address; TLS acceptance binds and connects via loopback.
 FIXTURE_PUBLIC_IP = "203.0.113.7"
-CANONICAL_IMAGE = "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e"
+CANONICAL_IMAGE = "coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e"
 CONTAINER_NAME = "concordvoice-coturn"
 IMAGE = os.environ.get("SELFHOST_CERT_TEST_COTURN_IMAGE", CANONICAL_IMAGE)
 TOOL_IMAGE = os.environ.get("SELFHOST_CERT_TEST_IMAGE", "ubuntu:24.04")
@@ -231,7 +231,7 @@ if [[ $# -eq 4 && "$1" == inspect && "$2" == --format &&
       "$3" == "$EXPECTED_INSPECT_TEMPLATE" && "$4" == "$OWNED_CONSUMER_ID" ]]; then
   [[ "${OWNED_PROJECT_NAME:-}" =~ ^concord-2504-selected-[0-9]+$ &&
      "${OWNED_CONTAINER_NAME:-}" == "$CONTAINER_NAME" ]] || fail
-  printf '{"Name":"/%s","Image":"coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e","Project":"%s","Service":"coturn","Status":"running","Running":true,"Paused":false,"Restarting":false}\n' \
+  printf '{"Name":"/%s","Image":"coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e","Project":"%s","Service":"coturn","Status":"running","Running":true,"Paused":false,"Restarting":false}\n' \
     "$CONTAINER_NAME" "$OWNED_PROJECT_NAME"
   exit 0
 fi
