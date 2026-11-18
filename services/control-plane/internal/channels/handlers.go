@@ -4477,20 +4477,6 @@ func insertWrappedDMKeyTx(ctx context.Context, tx *sql.Tx, conversationID, membe
 	return rowsAffected > 0, nil
 }
 
-// dmKeyHeldTx is the DM analogue of channelKeyHeldTx: keyVersion is the
-// batch's epoch-validated version, never a caller-supplied one (VULN-207).
-func dmKeyHeldTx(ctx context.Context, tx *sql.Tx, conversationID, userID string, keyVersion int) (bool, error) {
-	var held bool
-	if err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM dm_channel_keys
-			WHERE conversation_id = $1 AND user_id = $2 AND key_version = $3
-		)`, conversationID, userID, keyVersion).Scan(&held); err != nil {
-		return false, fmt.Errorf("read held dm key: %w", err)
-	}
-	return held, nil
-}
-
 // enqueueDMKeyRequest is the DM analogue of enqueueChannelKeyRequest (#2420
 // self-heal): idempotent re-request for a recipient skipped as stale.
 func enqueueDMKeyRequest(ctx context.Context, tx *sql.Tx, conversationID, userID string) error {
@@ -4526,7 +4512,9 @@ func distributeOneDMKey(ctx context.Context, tx *sql.Tx, conversationID, memberU
 			return dmRecipientSkippedStaleKey, fErr
 		}
 		if !fresh {
-			held, hErr := dmKeyHeldTx(ctx, tx, conversationID, memberUserID, keyVersion)
+			// keyVersion is the batch's epoch-validated version, never a
+			// caller-supplied one (VULN-207).
+			held, hErr := dmActorHoldsEpochTx(ctx, tx, conversationID, memberUserID, keyVersion)
 			if hErr != nil {
 				return dmRecipientSkippedStaleKey, hErr
 			}
@@ -4834,6 +4822,8 @@ func admitDMCurrentEpochWriteTx(ctx context.Context, tx *sql.Tx, conversationID,
 }
 
 // dmActorHoldsEpochTx reports whether actorID has a wrapped key at version.
+// It serves both the epoch-claim fence and the distribution already-held
+// check (the DM analogue of channelKeyHeldTx).
 func dmActorHoldsEpochTx(ctx context.Context, tx *sql.Tx, conversationID, actorID string, version int) (bool, error) {
 	var holder bool
 	if err := tx.QueryRowContext(ctx, `
@@ -4842,7 +4832,7 @@ func dmActorHoldsEpochTx(ctx context.Context, tx *sql.Tx, conversationID, actorI
 			WHERE conversation_id = $1 AND user_id = $2 AND key_version = $3
 		)
 	`, conversationID, actorID, version).Scan(&holder); err != nil {
-		return false, fmt.Errorf("read dm epoch claimant key: %w", err)
+		return false, fmt.Errorf("read dm key holder: %w", err)
 	}
 	return holder, nil
 }
