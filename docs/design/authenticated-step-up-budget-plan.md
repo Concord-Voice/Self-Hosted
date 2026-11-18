@@ -23,14 +23,14 @@ validation, release or delivery evidence.
 | Terminal composition | Canonical loginfamily access-guarded target capture | Complete actor/target union, immutable UUID order, final actor check and unchanged selector semantics |
 | Consumer integration | Authenticated mint and the contract's complete consumer inventory | Reserve before proof, no duplicate charges, definite-effect settlement and ordinary-auth isolation |
 | Proof lifecycle | Existing rollout singleton/current-image CLI and all strict readers/controllers | Complete process-generation inventory, whole-work drain, immutable receipt, one-way DB-clock cutover and rollback floor |
-| Delivery | Public API/design records, actual Hosted canonical-consumption lane and response consumers | Exact source provenance, client compatibility and controlled activation evidence |
+| Delivery | Public API/design records, actual downstream canonical-consumption lane and response consumers | Exact source provenance, client compatibility and controlled activation evidence |
 
 Paths are relative to `services/control-plane/` unless otherwise specified.
 No migration number is reserved by this plan. Recheck canonical main and pending
 delivery allocations when schema work begins. Reconcile current overlapping
-key-reveal, auth, router and lifecycle owners before those later units. Hosted
-issue 4201 remains outside this adapter's scope; no repair retry or controller
-write follows from it.
+key-reveal, auth, router and lifecycle owners before those later units. Repair
+work for the managed deployment remains outside this adapter's scope; no repair
+retry or controller write follows from it.
 
 ## SQL core interface and commit-boundary evidence
 
