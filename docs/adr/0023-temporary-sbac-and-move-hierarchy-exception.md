@@ -40,7 +40,9 @@ Add 3 columns to the existing `channel_permission_overrides` table (migration `0
 All existing voice-mod actions (`ServerMute/Deafen/Kick`) call `authorizeVoiceMod(..., requireHierarchy=true)` → `CheckHierarchy`, blocking a lower-ranked actor from acting on an equal/higher-ranked target or the owner. Issue #487 states the move permission must let a designated organizer (e.g. an events host with `MOVE_MEMBERS` but a low role) move *anyone*, including higher roles and the owner.
 
 ### Decision
-The move path (`ServerMove` in `internal/voice/handlers.go`) calls the authorization with `requireHierarchy=false`, plus a self-move short-circuit (actor == target ⇒ no permission required). This is an explicit, documented break of the hierarchy invariant, scoped to the move action only, with an inline comment at the call site citing #487 + this ADR.
+The move path (`ServerMove` in `internal/voice/handlers.go`) calls the authorization with `requireHierarchy=false`, plus a self-move short-circuit (actor == target ⇒ no Move Members bit and no hierarchy step). This is an explicit, documented break of the hierarchy invariant, scoped to the move action only, with an inline comment at the call site citing #487 + this ADR.
+
+**Amended (Concord-Voice/Security issue 168):** the self-move short-circuit no longer skips authorization entirely. A self-move still requires server membership (pool preamble and again in the decision transaction) and the actor's own `VIEW_VOICE_CHANNELS` and `JOIN_VOICE` on the destination (`authorizeMoveDestinationTx` with `selfMove=true`). It never writes a temporary grant and never writes an audit row. See Decision 3.
 
 ### Options Considered
 | Option | Pros | Cons | Verdict |
@@ -51,8 +53,37 @@ The move path (`ServerMove` in `internal/voice/handlers.go`) calls the authoriza
 
 ### Consequences
 - **Threat model:** worst case is a `MOVE_MEMBERS` holder relocating the owner between voice channels in the same server — annoyance, not privilege escalation (no data access, no kick/ban, server-scoped). Cannot move across servers, cannot move users not already in voice.
-- **Mitigations:** the deviation carries an inline comment at the `requireHierarchy=false` call site citing #487 + this ADR; a hierarchy-crossing move writes a `voice_member_moved` audit-log row.
+- **Mitigations:** the deviation carries an inline comment at the `requireHierarchy=false` call site citing #487 + this ADR; a non-self move writes one `voice_member_moved` audit-log row when it crosses hierarchy **or** writes a temporary grant (amended by Concord-Voice/Security issue 168; see Decision 3). The row's metadata always carries both `hierarchy_crossed` and `temporary_grant` booleans.
 - **Reviewer note:** `rbac-reviewer` — `ServerMove` is the single sanctioned place where hierarchy is skipped; treat any *other* `requireHierarchy=false` as a finding. `security-reviewer` — the move endpoint cannot grant durable access (the temp grant is `VIEW|CONNECT|SPEAK` only and presence-bound, cleaned up with CSK rotation on departure).
+
+---
+
+## Decision 3 — The mover holds what the move confers, at channel scope
+
+**Date:** 2026-11-18 · **Issue:** Concord-Voice/Security issue 168 (folds in the channel-scope and route-deletion parts of Concord-Voice/Security issue 144)
+
+### Context
+Decisions 1 and 2 decided move authority at server scope only, after the handler had already read voice state. A Move Members holder could therefore write a temporary `VIEW | CONNECT | SPEAK` override on a channel they could not access themselves, the write left no audit row when the target was lower-ranked, and a channel DENY of Move Members (or of Mute/Deafen Members on the other session actions) had no effect.
+
+### Decision
+Voice moderation is a narrow-only gate: the server-scope bit stays necessary, and channel overrides can only refuse. Code lives in `services/control-plane/internal/voice/mod_authority.go`.
+
+- **Authorize before reveal.** `authorizeVoiceModWith` runs on the pool before the body is parsed, before any voice-state read, and before any transaction or lock: path IDs (400) → membership (403 `Not a member of this server`) → server-scope bit (403 `Insufficient permissions`) → hierarchy (403, all routes except move).
+- **Move (`ServerMove`)** is decided again inside the decision transaction, under the server visibility lock, with `ResolveChannelPermissionsTx`:
+  - destination: a voice channel of this server on which the actor holds `VIEW_VOICE_CHANNELS`, `JOIN_VOICE` and, unless self, Move Members. A missing, non-voice, foreign or inaccessible destination answers the same 403 (`authorizeMoveDestinationTx`);
+  - source: every voice channel the target occupies, sorted (`findVoiceChannelsTx`). Channels the actor cannot see are dropped; none left answers the existing 409 not-in-voice. Every visible source requires Move Members, else 403 (`authorizeMoveSourcesTx`);
+  - grant: when the target needs a temporary grant, the actor's destination permissions must hold all of `tempGrantAllow` (`VIEW | CONNECT | SPEAK`), so a mover cannot confer a bit they lack.
+- **In-transaction re-check.** `revalidateVoiceMoveAuthorityTx` recomposes membership, server-scope Move (no hierarchy), the destination stage, `tempGrantAllow`, and the source stage, and is the only authority closure a moderated move passes to the grant transaction. A source no longer visible answers 409; a destination deleted since the decision answers 403. `grantTemporaryChannelAccessWithCredential` refuses a nil closure with `errTemporaryGrantAuthorityRequired` before `BeginTx` and runs the closure whether or not the credential guard is on.
+- **Session actions** (user-mute, user-deafen, disconnect) filter their captured command specs per channel (`filterAuthorizedSessionSpecsTx`): a channel the actor cannot see is dropped, a visible channel without the bit refuses the whole request with 403, and no remaining spec answers the existing not-in-voice response.
+- **Temp-access revoke** requires the named channel to be a voice channel of this server on which the actor holds `VIEW_VOICE_CHANNELS` and Move Members (`requireActorVoiceChannelPermTx`, inside the revoke transaction). The pool-side channel check is gone; a foreign or non-voice channel now answers 403, not 400.
+- **Persistent server mute/deafen** (`ServerMute`, `ServerUnmute`, `ServerDeafen`, `ServerUndeafen`) stay at server scope by decision: a channel DENY of the bit does not affect them, and a test pins that.
+- **Audit.** `auditVoiceMove` writes one `voice_member_moved` row for every non-self move that crosses hierarchy or writes a temporary grant (best-effort, after commit).
+- **Route removal.** The unused channel-scoped voice authorization-preview route is deleted; no client or service called it.
+
+### Consequences
+- **Upgrade behaviour:** latent channel DENY rows for Mute, Deafen or Move Members start to take effect on session actions and moves. Organizer roles that moved people into channels they cannot enter need access to those channels. Several 400 answers on move and temp-access revoke become 403.
+- **Accepted (R12):** a channel override carrying the Administrator bit satisfies the new channel checks, because they use the resolver's own semantics (the same ones `AuthorizeJoin` uses). No new authority arises, because the server-scope bit stays necessary. The class closes at the resolver under Concord-Voice/Security issue 142, which also carries the "channel ALLOW confers the bit" half of Concord-Voice/Security issue 144.
+- **Reviewer note:** `rbac-reviewer` — multi-bit checks use `hasAllPerms`, never `Permission.Has(A|B)` (any-of); channel resolves test `rbac.ErrChannelNotInServer` before `rbac.ErrNotMember`; move remains the only `requireHierarchy=false` call.
 
 ---
 
@@ -61,6 +92,7 @@ The move path (`ServerMove` in `internal/voice/handlers.go`) calls the authoriza
 - Grant/revoke convergence: `services/control-plane/internal/voice/temp_grants.go`
 - Per-channel CSK rotation (shared with member-removal): `services/control-plane/internal/keyrotation/rotator.go`
 - Move endpoint: `services/control-plane/internal/voice/handlers.go` (`ServerMove`)
+- Channel-scoped moderation authority (Decision 3): `services/control-plane/internal/voice/mod_authority.go`
 - Force-disconnect: NATS `voice.enforce.disconnect` → `services/media-plane/src/lib/forceDisconnect.ts`
 - Client purge signal: WS `channel_access_revoked` → `client/desktop/src/renderer/hooks/useWebSocketMessages.ts`
 - Orphan sweep: `services/control-plane/internal/voice/temp_grant_sweep.go`

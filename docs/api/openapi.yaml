@@ -17049,7 +17049,7 @@ paths:
         - Voice
       summary: Force-disconnect a member from voice
       description: >-
-        Durably queue disconnect commands for exact registered voice sessions in this server, including staged sessions. Requires Move Members and role hierarchy. No registered target returns 409. HTTP 202 with enforcement_status queued confirms durable acceptance, not transport closure. Applied disconnects emit voice.left, which drives temporary SBAC grant cleanup. Rate limit: 10 requests per minute per user.
+        Durably queue disconnect commands for exact registered voice sessions in this server, including staged sessions. Requires Move Members and role hierarchy. Move Members is also checked on each channel holding a target session: sessions in channels the caller cannot see are not touched, and a visible channel where the caller lacks Move Members refuses the whole request with 403. No registered target in a channel the caller can see returns 409. HTTP 202 with enforcement_status queued confirms durable acceptance, not transport closure. Applied disconnects emit voice.left, which drives temporary SBAC grant cleanup. Rate limit: 10 requests per minute per user.
       operationId: voiceServerDisconnect
       security:
         - BearerAuth: []
@@ -17086,14 +17086,15 @@ paths:
                 $ref: "#/components/schemas/Error"
         "403":
           description:
-            Not a member of this server, insufficient permissions (Move Members required),
-            or hierarchy violation (target has equal or higher role position)
+            Not a member of this server, insufficient permissions (Move Members required at
+            server scope and on every visible channel holding a target session), or hierarchy
+            violation (target has equal or higher role position)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: Target user is not currently in a voice channel
+          description: Target user is not in a voice channel the caller can see
           content:
             application/json:
               schema:
@@ -17117,11 +17118,15 @@ paths:
         destination, a temporary scoped SBAC grant (VIEW + CONNECT + SPEAK) is created before
         signalling and auto-revoked on departure (with channel-key rotation).
 
-        Authorization: a caller may always move themselves (no permission required). Moving
-        another member requires the Move Members permission and — by deliberate design
-        (ADR-0023) — does NOT enforce role hierarchy: a Move Members holder may move any member,
-        including higher roles and the server owner. Hierarchy-crossing moves are recorded in
-        the audit log.
+        Authorization: the caller is checked before the body is parsed or any voice state is
+        read. A self-move requires server membership and the caller''s own View and Join access
+        to the destination. Moving another member requires Move Members at server scope, on the
+        destination and on every source channel the caller can see, plus the caller''s own View
+        and Join access to the destination; when a temporary grant is needed the caller must
+        also hold Speak there. By deliberate design (ADR-0023) move does NOT enforce role
+        hierarchy: a Move Members holder may move any member, including higher roles and the
+        server owner. Every non-self move that crosses hierarchy or writes a temporary grant is
+        recorded in the audit log.
 
         Rate limit: 10 requests per minute (user-based).
 
@@ -17162,19 +17167,19 @@ paths:
                   moved:
                     type: boolean
         '400':
-          description: Invalid server/user/channel ID, target is not a voice channel in this server, or target equals the current channel
+          description: Invalid server/user ID, invalid target_channel_id in the body, or the member is already in the target channel
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Not a member of this server, or insufficient permissions (Move Members required to move another user)
+          description: Not a member of this server, or insufficient permissions (see Authorization above). A missing, non-voice, foreign or inaccessible destination answers the same 403.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: Target user is not currently in a voice channel
+          description: Target user is not in a voice channel the caller can see, the source channel changed before the temporary grant was written, or a permanent override blocks the target from the destination
           content:
             application/json:
               schema:
@@ -17318,7 +17323,9 @@ paths:
 
         Requires the Move Members permission; the target must be strictly lower in role hierarchy
         than the caller (this is a moderation action — it does NOT inherit the move endpoint''s
-        hierarchy exception).
+        hierarchy exception). `channel_id` must be a voice channel of this server on which the
+        caller holds View and Move Members; a missing, foreign, non-voice or inaccessible channel
+        answers 403.
 
         Rate limit: 10 requests per minute (user-based).
 
@@ -17366,8 +17373,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Not a member of this server, insufficient permissions (Move Members required),
-            or hierarchy violation (target has equal or higher role position)
+          description: Not a member of this server, insufficient permissions (Move Members required
+            at server scope and on channel_id, plus View on channel_id; a missing, foreign or
+            non-voice channel_id answers the same 403), or hierarchy violation (target has equal
+            or higher role position)
           content:
             application/json:
               schema:
@@ -17378,7 +17387,7 @@ paths:
         - Voice
       summary: Send a user-level deafen command
       description: >-
-        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
+        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The permission is also checked on each channel holding a target session: sessions in channels the caller cannot see are not touched, and a visible channel where the caller lacks the permission refuses the whole request with 403. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
       operationId: voiceUserDeafen
       security:
         - BearerAuth: []
@@ -17407,13 +17416,13 @@ paths:
                   message:
                     type: string
         "400":
-          description: Invalid IDs, self-target, or target is not in a voice channel
+          description: Invalid IDs, self-target, or target is not in a voice channel the caller can see
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: Not a member of this server or insufficient permissions
+          description: Not a member of this server, insufficient permissions at server scope or on a visible channel holding a target session, or hierarchy violation
           content:
             application/json:
               schema:
@@ -17432,7 +17441,7 @@ paths:
         - Voice
       summary: Send a user-level mute command
       description: >-
-        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
+        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The permission is also checked on each channel holding a target session: sessions in channels the caller cannot see are not touched, and a visible channel where the caller lacks the permission refuses the whole request with 403. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
       operationId: voiceUserMute
       security:
         - BearerAuth: []
@@ -17461,13 +17470,13 @@ paths:
                   message:
                     type: string
         "400":
-          description: Invalid IDs, self-target, or target is not in a voice channel
+          description: Invalid IDs, self-target, or target is not in a voice channel the caller can see
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: Not a member of this server or insufficient permissions
+          description: Not a member of this server, insufficient permissions at server scope or on a visible channel holding a target session, or hierarchy violation
           content:
             application/json:
               schema:

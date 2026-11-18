@@ -76,6 +76,7 @@ later storage migration.
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
+- **Voice:** Voice moderation now checks the moderator before it reveals anything about the target's voice state, and a refused caller gets the same answer whatever the target is doing. User-mute, user-deafen, disconnect and temporary-access revoke now honour channel denies of Mute Members, Deafen Members and Move Members, and a moderator can no longer act on someone in a channel the moderator cannot see. Moving a member now needs Move Members on both channels and the mover's own access to the destination, including Speak when the move gives temporary access, and every such move is audited. Server mute and server deafen stay server-wide. Several of these routes now answer 403 where they answered 400.
 
 ### Changed
 
@@ -84,6 +85,10 @@ later storage migration.
 - **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
 - **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
 - **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
+
+### Removed
+
+- **Voice:** Removed the unused `POST /channels/{id}/voice/authorize-action` route. No client or service called it, and it now returns 404.
 
 ### Fixed
 
