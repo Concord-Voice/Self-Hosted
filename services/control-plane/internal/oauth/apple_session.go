@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -61,7 +62,15 @@ func (h *Handler) ProviderSession(c *gin.Context) {
 	}
 
 	var req appleSessionRequest
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.State) > maxStateLength {
+	if err := bindSSORequest(c, &req); err != nil {
+		if errors.Is(err, errSSORequestTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error_code": "request_too_large"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
+	if len(req.State) > maxStateLength {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
 		return
 	}
@@ -84,6 +93,13 @@ func (h *Handler) ProviderSession(c *gin.Context) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(req.State), []byte(rec.State)) != 1 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_state"})
+		return
+	}
+	bindingDigest, bindingOK := clientBindingDigest(c)
+	var recordedDigest [32]byte
+	copy(recordedDigest[:], rec.ClientBindingDigest)
+	if !bindingOK || len(rec.ClientBindingDigest) != len(recordedDigest) || subtle.ConstantTimeCompare(bindingDigest[:], recordedDigest[:]) != 1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_state"})
 		return
 	}
