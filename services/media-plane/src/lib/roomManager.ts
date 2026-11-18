@@ -228,6 +228,20 @@ export interface ProducerEntry {
    * Never cleared — the entry is deleted with its producer at close.
    */
   closing?: boolean;
+  /**
+   * Security#176. Set once, when this camera's arrival first moves the room
+   * camera gate's computed value ON, by its own produce or by a demand on one
+   * of its consumers. That transition is charged to this producer's owner,
+   * never to the viewer whose re-sent demand applied it. Never cleared — the
+   * entry is deleted with its producer, so each new camera is charged once.
+   */
+  cameraArrivalAttributed?: boolean;
+}
+
+/** A camera producer whose arrival has not yet moved the camera gate ON (Security#176). */
+interface CameraArrival {
+  entry: ProducerEntry;
+  ownerUserId: string;
 }
 
 export interface Participant {
@@ -3430,7 +3444,13 @@ export class RoomManager {
       throw new Error('publish permission denied');
     }
 
-    if (source === 'camera') this.recomputeCameraLayeringGate(room, userId);
+    if (source === 'camera') {
+      const arrival = this.unattributedCameraArrival(
+        participant.producers.get(producer.id),
+        userId
+      );
+      this.recomputeCameraLayeringGate(room, userId, arrival);
+    }
 
     // Add mic audio producers to the AudioLevelObserver (skip screen-audio to
     // avoid false active-speaker detection from system audio)
@@ -4643,7 +4663,9 @@ export class RoomManager {
       consumer.consumers.delete(newConsumer.id);
       consumer.consumersByKey.delete(key);
       room.lastNPausedConsumers.delete(newConsumer.id);
-      this.clearCameraLayerDemand(room, newConsumer.id);
+      // The publisher closed its producer, so its owner caused this removal
+      // (Security#176), not the viewer whose demand it was.
+      this.clearCameraLayerDemand(room, newConsumer.id, producerUserId);
       this.clearScreenLayerDemand(room, newConsumer.id);
     });
 
@@ -4792,7 +4814,7 @@ export class RoomManager {
       // rather than every arriving payload. Before #3094 no client ever sent the
       // flag, so any non-zero total is itself proof the activated path is live.
       if (stored.pressureStepDown) this.counterHooks.onCameraPressureDemand?.();
-      this.recomputeCameraLayeringGate(room, userId);
+      this.recomputeCameraLayeringGate(room, userId, this.cameraArrivalForConsumer(room, consumer));
     } else if (source === 'screen') {
       // The watched screen producer's owner (server-set on consume, appData) is
       // the per-sharer gate key (#1924 fix "B"). Server-authoritative — never a
@@ -6279,8 +6301,19 @@ export class RoomManager {
    * member whose change moved it; a recompute that does not move it keeps the
    * attribution, so another member can neither apply nor pay for a pending
    * transition. Only the two timers pass no cause.
+   *
+   * `arrival` names the camera whose produce, or a demand on whose consumer,
+   * triggered this recompute (Security#176). A camera's arrival is its owner's
+   * change: the first move to ON it triggers is attributed to the owner, once
+   * per producer, and later moves go to `causeUserId`. Without this a
+   * publisher toggling its camera made each viewer's re-sent demand pay for
+   * the ON, and spent viewers' budgets instead of its own.
    */
-  private recomputeCameraLayeringGate(room: Room, causeUserId?: string): void {
+  private recomputeCameraLayeringGate(
+    room: Room,
+    causeUserId?: string,
+    arrival?: CameraArrival
+  ): void {
     const budget: CameraGateBudget = (room.cameraGateBudget ??= {
       flips: new Map(),
       desired: room.cameraLayeringGateEnabled,
@@ -6289,8 +6322,36 @@ export class RoomManager {
     if (next !== budget.desired) {
       budget.desired = next;
       budget.desiredCause = causeUserId;
+      if (next && arrival && !arrival.entry.cameraArrivalAttributed) {
+        arrival.entry.cameraArrivalAttributed = true;
+        budget.desiredCause = arrival.ownerUserId;
+      }
     }
     this.settleCameraLayeringGate(room, budget);
+  }
+
+  /** `entry` as a camera whose arrival has not yet moved the gate ON, else undefined. */
+  private unattributedCameraArrival(
+    entry: ProducerEntry | undefined,
+    ownerUserId: string
+  ): CameraArrival | undefined {
+    if (entry?.source !== 'camera' || entry.cameraArrivalAttributed) return undefined;
+    return { entry, ownerUserId };
+  }
+
+  /**
+   * The live camera behind `consumer`, resolved from the appData `consume()`
+   * sets server-side, so a client cannot name another producer. Undefined once
+   * that producer has closed: a demand on a stale consumer is the viewer's.
+   */
+  private cameraArrivalForConsumer(room: Room, consumer: Consumer): CameraArrival | undefined {
+    const appData = consumer.appData as
+      { producerId?: unknown; producerUserId?: unknown } | undefined;
+    const producerId = appData?.producerId;
+    const ownerUserId = appData?.producerUserId;
+    if (typeof producerId !== 'string' || typeof ownerUserId !== 'string') return undefined;
+    const entry = room.participants.get(ownerUserId)?.producers.get(producerId);
+    return this.unattributedCameraArrival(entry, ownerUserId);
   }
 
   private settleCameraLayeringGate(room: Room, budget: CameraGateBudget): void {
@@ -6383,11 +6444,12 @@ export class RoomManager {
     return cameraSpatialCapForParticipant(participant);
   }
 
-  private clearCameraLayerDemand(room: Room, consumerId: string): void {
-    // A server-observed close has no caller in scope: charge the demand's owner.
-    const ownerUserId = room.cameraLayerDemands.get(consumerId)?.userId;
+  private clearCameraLayerDemand(room: Room, consumerId: string, causeUserId?: string): void {
+    // Charge the member who caused the removal when it is known (producerclose:
+    // the producer's owner), else the demand's owner.
+    const cause = causeUserId ?? room.cameraLayerDemands.get(consumerId)?.userId;
     if (!room.cameraLayerDemands.delete(consumerId)) return;
-    this.recomputeCameraLayeringGate(room, ownerUserId);
+    this.recomputeCameraLayeringGate(room, cause);
   }
 
   private clearParticipantCameraLayerDemands(room: Room, participant: Participant): void {

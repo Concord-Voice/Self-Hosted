@@ -6490,6 +6490,149 @@ describe('RoomManager', () => {
         await on('u-a', 'c-a');
       }
 
+      // Consumers created through the real consume() path, so the real
+      // 'producerclose' listener runs and appData is the one consume() sets.
+      async function consumeCamera(userId: string, consumerId: string, producerId: string) {
+        const viewer = await cameraViewer(userId);
+        viewer.rtpCapabilities ??= createRtpCapabilities(['video/VP9']) as any;
+        const transport = createMockTransport();
+        mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
+        await manager.createTransport('room-1', userId, 'recv');
+        transport.consume.mockImplementationOnce(async (options: { appData: unknown }) =>
+          createMockConsumer({
+            id: consumerId,
+            producerId,
+            kind: 'video',
+            type: 'svc',
+            appData: options.appData,
+          })
+        );
+        await manager.consume('room-1', userId, producerId, transport.id);
+        return viewer.consumers.get(consumerId) as unknown as { _emit: (event: string) => void };
+      }
+
+      // Publisher u-1 closes `producerId`; the SFU then closes each viewer's consumer.
+      async function closeCamera(
+        producerId: string,
+        ...consumers: { _emit: (event: string) => void }[]
+      ) {
+        await manager.closeProducer('room-1', 'u-1', producerId);
+        for (const consumer of consumers) consumer._emit('producerclose');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+      }
+
+      // regression for Security#176 red-team finding
+      it("charges a publisher's camera toggles to the publisher, never to its viewers", async () => {
+        await setupRoom();
+        // Viewers u-a and u-c watch u-1's camera p1 at a low layer.
+        let ca = await consumeCamera('u-a', 'ca1', 'p1');
+        let cc = await consumeCamera('u-c', 'cc1', 'p1');
+        await on('u-a', 'ca1');
+        await on('u-c', 'cc1');
+        expect(enabled()).toEqual([true]);
+
+        await closeCamera('p1', ca, cc);
+        // u-1 re-produces; the viewers' clients consume it and resend demand.
+        await addCameraProducer('u-1', 'p1b', ['video/VP9']);
+        cc = await consumeCamera('u-c', 'cc2', 'p1b');
+        ca = await consumeCamera('u-a', 'ca2', 'p1b');
+        await on('u-c', 'cc2');
+        await on('u-a', 'ca2');
+        await closeCamera('p1b', cc, ca);
+
+        // The camera's arrival and its close spent u-1's two flips. The ON after
+        // the re-produce waited on u-1's budget, so the gate moved twice, not four times.
+        expect(enabled()).toEqual([true, false]);
+        expect(flipKeys()).toEqual(['u-1']);
+        expect(flipsOf('u-1')).toHaveLength(2);
+        // A viewer's own change still applies at once on its untouched budget.
+        await on('u-a', 'c-a');
+        expect(room().cameraGateBudget?.deferTimer).toBeUndefined();
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipsOf('u-a')).toHaveLength(1);
+      });
+
+      // regression for Security#176 red-team finding
+      it("defers the ON after a publisher's re-produce on the publisher's budget, not a viewer's", async () => {
+        await setupRoom();
+        const ca = await consumeCamera('u-a', 'ca1', 'p1');
+        const cc = await consumeCamera('u-c', 'cc1', 'p1');
+        await on('u-a', 'ca1');
+        await on('u-c', 'cc1');
+        await closeCamera('p1', cc, ca);
+        // The producerclose removals are charged to u-1, not to the demands' owners.
+        expect(enabled()).toEqual([true, false]);
+        expect(flipKeys()).toEqual(['u-1']);
+
+        await addCameraProducer('u-1', 'p1b', ['video/VP9']);
+        await consumeCamera('u-c', 'cc2', 'p1b');
+        await consumeCamera('u-a', 'ca2', 'p1b');
+        await on('u-c', 'cc2');
+        await on('u-a', 'ca2');
+        // u-1's third transition inside the window waits on u-1's own budget.
+        expect(room().cameraGateBudget?.deferTimer).toBeDefined();
+        expect(enabled()).toEqual([true, false]);
+        expect(flipsOf('u-c')).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(deferredWait);
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipKeys()).toEqual(['u-1']);
+        expect(flipsOf('u-1')).toHaveLength(2);
+      });
+
+      // regression for Security#176 red-team finding: the arrival rule must not
+      // let a viewer spend a publisher's budget more than once per camera.
+      it("charges a camera's arrival to its publisher once, then the viewer's changes to the viewer", async () => {
+        await setupRoom();
+        await consumeCamera('u-a', 'ca1', 'p1');
+        await on('u-a', 'ca1');
+        await hide('u-a', 'ca1');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        await on('u-a', 'ca1');
+
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipsOf('u-1')).toHaveLength(1);
+        expect(flipsOf('u-a')).toHaveLength(2);
+      });
+
+      // regression for Security#176 red-team finding
+      it("counts a camera's own produce as its arrival, so no later demand charges the publisher again", async () => {
+        // No camera yet, so u-a's low demand beside u-b's top demand cannot arm the gate.
+        await addCameraConsumer('u-a', 'c-a');
+        const { participant: viewerB } = await addCameraConsumer('u-b', 'c-b');
+        viewerB.maxManualBitrateBps = Number.MAX_SAFE_INTEGER;
+        await showTop('u-b', 'c-b');
+        await on('u-a', 'c-a');
+        expect(enabled()).toEqual([]);
+
+        // u-1's real produce moves the gate ON and pays for it.
+        await ensureParticipant('u-1', ['video/VP9']);
+        const send = createMockTransport();
+        mockRouter.createWebRtcTransport.mockResolvedValueOnce(send);
+        await manager.createTransport('room-1', 'u-1', 'send');
+        const vp9 = { mimeType: 'video/VP9', payloadType: 98, clockRate: 90000 };
+        send.produce.mockResolvedValueOnce(
+          createMockProducer({
+            id: 'p-live',
+            kind: 'video',
+            rtpParameters: { codecs: [vp9], encodings: [{}] },
+          })
+        );
+        const rtp = { ...createVideoRtpParameters(), codecs: [vp9] };
+        await manager.produce('room-1', 'u-1', send.id, 'video', rtp as any, 'camera');
+        expect(enabled()).toEqual([true]);
+        expect(flipKeys()).toEqual(['u-1']);
+
+        // u-a hides (its own OFF); u-c then watches u-1's camera, and that ON is u-c's.
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        await consumeCamera('u-c', 'cc1', 'p-live');
+        await on('u-c', 'cc1');
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipsOf('u-1')).toHaveLength(1);
+        expect(flipsOf('u-c')).toHaveLength(1);
+      });
+
       it("defers one viewer's third flip inside 30 s and applies it when the window frees", async () => {
         await deferThirdFlip();
         expect(room().cameraLayeringGateEnabled).toBe(false);
