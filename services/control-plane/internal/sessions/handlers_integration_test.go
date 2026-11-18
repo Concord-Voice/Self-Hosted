@@ -362,10 +362,37 @@ func TestListSessions_ReturnsExpectedFields(t *testing.T) {
 	require.NotEmpty(t, sessions)
 	sess := testhelpers.JSONElem[map[string]interface{}](t, sessions, 0)
 
-	expectedKeys := []string{"id", "device_name", "ip_address", "user_agent", "machine_id",
-		"expires_at", "created_at", "last_used", "remember_me", "is_current"}
-	for _, key := range expectedKeys {
+	for _, key := range sessionListKeys {
 		assert.Contains(t, sess, key, "session should contain key: %s", key)
+	}
+}
+
+var sessionListKeys = []string{"id", "device_name", "ip_address", "user_agent",
+	"expires_at", "created_at", "last_used", "remember_me", "is_current"}
+
+// TestSessionListOmitsMachineID proves the session list never returns the
+// machine identifier a trusted-device responder check is keyed on.
+func TestSessionListOmitsMachineID(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "sessnomachine")
+	sid := createSession(t, ts, user.ID, "TestBrowser", "192.168.1.1")
+	const machineID = "5f0c6a52-9d3e-4b1a-8c77-2e4f6a8b9c01"
+	_, err := ts.DB.Exec(`UPDATE refresh_tokens SET machine_id = $1 WHERE id = $2`, machineID, sid)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("GET", sessionsPath, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotContains(t, w.Body.String(), "machine_id")
+	require.NotContains(t, w.Body.String(), machineID)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	sessions := testhelpers.JSONField[[]interface{}](t, body, "sessions")
+	require.NotEmpty(t, sessions)
+	for i := range sessions {
+		sess := testhelpers.JSONElem[map[string]interface{}](t, sessions, i)
+		for _, key := range sessionListKeys {
+			assert.Contains(t, sess, key, "session should contain key: %s", key)
+		}
 	}
 }
 

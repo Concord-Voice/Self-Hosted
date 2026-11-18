@@ -1577,6 +1577,37 @@ func TestListTrustedDevicesAfterDesignate(t *testing.T) {
 	assert.Len(t, devices, 1)
 }
 
+// TestListTrustedDevicesOmitsMachineID proves the list never returns the
+// machine identifier a responder check is keyed on; only the designating
+// response tells a device its own value.
+func TestListTrustedDevicesOmitsMachineID(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "listdevnomachine")
+	const machineID = "c2d3e4f5-a6b7-4890-abcd-ef1234567890"
+	headers := testhelpers.AuthHeaders(user.AccessToken)
+	headers.Set(headerMachineID, machineID)
+	headers.Set(headerDeviceName, "My Desktop")
+	designated := ts.DoRequest("POST", urlTrustedDevices, map[string]interface{}{
+		"password":    testPassword,
+		"device_name": "My Desktop",
+	}, headers)
+	require.Equal(t, http.StatusOK, designated.Code, designated.Body.String())
+	require.Contains(t, designated.Body.String(), machineID, "the designate response is unchanged")
+
+	w := ts.DoRequest("GET", urlTrustedDevices, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotContains(t, w.Body.String(), "machine_id")
+	require.NotContains(t, w.Body.String(), machineID)
+	var body struct {
+		Devices []map[string]any `json:"devices"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	require.Len(t, body.Devices, 1)
+	for _, key := range []string{"id", "device_name", "designated_at", "last_seen_at"} {
+		require.Contains(t, body.Devices[0], key)
+	}
+}
+
 // --- ListRecoveryRequests (more paths) ---
 
 func TestRespondToRecoveryRequestApprove(t *testing.T) {

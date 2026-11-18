@@ -306,7 +306,7 @@ func (h *Handler) fetchActiveSessions(uid, currentTokenHash string) ([]gin.H, er
 	rows, err := h.db.Query(
 		`SELECT id, token_hash,
 		        COALESCE(device_name, ''), COALESCE(host(ip_address), ''), COALESCE(user_agent, ''),
-		        expires_at, created_at, last_used_at, remember_me, COALESCE(machine_id, '')
+		        expires_at, created_at, last_used_at, remember_me
 		 FROM refresh_tokens
 		 WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW()
 		 ORDER BY last_used_at DESC`,
@@ -322,7 +322,7 @@ func (h *Handler) fetchActiveSessions(uid, currentTokenHash string) ([]gin.H, er
 	for rows.Next() {
 		var s models.RefreshToken
 		if err := rows.Scan(&s.ID, &s.TokenHash, &s.DeviceName, &s.IPAddress, &s.UserAgent,
-			&s.ExpiresAt, &s.CreatedAt, &s.LastUsedAt, &s.RememberMe, &s.MachineID); err != nil {
+			&s.ExpiresAt, &s.CreatedAt, &s.LastUsedAt, &s.RememberMe); err != nil {
 			// Fail closed. A session the user cannot see is a session they
 			// cannot revoke, so a truncated list rendered as complete is a
 			// worse outcome than a 500 (#3290).
@@ -331,7 +331,7 @@ func (h *Handler) fetchActiveSessions(uid, currentTokenHash string) ([]gin.H, er
 		}
 		activeSessions = append(activeSessions, gin.H{
 			"id": s.ID, "device_name": s.DeviceName, "ip_address": maskIPAddress(s.IPAddress),
-			"user_agent": s.UserAgent, "machine_id": s.MachineID, "expires_at": s.ExpiresAt,
+			"user_agent": s.UserAgent, "expires_at": s.ExpiresAt,
 			"created_at": s.CreatedAt, "last_used": s.LastUsedAt, "remember_me": s.RememberMe,
 			"is_current": currentTokenHash != "" && s.TokenHash == currentTokenHash,
 		})

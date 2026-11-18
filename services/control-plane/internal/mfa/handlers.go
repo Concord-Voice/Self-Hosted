@@ -4173,7 +4173,7 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	userID := c.GetString("user_id")
 
 	rows, err := h.db.QueryContext(c.Request.Context(),
-		`SELECT id, device_name, machine_id, designated_at, last_seen_at
+		`SELECT id, device_name, designated_at, last_seen_at
 		 FROM trusted_recovery_devices WHERE user_id = $1
 		 ORDER BY designated_at DESC`, userID,
 	)
@@ -4184,10 +4184,11 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	}
 	defer func() { _ = rows.Close() }()
 
+	// The machine identifier is a responder credential input, so a list never
+	// returns it; only the designating device learns its own value.
 	type trustedDevice struct {
 		ID           string     `json:"id"`
 		DeviceName   string     `json:"device_name"`
-		MachineID    string     `json:"machine_id"`
 		DesignatedAt time.Time  `json:"designated_at"`
 		LastSeenAt   *time.Time `json:"last_seen_at"`
 	}
@@ -4196,7 +4197,7 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	var scanErr error
 	for rows.Next() {
 		var d trustedDevice
-		if err := rows.Scan(&d.ID, &d.DeviceName, &d.MachineID, &d.DesignatedAt, &d.LastSeenAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.DeviceName, &d.DesignatedAt, &d.LastSeenAt); err != nil {
 			h.log.Error("Failed to scan trusted device row", "user_id", userID, "error", err)
 			scanErr = err
 			break
@@ -4255,7 +4256,7 @@ func (h *Handler) DesignateTrustedDevice(c *gin.Context) {
 		return
 	}
 
-	h.log.Info("Trusted device designated", "user_id", userID, "device_id", deviceID, "machine_id", machineID)
+	h.log.Info("Trusted device designated", "user_id", userID, "device_id", deviceID)
 	h.clearStepUpAfterSuccess(c, userID)
 	c.JSON(http.StatusOK, gin.H{
 		"id":            deviceID,
