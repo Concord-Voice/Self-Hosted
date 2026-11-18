@@ -72,7 +72,7 @@ later storage migration.
 ### Security
 
 - **Media plane:** Updated `qs` to 6.17.1, which encodes keys when `stringify` runs with `allowEmptyArrays` (CVE-2026-110910) ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)).
-- **Development tooling:** The root package and the Admin Console move to patched `undici` 8.12.4 and `minimatch` 11.0.7 ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)), and the root lint tooling no longer installs a second ESLint 8 copy ([#334](https://github.com/Concord-Voice/Self-Hosted/pull/334)).
+- **Development tooling:** Updated the root package and the Admin Console to patched `undici` 8.12.4 and `minimatch` 11.0.7 ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)), and removed the second ESLint 8 copy that the root lint tooling installed ([#334](https://github.com/Concord-Voice/Self-Hosted/pull/334)).
 - **Admin Console:** Enrollment reset now invalidates earlier enrollment tokens, ceremonies, and console sessions. WebAuthn sign-in persists the credential counter before issuing a session and rejects a stale nonzero counter; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
 - **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
