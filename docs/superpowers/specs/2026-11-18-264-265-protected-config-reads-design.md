@@ -44,3 +44,19 @@ Issues: #264, #265. Both come from the security review of PR #263.
 - `migration-lint` in both workflows fails on a single-parent checkout, on a merge of another
   head, and on an empty head SHA. It reads both files from the base SHA, not from `HEAD^1`.
 - Each new test fails against the old code.
+
+## Addendum: red-team pass
+
+A pre-PR red-team pass on the first commit found three more bypasses. All three are fixed in the same PR.
+
+- **Selection.** golang-migrate runs any top-level `<digits>_*.up.*` / `.down.*` file and follows
+  symlinks, and squawk reads each argument as a glob. The select step now requires `migrations/`
+  to be a tree of regular files, and requires every changed runnable name to match
+  `^[0-9]{6}_[a-z0-9_]+\.(up|down)\.sql$`.
+- **Inline ignores.** Only the documented whole-line `-- squawk-ignore <rule>` above one statement
+  is accepted. `squawk-ignore-file`, a bare ignore, and ignores in trailing or block comments fail
+  the job. A blanket ban was rejected, because the migrations rules endorse the per-statement form
+  with a reason.
+- **Manifest bytes.** With no FILE list the checker parses the indexed blob whose mode it
+  checked, not the working-tree file, and refuses a manifest with an unresolved merge in the
+  index.
