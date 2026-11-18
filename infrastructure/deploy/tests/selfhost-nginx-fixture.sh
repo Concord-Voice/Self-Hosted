@@ -2,6 +2,8 @@
 # Prepare an isolated nginx unit configuration on the disposable acceptance VM.
 set -euo pipefail
 umask 077
+# Exact matching only: an inherited BASHOPTS=nocasematch would case-fold the guard.
+shopt -u nocasematch
 
 if [[ $# != 0 || ${GITHUB_ACTIONS:-} != true ||
       ${GITHUB_REPOSITORY:-} != Concord-Voice/Self-Hosted ||
