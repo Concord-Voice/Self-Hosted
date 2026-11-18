@@ -194,6 +194,10 @@ class MinioEnginePins(unittest.TestCase):
                                      and any(arg.startswith("docker-ce=") for arg in args)]
                     key_installs = [args for kind, args in calls if kind == "sudo"
                                     and args[:3] == ["install", "-m", "0644"]]
+                    prereq_calls = [args for kind, args in calls if kind == "sudo"
+                                    and args[-3:] == ["ca-certificates", "curl", "gnupg"]]
+                    self.assertEqual(prereq_calls, [["apt-get", "install", "-y", "-q", "--no-install-recommends",
+                                                     "--no-remove", "ca-certificates", "curl", "gnupg"]])
                     self.assertEqual(bool(sources), not key_refused)
                     self.assertEqual(bool(package_calls), not key_refused)
                     self.assertEqual(bool(key_installs), not key_refused)
@@ -201,8 +205,40 @@ class MinioEnginePins(unittest.TestCase):
                         self.assertEqual(package_calls[0][-len(PACKAGES):], list(PACKAGES))
                         self.assertEqual(package_calls[0][:-len(PACKAGES)],
                                          ["apt-get", "install", "-y", "-q", "--no-install-recommends", "--no-remove"])
+                    prereq = ["apt-get", "install", "-y", "-q", "--no-install-recommends", "--no-remove",
+                              "ca-certificates", "curl", "gnupg"]
+                    reviewed_calls = (
+                        ["apt-get", "update", "-q"], prereq,
+                        ["apt-get", "install", "-y", "-q", "--no-install-recommends", "--no-remove", *PACKAGES],
+                        ["install", "-m", "0755", "-d", "/etc/apt/keyrings"],
+                        ["tee", "/etc/apt/sources.list.d/docker.sources"])
+                    for kind, args in calls:  # every privileged call in the step must be a reviewed one
+                        if kind != "sudo":
+                            continue
+                        reviewed = (args in reviewed_calls
+                                    or (len(args) == 5 and args[:3] == ["install", "-m", "0644"]
+                                        and args[4] == "/etc/apt/keyrings/docker.asc")
+                                    or (len(args) == 3 and args[0] == "systemctl"
+                                        and args[1] in ("start", "restart", "is-active") and args[2] == "docker")
+                                    or args == ["systemctl", "is-active", "--quiet", "docker"])
+                        self.assertTrue(reviewed, f"unreviewed privileged call: {args}")
+                    self.assertLessEqual(len(package_calls), 1)
+                    self.assertLessEqual(len(sources), 1)
                     self.assertNotIn("fixture-public-key", result.stdout + result.stderr)
                     self.assertEqual(list(directory.glob("tmp.*")), [], "owned key scratch must be cleaned")
+
+    def test_no_other_apt_channel_in_publisher_jobs(self):
+        docs = {"minio": yaml.safe_load(WORKFLOW.read_text()), "buildtools": yaml.safe_load(BUILDTOOLS.read_text())}
+        for workflow, jobs, job_id in self.bootstraps():
+            with self.subTest(workflow=workflow, job=job_id):
+                job = jobs[job_id]
+                install = next(s for s in job["steps"] if s.get("name", "").startswith("Install official Docker CE"))
+                for scope in (docs[workflow].get("env"), job.get("env"), install.get("env")):
+                    bad = [k for k in (scope or {}) if str(k).upper().startswith(("APT", "DPKG", "DEBCONF"))]
+                    self.assertEqual(bad, [], "apt/dpkg behaviour must not be set through env")
+                others = [s.get("name") for s in job["steps"] if s is not install
+                          and any(w in str(s.get("run", "")) for w in ("apt-get", "apt ", "dpkg -i", "apt.conf"))]
+                self.assertEqual(others, [], "no other step in a publisher job may drive apt")
 
 
 if __name__ == "__main__":
