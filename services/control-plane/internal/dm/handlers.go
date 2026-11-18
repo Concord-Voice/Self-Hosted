@@ -1919,8 +1919,7 @@ func (h *Handler) removeActiveMemberTx(
 	ctx context.Context,
 	convID string,
 	targetID uuid.UUID,
-	callerUserID string,
-	credentialEpoch string,
+	callerUserID, credentialEpoch string,
 	preflight memberRemovalPreflight,
 ) (string, int, error) {
 	if h.activePlans == nil {
@@ -1978,8 +1977,7 @@ func (h *Handler) removeInactiveMemberTx(
 	ctx context.Context,
 	convID string,
 	targetID uuid.UUID,
-	callerUserID string,
-	credentialEpoch string,
+	callerUserID, credentialEpoch string,
 	preflight memberRemovalPreflight,
 ) (string, int, error) {
 	tx, err := h.db.BeginTx(ctx, nil)
@@ -2141,8 +2139,7 @@ func (h *Handler) transferMemberRemovalCreator(
 	tx *sql.Tx,
 	convID string,
 	targetID uuid.UUID,
-	createdBy string,
-	preflightSuccessorID string,
+	createdBy, preflightSuccessorID string,
 ) (string, error) {
 	if targetID.String() != createdBy {
 		return "", nil
