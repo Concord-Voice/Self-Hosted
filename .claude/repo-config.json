@@ -44,7 +44,7 @@
       "blocking": true,
       "offline": false,
       "when": "always",
-      "ack_pattern": "(?s)\\A(?!.*<summary><b>(Code Review|Verification|Options)</b>)(?=(?:[ \\t]*>[^\\n]*\\n)*?[ \\t]*>[^\\n]*gitar)(?=(?:[ \\t]*>[^\\n]*(?:\\n|\\z))*\\s*.{0,900}\\z).*?(?:(^|\\n)[ \\t>*_]{0,6}(On it[^\\n]{0,8})?running [^\\n]{0,40}review now|(^|\\n)[ \\t>*_]{0,6}(starting|review started)|will (appear|show up|post)[^\\n]{0,80}dashboard comment|\\bI.m re-?(checking|reviewing)\\b)",
+      "ack_pattern": "(?s)\\A(?!.*<summary><b>(Code Review|Verification|Options)</b>)(?=(?:[ \\t]*>[^\\n]*\\n)*?[ \\t]*>[^\\n]*gitar)(?=(?:[ \\t]*>[^\\n]*(?:\\n|\\z))*\\s*.{0,900}\\z)(?>(?:[ \\t]*>[^\\n]*(?:\\n|\\z))*).*?(?:(^|\\n)[ \\t*_]{0,6}(On it[^\\n]{0,8})?running [^\\n]{0,40}review now|(^|\\n)[ \\t*_]{0,6}(starting( a| the)? review|review started)|will (appear|show up|post)[^\\n]{0,80}dashboard comment|\\bI.m re-?(checking|reviewing)\\b)",
       "decline_pattern": "sent several Gitar comments|wait about [0-9]+ minutes and comment again"
     },
     {
