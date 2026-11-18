@@ -1038,7 +1038,7 @@ When a new AI reviewer is added to the repo, the `user.type == "Bot"` filter pic
    gh api repos/${REPO}/pulls/{pr}/comments --jq '.[] | select(.user.type == "Bot") | .user.login' | sort -u
    gh api repos/${REPO}/issues/{pr}/comments --jq '.[] | select(.user.type == "Bot") | .user.login' | sort -u
    ```
-2. Add a `.bots[]` entry (schema in `config/repo-config.reference.md`):
+2. Add a `.bots[]` entry (schema in `.claude/repo-config.reference.md`):
    - **Dedicated-login reviewer** — set `.match` to a stable login substring (case-insensitive). Prefer a substring over an exact login so a bot that posts inline comments under one login and review summaries under a `…[bot]` variant resolves with one entry:
      ```json
      { "match": "graphite", "name": "Graphite", "login": "graphite-app[bot]" }
