@@ -122,10 +122,10 @@ function bufferToBase64url(value: ArrayBuffer | ArrayBufferView): string {
   }
   let binary = "";
   for (const byte of bytes) binary += String.fromCodePoint(byte);
-  return btoa(binary)
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll(/=+$/g, "");
+  const encoded = btoa(binary).replaceAll("+", "-").replaceAll("/", "_");
+  let end = encoded.length;
+  while (end > 0 && encoded[end - 1] === "=") end--;
+  return encoded.slice(0, end);
 }
 
 function descriptor(value: unknown): PublicKeyCredentialDescriptor {

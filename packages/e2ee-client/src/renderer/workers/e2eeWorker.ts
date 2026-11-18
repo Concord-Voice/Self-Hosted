@@ -89,7 +89,7 @@ export function recordDecryptEntry(probeId: string | undefined): void {
 }
 
 function postToMain(msg: E2EEMainMessage): void {
-  self.postMessage(msg);
+  globalThis.postMessage(msg);
 }
 
 function log(
@@ -102,7 +102,7 @@ function log(
 
 // ─── Message handler (key management from main thread) ────────────────
 
-self.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
+globalThis.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
   const msg = event.data;
   switch (msg.type) {
     case 'init':
@@ -177,7 +177,7 @@ self.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
 // Use addEventListener — the onrtctransform IDL attribute is not supported
 // in all Chromium/Electron Worker contexts, but the event itself dispatches.
 
-self.addEventListener('rtctransform', ((event: RTCTransformEvent) => {
+globalThis.addEventListener('rtctransform', ((event: RTCTransformEvent) => {
   const transformer = event.transformer;
   const opts = transformer.options as E2EETransformOptions;
 
