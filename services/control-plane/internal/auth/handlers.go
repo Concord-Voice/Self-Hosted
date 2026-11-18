@@ -3501,6 +3501,7 @@ func (h *Handler) issueAndDeliverRecovery(ctx context.Context, job recoveryJob, 
 		return
 	}
 	sendID := hex.EncodeToString(sendIDBytes[:])
+	codeKey := ""
 
 	var secret, recordKey string
 	var record []byte
@@ -3509,9 +3510,11 @@ func (h *Handler) issueAndDeliverRecovery(ctx context.Context, job recoveryJob, 
 		secret, err = generateRecoveryEmailToken()
 		if err == nil {
 			recordKey = recoveryEmailTokenKey(secret)
+			codeKey = recoveryRedisKey(job.addr)
 			record, err = json.Marshal(recoveryEmailTokenRecord{UserID: userID, SendID: sendID})
 		}
 	} else {
+		sendID = recoveryCodeSendPrefix + sendID
 		secret, err = generateRecoveryCode()
 		if err == nil {
 			recordKey = recoveryRedisKey(job.addr)
@@ -3529,6 +3532,7 @@ func (h *Handler) issueAndDeliverRecovery(ctx context.Context, job recoveryJob, 
 		SendsKey:  recoverySendsKey(userID),
 		SendID:    sendID,
 		Record:    record,
+		CodeKey:   codeKey,
 	}
 	ttl, held, err := h.issueRecoveryRecord(ctx, issue)
 	if err != nil {

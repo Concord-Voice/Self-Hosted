@@ -110,6 +110,64 @@ func TestIssueRecoveryRecordHeldSendsNothing(t *testing.T) {
 	require.Equal(t, "s1", slot)
 }
 
+// A slot held by a 6-digit code must not block a recovery key: the code may be
+// unusable (its address budget spent, or a client that cannot enter it), and a
+// key cannot be guessed. A key replaces the code once; nothing replaces a key,
+// and a code never replaces anything (#344 review).
+func TestIssueRecoveryRecordTokenReplacesCodeHeldSlot(t *testing.T) {
+	rdb, mini := newRecoveryRedis(t)
+	h := NewHandler(nil, rdb, logger.New("test"), "test", nil)
+	ctx := context.Background()
+	codeKey := recoveryRedisKey("user@example.test")
+
+	_, held, err := h.issueRecoveryRecord(ctx, testRecoveryIssue("u1", recoveryCodeSendPrefix+"1", codeKey))
+	require.NoError(t, err)
+	require.False(t, held)
+
+	code2 := testRecoveryIssue("u1", recoveryCodeSendPrefix+"2", codeKey)
+	_, held, err = h.issueRecoveryRecord(ctx, code2)
+	require.NoError(t, err)
+	require.True(t, held, "a code never replaces a live code")
+
+	token := testRecoveryIssue("u1", "t-1", recoveryTokenKeyPrefix+"one")
+	token.CodeKey = codeKey
+	ttl, held, err := h.issueRecoveryRecord(ctx, token)
+	require.NoError(t, err)
+	require.False(t, held, "a key replaces a slot a code holds")
+	require.Equal(t, recoveryFastTierTTL, ttl)
+	require.False(t, mini.Exists(codeKey), "the replaced code is no longer redeemable")
+	require.True(t, mini.Exists(token.RecordKey))
+	require.Equal(t, "t-1", mustGet(t, mini, token.SlotKey))
+	require.Equal(t, "2", mustGet(t, mini, token.SendsKey), "the replacement counts as a send")
+
+	again := testRecoveryIssue("u1", "t-2", recoveryTokenKeyPrefix+"two")
+	again.CodeKey = codeKey
+	_, held, err = h.issueRecoveryRecord(ctx, again)
+	require.NoError(t, err)
+	require.True(t, held, "nothing replaces a live key")
+	_, held, err = h.issueRecoveryRecord(ctx, testRecoveryIssue("u1", recoveryCodeSendPrefix+"3", codeKey))
+	require.NoError(t, err)
+	require.True(t, held, "a code never replaces a key")
+	require.Equal(t, "t-1", mustGet(t, mini, token.SlotKey))
+}
+
+// The begin path wires the replacement: an attacker who holds the slot with a
+// code email cannot stop the owner's key email.
+func TestRecoveryBeginTokenAfterCodeSendsKey(t *testing.T) {
+	rdb, mini := newRecoveryRedis(t)
+	h := NewHandler(nil, rdb, logger.New("test"), "test", nil)
+	mail := &fakeRecoveryMailer{}
+	h.recoveryMail = mail
+	t.Cleanup(h.CloseRecoveryJobs)
+
+	h.issueAndDeliverRecovery(t.Context(), recoveryJob{addr: "owner@example.test", format: recoveryFormatCode}, "user-1")
+	h.issueAndDeliverRecovery(t.Context(), recoveryJob{addr: "owner@example.test", format: recoveryFormatToken}, "user-1")
+	h.recoveryDeliveries.Wait()
+	require.Len(t, mail.keys, 1, "the key email is sent although a code holds the slot")
+	require.True(t, mini.Exists(recoveryEmailTokenKey(mail.keys[0])))
+	require.False(t, mini.Exists(recoveryRedisKey("owner@example.test")))
+}
+
 func TestIssueRecoveryRecordRedisFailureLeavesNoState(t *testing.T) {
 	rdb, mini := newRecoveryRedis(t)
 	h := NewHandler(nil, rdb, logger.New("test"), "test", nil)
@@ -280,7 +338,8 @@ func TestRecoveryBeginAlternatingFormatsShareSlot(t *testing.T) {
 	// A second address spelling for the same account shares the limit too.
 	h.issueAndDeliverRecovery(t.Context(), recoveryJob{addr: "Owner@Example.test", format: recoveryFormatToken}, "user-1")
 	h.recoveryDeliveries.Wait()
-	require.Equal(t, 1, mail.sent(), "one email per cooldown for the account, whatever the format or spelling")
+	// The code, then the key that replaces it; every later request is held.
+	require.Equal(t, 2, mail.sent(), "at most a code and one key per cooldown, whatever the format or spelling")
 }
 
 func TestRecoveryBeginDeliveryFailureRefunds(t *testing.T) {

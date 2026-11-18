@@ -40,6 +40,10 @@ const (
 	recoveryTokenKeyPrefix = "recovery_code:token:"
 	recoverySlotKeyPrefix  = "recovery_code:slot:"
 	recoverySendsKeyPrefix = "recovery_code:sends:"
+
+	// recoveryCodeSendPrefix starts the send_id of a 6-digit code email, so the
+	// issue script can tell a code-held slot from a key-held one.
+	recoveryCodeSendPrefix = "c-"
 )
 
 // recoveryMailer is the part of the email service recovery uses.
@@ -96,14 +100,24 @@ type recoveryIssue struct {
 	SendsKey  string
 	SendID    string
 	Record    []byte
+	// CodeKey is set only for a key: the account's 6-digit code record that
+	// the key replaces when a code holds the slot.
+	CodeKey string
 }
 
 // issueRecoveryRecordLua takes the account's send slot, counts the send, picks
 // the tier, and stores the record with the slot's TTL, all in one command.
-// KEYS: slot, sends, record. ARGV: send_id, record, fast ms, slow ms, fast
-// sends, window ms. Returns 0 when the slot is held, else the TTL in ms.
+// A held slot refuses the send, except that a key (ARGV[7] == "1") replaces a
+// slot held by a 6-digit code and deletes that code (KEYS[4]): an attacker
+// must not hold the slot with a code its owner cannot use.
+// KEYS: slot, sends, record, code. ARGV: send_id, record, fast ms, slow ms,
+// fast sends, window ms, replace. Returns 0 when held, else the TTL in ms.
 var issueRecoveryRecordLua = redis.NewScript(`
-if redis.call("EXISTS", KEYS[1]) == 1 then return 0 end
+local slot = redis.call("GET", KEYS[1])
+if slot then
+  if ARGV[7] ~= "1" or string.sub(slot, 1, string.len(ARGV[8])) ~= ARGV[8] then return 0 end
+  redis.call("DEL", KEYS[4])
+end
 local n = redis.call("INCR", KEYS[2])
 if redis.call("PTTL", KEYS[2]) < 0 then redis.call("PEXPIRE", KEYS[2], ARGV[6]) end
 local ttl = ARGV[3]
@@ -116,11 +130,16 @@ return tonumber(ttl)
 // issueRecoveryRecord stores a recovery record unless the account already has
 // a live recovery email. held is true when nothing was stored.
 func (h *Handler) issueRecoveryRecord(ctx context.Context, in recoveryIssue) (ttl time.Duration, held bool, err error) {
+	codeKey, replace := in.RecordKey, "0"
+	if in.CodeKey != "" {
+		codeKey, replace = in.CodeKey, "1"
+	}
 	ms, err := issueRecoveryRecordLua.Run(ctx, h.redis,
-		[]string{in.SlotKey, in.SendsKey, in.RecordKey},
+		[]string{in.SlotKey, in.SendsKey, in.RecordKey, codeKey},
 		in.SendID, string(in.Record),
 		recoveryFastTierTTL.Milliseconds(), recoverySlowTierTTL.Milliseconds(),
 		recoveryFastTierSends, recoverySendsWindow.Milliseconds(),
+		replace, recoveryCodeSendPrefix,
 	).Int64()
 	if err != nil {
 		return 0, false, fmt.Errorf("issue recovery record: %w", err)

@@ -136,7 +136,10 @@ Worker, both formats:
 1. Look up the user. No user: stop.
 2. Generate the secret (token, or 6-digit code for legacy) and a `send_id`.
 3. Run the **issue script** (one Lua call, keys: slot, counter, record):
-   - If the slot exists: return "held". Send nothing.
+   - If the slot exists: return "held" and send nothing, unless this is a
+     token send and a 6-digit code holds the slot (its `send_id` starts with
+     `c-`). Then delete that code record and continue (revised after review,
+     see the review record).
    - `INCR` the counter; `EXPIRE NX` 24 h.
    - Tier = 15 min if the count is 1 to 3, else 60 min.
    - `SET` the slot (`send_id`) and the record, both with `PX` = tier.
@@ -155,7 +158,10 @@ Worker, both formats:
 `send_id`, so `clearInflightRecoveryCodes` can run the cleanup script.
 
 Legacy and token sends share the slot and counter, so alternating `format`
-values gets no extra emails.
+values gets at most one extra email per slot: a key may replace a code once,
+and nothing replaces a key. A code can be unusable (its address budget spent,
+or a client that cannot enter it), so a code must never stop a key from being
+sent. A key cannot be guessed, so replacing a code with one is safe.
 
 ### 3. Verify: `POST /auth/recovery/verify-code`
 
@@ -320,6 +326,10 @@ A security review and a builder check read the first draft. Changes made:
 | Switch-off behaviour on verify unclear | `400`, no state touched, lock-out warning (section 5) |
 | Regression test conflicted with the client-address limiter | Test level and owner address stated (Tests) |
 | Slot release after redeem not atomic | Accepted residual, stated (section 3) |
+
+- Post-implementation security review: a slot held by a 6-digit code that
+  the owner cannot use could delay the owner's recovery key. Fixed: a key
+  replaces a code-held slot (once) and deletes the code.
 
 ## Decisions for the approver
 
