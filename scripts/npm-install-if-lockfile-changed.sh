@@ -1,10 +1,12 @@
 #!/bin/bash
 # npm-install-if-lockfile-changed.sh — auto-sync node_modules on pull/checkout.
 #
-# Runs `npm install` in each specified directory whose package-lock.json
+# Runs `npm ci` in each specified directory whose package-lock.json
 # differs between the previous HEAD and the current HEAD. Designed as a
 # pre-commit post-merge / post-checkout hook so dependency updates are picked
-# up the moment they land in the working tree.
+# up the moment they land in the working tree. `npm ci` installs exactly what
+# the lockfile pins, never rewrites it, and fails if package.json and the
+# lockfile disagree.
 #
 # pre-commit stage env vars:
 #   post-checkout: PRE_COMMIT_FROM_REF, PRE_COMMIT_TO_REF, PRE_COMMIT_CHECKOUT_TYPE
@@ -48,7 +50,7 @@ fi
 # unhelpful for contributors without a local Node toolchain.
 if ! command -v npm >/dev/null 2>&1; then
   echo -e "${YELLOW}⚠️  \`npm\` not on PATH — skipping auto-install hook.${NC}" >&2
-  echo -e "   Install Node.js, then run \`npm install\` manually when ready." >&2
+  echo -e "   Install Node.js, then run \`npm ci\` manually when ready." >&2
   exit 0
 fi
 
@@ -105,22 +107,11 @@ for dir in "$@"; do
        exit "$rc" ;;
   esac
 
-  echo -e "${YELLOW}📦 $lockfile changed — running \`npm install\` in $dir...${NC}"
-  if ! (cd "$dir" && npm install --no-audit --no-fund); then
-    echo -e "${RED}✗ npm install failed in $dir.${NC}" >&2
+  echo -e "${YELLOW}📦 $lockfile changed — running \`npm ci\` in $dir...${NC}"
+  if ! (cd "$dir" && npm ci --no-audit --no-fund); then
+    echo -e "${RED}✗ npm ci failed in $dir.${NC}" >&2
     exit 1
   fi
 
-  # Detect silent lockfile mutation. `npm install` will rewrite the lockfile
-  # if package.json and the incoming lockfile disagree — leaving an
-  # uncommitted change from a hook the user didn't explicitly invoke. Warn
-  # loudly; don't auto-revert (the developer may want to inspect and commit it).
-  if ! git diff --quiet -- "$lockfile"; then
-    echo -e "${YELLOW}⚠️  npm install mutated $lockfile.${NC}" >&2
-    echo -e "   Usually means package.json and the incoming lockfile disagreed." >&2
-    echo -e "   Review:  git diff -- $lockfile" >&2
-    echo -e "   Discard: git restore $lockfile" >&2
-  fi
-
-  echo -e "${GREEN}✓ npm install complete in $dir${NC}"
+  echo -e "${GREEN}✓ npm ci complete in $dir${NC}"
 done

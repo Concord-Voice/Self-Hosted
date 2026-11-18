@@ -66,10 +66,10 @@ if ! change_output=$(cd "${TMP_DIR}/repo" && \
   PRE_COMMIT_CHECKOUT_TYPE=1 bash "${HOOK}" client 2>&1); then
   fail "changed lockfile should run npm: ${change_output}"
 fi
-[[ "$(<"${TMP_DIR}/npm.log")" == "install --no-audit --no-fund" ]] ||
-  fail "changed lockfile did not run the expected npm install"
+[[ "$(<"${TMP_DIR}/npm.log")" == "ci --no-audit --no-fund" ]] ||
+  fail "changed lockfile did not run the expected npm ci"
 
-echo "PASS: null OID skips cleanly and changed lockfiles run npm install"
+echo "PASS: null OID skips cleanly and changed lockfiles run npm ci"
 
 # git exports GIT_DIR to its hooks, and in a linked worktree it names
 # .git/worktrees/<name>. npm fetches a git dependency with its own `git clone`
