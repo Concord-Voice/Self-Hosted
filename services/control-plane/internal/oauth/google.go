@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/sync/singleflight"
 )
 
 // GoogleConfig is the constructor input for GoogleProvider.
@@ -58,8 +59,10 @@ type GoogleProvider struct {
 	cfg        GoogleConfig
 	httpClient *http.Client
 
-	jwksMu    sync.RWMutex
-	jwksCache map[string]cachedKey
+	jwksMu          sync.RWMutex
+	jwksCache       map[string]cachedKey
+	jwksLastAttempt time.Time
+	jwksFlight      singleflight.Group
 }
 
 // NewGoogleProvider validates configuration and returns a provider ready to use.
@@ -230,39 +233,67 @@ func (g *GoogleProvider) fetchKey(ctx context.Context, kid string) (*rsa.PublicK
 	}
 	g.jwksMu.RUnlock()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.cfg.JWKSEndpoint, nil)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	resp, err := g.httpClient.Do(req) //nolint:gosec // JWKSEndpoint set from trusted config (env or hardcoded default)
-	if err != nil {
-		return nil, fmt.Errorf("JWKS HTTP: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	refreshCh := g.jwksFlight.DoChan("refresh", func() (any, error) {
+		g.jwksMu.Lock()
+		now := time.Now()
+		if !g.jwksLastAttempt.IsZero() && now.Before(g.jwksLastAttempt.Add(time.Minute)) {
+			g.jwksMu.Unlock()
+			return nil, nil
+		}
+		g.jwksLastAttempt = now // Spend the opportunity before network I/O, including failures.
+		g.jwksMu.Unlock()
 
-	var jwksResp jwksResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jwksResp); err != nil {
-		return nil, fmt.Errorf("JWKS decode: %w", err)
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(refreshCtx, http.MethodGet, g.cfg.JWKSEndpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := g.httpClient.Do(req) //nolint:gosec // JWKSEndpoint set from trusted config (env or hardcoded default)
+		if err != nil {
+			return nil, fmt.Errorf("JWKS HTTP: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("JWKS HTTP status %d", resp.StatusCode)
+		}
+		var jwksResp jwksResponse
+		if err := json.NewDecoder(resp.Body).Decode(&jwksResp); err != nil {
+			return nil, fmt.Errorf("JWKS decode: %w", err)
+		}
+		parsed := parseJWKResponse(&jwksResp)
+		if len(parsed) == 0 {
+			return nil, errors.New("JWKS has no usable keys")
+		}
+		expiresAt := time.Now().Add(time.Hour)
+		next := make(map[string]cachedKey, len(parsed))
+		for k, pub := range parsed {
+			next[k] = cachedKey{key: pub, expiresAt: expiresAt}
+		}
+		g.jwksMu.Lock()
+		g.jwksCache = next
+		g.jwksMu.Unlock()
+		return nil, nil
+	})
+	var refreshErr error
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-refreshCh:
+		refreshErr = result.Err
 	}
-
-	parsed := parseJWKResponse(&jwksResp)
-
-	// Concurrent cache misses on the same kid will all issue a JWKS fetch and
-	// each acquire this lock in turn to write the same keys (last-write-wins).
-	// Acceptable at human-paced auth volume; if telemetry shows fetch storms,
-	// coalesce concurrent fetches via golang.org/x/sync/singleflight.Group.
-	g.jwksMu.Lock()
-	defer g.jwksMu.Unlock()
-	if g.jwksCache == nil {
-		g.jwksCache = make(map[string]cachedKey)
-	}
-	expiresAt := time.Now().Add(time.Hour)
-	for k, pub := range parsed {
-		g.jwksCache[k] = cachedKey{key: pub, expiresAt: expiresAt}
-	}
-
-	if ck, ok := g.jwksCache[kid]; ok {
+	g.jwksMu.RLock()
+	ck, ok := g.jwksCache[kid]
+	valid := ok && time.Now().Before(ck.expiresAt)
+	g.jwksMu.RUnlock()
+	if valid {
 		return ck.key, nil
+	}
+	if refreshErr != nil {
+		return nil, refreshErr
 	}
 	return nil, fmt.Errorf("JWKS: kid %q not found", kid)
 }
