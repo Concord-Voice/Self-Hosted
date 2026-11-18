@@ -1226,6 +1226,13 @@ func (h *Handler) userLevelAction(c *gin.Context, perm rbac.Permission, action, 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg})
 		return
 	}
+	// Channel scope (Concord-Voice/Security issue 168): sessions in channels the
+	// actor cannot see are dropped; a visible channel without perm refuses.
+	specs, err = filterAuthorizedSessionSpecsTx(c.Request.Context(), tx, h.resolver, ctx.serverID, c.GetString("user_id"), perm, specs)
+	if err != nil {
+		h.respondVoiceModAuthorityTxError(c, err, failMsg)
+		return
+	}
 	if len(specs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotInVoice})
 		return
@@ -1414,6 +1421,13 @@ func (h *Handler) ServerDisconnect(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisconnectMember})
 		return
 	}
+	// Channel scope (Concord-Voice/Security issue 168): sessions in channels the
+	// actor cannot see are dropped; a visible channel without Move refuses.
+	specs, err = filterAuthorizedSessionSpecsTx(c.Request.Context(), tx, h.resolver, ctx.serverID, c.GetString("user_id"), rbac.PermMoveMembers, specs)
+	if err != nil {
+		h.respondVoiceModAuthorityTxError(c, err, errMsgFailedDisconnectMember)
+		return
+	}
 	if len(specs) == 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": errMsgTargetNotInVoice})
 		return
@@ -1452,8 +1466,11 @@ type tempAccessRevokeRequest struct {
 // user's channel_keys + pending requests, rotate the channel CSK,
 // force-disconnect the live peer, broadcast channel_access_revoked). Authorize
 // with Move Members + hierarchy (this is a moderation action, NOT the move
-// exception). If no temporary grant exists for (user, channel) the revoke is a
-// no-op and returns 200 {revoked:false}.
+// exception), then, inside the revoke transaction, require the named channel to
+// be a voice channel of this server on which the actor holds VIEW and Move
+// Members (Concord-Voice/Security issue 168). A missing, foreign, non-voice or
+// inaccessible channel answers the same 403. If no temporary grant exists for
+// (user, channel) the revoke is a no-op and returns 200 {revoked:false}.
 //
 // DELETE /servers/:id/voice/:userId/temp-access  body {channel_id}
 func (h *Handler) RevokeTempAccess(c *gin.Context) {
@@ -1475,23 +1492,12 @@ func (h *Handler) RevokeTempAccess(c *gin.Context) {
 
 	reqCtx := c.Request.Context()
 
-	// Scope the body channel_id to the path server: authorizeVoiceMod authorized the
-	// actor for :id only, so a temp grant in a DIFFERENT server must not be revocable
-	// here (cross-server IDOR guard — Gitar finding). Reuses the ServerMove scope helper;
-	// temp grants are only ever issued on voice channels, so isVoiceChannelInServer is exact.
-	inServer, scopeErr := h.isVoiceChannelInServer(reqCtx, req.ChannelID, ctx.serverID)
-	if scopeErr != nil {
-		h.log.Error("temp-access revoke: channel-scope check", "error", scopeErr, "channel_id", req.ChannelID, "server_id", ctx.serverID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRevokeTempAccess})
-		return
-	}
-	if !inServer {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotVoiceInSrv})
-		return
-	}
-
 	// The shared transactional delete reports the actual result, avoiding a
 	// preflight-to-delete race that could otherwise claim a revoke occurred.
+	// The body channel_id is scoped to the path server inside that transaction
+	// (cross-server IDOR guard): requireActorVoiceChannelPermTx refuses a channel
+	// of another server like any channel the actor cannot moderate, so there is
+	// no pool-side check whose answer could confirm a hidden channel ID.
 	actorID := c.GetString("user_id")
 	removed, err := h.tempGrant.revokeTemporaryChannelAccessWithCredential(
 		reqCtx, ctx.serverID, req.ChannelID, ctx.targetID,
@@ -1500,7 +1506,10 @@ func (h *Handler) RevokeTempAccess(c *gin.Context) {
 			credentialEpoch: middleware.TokenCredentialEpoch(c),
 			guardCredential: true,
 			authority: func(txCtx context.Context, tx *sql.Tx) error {
-				return revalidateVoiceModAuthorityTx(txCtx, tx, h.resolver, ctx, actorID, rbac.PermMoveMembers, true)
+				if err := revalidateVoiceModAuthorityTx(txCtx, tx, h.resolver, ctx, actorID, rbac.PermMoveMembers, true); err != nil {
+					return err
+				}
+				return requireActorVoiceChannelPermTx(txCtx, tx, h.resolver, ctx.serverID, actorID, req.ChannelID, rbac.PermMoveMembers)
 			},
 		},
 	)
@@ -1525,7 +1534,6 @@ func (h *Handler) RevokeTempAccess(c *gin.Context) {
 
 const (
 	errMsgInvalidTargetChannel = "Invalid target_channel_id"
-	errMsgTargetNotVoiceInSrv  = "target is not a voice channel in this server"
 	errMsgAlreadyInTarget      = "user is already in the target channel"
 	errMsgMovePrep             = "Failed to prepare move"
 	errMsgMoveTargetBlocked    = "target cannot access the destination channel due to a permanent permission override"
@@ -1845,20 +1853,6 @@ func (h *Handler) signalMove(serverID, targetID, fromChannelID, targetChannelID 
 			"server_id":       serverID,
 		},
 	})
-}
-
-// isVoiceChannelInServer reports whether channelID is a voice channel belonging to
-// serverID. channelID is already UUID-validated by the request binding
-// (target_channel_id binding:"required,uuid"), so no parse guard is needed here.
-func (h *Handler) isVoiceChannelInServer(ctx context.Context, channelID, serverID string) (bool, error) {
-	var exists bool
-	err := h.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1 AND server_id = $2 AND type = 'voice')`,
-		channelID, serverID).Scan(&exists)
-	if err != nil {
-		return false, err
-	}
-	return exists, nil
 }
 
 // auditVoiceMove writes one voice_member_moved audit_log entry when a move
