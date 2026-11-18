@@ -152,7 +152,8 @@ func ParseEncryptionKey(hexKey string) ([]byte, error) {
 // Returns the plaintext codes (to show the user once) and their v2 hashes: each
 // code gets its own random salt and the bounded Argon2id tuple the reader
 // accepts. Only a release whose every serving replica reads v2 may run this
-// writer; see docs/architecture.md, "Backup-code storage".
+// writer; see the "Backup-code storage" entry under Security Architecture in
+// docs/architecture.md.
 func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 	codes = make([]string, backupCount)
 	hashes = make([]string, backupCount)
