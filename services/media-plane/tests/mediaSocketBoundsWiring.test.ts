@@ -43,3 +43,18 @@ describe('media socket bounds wiring in src/index.ts', () => {
     expect(indexSrc).toContain('commitDMAdmission(roomManager, socket, data, roomId, value, commitSocketMembership)');
   });
 });
+
+describe('idle voice identity sweep wiring in src/index.ts', () => {
+  it('schedules terminateIdle every IDLE_SWEEP_INTERVAL_MS and clears it before the shutdown drain', () => {
+    const scheduled = indexSrc.match(
+      /const (\w+) = setInterval\([\s\S]{0,120}terminateIdle\(\)[\s\S]{0,40}IDLE_SWEEP_INTERVAL_MS/
+    );
+    expect(scheduled).not.toBeNull();
+    const clearAt = indexSrc.indexOf(`clearInterval(${scheduled?.[1] ?? ''})`);
+    const drainAt = indexSrc.indexOf('shutdownTerminalWork = voiceAuthConnections.terminateAll()');
+    expect(clearAt).toBeGreaterThan(0);
+    // terminateAll() clears `draining` when it settles, so a live sweep would run again.
+    expect(drainAt).toBeGreaterThan(clearAt);
+    expect(indexSrc).toMatch(/import \{[^}]*\bIDLE_SWEEP_INTERVAL_MS\b[^}]*\} from '\.\/lib\/voiceAuthConnection\.js'/);
+  });
+});

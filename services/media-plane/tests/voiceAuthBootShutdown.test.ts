@@ -178,7 +178,8 @@ async function fixture(options: { retained?: boolean; receipt?: Receipt; recover
     stopObservingRequiredSubscriptions: () => {}, mediaPolicerTick: { stop: () => {} },
     opsMetricsPublisher: { stop: async () => {} }, redisService: { close: async () => { events.push('redis-closed'); } },
     securityEvents: { close: async () => true }, httpServer: { close: (done: () => void) => { events.push('http-closed'); done(); } },
-    epochSyncInterval: -1, roomHeartbeatInterval: -2, voiceEnforcementLeaseInterval: -3, voiceEnforcementHealthInterval: healthInterval,
+    epochSyncInterval: -1, roomHeartbeatInterval: -2, voiceEnforcementLeaseInterval: -3, voiceAuthIdleInterval: -4,
+    voiceEnforcementHealthInterval: healthInterval,
   });
   return { caller, connections, queue, retry, lease, events, requests, nats, exit, logger, timers, scheduled,
     recovery, native, renewal, owner, retirement, release,

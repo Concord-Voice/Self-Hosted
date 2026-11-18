@@ -71,7 +71,7 @@ import {
   renewVoiceEnforcementSession,
   pollVoiceEnforcementHealth,
 } from './lib/voiceEnforcementSession.js';
-import { readVoiceAuthResponse, VoiceAuthConnections } from './lib/voiceAuthConnection.js';
+import { IDLE_SWEEP_INTERVAL_MS, readVoiceAuthResponse, VoiceAuthConnections } from './lib/voiceAuthConnection.js';
 import { newRequestContext, signHttpRequest, verifyHttpResponse } from './lib/voiceAuthProtocol.js';
 import type { VoiceEnforcementSession } from './lib/voiceEnforcementSession.js';
 import { voiceEnforcementNodeBootId } from './lib/voiceEnforcementIdentity.js';
@@ -1570,6 +1570,10 @@ async function main() {
     // The fence keeps ownership; avoid adding one reaction per tick while hung.
     if (!voiceEnforcementExpiryFence.pending()) enforceLeaseObserved();
   }, 1_000);
+  // VULN-146: release voice identities of sockets idle outside an attached room.
+  const voiceAuthIdleInterval = setInterval(() => {
+    voiceAuthConnections.terminateIdle();
+  }, IDLE_SWEEP_INTERVAL_MS);
 
   natsService.subscribeRequest(
     'voice.admission.activate',
@@ -2540,6 +2544,9 @@ async function main() {
       const shutdownRecovery = voiceEnforcementHealth.fenceRecoveryAndJoin();
       const shutdownLegacySessions = snapshotVoiceEnforcementSessions(io.sockets.sockets.values(), voiceAuthConnections);
       voiceEnforcementReleaseQueue.enqueueAll(shutdownLegacySessions);
+      // Before the drain: terminateAll() clears `draining` when it settles, and a live
+      // sweep would then start new terminal work during the rest of shutdown.
+      clearInterval(voiceAuthIdleInterval);
       shutdownTerminalWork = voiceAuthConnections.terminateAll();
       enforcementAvailability.stop();
       stopObservingRequiredSubscriptions();
