@@ -241,12 +241,14 @@ func TestLockout_EscalatesAcrossExpiry(t *testing.T) {
 	rdb, cleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
-	user, ip := uniqueAdminUsername("acct"), uniqueLockoutIP("1.2.4")
+	user := uniqueAdminUsername("acct")
 	lk := admin.NewLockout(rdb, nil)
 
 	want := []int{1, 2, 4, 8, 16, 32, 60, 60, 60}
 	for i, minutes := range want {
-		lockOut(t, lk, user, ip+string(rune('a'+i)))
+		// A fresh /64 each round: addresses inside one /64 share the per-IP
+		// lock, and this test isolates the account axis.
+		lockOut(t, lk, user, uniqueLockoutIP(fmt.Sprintf("1.2.4-%d", i)))
 		assertWindow(t, rdb, acctLockKey(user), time.Duration(minutes)*time.Minute, "lock window")
 		// Expiry: the lock key goes, the level key stays.
 		require.NoError(t, rdb.Del(ctx, acctLockKey(user)).Err())
