@@ -804,6 +804,9 @@ func httpRequestWithBody(c *gin.Context, body []byte) *http.Request {
 type createAdminRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	// StepUp is the acting admin's fresh create_admin assertion, begun with
+	// POST /admin/api/v1/admins/stepup (VULN-139).
+	StepUp *adminStepUpProof `json:"stepup,omitempty"`
 }
 
 // CreateAdmin provisions a pending admin and mints a one-time enrollment token,
@@ -811,6 +814,13 @@ type createAdminRequest struct {
 // (set by AdminAuthRequired). The password set here is a temporary credential the
 // new operator changes is out-of-scope; it is hashed with Argon2id and never
 // echoed back.
+//
+// The request must carry a fresh create_admin step-up from the acting admin,
+// redeemed before any row is written, so a session alone cannot mint a new
+// step-up-capable identity (VULN-139). The admin_created audit row is written
+// before the token is minted, and no token is minted when it cannot be, so
+// every live enrollment token has a durable record other admins are told about
+// at their next sign-in.
 func (h *Handler) CreateAdmin(c *gin.Context) {
 	ctx := c.Request.Context()
 	actingAdminID := c.GetString(adminIDContextKey)
@@ -826,6 +836,9 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	}
 	if err := auth.ValidatePasswordStrength(req.Password); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "password too weak"})
+		return
+	}
+	if !h.requireCreateAdminStepUp(c, req.Username, req.StepUp) {
 		return
 	}
 
@@ -847,15 +860,24 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		return
 	}
 
+	// The pending row has no credentials and no token yet, so it cannot be
+	// enrolled; if the record cannot be written it stays inert until an
+	// operator reissues its token with reset-enrollment.
+	acting := actingAdminID
+	if err := h.audit.Write(ctx, AuditEvent{
+		AdminID: &acting, Actor: req.Username, EventType: EventAdminCreated, Result: AuditSuccess,
+	}); err != nil {
+		h.log.Error("admin create audit write failed", "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "audit_unavailable"})
+		return
+	}
+
 	token, err := h.enroll.MintEnrollmentToken(ctx, created.ID, created.CredentialGeneration)
 	if err != nil {
 		h.log.Error("admin mint enrollment token failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
-
-	acting := actingAdminID
-	h.auditOK(ctx, &acting, req.Username, EventBootstrap)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"username": created.Username,
