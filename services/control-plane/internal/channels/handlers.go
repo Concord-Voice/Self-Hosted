@@ -2384,6 +2384,14 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 	// deadline, so a distribution that overruns still answers 503.
 	ctx, cancel := context.WithTimeout(c.Request.Context(), keyDistributionDeadline)
 	defer cancel()
+	h.distributeChannelKeysWithin(ctx, c)
+}
+
+// distributeChannelKeysWithin serves a channel-key distribution under ctx,
+// which carries the request's keyDistributionDeadline. DistributeUnifiedKeys
+// passes the context its channel pre-check already ran under, so the pre-check
+// and the distribution share one deadline.
+func (h *Handler) distributeChannelKeysWithin(ctx context.Context, c *gin.Context) {
 	userID := c.GetString("user_id")
 	channelID := c.Param("id")
 	channelID, err := requestid.Canonical(channelID)
@@ -4325,7 +4333,18 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 	// unified GET/rewrap paths: a no-view member gets the same 404 as an unknown
 	// context. channelKeyAccess fails closed on a resolver error (returns err),
 	// matching the 500 those paths emit.
-	isMember, canView, err := h.channelKeyAccess(c.Request.Context(), contextID, userID)
+	//
+	// VULN-079: the pre-check runs under the channel distribution's deadline,
+	// which the delegated distribution then shares. The DM branch below keeps
+	// the request context.
+	channelCtx, cancelChannel := context.WithTimeout(c.Request.Context(), keyDistributionDeadline)
+	defer cancelChannel()
+	isMember, canView, err := h.channelKeyAccess(channelCtx, contextID, userID)
+	if err != nil && channelCtx.Err() != nil {
+		// A pre-check that ran out of time is not a denial.
+		h.respondKeyDistributionError(c, withDistributionContextErr(channelCtx, err), contextID)
+		return
+	}
 	if err != nil {
 		h.log.Error("unified key distribution: channel check failed",
 			"kind", "distribute_channel_check_db_error",
@@ -4338,7 +4357,7 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 
 	if isMember && canView {
 		c.Params = append(c.Params, gin.Param{Key: "id", Value: contextID})
-		h.DistributeChannelKeys(c)
+		h.distributeChannelKeysWithin(channelCtx, c)
 		return
 	}
 

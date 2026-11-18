@@ -423,6 +423,25 @@ func sleepOnDistributionWrite(t *testing.T, db *sql.DB, name, op, table, actorID
 	})
 }
 
+// stallChannelPreCheck holds an ACCESS EXCLUSIVE lock on channels for 20 s, so
+// the unified route's channel pre-check, a pool read with no lock_timeout,
+// waits on it. Only the request deadline can end that wait before the server's
+// write deadline. The lock is released when the test ends, or at 20 s.
+func stallChannelPreCheck(t *testing.T, ts *testhelpers.TestServer, _ string) {
+	t.Helper()
+	locker, err := ts.DB.Begin()
+	require.NoError(t, err)
+	_, err = locker.Exec(`LOCK TABLE channels IN ACCESS EXCLUSIVE MODE`)
+	require.NoError(t, err)
+	var once sync.Once
+	release := func() { once.Do(func() { assert.NoError(t, locker.Rollback()) }) }
+	timer := time.AfterFunc(20*time.Second, release)
+	t.Cleanup(func() {
+		timer.Stop()
+		release()
+	})
+}
+
 // postOverServerWithWriteTimeout sends one distribution through a real HTTP
 // server whose WriteTimeout matches cmd/server/main.go. A handler that answers
 // after the write deadline leaves the client with a dropped connection, not a
@@ -466,6 +485,7 @@ func TestDistribution_OverrunAnswers503BeforeWriteTimeout(t *testing.T) {
 			sleepOnDistributionWrite(t, ts.DB, "deadline_ins", "INSERT", "channel_keys", actorID, 7)
 			sleepOnDistributionWrite(t, ts.DB, "deadline_del", "DELETE", "pending_key_requests", actorID, 7)
 		}},
+		{"the unified route's channel pre-check overruns the deadline", stallChannelPreCheck},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
