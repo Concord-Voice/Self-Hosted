@@ -292,9 +292,13 @@ func TestTOTPStepReplay_VerifySetupDoubleSubmitPersistsOnlyOneWinner(t *testing.
 		wg.Wait()
 		close(done)
 	}()
+	// This bound catches a hang, not a slow run. Each request derives eight
+	// Argon2id v2 backup-code hashes (19 MiB, two passes) before its UPDATE,
+	// so five concurrent requests under -race on a loaded runner can take more
+	// than 10 s without anything being wrong.
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("TOTPStepReplay: concurrent TOTPVerifySetup calls did not complete within timeout")
 	}
 
