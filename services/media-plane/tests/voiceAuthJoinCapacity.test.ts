@@ -19,6 +19,7 @@ import { attestationRelayHeaders, resolveParticipantIdentity } from '../src/midd
 import { createMockRouter, createRtpCapabilities } from './mocks/mediasoup.js';
 import type { VoiceEnforcementSession } from '../src/lib/voiceEnforcementSession.js';
 import { mediaPolicyCooldownAck } from '../src/lib/mediaPolicyWire.js';
+import { commitChannelAdmission, commitDMAdmission } from '../src/lib/roomAdmissionCommit.js';
 
 const boot = '11111111-1111-4111-8111-111111111111';
 const user = '22222222-2222-4222-8222-222222222222';
@@ -45,7 +46,7 @@ type JoinHandler = (request: JoinRequest, callback: (value: unknown) => void) =>
 function productionRegister(bindings: Record<string, unknown>) {
   const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const names = ['registerJoinRoomHandler', 'parseJoinMediaFrameCryptoVersion', 'joinErrorAck', 'emitJoinError', 'rollbackRegisteredRoomJoin', 'commitChannelAdmission', 'commitDMAdmission', 'rollbackSocketMembership'];
+  const names = ['registerJoinRoomHandler', 'parseJoinMediaFrameCryptoVersion', 'joinErrorAck', 'emitJoinError', 'rollbackRegisteredRoomJoin'];
   const declarations = names.map(name => {
     const matches = ast.statements.filter(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name);
     if (matches.length !== 1) throw new Error(`Expected one production function ${name}`);
@@ -130,6 +131,7 @@ async function fixture(identityCount: number) {
     },
     isCanonicalEnforcementUUID, parseMediaFrameCryptoVersion, resolveParticipantIdentity,
     RoomCreationRefusedError, CryptoVersionMismatchError, MediaPolicyCooldownError, mediaPolicyCooldownAck,
+    commitChannelAdmission, commitDMAdmission,
     logger: { info() {}, debug() {}, warn() {}, error() {} },
   });
   const dmJoinFence = new lifecycle.KeyedJoinFence();
@@ -139,7 +141,7 @@ async function fixture(identityCount: number) {
     const data: AuthenticatedSocketData = { userId: user, username: 'join-capacity-test', tier: 'free', credentialEpoch: epoch, tokenExpiresAt: now + 60_000 };
     const broadcast = vi.fn();
     const socket = { id: socketId, connected: true, handshake: { auth: { token, room_kind: 'channel' } },
-      emit: vi.fn(), join: vi.fn(), leave: vi.fn(), to: () => ({ emit: broadcast }) };
+      emit: vi.fn(), join: vi.fn(), leave: vi.fn(), to: () => ({ emit: broadcast }), nsp: { sockets: new Map() } };
     register(socket, data, { roomManager: manager, dmJoinFence, channelAdmissionFence, voiceAuthConnections: owners,
       emitSecurityEvent: vi.fn(), isShuttingDown: () => !lease.valid(),
       withRateLimit: (_socket: unknown, event: string, listener: JoinHandler) => {

@@ -46,6 +46,7 @@ import {
   resolveParticipantIdentity,
 } from './middleware/auth.js';
 import type { AuthenticatedSocketData } from './middleware/auth.js';
+import { commitChannelAdmission, commitDMAdmission } from './lib/roomAdmissionCommit.js';
 import { NatsService } from './lib/nats.js';
 import { EnforcementAvailability } from './lib/enforcementAvailability.js';
 import { VoiceCommandDispatcher } from './lib/voiceCommandDispatcher.js';
@@ -395,97 +396,6 @@ function getExpectedKeyframeRequestError(error: unknown): string | undefined {
   }
 
   return expectedKeyframeRequestErrors.has(error.message) ? error.message : undefined;
-}
-
-type RoomJoinValue = {
-  authorizedCallId: string | undefined;
-  identity: ReturnType<typeof resolveParticipantIdentity>;
-  promotion: ChannelParticipantPromotion | DMParticipantPromotion | undefined;
-  result: JoinRoomResult;
-};
-
-function rollbackSocketMembership(
-  socket: Socket,
-  data: AuthenticatedSocketData,
-  roomId: string
-): void {
-  data.roomId = undefined;
-  try {
-    socket.leave(roomId);
-  } catch (leaveError) {
-    logger.error('Failed to roll back Socket.IO room membership', {
-      error: leaveError,
-      roomId,
-      userId: data.userId,
-    });
-  }
-}
-
-function commitChannelAdmission(
-  roomManager: RoomManager,
-  socket: Socket,
-  data: AuthenticatedSocketData,
-  roomId: string,
-  value: RoomJoinValue,
-  commitSocketMembership: () => void
-): RoomJoinValue {
-  if (!value.promotion) {
-    throw new Error('Room admission is missing its A2 promotion state');
-  }
-  if (!('permissions' in value.promotion)) {
-    throw new Error('Channel admission is missing its A2 promotion state');
-  }
-  try {
-    const displacedSocketId = roomManager.getParticipant(roomId, data.userId)?.socketId;
-    value.result = roomManager.promoteChannelParticipant(
-      roomId,
-      data.userId,
-      socket.id,
-      value.promotion,
-      commitSocketMembership
-    );
-    if (displacedSocketId && displacedSocketId !== socket.id) {
-      socket.nsp.sockets.get(displacedSocketId)?.disconnect(true);
-    }
-  } catch (error) {
-    // A custom/failed adapter must not strand Socket.IO membership or socket.data
-    // when its synchronous join boundary throws.
-    rollbackSocketMembership(socket, data, roomId);
-    throw error;
-  }
-  return value;
-}
-
-function commitDMAdmission(
-  roomManager: RoomManager,
-  socket: Socket,
-  data: AuthenticatedSocketData,
-  roomId: string,
-  value: RoomJoinValue,
-  commitSocketMembership: () => void
-): RoomJoinValue {
-  if (!value.promotion) {
-    throw new Error('Room admission is missing its A2 promotion state');
-  }
-  if (!value.authorizedCallId || !('callId' in value.promotion)) {
-    throw new Error('DM admission is missing its A2 promotion state');
-  }
-  try {
-    value.result = roomManager.promoteDMParticipant(
-      roomId,
-      data.userId,
-      socket.id,
-      value.authorizedCallId,
-      value.promotion,
-      commitSocketMembership
-    );
-  } catch (error) {
-    // A custom/failed adapter must not strand Socket.IO membership or socket.data
-    // when its synchronous join boundary throws.
-    rollbackSocketMembership(socket, data, roomId);
-    throw error;
-  }
-  return value;
 }
 
 async function rollbackRegisteredRoomJoin({
