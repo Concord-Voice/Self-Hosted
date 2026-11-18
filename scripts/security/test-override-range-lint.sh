@@ -786,7 +786,7 @@ NODE
   while IFS=$'\t' read -r configured_name configured_args; do
     # read splits the validated argument tokens without evaluating shell text.
     read -r -a configured_flags <<< "$configured_args"
-    for boundary in 6.29.0:1 6.29.1:0 7.29.1:1 7.30.1:0 8.12.1:1 8.12.2:0; do
+    for boundary in 6.29.0:1 6.29.1:0 7.30.1:1 7.30.2:0 8.12.3:1 8.12.4:0; do
       version="${boundary%:*}"
       want="${boundary#*:}"
       D=$(mkfixture "configured-$version-$pass-$fail" \
