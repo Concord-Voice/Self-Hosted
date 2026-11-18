@@ -37,7 +37,7 @@ Android. SSO account linking now requires current account policy and MFA,
 SSO initiation is bound to the Desktop flow that started it, and backup-code
 readers accept the versioned formats needed for a later storage migration.
 
-**22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
+**23 Total Changes** | 8 Added | 6 Changed | 7 Fixed | 2 Security
 
 ### Added
 
@@ -74,6 +74,8 @@ readers accept the versioned formats needed for a later storage migration.
 ### Security
 
 - **Recovery:** Email account recovery can now send a single-use recovery key that cannot be guessed, so wrong attempts by others can no longer block the account owner's email recovery. A client asks for one with `format: "token"` on `/auth/recovery/begin` and submits it as `token` on `/auth/recovery/verify-code`. Each account has one live recovery email at a time, valid until the resend wait ends (15 minutes for the first three emails in a day, then 60 minutes); a key request replaces a live 6-digit code ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
+- **Encryption keys:** Channel and DM key distribution no longer takes a second database connection while it holds a lock, so many concurrent distributions can no longer stall every other request. Distribution and DM key rotation now give up after a 5-second lock wait or a 15-second statement and return 503 instead of hanging, and the pool closes connections left idle inside a transaction for 60 seconds (VULN-079).
+- **Encryption keys:** A key request for someone who already holds the current key is no longer stored, and such requests are cleared after a distribution. `GET /api/v1/e2ee/pending-keys` is now paged (`limit`, `cursor`, `next_cursor`; 100 per page by default, up to 200) and reads at most 1,000 rows per request. The cursor is opaque and sealed, so it reveals nothing about requests the caller cannot see. Older clients still get the first page (VULN-080, VULN-207).
 - **Media plane:** Updated `qs` to 6.17.1, which encodes keys when `stringify` runs with `allowEmptyArrays` (CVE-2026-110910) ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)).
 - **Development tooling:** Updated the root package and the Admin Console to patched `undici` 8.12.4 and `minimatch` 11.0.7 ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)), and removed the second ESLint 8 copy that the root lint tooling installed ([#334](https://github.com/Concord-Voice/Self-Hosted/pull/334)).
 - **Admin Console:** Enrollment reset now invalidates earlier enrollment tokens, ceremonies, and console sessions. WebAuthn sign-in persists the credential counter before issuing a session and rejects a stale nonzero counter; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
@@ -85,6 +87,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Changed
 
+- **Operations:** `ATTESTATION_OIDC_SUBJECT_PREFIX` now defaults to `repo:Concord-Voice@264583090/Self-Hosted@1359565266:`, the immutable subject form this repository's GitHub OIDC tokens carry. Set it to bind attestation to a different repository. The self-hosted acceptance runner checks now admit this repository too.
 - **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.
 - **Self-hosted setup:** Fresh installs now write `WS_EVENT_BUDGET_ENABLED=false`, so budgets stay off until an operator sets `true`. The `concord-selfhost`, `concord-ctl.sh` and installer entrypoints, and the TLS helper's reader shell, start Bash in privileged mode, so shell functions and `BASH_ENV` from the calling environment cannot bypass their environment cleanup. Run the wrapper directly, not as `bash concord-selfhost`.
 - **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
