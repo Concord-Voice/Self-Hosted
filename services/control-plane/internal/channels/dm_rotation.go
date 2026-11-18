@@ -173,6 +173,9 @@ func (h *Handler) RotateDMKey(c *gin.Context) {
 			c.JSON(status, body)
 			return
 		}
+		if h.respondKeyDistributionTimeout(c, rotErr, convID, errMsgFailedRotateKey) {
+			return
+		}
 		h.log.Error("dm key rotation failed", "error", rotErr, "conversation_id", sanitizeID(convID))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRotateKey})
 		return
@@ -274,6 +277,10 @@ func (h *Handler) rotateDMKeyTx(ctx context.Context, actorID, tokenEpoch, convID
 			return dmDistributionOutcome{}, fmt.Errorf("begin dm rotation tx: %w", err)
 		}
 		defer h.rollbackDMRotationTx(tx)
+		if err := setDistributionTimeouts(ctx, tx); err != nil {
+			h.rollbackDMRotationTx(tx)
+			return dmDistributionOutcome{}, err
+		}
 		outcome, err := distributeDMKeysTx(ctx, tx, batch)
 		if err != nil {
 			h.rollbackDMRotationTx(tx)

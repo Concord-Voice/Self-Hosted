@@ -3,11 +3,14 @@ package channels
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -72,6 +75,22 @@ func (f keyAccessFixture) userOverride(channelID, userID string, allow, deny rba
 	_, err := f.db.Exec(`INSERT INTO channel_permission_overrides (channel_id, target_type, target_id, allow, deny)
 		VALUES ($1, 'user', $2, $3, $4)`, channelID, userID, int64(allow), int64(deny))
 	require.NoError(f.t, err)
+}
+
+// openSingleConnPool opens a private pool of one connection. A regression that
+// leaks that connection then fails its own test instead of stalling the shared
+// truncate cleanup. Call it after SetupTestDB so it closes before that cleanup.
+func openSingleConnPool(t *testing.T) *sql.DB {
+	t.Helper()
+	single, err := sql.Open("postgres", dbtest.DatabaseURL())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if closeErr := single.Close(); closeErr != nil {
+			t.Errorf("close one-connection pool: %v", closeErr)
+		}
+	})
+	single.SetMaxOpenConns(1)
+	return single
 }
 
 func newKeyAccessHandler(db *sql.DB) *Handler {
@@ -204,17 +223,7 @@ func TestDistribution_NoPoolConnWhileTxOpen(t *testing.T) {
 	f.member(srv, target)
 	f.grantRole(srv, target, rbac.PermViewTextChannels)
 
-	// A private one-connection pool: a regression that leaks its connection
-	// then fails this test instead of stalling the shared truncate cleanup.
-	// Registered after SetupTestDB, so it closes before that cleanup runs.
-	single, err := sql.Open("postgres", dbtest.DatabaseURL())
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		if closeErr := single.Close(); closeErr != nil {
-			t.Errorf("close one-connection pool: %v", closeErr)
-		}
-	})
-	single.SetMaxOpenConns(1)
+	single := openSingleConnPool(t)
 	h := newKeyAccessHandler(single)
 	tx, err := single.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
@@ -283,4 +292,75 @@ func TestDistribution_TargetCheckErrorDoesNotPoisonBatch(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
 		ch, member).Scan(&enrolled))
 	assert.Equal(t, 1, enrolled, "target 1 is enrolled for retry")
+}
+
+// TestSetDistributionTimeouts_AppliesInTxOnly: the bounds hold inside the
+// distribution transaction and are gone after it. The pool has one
+// connection, so the post-commit read is on the session the transaction used.
+func TestSetDistributionTimeouts_AppliesInTxOnly(t *testing.T) {
+	_, cleanup := dbtest.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	single := openSingleConnPool(t)
+	ctx := context.Background()
+	show := func(q interface {
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	}, setting string) string {
+		t.Helper()
+		var v string
+		require.NoError(t, q.QueryRowContext(ctx, `SELECT current_setting($1)`, setting).Scan(&v))
+		return v
+	}
+	bounds := map[string]string{
+		"lock_timeout":                        "5s",
+		"statement_timeout":                   "15s",
+		"idle_in_transaction_session_timeout": "15s",
+	}
+
+	tx, err := single.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	for setting := range bounds {
+		require.Equal(t, "0", show(tx, setting), "precondition: %s is unset before the call", setting)
+	}
+	require.NoError(t, setDistributionTimeouts(ctx, tx))
+	for setting, want := range bounds {
+		assert.Equal(t, want, show(tx, setting), "%s inside the transaction", setting)
+	}
+	require.NoError(t, tx.Commit())
+
+	for setting := range bounds {
+		assert.Equal(t, "0", show(single, setting), "%s must not outlive the transaction", setting)
+	}
+}
+
+// TestRespondKeyDistributionTimeout pins the 503 mapping for a distribution
+// that gave up on a bound, with each route's own generic body.
+func TestRespondKeyDistributionTimeout(t *testing.T) {
+	h := &Handler{log: logger.NewWithWriter(io.Discard)}
+	lockTimeout := fmt.Errorf("lock channel for key distribution: %w", &pq.Error{Code: pgLockNotAvailable})
+	stmtTimeout := fmt.Errorf("store key: %w", &pq.Error{Code: pgQueryCanceled})
+
+	t.Run("lock timeout is a retryable 503", func(t *testing.T) {
+		c, w := newInternalTestContext()
+		h.respondKeyDistributionError(c, lockTimeout, "ctx-1")
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Contains(t, w.Body.String(), errMsgFailedDistributeKeys)
+	})
+	t.Run("statement timeout is a retryable 503", func(t *testing.T) {
+		c, w := newInternalTestContext()
+		h.respondKeyDistributionError(c, stmtTimeout, "ctx-2")
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Contains(t, w.Body.String(), errMsgFailedDistributeKeys)
+	})
+	t.Run("rotation keeps its own body", func(t *testing.T) {
+		c, w := newInternalTestContext()
+		require.True(t, h.respondKeyDistributionTimeout(c, lockTimeout, "ctx-3", errMsgFailedRotateKey))
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Contains(t, w.Body.String(), errMsgFailedRotateKey)
+	})
+	t.Run("another database error stays a 500", func(t *testing.T) {
+		c, w := newInternalTestContext()
+		h.respondKeyDistributionError(c, fmt.Errorf("store key: %w", &pq.Error{Code: "23505"}), "ctx-4")
+		assert.Equal(t, http.StatusInternalServerError, w.Code)
+	})
 }

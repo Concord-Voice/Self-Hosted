@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // Register PostgreSQL driver
+	"github.com/lib/pq" // also registers the PostgreSQL driver
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
 )
@@ -19,9 +21,51 @@ const migrationsSourceURL = "file://migrations"
 
 var errSchemaNotCurrent = errors.New("schema not current for this binary (verify mode)")
 
+// poolIdleInTxParam bounds how long any pooled session may sit idle inside an
+// open transaction (VULN-079), so a stalled request cannot pin a connection
+// and the locks it holds. It is a run-time parameter sent at connection
+// startup, not a statement timeout: migrations run on this pool and never sit
+// idle mid-transaction, so it cannot cut one short. If a connection pooler is
+// ever placed in front of PostgreSQL, set it with ALTER ROLE ... SET instead.
+const (
+	poolIdleInTxParam = "idle_in_transaction_session_timeout"
+	poolIdleInTxValue = "60000" // milliseconds
+)
+
+// errInvalidDatabaseURL deliberately carries no cause: a parse error can quote
+// the URL, and the URL can carry the database password.
+var errInvalidDatabaseURL = errors.New("invalid database URL")
+
+// withPoolSessionParams adds poolIdleInTxParam to a URL-form or key=value DSN.
+// A value the caller already set, as a parameter or inside options, is kept.
+func withPoolSessionParams(databaseURL string) (string, error) {
+	cfg, err := pq.NewConfig(databaseURL)
+	if err != nil {
+		return "", errInvalidDatabaseURL
+	}
+	if _, set := cfg.Runtime[poolIdleInTxParam]; set || strings.Contains(cfg.Options, poolIdleInTxParam) {
+		return databaseURL, nil
+	}
+	if strings.HasPrefix(databaseURL, "postgres://") || strings.HasPrefix(databaseURL, "postgresql://") {
+		u, err := url.Parse(databaseURL)
+		if err != nil {
+			return "", errInvalidDatabaseURL
+		}
+		q := u.Query()
+		q.Set(poolIdleInTxParam, poolIdleInTxValue)
+		u.RawQuery = q.Encode()
+		return u.String(), nil
+	}
+	return strings.TrimSpace(databaseURL) + " " + poolIdleInTxParam + "=" + poolIdleInTxValue, nil
+}
+
 // New creates a new PostgreSQL database connection
 func New(databaseURL string) (*sql.DB, error) {
-	db, err := sql.Open("postgres", databaseURL)
+	dsn, err := withPoolSessionParams(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

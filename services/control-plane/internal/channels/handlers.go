@@ -2848,8 +2848,65 @@ func (h *Handler) respondKeyDistributionError(c *gin.Context, distErr error, con
 		c.JSON(status, body)
 		return
 	}
+	if h.respondKeyDistributionTimeout(c, distErr, contextID, errMsgFailedDistributeKeys) {
+		return
+	}
 	h.log.Error("Key distribution failed", "error", distErr, "context_id", sanitizeID(contextID))
 	c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDistributeKeys})
+}
+
+// distributionTimeoutsSQL bounds a key-distribution transaction (VULN-079):
+// lock_timeout a wait on the channel or conversation lock, statement_timeout
+// any one statement, idle_in_transaction_session_timeout a transaction left
+// open between statements. All three are SET LOCAL because the same pool runs
+// migrations, which a pool-wide statement_timeout would cut short. It is a
+// const statement, never built from input.
+const distributionTimeoutsSQL = `SET LOCAL lock_timeout = '5s'; ` +
+	`SET LOCAL statement_timeout = '15s'; ` +
+	`SET LOCAL idle_in_transaction_session_timeout = '15s'`
+
+// setDistributionTimeouts applies distributionTimeoutsSQL. It is the first
+// statement after every distribution BeginTx; its error fails the request.
+func setDistributionTimeouts(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, distributionTimeoutsSQL); err != nil {
+		return fmt.Errorf("set distribution timeouts: %w", err)
+	}
+	return nil
+}
+
+const (
+	pgLockNotAvailable = "55P03"
+	pgQueryCanceled    = "57014"
+)
+
+// keyDistributionTimeoutClass reports whether a distribution gave up on one of
+// its bounds — lock_timeout (55P03) or statement_timeout (57014, which a
+// cancelled request also raises) — and the failure class to log for it.
+func keyDistributionTimeoutClass(err error) (string, bool) {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return "", false
+	}
+	switch pqErr.Code {
+	case pgLockNotAvailable:
+		return "distribution_lock_timeout", true
+	case pgQueryCanceled:
+		return "distribution_statement_timeout", true
+	}
+	return "", false
+}
+
+// respondKeyDistributionTimeout answers a timed-out distribution with 503 and
+// the route's own generic body. The transaction rolled back, so nothing was
+// written and the client may retry. It reports whether it responded.
+func (h *Handler) respondKeyDistributionTimeout(c *gin.Context, distErr error, contextID, body string) bool {
+	class, timedOut := keyDistributionTimeoutClass(distErr)
+	if !timedOut {
+		return false
+	}
+	h.log.Warn("Key distribution timed out", "failure_class", class, "context_id", sanitizeID(contextID))
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": body})
+	return true
 }
 
 // keyDistributionErrorResponse maps a distribution or rotation error to its
@@ -3061,6 +3118,9 @@ func (h *Handler) distributeChannelKeysToMembers(ctx context.Context, req channe
 			h.log.Error("Failed to rollback distribution tx", "error", rbErr)
 		}
 	}()
+	if err := setDistributionTimeouts(ctx, tx); err != nil {
+		return tally, err
+	}
 	state, err := h.prepareChannelKeyDistribution(ctx, tx, req)
 	if err != nil {
 		return tally, err
@@ -4459,6 +4519,12 @@ func (h *Handler) distributeDMKeys(ctx context.Context, actorID, tokenEpoch, con
 		tx, err := h.db.BeginTx(ctx, nil)
 		if err != nil {
 			return 0, fmt.Errorf("begin dm distribution tx: %w", err)
+		}
+		if err := setDistributionTimeouts(ctx, tx); err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				h.log.Error("Failed to rollback dm distribution tx", "error", rbErr)
+			}
+			return 0, err
 		}
 		outcome, err := distributeDMKeysTx(ctx, tx, batch)
 		if err != nil {
