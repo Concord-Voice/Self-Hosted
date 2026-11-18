@@ -1,6 +1,6 @@
 package rbac
 
-import "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+import "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 
 // SetMFAVerifier wires the verifier that confirms #3454's dangerous-action
 // gates on role create, update and delete and on permission-override upserts.

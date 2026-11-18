@@ -1,11 +1,11 @@
 package api
 
 import (
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/channels"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/members"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/channels"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/members"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // dangerousActionGateGap names the first dependency of #3454's dangerous-action

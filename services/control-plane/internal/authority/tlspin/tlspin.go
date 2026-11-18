@@ -18,7 +18,7 @@ import (
 	"math/big"
 	"time"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // ServerName is every minted leaf's CN and the authority leaf's only DNS SAN

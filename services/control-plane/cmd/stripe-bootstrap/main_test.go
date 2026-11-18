@@ -15,8 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stripe/stripe-go/v87"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/billing"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/billing"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 // None of these tests may call t.Parallel: they set env vars and the

@@ -10,7 +10,7 @@ import (
 	"crypto/sha512"
 	"errors"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // ErrSelfVerify means a signature failed its own verification; the caller
