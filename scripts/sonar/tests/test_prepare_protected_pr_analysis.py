@@ -422,15 +422,49 @@ class PrepareTest(unittest.TestCase):
         self.assertFalse((self.root / "analysis/services/control-plane/coverage.out").exists())
 
     def test_go_coverage_accepts_module_path_prefix(self):
+        for module in MODULE.GO_MODULE_PREFIXES:
+            with self.subTest(module=module):
+                self.zips[3] = zipped("coverage.out", (
+                    "mode: atomic\n" + module + "services/control-plane/internal/x.go:1.1,2.1 1 1\n").encode())
+                self.prepare()
+                report = (self.root / "analysis/services/control-plane/coverage.out").read_text()
+                self.assertEqual(report, "mode: atomic\nservices/control-plane/internal/x.go:1.1,2.1 1 1\n")
+                shutil.rmtree(self.root / "analysis")
+
+    def test_go_coverage_rejects_lookalike_module_prefix(self):
         self.zips[3] = zipped("coverage.out",
-                              b"mode: atomic\ngithub.com/Concord-Voice/Self-Hosted/services/control-plane/internal/x.go:1.1,2.1 1 1\n")
-        self.prepare()
-        self.assertTrue((self.root / "analysis/services/control-plane/coverage.out").is_file())
+                              b"mode: atomic\ngithub.com/Concord-Voice/Self-Hosted-evil/services/control-plane/internal/x.go:1.1,2.1 1 1\n")
+        with self.assertRaisesRegex(MODULE.Reject, "^Go coverage source outside component$"):
+            self.prepare()
+
+    def test_go_coverage_rejects_traversal_after_module_prefix(self):
+        self.zips[3] = zipped("coverage.out",
+                              b"mode: atomic\ngithub.com/Concord-Voice/Self-Hosted/services/control-plane/../../x.go:1.1,2.1 1 1\n")
+        with self.assertRaisesRegex(MODULE.Reject, "unsafe path"):
+            self.prepare()
+
+    def test_go_coverage_rejects_colon_in_file_name(self):
+        self.zips[3] = zipped("coverage.out",
+                              b"mode: atomic\nservices/control-plane/internal/x.go:../../etc/passwd:1.1,2.1 1 1\n")
+        with self.assertRaisesRegex(MODULE.Reject, "record malformed"):
+            self.prepare()
+
+    def test_go_coverage_rejects_non_go_subpath_target(self):
+        self.zips[3] = zipped("coverage.out",
+                              b"mode: atomic\nservices/control-plane/packages/e2ee-client/src/foo.ts:1.1,2.1 1 1\n")
+        with self.assertRaisesRegex(MODULE.Reject, "^Go coverage source outside component$"):
+            self.prepare()
+
+    def test_go_coverage_rejects_file_missing_from_pr_tree(self):
+        self.zips[3] = zipped("coverage.out",
+                              b"mode: atomic\nservices/control-plane/internal/missing.go:1.1,2.1 1 1\n")
+        with self.assertRaisesRegex(MODULE.Reject, "not in PR tree"):
+            self.prepare()
 
     def test_go_coverage_rejects_other_module_prefix(self):
         self.zips[3] = zipped("coverage.out",
                               b"mode: atomic\ngithub.com/example/other/services/control-plane/internal/x.go:1.1,2.1 1 1\n")
-        with self.assertRaisesRegex(MODULE.Reject, "outside component"):
+        with self.assertRaisesRegex(MODULE.Reject, "^Go coverage source outside component$"):
             self.prepare()
 
     def test_go_coverage_rejects_parent_traversal(self):
