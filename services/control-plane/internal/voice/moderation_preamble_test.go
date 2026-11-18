@@ -86,7 +86,7 @@ var preambleStates = []preambleState{
 	{name: "text destination", target: func(f preambleFixture) string { return f.inVoice.ID },
 		moveBody: func(f preambleFixture) any { return map[string]string{"target_channel_id": f.textChan} }},
 	{name: "missing destination", target: func(f preambleFixture) string { return f.inVoice.ID },
-		moveBody: func(f preambleFixture) any {
+		moveBody: func(_ preambleFixture) any {
 			return map[string]string{"target_channel_id": "00000000-0000-4000-8000-000000000000"}
 		}},
 	{name: "same channel", target: func(f preambleFixture) string { return f.inVoice.ID },
