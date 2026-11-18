@@ -8,26 +8,18 @@ credentials, or host data.
 from __future__ import annotations
 
 import importlib.util
-import hashlib
-import io
 import copy
 from collections import Counter
-import ipaddress
 import json
-import math
 import os
-import signal
 import shutil
 import subprocess
-import time
 from types import SimpleNamespace
 from pathlib import Path
 import re
 import sys
 import tempfile
-import tarfile
-import unittest
-from unittest import mock
+import unittest.mock
 
 
 TEST_BASH = shutil.which("bash")
@@ -2043,7 +2035,7 @@ if name == config["failing"]:
         storage = "infrastructure/deploy/tests/test-selfhost-storage.sh"
         deployment = (*self.DEPLOY_QUEUE_INVENTORY, storage)
         inventory = deployment + self.LIFECYCLE_QUEUE_INVENTORY
-        with mock.patch.object(self, "DEPLOY_QUEUE_INVENTORY", deployment):
+        with unittest.mock.patch.object(self, "DEPLOY_QUEUE_INVENTORY", deployment):
             result, state, expected = self.invoke_static_script_queue(
                 self.QUEUE_STEPS[0], rendezvous=True)
             filtered_result, filtered_state, filtered_expected = self.invoke_static_script_queue(

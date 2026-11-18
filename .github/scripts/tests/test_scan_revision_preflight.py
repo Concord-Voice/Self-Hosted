@@ -1,5 +1,4 @@
 """Actual protected scanner preflight against bounded offline GitHub GET fixtures."""
-import copy
 import json
 from pathlib import Path
 import tempfile

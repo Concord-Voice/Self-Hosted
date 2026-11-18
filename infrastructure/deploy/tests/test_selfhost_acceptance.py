@@ -7,17 +7,14 @@ credentials, or host data.
 """
 from __future__ import annotations
 
-import importlib.util
 import hashlib
 import io
-import copy
 from collections import Counter
 import ipaddress
 import json
 import math
 import os
 import signal
-import shutil
 import subprocess
 import time
 from types import SimpleNamespace
@@ -27,7 +24,7 @@ import sys
 import tempfile
 import tarfile
 import unittest
-from unittest import mock
+import unittest.mock as mock
 
 if __package__:
     from .selfhost_acceptance_support import (
@@ -882,6 +879,7 @@ class AcceptanceRunnerTests(unittest.TestCase):
                 try:
                     os.kill(int(pid_file.read_text()), signal.SIGKILL)
                 except ProcessLookupError:
+                    # The descendant already exited, so there is nothing left to clean up.
                     pass
 
     def runner(self):
