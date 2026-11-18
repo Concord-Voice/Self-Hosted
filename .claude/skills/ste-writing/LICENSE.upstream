@@ -7,7 +7,9 @@ The upstream repository is MIT licensed. Its reserved-rights carve-out applies
 only to `app/(website)/blog` and `public/`; the vendored kit lives under
 `videos/` and is therefore covered by the MIT terms reproduced below.
 
-Local modifications in this repository are distributed under the repository's MIT license.
+Local modifications to these files are documented in the files themselves and are
+likewise released under the MIT terms reproduced below, whatever license the
+repository that carries a copy uses for its own code.
 
 This repository's own attribution policy for this kit is repository policy, not a
 term of the license below. It is in SKILL.md, under "Attribution".

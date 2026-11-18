@@ -17,7 +17,7 @@ This file is the single source of truth for skills that `/issue-creation`, `/pr-
 This catalog selects skills; it never selects a subagent model. Agent-dispatching skills use the
 named profiles from `lifecycle-agent-dispatch.md` or `pr-review-agent-dispatch.md`, and dispatch
 without a `model` override. Cross-vendor profile generation follows
-[`model-capability-tiers.md`](model-capability-tiers.md), including the Codex-only `gpt-6-sol`
+[`model-equivalence.md`](model-equivalence.md), including the Codex-only `gpt-6-sol`
 assignment for `red-team`; the source agent pins remain unchanged.
 
 ## Dynamic skill scoping (mandatory)
@@ -343,11 +343,11 @@ Catalog entries tagged **`design-class`** build out a design or plan (architectu
 
 ### `/superpowers:subagent-driven-development` OR `/superpowers:executing-plans` (always-dispatch, per the Implementation Approach selected at Phase 1.5)
 
-**Use case:** Execute an approved plan task-by-task. Under `Inline`, `executing-plans` runs the whole plan in-session with batch checkpoints (lower cost, less isolation). Under `Subagent Driven`, `subagent-driven-development` dispatches a fresh subagent per task with two-stage review (high isolation, higher token cost). Under `Dynamic`, `executing-plans` is the session spine and the orchestrator decides inline-vs-subagent **per task** against the D1–D5 criteria in `/dev-lifecycle` Phase 3, sized by the tier profile's batch axis (`_shared/model-capability-tiers.md`); subagent-decided tasks follow the `subagent-driven-development` per-task contract, and every decision emits an auditable visibility line. On the `generic` tier, Dynamic degrades to a plan-time static split.
+**Use case:** Execute an approved plan task-by-task. Under `Inline`, `executing-plans` runs the whole plan in-session with batch checkpoints (lower cost, less isolation). Under `Subagent Driven`, `subagent-driven-development` dispatches a fresh subagent per task with two-stage review (high isolation, higher token cost). Under `Dynamic`, `executing-plans` is the session spine and the orchestrator decides inline-vs-subagent **per task** against the D1–D5 criteria in `/dev-lifecycle` Phase 3, in batches of 2–3 tasks (`/dev-lifecycle` § No model gate); subagent-decided tasks follow the `subagent-driven-development` per-task contract, and every decision emits an auditable visibility line.
 
 **Example:** A docs-only issue's execution went inline via `/superpowers:executing-plans` because Phase 1.5 selected `Inline` for that lift.
 
-**Mode interaction:** Always-dispatch at Phase 3 once a plan exists. All modes auto-progress through plan completion — Phase 3 is ungated in every mode under the consolidated matrix (the former `Hand-Held` per-task gate was retired on 2026-06-20). The Phase 1.5 Implementation Approach (with tier-aware defaults per `_shared/model-capability-tiers.md`) determines which skill(s) fire and at what granularity. Tier never alters the gate matrix (see the tier catalog's "Invariants tiers may not alter").
+**Mode interaction:** Always-dispatch at Phase 3 once a plan exists. All modes auto-progress through plan completion — Phase 3 is ungated in every mode under the consolidated matrix (the former `Hand-Held` per-task gate was retired on 2026-06-20). The Phase 1.5 Implementation Approach (default: Dynamic at nontrivial scope, Inline for trivial — see `/dev-lifecycle` § No model gate) determines which skill(s) fire and at what granularity.
 
 ### `/reproduce-then-fix` (candidate, per-task — defect repair)
 
