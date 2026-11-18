@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
@@ -514,7 +513,6 @@ func (t *TestTempGrantManager) GrantTemporaryChannelAccessForTest(ctx context.Co
 	return err
 }
 
-// ErrTemporaryGrantAuthorityRequiredForTest must alias the production
-// errTemporaryGrantAuthorityRequired once Task 3 adds it (replace this
-// placeholder with `= errTemporaryGrantAuthorityRequired`).
-var ErrTemporaryGrantAuthorityRequiredForTest = errors.New("placeholder: production sentinel not yet defined")
+// ErrTemporaryGrantAuthorityRequiredForTest aliases the production
+// errTemporaryGrantAuthorityRequired.
+var ErrTemporaryGrantAuthorityRequiredForTest = errTemporaryGrantAuthorityRequired

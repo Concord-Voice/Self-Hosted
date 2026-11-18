@@ -205,6 +205,54 @@ func authorizeMoveSourcesTx(
 	return visible, nil
 }
 
+// revalidateMoveActorTx repeats the actor's server-scope move decision inside
+// the decision transaction: membership and Move Members, with no hierarchy
+// step (ADR-0023). A self-move needs membership only.
+func revalidateMoveActorTx(ctx context.Context, tx *sql.Tx, r *rbac.Resolver, mod *voiceModContext, actorID string) error {
+	if !mod.self {
+		return revalidateVoiceModAuthorityTx(ctx, tx, r, mod, actorID, rbac.PermMoveMembers, false)
+	}
+	member, err := serverMemberExistsTx(ctx, tx, mod.serverID, actorID)
+	if err != nil {
+		return fmt.Errorf("revalidate self-move membership: %w", err)
+	}
+	if !member {
+		return errVoiceModActorNotMember
+	}
+	return nil
+}
+
+// revalidateVoiceMoveAuthorityTx is the only authority closure a moderated
+// move passes to the temporary grant. Inside the grant transaction it
+// recomposes the whole move decision for a non-self move: membership and
+// server-scope Move (no hierarchy), the destination stage, that the actor
+// holds everything the grant confers (tempGrantAllow), and the source stage on
+// sourceID. A source the actor can no longer see maps to
+// errTemporaryGrantSourceChanged; every permission refusal, including a
+// destination deleted since the decision, is errVoiceModPermission.
+func revalidateVoiceMoveAuthorityTx(
+	ctx context.Context, tx *sql.Tx, r *rbac.Resolver, serverID, actorID, sourceID, destID string,
+) error {
+	if err := revalidateMoveActorTx(ctx, tx, r, &voiceModContext{serverID: serverID}, actorID); err != nil {
+		return err
+	}
+	destPerms, err := authorizeMoveDestinationTx(ctx, tx, r, serverID, actorID, destID, false)
+	if err != nil {
+		return err
+	}
+	if !hasAllPerms(destPerms, tempGrantAllow) {
+		return errVoiceModPermission
+	}
+	visible, err := authorizeMoveSourcesTx(ctx, tx, r, serverID, actorID, []string{sourceID})
+	if err != nil {
+		return err
+	}
+	if len(visible) == 0 {
+		return errTemporaryGrantSourceChanged
+	}
+	return nil
+}
+
 // filterAuthorizedSessionSpecsTx keeps the session command specs whose channel
 // the actor can see. For each distinct channel: absent or not VIEW drops its
 // specs; VIEW without perm refuses the whole request, so an action is applied
