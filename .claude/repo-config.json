@@ -34,5 +34,52 @@
     "reviewer_bots": [
       "gitar-bot[bot]"
     ]
-  }
+  },
+  "bots": [
+    {
+      "match": "gitar",
+      "name": "Gitar",
+      "login": "gitar-bot[bot]",
+      "ci_check": "Gitar",
+      "blocking": true,
+      "offline": false,
+      "when": "always",
+      "ack_pattern": "(?s)\\A(?!.*<summary><b>(Code Review|Verification|Options)</b>)(?=(?:[ \\t]*>[^\\n]*\\n)*?[ \\t]*>[^\\n]*gitar)(?=(?:[ \\t]*>[^\\n]*(?:\\n|\\z))*\\s*.{0,900}\\z).*?(?:(^|\\n)[ \\t>*_]{0,6}(On it[^\\n]{0,8})?running [^\\n]{0,40}review now|(^|\\n)[ \\t>*_]{0,6}(starting|review started)|will (appear|show up|post)[^\\n]{0,80}dashboard comment|\\bI.m re-?(checking|reviewing)\\b)",
+      "decline_pattern": "sent several Gitar comments|wait about [0-9]+ minutes and comment again"
+    },
+    {
+      "match": "sonarqubecloud",
+      "name": "SonarCloud",
+      "login": "sonarqubecloud[bot]",
+      "ci_check": "SonarCloud Code Analysis",
+      "blocking": true,
+      "when": "always"
+    },
+    {
+      "name": "Semgrep SAST",
+      "login": "github-actions[bot]",
+      "marker": "<!-- semgrep-results -->",
+      "ci_check": "Protected scan enforcement / semgrep / Semgrep SAST",
+      "when": "always"
+    },
+    {
+      "match": "copilot",
+      "name": "Copilot Code Review",
+      "login": [
+        "copilot-pull-request-reviewer[bot]",
+        "Copilot"
+      ],
+      "when": "active",
+      "offline": true
+    },
+    {
+      "match": "chatgpt-codex-connector",
+      "name": "Codex",
+      "login": "chatgpt-codex-connector[bot]",
+      "when": "always",
+      "ack_pattern": "(?s)<!-- codex-pull-request-review-summary -->.*\\*\\*Running\\*\\*",
+      "head_verdict_pattern": "\\*\\*Completed\\*\\*[^|\\n]*\\|\\s*`([0-9a-f]{7,40})`",
+      "decline_pattern": "codex usage limit|usage limits? (have|has) been reached|reached your (codex )?usage limit|Codex Review: Something went wrong"
+    }
+  ]
 }
