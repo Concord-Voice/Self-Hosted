@@ -199,6 +199,8 @@ class MinioEnginePins(unittest.TestCase):
                     self.assertEqual(bool(key_installs), not key_refused)
                     if package_calls:
                         self.assertEqual(package_calls[0][-len(PACKAGES):], list(PACKAGES))
+                        self.assertEqual(package_calls[0][:-len(PACKAGES)],
+                                         ["apt-get", "install", "-y", "-q", "--no-install-recommends", "--no-remove"])
                     self.assertNotIn("fixture-public-key", result.stdout + result.stderr)
                     self.assertEqual(list(directory.glob("tmp.*")), [], "owned key scratch must be cleaned")
 

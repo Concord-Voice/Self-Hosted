@@ -12,6 +12,7 @@ docker-compose.authority.yml                        @Concord-Voice/security
 docker-compose.byo-s3.yml                           @Concord-Voice/security
 infrastructure/**                                   @Concord-Voice/security
 /scripts/security/**                                 @Concord-Voice/security
+/scripts/ci/                                         @Concord-Voice/security
 scripts/security/check-ioc-refresh-pr.sh            @Concord-Voice/security
 **/crypto*                                          @Concord-Voice/security
 **/e2ee*                                            @Concord-Voice/security

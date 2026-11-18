@@ -82,7 +82,7 @@ jobs:
           Signed-By: /etc/apt/keyrings/docker.asc 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
           EOF
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends --allow-downgrades \
+          sudo apt-get install -y -q --no-install-recommends --no-remove \
             docker-ce=5:29.9.2-1~ubuntu.24.04~noble \
             docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble \
             docker-ce-rootless-extras=5:29.9.2-1~ubuntu.24.04~noble \
@@ -255,7 +255,7 @@ jobs:
           Signed-By: /etc/apt/keyrings/docker.asc 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
           EOF
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends --allow-downgrades \
+          sudo apt-get install -y -q --no-install-recommends --no-remove \
             docker-ce=5:29.9.2-1~ubuntu.24.04~noble \
             docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble \
             docker-ce-rootless-extras=5:29.9.2-1~ubuntu.24.04~noble \
