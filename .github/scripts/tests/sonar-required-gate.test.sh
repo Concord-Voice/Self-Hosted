@@ -340,7 +340,7 @@ with tempfile.TemporaryDirectory() as temporary:
     policy_output.unlink()
 assert "&& false || true" not in pr_osv and "&& false || true" not in pr_osv.lower(), (
     "false delegation cannot be collapsed by a true fallback")
-assert "osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36" in osv["jobs"]["scan-pr"]["uses"]
+assert "osv-scanner-reusable-pr.yml@32d3cd482bdadfb38b186c0ad1b031902d55d932" in osv["jobs"]["scan-pr"]["uses"]
 scheduled_if = osv["jobs"]["scan-scheduled"]["if"]
 assert "github.event_name == 'schedule'" in scheduled_if
 assert "needs.select-osv.outputs.known != 'true'" in scheduled_if
