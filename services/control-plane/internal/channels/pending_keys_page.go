@@ -308,6 +308,12 @@ func requesterViewKey(channelID, userID string) string { return channelID + "|" 
 // caller once per new channel, then each requester once per channel the
 // caller can view, both with one fresh resolve per distinct server.
 func (v *pendingVisibility) resolveChannelBatch(ctx context.Context, batch []pendingCandidate) {
+	v.resolveCallerViews(ctx, batch)
+	v.resolveRequesterViews(ctx, batch)
+}
+
+// resolveCallerViews memoizes the caller's view of each channel new to the batch.
+func (v *pendingVisibility) resolveCallerViews(ctx context.Context, batch []pendingCandidate) {
 	var newChannels []string
 	seen := map[string]bool{}
 	for _, cand := range batch {
@@ -323,7 +329,11 @@ func (v *pendingVisibility) resolveChannelBatch(ctx context.Context, batch []pen
 	for ch, canView := range v.h.pendingChannelViews(ctx, v.callerID, newChannels) {
 		v.callerView[ch] = canView
 	}
+}
 
+// resolveRequesterViews memoizes each requester's view of the channels the
+// caller can view.
+func (v *pendingVisibility) resolveRequesterViews(ctx context.Context, batch []pendingCandidate) {
 	byRequester := map[string][]string{}
 	for _, cand := range batch {
 		ch, user := cand.req.ChannelID, cand.req.UserID
@@ -426,7 +436,7 @@ func (h *Handler) readPendingChannelTargets(ctx context.Context, userID string, 
 		if err := rows.Scan(&target.channelID, &target.serverID, &channelType); err != nil {
 			return nil, fmt.Errorf("scan pending key request channel: %w", err)
 		}
-		target.viewPerm = channelViewPermission(channelType)
+		target.viewPerm = viewPermForType(channelType)
 		targets[target.serverID] = append(targets[target.serverID], target)
 	}
 	if err := rows.Err(); err != nil {

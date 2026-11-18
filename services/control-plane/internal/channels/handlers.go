@@ -2320,17 +2320,8 @@ func readChannelKeyTarget(ctx context.Context, q dmKeyVersionQueryRower, channel
 	if qErr != nil {
 		return target, false, qErr
 	}
-	target.viewPerm = channelViewPermission(channelType)
+	target.viewPerm = viewPermForType(channelType)
 	return target, true, nil
-}
-
-// channelViewPermission is the permission that grants VIEW on a channel of
-// channelType.
-func channelViewPermission(channelType string) rbac.Permission {
-	if channelType == "voice" {
-		return rbac.PermViewVoiceChannels
-	}
-	return rbac.PermViewTextChannels
 }
 
 // GetChannelKeys returns the caller's own wrapped channel key (optionally a
@@ -2915,9 +2906,10 @@ func (h *Handler) respondKeyDistributionError(c *gin.Context, distErr error, con
 // open between statements. All three are SET LOCAL because the same pool runs
 // migrations, which a pool-wide statement_timeout would cut short. It is a
 // const statement, never built from input.
-const distributionTimeoutsSQL = `SET LOCAL lock_timeout = '5s'; ` +
-	`SET LOCAL statement_timeout = '15s'; ` +
-	`SET LOCAL idle_in_transaction_session_timeout = '15s'`
+const distributionTimeoutsSQL = `SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '15s'; SET LOCAL idle_in_transaction_session_timeout = '15s'`
+
+// msgDMDistributionRollbackFailed is logged when a DM distribution rollback fails.
+const msgDMDistributionRollbackFailed = "Failed to rollback dm distribution tx"
 
 // setDistributionTimeouts applies distributionTimeoutsSQL. It is the first
 // statement after every distribution BeginTx; its error fails the request.
@@ -4461,14 +4453,14 @@ func (h *Handler) distributeDMKeys(ctx context.Context, actorID, tokenEpoch, con
 		}
 		if err := setDistributionTimeouts(ctx, tx); err != nil {
 			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-				h.log.Error("Failed to rollback dm distribution tx", "error", rbErr)
+				h.log.Error(msgDMDistributionRollbackFailed, "error", rbErr)
 			}
 			return 0, err
 		}
 		outcome, err := distributeDMKeysTx(ctx, tx, batch)
 		if err != nil {
 			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-				h.log.Error("Failed to rollback dm distribution tx", "error", rbErr)
+				h.log.Error(msgDMDistributionRollbackFailed, "error", rbErr)
 			}
 			if errors.Is(err, dmblock.ErrMembershipChanged) && attempt+1 < dmDistributionTopologyAttempts {
 				continue
@@ -4477,7 +4469,7 @@ func (h *Handler) distributeDMKeys(ctx context.Context, actorID, tokenEpoch, con
 		}
 		if err := tx.Commit(); err != nil {
 			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-				h.log.Error("Failed to rollback dm distribution tx", "error", rbErr)
+				h.log.Error(msgDMDistributionRollbackFailed, "error", rbErr)
 			}
 			return 0, fmt.Errorf("commit dm distribution tx: %w", err)
 		}
