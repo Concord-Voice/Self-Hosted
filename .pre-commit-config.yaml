@@ -657,7 +657,7 @@ repos:
 
 
   # ── concord-dev.sh unit tests (#1113) ────────────────────────────────────
-  # Runs the 4 test-concord-dev-*.sh files when scripts/concord-dev.sh,
+  # Runs every test-concord-dev-*.sh file when scripts/concord-dev.sh,
   # any test file in scripts/tests/, or docker-compose.dev.yml changes.
   # The tests use PATH stubs (no docker daemon required) and real fork/kill
   # on sleep subprocesses for PID lifecycle coverage. Fast enough (~3s
@@ -716,9 +716,9 @@ repos:
         pass_filenames: false
 
 
-  # ── npm install auto-sync (post-merge / post-checkout) ────────────────────
+  # ── npm ci auto-sync (post-merge / post-checkout) ─────────────────────────
   # When a pull, merge, or branch switch changes package-lock.json in
-  # client/desktop/ or services/media-plane/, auto-run `npm install` in the
+  # client/desktop/ or services/media-plane/, auto-run `npm ci` in the
   # affected directory so local node_modules stays current after dependency
   # updates. Prevents the
   # confusing "Cannot find module" failures from tsc/eslint/prettier after
@@ -727,7 +727,7 @@ repos:
   - repo: local
     hooks:
       - id: test-npm-install-lockfile-sync
-        name: Test npm install lockfile sync (#2459)
+        name: Test npm ci lockfile sync (#2459)
         entry: bash scripts/test-npm-install-if-lockfile-changed.sh
         language: system
         files: '^scripts/(npm-install-if-lockfile-changed|test-npm-install-if-lockfile-changed)\.sh$'
@@ -738,13 +738,13 @@ repos:
       # test (there is no root package.json). See PR #2709 for the incident.
       - id: override-range-lint-desktop
         name: override-range lint — packages workspace
-        entry: node scripts/security/override-range-lint.mjs --dir . --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
+        entry: node scripts/security/override-range-lint.mjs --dir . --minimum-version undici=6.29.1 --minimum-version undici=7.30.2 --minimum-version undici=8.12.4
         language: system
         files: '^(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
         pass_filenames: false
       - id: override-range-lint-admin
         name: override-range lint — client/admin
-        entry: node scripts/security/override-range-lint.mjs --dir client/admin --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
+        entry: node scripts/security/override-range-lint.mjs --dir client/admin --minimum-version undici=6.29.1 --minimum-version undici=7.30.2 --minimum-version undici=8.12.4
         language: system
         files: '^client/admin/(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
         pass_filenames: false
@@ -846,7 +846,7 @@ repos:
         files: '^scripts/security/(audit-dependabot-coverage\.sh|test-audit-dependabot-coverage\.sh|check-pin-exceptions\.mjs)$'
         pass_filenames: false
       - id: npm-install-lockfile-sync
-        name: npm install if lockfile changed
+        name: npm ci if lockfile changed
         entry: scripts/npm-install-if-lockfile-changed.sh
         args: [., services/media-plane]
         language: script
