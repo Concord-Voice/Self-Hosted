@@ -13,7 +13,7 @@ workflow files are out of scope (other sweeps own them).
 | Dedicated matchers (`typescript:S5906`) | 16 test assertions | Use `toHaveLength` / `toBeNull`. The two `mediaEncryption.test.ts` cases assert `AesKeyAlgorithm.length`, a key-size field; the agent decides if `toHaveLength` is correct or if a property assertion is better. Either result fixes the smell. |
 | Go smells | `godre:S8196`, `go:S3776` | Rename the single-method interface to the `-er` form. Extract helpers to get cognitive complexity to 15 or less, with no behaviour change. |
 | Calibrated FPs | `docker:S8431` ×4, `go:S1313` ×1 | Existing register calibrations hold (tag = Dependabot lineage anchor; RFC1918 dev-only fallback). Flip per instance and append rows (renumbered #92–#96 after a merge from main). |
-| CodeQL | #1–#9, #88 (as built: #9 won't fix. The hash-pinned generator forces an 8.25 MB vector redraw, and the required custom Semgrep scan times out on it.) | Fix each one (dead assignment, duplicate object-literal key, unused variable, impossible null comparison). For `js/missing-await` in `redis.ts` / `nats.ts`, find out if the un-awaited promise is a deliberate fire-and-forget. If it is, use `void` with an attached error handler. If it is not, await it. |
+| CodeQL | #1–#9, #88 (as built: #9 is fixed. `gen.mjs` is hash-pinned, so `vectors.json` is regenerated in the same PR.) | Fix each one (dead assignment, duplicate object-literal key, unused variable, impossible null comparison). For `js/missing-await` in `redis.ts` / `nats.ts`, find out if the un-awaited promise is a deliberate fire-and-forget. If it is, use `void` with an attached error handler. If it is not, await it. |
 
 ## Acceptance criteria
 

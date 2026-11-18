@@ -430,14 +430,3 @@ _None yet._
 | Justification | `value` comes from `JSON.parse` of untrusted envelope text, and `JSON.parse('null')` returns `null`. Because `typeof null === 'object'`, the `typeof` check alone does not reject `null`. The `value === null` check is what keeps this validation fail-closed on a `null` envelope. CodeQL's type inference wrongly treats the narrowed value as non-null. Removing the check would let `null` reach `Object.keys`-style access and throw an unexpected `TypeError` there, outside the defined `reject()` path. |
 | Dismissal | Not dismissed in GitHub. The Code Quality findings API is read-only (see above). Recorded here only. |
 | Re-check | Reopen if the value stops coming from `JSON.parse`, or if this guard is replaced by a decoder that already rejects `null`. |
-
-#### Code Quality #9 — `js/useless-assignment-to-local` — `scripts/authority-vectors/gen.mjs:1167`
-
-| Field | Value |
-|---|---|
-| Finding | GitHub Code Quality #9 (`let accepted = true;` in `pushHead`) |
-| Recorded | 2026-11-18, weekly hygiene sweep (PR #335) |
-| Reason | `won't fix` |
-| Justification | The finding is correct: the `try` and the `catch` both overwrite the initializer, so it is dead. But removing it has zero runtime effect, and in PR #335 the edit had two costs the finding does not justify. (1) `gen.mjs` pins its own SHA-384 in `services/control-plane/internal/authoritycontract/testdata/vectors.json`, so any edit forces a full random redraw of that 8.25 MB cross-language fixture. (2) The required custom Semgrep scan only scans changed files. On this ~4,600-line generator, three `.semgrep/` rules (`concord-crypto-deprecated-des-ts`, `concord-crypto-outside-module`, `concord-electron-node-integration`) hit the per-rule timeout. The scan then reports a scanner error and fails the gate. This reproduces locally with the pinned Semgrep 1.121.0. The fix was reverted in the same PR. |
-| Dismissal | Not dismissed in GitHub. The Code Quality findings API is read-only (see the `js/missing-await` entry above). |
-| Re-check | Fold the one-token fix into the next change that must regenerate the vectors anyway, after the Semgrep timeout on `gen.mjs` is resolved. |
