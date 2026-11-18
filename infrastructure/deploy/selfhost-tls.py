@@ -16,7 +16,7 @@ import sys
 import time
 
 
-IMAGE = "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e"
+IMAGE = "coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e"
 CERT_ROOT = "/opt/concord/certs/coturn"
 CERT_TARGET = "/etc/coturn/certs"
 CERT_PATH = CERT_TARGET + "/cert.pem"

@@ -19,12 +19,12 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedturn"
 )
 
-// coturnDDL is the exact list of statements coturn 4.18.0 runs in
+// coturnDDL is the exact list of statements coturn 4.19.0 runs in
 // init_sqlite_database (src/apps/relay/dbdrivers/dbd_sqlite.c), keyed by table.
 // The \t escapes are literal tab characters in the C source. Whitespace
 // matters: sqlite_master.sql stores the statement text verbatim, and the
 // read-only coturn mount must find the tables exactly as coturn would create.
-var coturnDDL = map[string]string{ // #nosec G101 -- coturn 4.18.0 schema DDL, not a credential.
+var coturnDDL = map[string]string{ // #nosec G101 -- coturn 4.19.0 schema DDL, not a credential.
 	"turnusers_lt":         "CREATE TABLE turnusers_lt ( realm varchar(127) default '', name varchar(512), hmackey char(128), PRIMARY KEY (realm,name))",
 	"turn_secret":          "CREATE TABLE turn_secret (realm varchar(127) default '', value varchar(127), primary key (realm,value))",
 	"allowed_peer_ip":      "CREATE TABLE allowed_peer_ip (realm varchar(127) default '', ip_range varchar(256), primary key (realm,ip_range))",
@@ -105,7 +105,7 @@ func TestStore_InitSchema_CoturnReadQueryWorks(t *testing.T) {
 	k, raw := newKey(t)
 	require.NoError(t, s.Insert(context.Background(), testRealm, k))
 
-	// The exact statement coturn 4.18.0 issues per authentication.
+	// The exact statement coturn 4.19.0 issues per authentication.
 	rows, err := openRaw(t, path, "ro").Query(`select value from turn_secret where realm=?`, testRealm)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, rows.Close()) }()

@@ -40,6 +40,7 @@ later storage migration.
 
 ### Added
 
+- **Operations:** The nightly main-branch SonarQube Cloud scan now runs dependency analysis (SCA), and a daily `sonar-container-scan.yml` sends the service images and every digest-pinned image to SonarQube Cloud container scanning (beta). Neither blocks a pull request: OSV-Scanner and Dependabot keep the pull-request dependency checks, and Trivy keeps the image gate.
 - **Operations:** Added a default-off control-plane blue-green rail to `concord-ctl.sh` (`CONTROL_PLANE_DEPLOY_PROFILE=control-plane-bluegreen`, managed production and staging only, never self-host) that rebuilds the control plane without 502s when no migration is pending, plus a read-only `control-plane migrations status` subcommand and a `MIGRATIONS_MODE=verify` startup setting that refuses to start on a schema that is not current. Do not turn the rail on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 ship.
 - **Authentication:** Added `authority-ceremony`, an operator tool that signs account-key authority delegations and successions with two hardware keys, or with two key files on a self-hosted install (`--key-file`, `--yes`). It also writes a realm's anchors file (`make-anchors`) and prints a trust file's current delegation window (`show-trust`). Nothing runs it yet.
 - **Authentication:** Added dormant checks to the account-key authority contract that refuse a delegation or succession before it is signed when clients would ignore it, halt on it, or see its cutover or supersession move backward. Nothing calls them yet.
@@ -75,6 +76,7 @@ later storage migration.
 - **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
+- **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed

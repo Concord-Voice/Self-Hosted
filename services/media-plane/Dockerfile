@@ -48,6 +48,10 @@ COPY --from=builder /app/package*.json ./
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
+# zlib: CVE-2026-4738 is fixed in 1.4-r0, which the pinned base predates.
+# Same upgrade as the control-plane runtime stage.
+RUN apk --no-cache upgrade zlib
+
 # Run as non-root user. UID/GID 10007 is fixed and differs from control-plane
 # (10006) so the managed Redis controller can tell the two apart by peer UID.
 RUN addgroup -S -g 10007 appuser && adduser -S -u 10007 -G appuser appuser

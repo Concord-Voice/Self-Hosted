@@ -118,7 +118,7 @@ def live_projection(model: dict | None = None) -> list[dict]:
     model = model or rendered_model()
     images = {"postgres": "concordvoice-postgres:16-alpine",
               "redis": "redis:8-alpine", "nats": "nats:2-alpine",
-              "coturn": "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e",
+              "coturn": "coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e",
               "minio": "ghcr.io/concord-voice/minio@sha256:fixture",
               "ops-agent": "concordvoice-ops-agent:local",
               "control-plane": "concordvoice-control-plane:local",
