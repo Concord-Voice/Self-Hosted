@@ -44,7 +44,7 @@
       "blocking": true,
       "offline": false,
       "when": "always",
-      "ack_pattern": "(?s)\\A(?=(?:[ \\t]*>[^\\n]*\\n)*?[ \\t]*>[^\\n]*gitar)(?>(?:[ \\t]*>[^\\n]*(?:\\n|\\z))*)(?>\\s*)[ \\t*_]{0,6}(?:(?:on it[^\\n]{0,8})?running [^\\n]{0,20}review now|(?:review (?:queued|started)|starting (?:a |the |a full )?review(?: now)?)(?:(?:[.;:,!]|[ \\t]+[—–-])[ \\t]+(?:the |all |any |your )?(?:results|findings)(?: of (?:the|this) review)? will (?:appear|show up|post|be posted)(?: in| to| on)(?: the| your)? dashboard comment(?: (?:once|when|after) it (?:completes|finishes|is done)| shortly| soon)?)?|i.m re-?(?:checking|reviewing)[^\\n]{0,30}(?:now|commit|changes|pr|pull request))[.!]?[ \\t*_]{0,6}\\s*\\z",
+      "ack_pattern": "(?s)\\A(?=(?:[ \\t]*>[^\\n]*\\n)*?[ \\t]*>[^\\n]*gitar)(?>(?:[ \\t]*>[^\\n]*(?:\\n|\\z))*)(?>\\s*)[ \\t>*_]{0,6}(?:(?:on it[^\\n]{0,8})?running [^\\n]{0,20}review now|review (?:queued|started)|starting (?:a |the |a full )?review(?: now)?|i.m re-?(?:checking|reviewing)[^\\n]{0,30}(?:now|commit|changes|pr|pull request))[ \\t*_]{0,4}(?:(?:[.;:,!]|[ \\t]+[—–-])[ \\t]+(?:the |all |any |your )?(?:results|findings)(?: of (?:the|this) review)? will (?:appear|show up|post|be posted)(?: in| to| on)(?: the| your)? dashboard comment(?: (?:once|when|after) it (?:completes|finishes|is done)| shortly| soon)?)?[.!]?[ \\t*_]{0,6}\\s*\\z",
       "decline_pattern": "(?s)\\A(?>(?:[ \\t]*>[^\\n]*(?:\\n|\\z)|[ \\t\\r]*\\n)*)(?!.*<summary><b>Code Review</b>).*?(?:sent several Gitar comments|wait about [0-9]+ minutes and comment again)"
     },
     {
