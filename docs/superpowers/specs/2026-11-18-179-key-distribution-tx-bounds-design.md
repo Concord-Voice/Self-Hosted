@@ -60,7 +60,7 @@ Channel-key and DM-key distribution must not be able to stall the whole control 
 ### 4. Paged reader (VULN-080, VULN-207)
 
 - `GET /api/v1/e2ee/pending-keys?limit=&cursor=`. Default limit 100, maximum 200. The response becomes `{pending_requests: [...], next_cursor: "<opaque>" | null}`. The field is additive, so old clients keep working and read only the first page.
-- One keyset cursor across both sources: a `UNION ALL` of channel and DM requests, ordered by `(created_at, id)`. The cursor is base64url of `created_at|id`, and the server rejects a malformed cursor with 400.
+- One keyset cursor across both sources: a `UNION ALL` of channel and DM requests, ordered by `(created_at, id)`. The cursor is opaque: `created_at|source|id` sealed with AES-256-GCM under a key the process draws at start, sent as unpadded base64url (at most 138 characters). A capped scan's cursor can name a row the caller cannot see, so the client can neither read a cursor nor forge one. The server rejects with 400 a cursor that does not open or is malformed. A restart draws a new key, so cursors in flight then get 400 and the client starts again from the first page; the single control-plane replica makes that the only case.
 - Visibility is applied before `LIMIT`, so a page is never filled with rows the caller cannot act on and later rows cannot starve. The per-row resolver call is replaced by one batched resolve per distinct server. Builder's call: the SQL or batched-resolver form, whichever keeps the results identical to today's `filterVisiblePendingRequests`, proved by a test.
 - `docs/api/openapi.yaml` documents `limit`, `cursor` and `next_cursor`.
 

@@ -142,6 +142,8 @@ type Handler struct {
 	// responseBudget overrides expiration.ResponseBudget for the expiration
 	// PATCH; zero means the default. Only tests set it.
 	responseBudget time.Duration
+	// pendingCursors seals the pending-keys next_cursor (pending_keys_page.go).
+	pendingCursors pendingCursorCodec
 }
 
 // SetAuthorityHandler wires the RBAC authority coordinator used only for
@@ -158,13 +160,20 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rb
 	if len(serverTiers) > 0 {
 		st = serverTiers[0]
 	}
+	// A codec without a key refuses every cursor and fails any page that
+	// needs one, so this degrades to errors, never to an unsealed cursor.
+	cursors, err := newPendingCursorCodec()
+	if err != nil {
+		log.Error("Pending key request cursors are unavailable", "error", err)
+	}
 	return &Handler{
-		db:          db,
-		log:         log,
-		hub:         hub,
-		resolver:    resolver,
-		redis:       redis,
-		serverTiers: st,
+		db:             db,
+		log:            log,
+		hub:            hub,
+		resolver:       resolver,
+		redis:          redis,
+		serverTiers:    st,
+		pendingCursors: cursors,
 	}
 }
 
@@ -3388,7 +3397,7 @@ type pendingKeyRequest struct {
 // GET /api/v1/e2ee/pending-keys
 func (h *Handler) GetPendingKeyRequests(c *gin.Context) {
 	userID := c.GetString("user_id")
-	limit, after, err := parsePendingKeysPage(c)
+	limit, after, err := parsePendingKeysPage(c, h.pendingCursors)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidPendingKeysPage})
 		return
@@ -3401,8 +3410,13 @@ func (h *Handler) GetPendingKeyRequests(c *gin.Context) {
 	}
 	var nextCursor *string
 	if next != nil {
-		encoded := next.encode()
-		nextCursor = &encoded
+		sealed, sealErr := h.pendingCursors.seal(*next)
+		if sealErr != nil {
+			h.log.Error("Failed to seal pending key request cursor", "error", sealErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchPendingKeys})
+			return
+		}
+		nextCursor = &sealed
 	}
 	c.JSON(http.StatusOK, gin.H{"pending_requests": requests, "next_cursor": nextCursor})
 }

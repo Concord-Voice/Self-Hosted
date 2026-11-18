@@ -280,16 +280,36 @@ func TestPendingKeys_FullPageCursorIndependentOfHiddenRows(t *testing.T) {
 	}
 }
 
+// When the scan cap ends a request, the cursor names the last row examined,
+// which can be a row hidden from the caller. The cursor must not disclose that
+// row's id, created_at or source.
+func TestPendingKeys_ScanCapCursorRevealsNoRowData(t *testing.T) {
+	ts, _, caller, serverID, _, ch2 := setupHiddenChannelCaller(t)
+	hidden := seedPendingRequesters(t, ts, serverID, ch2, 1000, pendingSeedBase, time.Millisecond, true)
+	last := hidden[len(hidden)-1]
+	var createdAt time.Time
+	require.NoError(t, ts.DB.QueryRow(`SELECT created_at FROM pending_key_requests WHERE id = $1`, last).Scan(&createdAt))
+
+	page := getPendingPage(t, ts, caller.AccessToken, "")
+	require.Empty(t, page.ids, "every examined row is hidden from the caller")
+	require.NotEmpty(t, page.next, "the scan cap ends the request with a cursor")
+
+	decoded, err := base64.RawURLEncoding.DecodeString(page.next)
+	require.NoError(t, err, "the cursor is unpadded base64url")
+	for _, form := range []string{page.next, string(decoded)} {
+		assert.NotContains(t, form, last, "the hidden row's id")
+		assert.NotContains(t, form, strings.ReplaceAll(last, "-", ""), "the hidden row's id without dashes")
+		assert.NotContains(t, form, createdAt.UTC().Format(time.RFC3339Nano), "the hidden row's created_at")
+		assert.NotContains(t, form, createdAt.UTC().Format("2006-01-02"), "the hidden row's creation date")
+		assert.NotContains(t, form, "channel", "the hidden row's source")
+	}
+}
+
+// A cursor is sealed, so a forged or altered one is refused. A genuine cursor
+// taken from another user's session still opens, and visibility still applies
+// to every row after it.
 func TestPendingKeys_ForgedCursorStillFiltered(t *testing.T) {
-	ts, owner, serverID, ch1 := setupEncryptedChannel(t)
-	caller := ts.CreateTestUser(t, "pkforgecaller")
-	ts.AddMemberToServer(t, serverID, caller.ID, roleMember)
-	dist := ts.DoRequest("POST", pathChannelsPrefix+ch1+pathKeys, map[string]interface{}{
-		keyWrappedKeys: map[string]string{caller.ID: testhelpers.ValidCiphertext()},
-	}, testhelpers.AuthHeaders(owner.AccessToken))
-	require.Equal(t, http.StatusOK, dist.Code, dist.Body.String())
-	ch2 := createKeyedChannel(t, ts, owner, serverID, "text", caller.ID)
-	ts.CreateChannelOverride(t, ch2, "user", caller.ID, 0, int64(rbac.PermViewTextChannels))
+	ts, owner, caller, serverID, ch1, ch2 := setupHiddenChannelCaller(t)
 
 	// Hidden from the caller: requesters who cannot view ch1, and every row of
 	// ch2, which the caller cannot view.
@@ -299,21 +319,36 @@ func TestPendingKeys_ForgedCursorStillFiltered(t *testing.T) {
 
 	// The owner sees the ch2 rows; take a cursor from the owner's first page.
 	ownerPage := getPendingPage(t, ts, owner.AccessToken, pendingQuery(1, ""))
+	require.Len(t, ownerPage.ids, 1)
+	require.Contains(t, hidden, ownerPage.ids[0], "fixture check: the owner's cursor sits among rows hidden from the caller")
 	require.NotEmpty(t, ownerPage.next)
 
+	t.Run("another user's cursor", func(t *testing.T) {
+		page := getPendingPage(t, ts, caller.AccessToken, pendingQuery(200, ownerPage.next))
+		for _, id := range hidden {
+			assert.NotContains(t, page.ids, id, "a hidden row must not leak through a cursor")
+		}
+		assert.Equal(t, visible, page.ids, "the caller's own visible row is still returned")
+	})
+
+	sealed, err := base64.RawURLEncoding.DecodeString(ownerPage.next)
+	require.NoError(t, err)
+	tampered := append([]byte{}, sealed...)
+	tampered[len(tampered)/2] ^= 0x01
 	zero := "00000000-0000-0000-0000-000000000000"
-	cursors := map[string]string{
+	refused := map[string]string{
 		"forged channel cursor before every row": rawCursor("1970-01-01T00:00:00Z|channel|" + zero),
 		"forged dm cursor before every row":      rawCursor("1970-01-01T00:00:00Z|dm|" + zero),
-		"another user's cursor":                  ownerPage.next,
+		"another user's cursor, altered":         base64.RawURLEncoding.EncodeToString(tampered),
 	}
-	for name, cursor := range cursors {
+	for name, cursor := range refused {
 		t.Run(name, func(t *testing.T) {
-			page := getPendingPage(t, ts, caller.AccessToken, pendingQuery(200, cursor))
-			for _, id := range hidden {
-				assert.NotContains(t, page.ids, id, "a hidden row must not leak through a cursor")
-			}
-			assert.Equal(t, visible, page.ids, "the caller's own visible row is still returned")
+			w := ts.DoRequest("GET", pathE2EEPendingKeys+pendingQuery(200, cursor), nil, testhelpers.AuthHeaders(caller.AccessToken))
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			var body map[string]interface{}
+			testhelpers.ParseJSON(t, w, &body)
+			assert.Equal(t, "Invalid limit or cursor", testhelpers.JSONField[string](t, body, "error"))
+			assert.NotContains(t, body, "pending_requests")
 		})
 	}
 }

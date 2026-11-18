@@ -2,6 +2,9 @@ package channels
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -21,14 +24,17 @@ import (
 // caller cannot act on never fill a page, and one request examines at most
 // pendingKeysScanCap rows. When the cap ends a request with the page not full,
 // next_cursor points past the last examined row, so later visible rows are
-// still reached.
+// still reached. That row can be one the caller cannot see, so the cursor is
+// sealed (pendingCursorCodec) and tells the client nothing about it.
 const (
 	pendingKeysDefaultLimit = 100
 	pendingKeysMaxLimit     = 200
 	pendingKeysScanCap      = 1000
 	pendingKeysBatchSize    = 200
-	// A well-formed cursor is about 110 characters.
+	// A sealed cursor is at most 134 characters: a microsecond created_at,
+	// the source and the id, plus a 12-byte nonce and a 16-byte tag.
 	pendingCursorMaxLen = 160
+	pendingCursorKeyLen = 32 // AES-256
 
 	pendingSourceChannel = "channel"
 	pendingSourceDM      = "dm"
@@ -37,8 +43,9 @@ const (
 )
 
 var (
-	errInvalidPendingCursor    = errors.New("invalid pending key request cursor")
-	errInvalidPendingKeysLimit = errors.New("invalid pending key request limit")
+	errInvalidPendingCursor     = errors.New("invalid pending key request cursor")
+	errInvalidPendingKeysLimit  = errors.New("invalid pending key request limit")
+	errPendingCursorUnavailable = errors.New("pending key request cursor key unavailable")
 )
 
 // pendingCursor is the position of one examined pending request.
@@ -48,16 +55,52 @@ type pendingCursor struct {
 	ID        string
 }
 
-func (c pendingCursor) encode() string {
-	raw := c.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + c.Source + "|" + c.ID
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+// pendingCursorCodec seals cursors with AES-256-GCM under a key drawn when the
+// handler is built, so a client can neither read a cursor nor make one, and a
+// cursor that does not open is rejected. The control plane runs one replica,
+// so a restart only invalidates the cursors in flight: the next request with
+// one gets 400 and the client starts again from the first page.
+type pendingCursorCodec struct {
+	aead cipher.AEAD // nil when no key could be made: every cursor then fails
 }
 
-func decodePendingCursor(s string) (pendingCursor, error) {
-	if s == "" || len(s) > pendingCursorMaxLen {
+func newPendingCursorCodec() (pendingCursorCodec, error) {
+	key := make([]byte, pendingCursorKeyLen)
+	if _, err := rand.Read(key); err != nil {
+		return pendingCursorCodec{}, fmt.Errorf("generate pending cursor key: %w", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return pendingCursorCodec{}, fmt.Errorf("create pending cursor cipher: %w", err)
+	}
+	aead, err := cipher.NewGCMWithRandomNonce(block)
+	if err != nil {
+		return pendingCursorCodec{}, fmt.Errorf("create pending cursor AEAD: %w", err)
+	}
+	return pendingCursorCodec{aead: aead}, nil
+}
+
+func (k pendingCursorCodec) seal(c pendingCursor) (string, error) {
+	return k.sealText(c.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + c.Source + "|" + c.ID)
+}
+
+func (k pendingCursorCodec) sealText(raw string) (string, error) {
+	if k.aead == nil {
+		return "", errPendingCursorUnavailable
+	}
+	// The AEAD draws a fresh random nonce per seal and requires a nil one here.
+	return base64.RawURLEncoding.EncodeToString(k.aead.Seal(nil, nil, []byte(raw), nil)), nil //nolint:gosec // G407: see above
+}
+
+func (k pendingCursorCodec) open(s string) (pendingCursor, error) {
+	if k.aead == nil || s == "" || len(s) > pendingCursorMaxLen {
 		return pendingCursor{}, errInvalidPendingCursor
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(s)
+	sealed, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return pendingCursor{}, errInvalidPendingCursor
+	}
+	raw, err := k.aead.Open(nil, nil, sealed, nil)
 	if err != nil {
 		return pendingCursor{}, errInvalidPendingCursor
 	}
@@ -81,8 +124,8 @@ func decodePendingCursor(s string) (pendingCursor, error) {
 
 // parsePendingKeysPage reads ?limit= and ?cursor=. An absent limit is the
 // default; a present limit must be an integer in [1, max]. A present cursor
-// must decode. Each parameter may appear at most once.
-func parsePendingKeysPage(c *gin.Context) (limit int, after *pendingCursor, err error) {
+// must open. Each parameter may appear at most once.
+func parsePendingKeysPage(c *gin.Context, cursors pendingCursorCodec) (limit int, after *pendingCursor, err error) {
 	limit = pendingKeysDefaultLimit
 	query := c.Request.URL.Query()
 	if values, ok := query["limit"]; ok {
@@ -99,7 +142,7 @@ func parsePendingKeysPage(c *gin.Context) (limit int, after *pendingCursor, err 
 		if len(values) != 1 {
 			return 0, nil, errInvalidPendingCursor
 		}
-		cursor, decErr := decodePendingCursor(values[0])
+		cursor, decErr := cursors.open(values[0])
 		if decErr != nil {
 			return 0, nil, decErr
 		}
