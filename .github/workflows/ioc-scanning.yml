@@ -115,7 +115,11 @@ jobs:
         run: python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
 
       - name: Install PyYAML (runner linter dependency)
-        run: python3 -m pip install --user pyyaml
+        # Trusted-source runs have no root checkout; take the pinned file from
+        # the protected scanner revision, never from the scanned target.
+        working-directory: ${{ inputs.trusted-source && 'scanner' || '.' }}
+        run: >-
+          python3 -m pip install --user --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
 
       - name: Run supply-chain IOC scan
         id: scan
@@ -251,7 +255,8 @@ jobs:
           persist-credentials: false
 
       - name: Install PyYAML (required by runner linter)
-        run: python3 -m pip install --user pyyaml
+        run: >-
+          python3 -m pip install --user --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
 
       - name: Run self-test suite
         run: bash scripts/security/tests/run-tests.sh
