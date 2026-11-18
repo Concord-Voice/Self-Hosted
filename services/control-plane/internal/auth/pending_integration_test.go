@@ -361,6 +361,37 @@ func TestPromoteRejectsCodeForDifferentEmail(t *testing.T) {
 	assert.Equal(t, 1, pendingCount)
 }
 
+// TestPromoteRequiresBothRecipientChecks pins that Promote has no exempt call
+// shape: an empty expected email or a missing current-code check refuses
+// promotion, so a record without a bound recipient cannot be confirmed.
+func TestPromoteRequiresBothRecipientChecks(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	repo := auth.NewPendingRepo(ts.DB)
+	ctx := context.Background()
+	const email = "both-checks@test.concord.chat"
+	id, _, _, err := repo.InsertOrTakeover(ctx,
+		insertPendingParams(t, email, "bothchecks", "TestPassword123!"),
+		"TestPassword123!",
+	)
+	require.NoError(t, err)
+
+	_, err = repo.Promote(ctx, id, "  ", func() error { return nil })
+	require.ErrorIs(t, err, auth.ErrVerificationEmailChanged)
+
+	_, err = repo.Promote(ctx, id, email, nil)
+	require.Error(t, err)
+
+	var users, pending int
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM users WHERE email = $1`, email,
+	).Scan(&users))
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pending_registrations WHERE id = $1`, id,
+	).Scan(&pending))
+	assert.Zero(t, users)
+	assert.Equal(t, 1, pending)
+}
+
 // TestPromoteRejectsCodeReservedBeforeResend pins the confirm-reserve → resend
 // → promote interleaving. A confirm can reserve the old Redis record before a
 // resend takes the pending-row lock; promotion must reject that stale proof.
