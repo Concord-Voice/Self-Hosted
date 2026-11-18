@@ -1723,17 +1723,19 @@ func dmKeyRevocationEvent(convID string, revokedEpoch int, reason string) websoc
 }
 
 // RemoveMember removes a user from a group DM (admin action or self-leave).
+// Both path IDs are canonicalised before use, so the self-leave and creator
+// comparisons and every query see one spelling; userID is canonical by
+// construction (AuthRequired) and created_by is read from a uuid column.
 // DELETE /dm/conversations/:id/members/:userId
 func (h *Handler) RemoveMember(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-	targetUserID := c.Param("userId")
-
-	if _, err := uuid.Parse(convID); err != nil {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
-	if _, err := uuid.Parse(targetUserID); err != nil {
+	targetUserID, err := requestid.Param(c, "userId")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
@@ -1741,7 +1743,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	// Verify caller is participant and get conversation info
 	var isGroup bool
 	var createdBy, role string
-	err := h.db.QueryRow(`
+	err = h.db.QueryRow(`
 		SELECT dc.is_group, dc.created_by, dp.role FROM dm_conversations dc
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
 		WHERE dc.id = $1
@@ -3862,25 +3864,25 @@ func (h *Handler) loadDMAttachments(messageIDs []string) (map[string][]models.At
 // ---------------------------------------------------------------------------
 
 // authorizeDMGroupAdmin validates params, verifies group DM membership, and checks admin role.
-// Returns the conversation ID, target ID, and true if authorization succeeds.
+// Returns the canonical conversation ID, canonical target ID, and true if
+// authorization succeeds, so callers query and emit one spelling.
 // Returns empty strings and false (with HTTP error already sent) on failure.
 func (h *Handler) authorizeDMGroupAdmin(c *gin.Context, errMsgNotAdmin string) (convID, targetID string, ok bool) {
 	actorID := c.GetString("user_id")
-	convID = c.Param("id")
-	targetID = c.Param("userId")
-
-	if _, err := uuid.Parse(convID); err != nil {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return "", "", false
 	}
-	if _, err := uuid.Parse(targetID); err != nil {
+	targetID, err = requestid.Param(c, "userId")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return "", "", false
 	}
 
 	var isGroup bool
 	var actorRole string
-	err := h.db.QueryRow(`SELECT dc.is_group, dp.role FROM dm_conversations dc
+	err = h.db.QueryRow(`SELECT dc.is_group, dp.role FROM dm_conversations dc
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
 		WHERE dc.id = $1`, convID, actorID).Scan(&isGroup, &actorRole)
 	if err == sql.ErrNoRows {
