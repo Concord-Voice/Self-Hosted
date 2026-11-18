@@ -323,7 +323,7 @@ jobs:
         # SHA-pinned per supply-chain hardening. Same SHA as refresh-ioc-list.yml.
         # Upgrade procedure: `gh api repos/peter-evans/create-pull-request/git/refs/tags/vX.Y.Z`,
         # replace SHA + comment.
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        uses: peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8 # v8.1.2
         with:
           token: ${{ steps.app-token.outputs.token }}
           # Pin BOTH identities. create-pull-request defaults `author` to
