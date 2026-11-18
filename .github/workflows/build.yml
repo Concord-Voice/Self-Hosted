@@ -224,7 +224,7 @@ jobs:
         run: scripts/security/scan-supply-chain-iocs.sh --include-node-modules --working-tree-only
 
       - name: Verify installed Undici floors
-        run: node scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
+        run: node scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.29.1 --minimum-version undici=7.30.2 --minimum-version undici=8.12.4
 
       - name: Run tests with coverage (shard ${{ matrix.shard }}/2)
         env:
@@ -843,7 +843,7 @@ jobs:
 
       - name: Verify installed Undici floors
         working-directory: client/admin
-        run: node ../../scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
+        run: node ../../scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.29.1 --minimum-version undici=7.30.2 --minimum-version undici=8.12.4
 
       - name: Format check
         working-directory: client/admin
