@@ -394,7 +394,7 @@ Stances on CodeQL rules whose mismatch with this project's idioms is **structura
 
 #### `py/file-not-closed` — descriptors closed through a list in `finally`
 
-GitHub Code Quality's `py/file-not-closed` does not follow a descriptor once it is appended to a list. It flags `descriptors.append(os.open(...))` even when the enclosing `try` has a `finally` that runs `for descriptor in descriptors: os.close(descriptor)`. This pattern is correct when the descriptors must stay open for the whole `try` body, for example FIFO ends that hold a pipe open while child processes run. Treat such a finding as a false positive only when the `finally` covers every append. A plain `with` block would close the descriptor too early. The Code Quality findings API is read-only (list and get only), so dismissal is a UI action and this register is the record.
+GitHub Code Quality's `py/file-not-closed` does not follow a descriptor once it is appended to a list. It flags `descriptors.append(os.open(...))` even when the enclosing `try` has a `finally` that runs `for descriptor in descriptors: os.close(descriptor)`. This pattern is correct when the descriptors must stay open for the whole `try` body (for example FIFO ends that hold a pipe open while child processes run), or when a helper records each descriptor it opens in a list that the caller closes from a saved mark. Treat such a finding as a false positive only when the `finally` covers every append. A plain `with` block would close the descriptor too early. The Code Quality findings API is read-only (list and get only), so dismissal is a UI action and this register is the record.
 
 ### Instance-Specific Entries
 
@@ -420,3 +420,15 @@ GitHub Code Quality's `py/file-not-closed` does not follow a descriptor once it 
 | Justification | Each test opens the read-write end of one or more FIFOs so the pipes stay open while the queue scripts under test run as subprocesses in the `try` body. Every descriptor goes into `descriptors` right after `os.open`, and the `finally` closes all of them, on success and on failure. A `with` block per descriptor would close a FIFO before the subprocesses read it and change what the test exercises. CodeQL does not track the close through the list. |
 | Dismissal | The Code Quality findings API has no dismiss endpoint (2026-11-18), so the finding is dismissed in the repository UI. This entry is the record. |
 | Re-check | Reopen if any of these blocks moves an `os.open` outside the `try`, or stops closing `descriptors` in `finally`. |
+
+#### Code Quality finding #55 — `py/file-not-closed` — `infrastructure/deploy/voice-boot-containment.py`
+
+| Field | Value |
+|---|---|
+| Finding | GitHub Code Quality #55 (line 255 on `65646fc8`), `py/file-not-closed`; raised again inline on this PR at line 265 |
+| Location | `canonical = self.open_trusted_directory(self.parent)` in `AssociationStore.recheck()`. `open_trusted_directory` appends every descriptor it opens to `self.fds` (lines 246 and 249) |
+| Decided | 2026-11-18, in the weekly Python hygiene PR (`fix/weekly-hygiene-python-quality`) |
+| Reason | `false positive` (see the `py/file-not-closed` rule-calibration note above) |
+| Justification | On `origin/main` this finding was a real leak in effect: every `recheck()` call left one more set of ancestry descriptors in `self.fds` until `close()`. This PR fixes that. `recheck()` records `mark = len(self.fds)` before the re-walk, and its `finally` (line 268) closes every descriptor after `mark` and removes it from the list, on success and on refusal. `canonical` is one of those descriptors. CodeQL does not track the close through the list. An explicit `os.close(canonical)` would close it twice. |
+| Dismissal | The Code Quality findings API has no dismiss endpoint (2026-11-18), so the finding is dismissed in the repository UI. This entry is the record. |
+| Re-check | Reopen if `open_trusted_directory` stops appending to `self.fds`, or if `recheck()` stops closing `self.fds[mark:]` in `finally`. |
