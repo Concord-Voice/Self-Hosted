@@ -4,7 +4,6 @@
 > - `/review-pr` (user-facing convenience skill — `disable-model-invocation: true`)
 > - `/enhanced-pr-review` Phase 1 Step 5 (dispatches these directly)
 > - `/weekly-deps` Tier-C fallback (same direct dispatch)
-> - `/weekly-deps` Phase 3.7.2 coverage pass on a zero-coverage bot PR, any tier, unattended in `--mode=triage` (same direct dispatch)
 >
 > **How "direct dispatch" works:** the `@`-prefixed entries are subagents — dispatch them
 > via the **Agent tool**, which bypasses the `Skill` tool entirely. The one `/`-prefixed
@@ -20,7 +19,7 @@
 > was retired and replaced by agent selection (see
 > [`lifecycle-agent-dispatch.md`](lifecycle-agent-dispatch.md) § Escalation (E1-E4)).
 > Cross-vendor profile generation follows
-> [`model-capability-tiers.md`](model-capability-tiers.md); on Codex, its role-specific mapping
+> [`model-equivalence.md`](model-equivalence.md); on Codex, its role-specific mapping
 > assigns `@red-team` to `gpt-6-sol` without changing its source Opus pin.
 >
 > **This table dispatches reviewers, which are unaffected.** Every agent listed

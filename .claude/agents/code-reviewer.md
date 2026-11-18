@@ -4,7 +4,7 @@ description: Code quality review for PRs — checks patterns, conventions, reada
 tools: Read, Grep, Glob, Bash(git diff *), Bash(git log *), Bash(gh pr view *), Bash(gh pr diff *)
 model: opus
 maxTurns: 30
-effort: xhigh
+effort: high
 color: blue
 ---
 
