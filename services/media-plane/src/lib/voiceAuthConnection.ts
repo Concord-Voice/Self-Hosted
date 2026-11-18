@@ -56,11 +56,15 @@ interface LegacyRoomState {
   terminal: Completion;
   started: boolean;
 }
-const CAPACITY = 1000;
-// Connection identities one account may hold, so a few accounts cannot fill CAPACITY
-// with idle sockets. Twice the control plane's 8-per-user WebSocket admission, so
-// reconnect overlap fits. ponytail: fixed cap; make it configurable if real multi-device use nears it.
-const PER_USER_CONNECTIONS = 16;
+export const CAPACITY = 1000;
+// Connection identities one account may hold on this node, counted until the signed
+// release lands. One live socket plus three reconnects whose releases are still in flight.
+export const PER_USER_CONNECTIONS = 4;
+// Slots above the general pool (CAPACITY - NEW_USER_RESERVE) that only a user holding
+// no identity may take, with that user's first room. No separate counter: eligibility is
+// derived from `retained` and `userConnections`, which only the signed release decrements.
+export const NEW_USER_RESERVE = 200;
+const GENERAL_POOL = CAPACITY - NEW_USER_RESERVE;
 // Three signed-release timeouts: an ordinary leave finishes well inside this.
 const TERMINATION_STALL_MS = 15_000;
 const bytes = (value: unknown): Uint8Array => Buffer.from(JSON.stringify(value), 'utf8');
@@ -199,6 +203,8 @@ export class VoiceAuthConnections {
     if (this.retained >= CAPACITY) throw new Error('Voice identity capacity exhausted');
     const held = this.userConnections.get(input.userId) ?? 0;
     if (held >= PER_USER_CONNECTIONS) throw new Error('Voice identity capacity exhausted for user');
+    // A terminal identity awaiting release still counts, so a reconnect is not "new".
+    if (this.retained >= GENERAL_POOL && held !== 0) throw new Error('Voice identity capacity exhausted');
     if (!Number.isSafeInteger(input.tokenExpiresAt) || input.tokenExpiresAt <= this.now())
       throw new Error('Expired voice connection');
     const target: Target = {
@@ -287,6 +293,10 @@ export class VoiceAuthConnections {
     this.assertProductive(handle);
     const state = this.owned(handle);
     if (this.retained >= CAPACITY) throw new Error('Voice identity capacity exhausted');
+    // The reserve covers only a user's first room on its only connection.
+    if (this.retained >= GENERAL_POOL &&
+        (this.userConnections.get(state.userId) !== 1 || state.rooms.size !== 0))
+      throw new Error('Voice identity capacity exhausted');
     if (this.rooms.has(session.sessionGeneration) || this.legacyRooms.has(session.sessionGeneration) ||
         session.userId !== state.userId || session.socketId !== state.target.socketId ||
         session.nodeBootId !== state.target.nodeBootId || session.credentialEpoch !== state.target.credentialEpoch ||
