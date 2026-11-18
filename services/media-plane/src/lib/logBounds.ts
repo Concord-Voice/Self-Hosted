@@ -51,17 +51,30 @@ function isHighSurrogate(code: number): boolean {
 export function cutLogString(value: string, max: number): string {
   if (value.length <= max) return value;
   let end = max;
-  if (isHighSurrogate(value.charCodeAt(end - 1))) end -= 1;
+  // codePointAt reads a whole pair when one starts at `end - 1`; a lone high
+  // surrogate there reads as itself. Either way the cut would split a pair.
+  const point = value.codePointAt(end - 1) ?? 0;
+  if (point > 0xffff || isHighSurrogate(point)) end -= 1;
   return `${value.slice(0, end)}...[+${value.length - end} chars]`;
 }
 
 // defineProperty, not assignment: a `__proto__` key from parsed client JSON
 // must stay an own data property instead of replacing the copy's prototype.
 function setEntry(target: object, key: string | symbol, value: unknown): void {
-  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
 }
 
-function boundNode(value: unknown, budget: NodeBudget, depth: number, ancestors: Set<object>): unknown {
+function boundNode(
+  value: unknown,
+  budget: NodeBudget,
+  depth: number,
+  ancestors: Set<object>
+): unknown {
   if (budget.nodes <= 0) return TRUNCATED;
   budget.nodes -= 1;
   return boundCharged(value, budget, depth, ancestors, true);
@@ -80,47 +93,75 @@ function boundCharged(
   if (value === null || typeof value !== 'object') return value;
   if (ancestors.has(value)) return CIRCULAR;
 
-  if (allowToJSON) {
-    const toJSON: unknown = (value as { toJSON?: unknown }).toJSON;
-    if (typeof toJSON === 'function') {
-      let replaced: unknown;
-      try {
-        replaced = toJSON.call(value);
-      } catch {
-        return UNSERIALIZABLE;
-      }
-      if (replaced === value) return boundCharged(value, budget, depth, ancestors, false);
-      ancestors.add(value);
-      try {
-        return boundCharged(replaced, budget, depth, ancestors, false);
-      } finally {
-        ancestors.delete(value);
-      }
-    }
+  if (allowToJSON && typeof (value as { toJSON?: unknown }).toJSON === 'function') {
+    return boundToJSON(value, budget, depth, ancestors);
   }
 
   if (depth > LOG_MAX_DEPTH) return Array.isArray(value) ? '[Array]' : '[Object]';
 
   ancestors.add(value);
   try {
-    if (Array.isArray(value)) {
-      const count = Math.min(value.length, LOG_MAX_ENTRIES);
-      const out: unknown[] = new Array<unknown>(count);
-      for (let i = 0; i < count; i++) out[i] = boundNode(value[i], budget, depth + 1, ancestors);
-      return out;
-    }
-    const out: Record<string, unknown> = {};
-    const keys = Object.keys(value);
-    const count = Math.min(keys.length, LOG_MAX_ENTRIES);
-    for (let i = 0; i < count; i++) {
-      const key = keys[i];
-      const bounded = boundNode((value as Record<string, unknown>)[key], budget, depth + 1, ancestors);
-      setEntry(out, cutLogString(key, LOG_MAX_KEY_CHARS), bounded);
-    }
-    return out;
+    return Array.isArray(value)
+      ? boundArray(value, budget, depth, ancestors)
+      : boundObject(value, budget, depth, ancestors);
   } finally {
     ancestors.delete(value);
   }
+}
+
+function boundToJSON(
+  value: object,
+  budget: NodeBudget,
+  depth: number,
+  ancestors: Set<object>
+): unknown {
+  let replaced: unknown;
+  try {
+    replaced = (value as { toJSON: () => unknown }).toJSON();
+  } catch {
+    return UNSERIALIZABLE;
+  }
+  if (replaced === value) return boundCharged(value, budget, depth, ancestors, false);
+  ancestors.add(value);
+  try {
+    return boundCharged(replaced, budget, depth, ancestors, false);
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function boundArray(
+  value: unknown[],
+  budget: NodeBudget,
+  depth: number,
+  ancestors: Set<object>
+): unknown[] {
+  const count = Math.min(value.length, LOG_MAX_ENTRIES);
+  const out: unknown[] = new Array<unknown>(count);
+  for (let i = 0; i < count; i++) out[i] = boundNode(value[i], budget, depth + 1, ancestors);
+  return out;
+}
+
+function boundObject(
+  value: object,
+  budget: NodeBudget,
+  depth: number,
+  ancestors: Set<object>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const keys = Object.keys(value);
+  const count = Math.min(keys.length, LOG_MAX_ENTRIES);
+  for (let i = 0; i < count; i++) {
+    const key = keys[i];
+    const bounded = boundNode(
+      (value as Record<string, unknown>)[key],
+      budget,
+      depth + 1,
+      ancestors
+    );
+    setEntry(out, cutLogString(key, LOG_MAX_KEY_CHARS), bounded);
+  }
+  return out;
 }
 
 /**
@@ -132,8 +173,8 @@ function boundCharged(
  * May throw on a hostile value (a throwing getter or Proxy trap); the format
  * below turns that into a fallback line.
  */
-export function boundLogValue(value: unknown, budget: NodeBudget = { nodes: LOG_MAX_NODES }): unknown {
-  return boundNode(value, budget, 0, new Set<object>());
+export function boundLogValue(value: unknown, budget?: NodeBudget): unknown {
+  return boundNode(value, budget ?? { nodes: LOG_MAX_NODES }, 0, new Set<object>());
 }
 
 function boundReserved(key: string, value: unknown, budget: NodeBudget): unknown {
@@ -173,7 +214,8 @@ function boundInfo(info: Logform.TransformableInfo): Logform.TransformableInfo {
 function fallbackInfo(info: Logform.TransformableInfo): Logform.TransformableInfo {
   let message = UNLOGGABLE_MESSAGE;
   try {
-    if (typeof info.message === 'string') message = cutLogString(info.message, LOG_MESSAGE_MAX_CHARS);
+    if (typeof info.message === 'string')
+      message = cutLogString(info.message, LOG_MESSAGE_MAX_CHARS);
   } catch {
     // keep the fixed message
   }

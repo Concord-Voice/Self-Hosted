@@ -72,8 +72,8 @@ describe('boundLogValue (VULN-157)', () => {
     expect(boundLogValue(atLimit)).toBe(atLimit);
     expect(boundLogValue(42)).toBe(42);
     expect(boundLogValue(true)).toBe(true);
-    expect(boundLogValue(null)).toBe(null);
-    expect(boundLogValue(undefined)).toBe(undefined);
+    expect(boundLogValue(null)).toBeNull();
+    expect(boundLogValue(undefined)).toBeUndefined();
   });
 
   it('cuts keys at 64 chars', () => {
