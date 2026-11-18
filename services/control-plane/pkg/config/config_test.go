@@ -1494,16 +1494,16 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 		// The immutable owner@id/repo@id form must stay fully qualified.
 		{"id form bare org", "repo:Concord-Voice@264583090:", "matches every repo under the org"},
 		{"id form owner with slash", "repo:Concord-Voice@264583090/", "matches any repo under the org"},
-		{"id form missing trailing colon", "repo:Concord-Voice@264583090/Hosted@1158152129", "also matches a repo id with more digits"},
-		{"id form repo without id", "repo:Concord-Voice@264583090/Hosted:", "GitHub never emits a half-immutable subject"},
-		{"id form owner without id", "repo:Concord-Voice/Hosted@1158152129:", "GitHub never emits a half-immutable subject"},
-		{"id form non-numeric owner id", "repo:Concord-Voice@abc/Hosted@1158152129:", "ids are decimal"},
-		{"id form empty repo id", "repo:Concord-Voice@264583090/Hosted@:", "ids are decimal"},
-		{"id form leading-zero id", "repo:Concord-Voice@0264583090/Hosted@1158152129:", "GitHub ids have no leading zero"},
-		{"id form leading-zero repo id", "repo:Concord-Voice@264583090/Hosted@01158152129:", "GitHub ids have no leading zero"},
-		{"id form non-numeric repo id", "repo:Concord-Voice@264583090/Hosted@abc:", "ids are decimal"},
-		{"id form not at start", "xrepo:Concord-Voice@264583090/Hosted@1158152129:", "the shape is anchored"},
-		{"name form not at start", "evil:repo:Concord-Voice/Hosted:", "the shape is anchored"},
+		{"id form missing trailing colon", "repo:Concord-Voice@264583090/Self-Hosted@1158152129", "also matches a repo id with more digits"},
+		{"id form repo without id", "repo:Concord-Voice@264583090/Self-Hosted:", "GitHub never emits a half-immutable subject"},
+		{"id form owner without id", "repo:Concord-Voice/Self-Hosted@1158152129:", "GitHub never emits a half-immutable subject"},
+		{"id form non-numeric owner id", "repo:Concord-Voice@abc/Self-Hosted@1158152129:", "ids are decimal"},
+		{"id form empty repo id", "repo:Concord-Voice@264583090/Self-Hosted@:", "ids are decimal"},
+		{"id form leading-zero id", "repo:Concord-Voice@0264583090/Self-Hosted@1158152129:", "GitHub ids have no leading zero"},
+		{"id form leading-zero repo id", "repo:Concord-Voice@264583090/Self-Hosted@01158152129:", "GitHub ids have no leading zero"},
+		{"id form non-numeric repo id", "repo:Concord-Voice@264583090/Self-Hosted@abc:", "ids are decimal"},
+		{"id form not at start", "xrepo:Concord-Voice@264583090/Self-Hosted@1158152129:", "the shape is anchored"},
+		{"name form not at start", "evil:repo:Concord-Voice/Self-Hosted:", "the shape is anchored"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1521,7 +1521,7 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 // own slug must both still pass.
 func TestValidateAttestation_AcceptsFullyQualifiedSubjectPrefix(t *testing.T) {
 	for _, prefix := range []string{
-		"repo:Concord-Voice@264583090/Hosted@1158152129:",
+		"repo:Concord-Voice@264583090/Self-Hosted@1158152129:",
 		"repo:Concord-Voice/Concord-Voice-Alpha:",
 		"repo:some-operator/their.fork_name:",
 	} {

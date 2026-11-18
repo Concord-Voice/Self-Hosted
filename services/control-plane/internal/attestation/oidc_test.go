@@ -664,7 +664,7 @@ func TestOIDCVerifier_UnpinnedVerifierAcceptsES256(t *testing.T) {
 // ── Immutable owner@id/repo@id subject ─────────────────────
 
 const (
-	immutableSubjectPrefix = "repo:Concord-Voice@264583090/Hosted@1158152129:"
+	immutableSubjectPrefix = "repo:Concord-Voice@264583090/Self-Hosted@1158152129:"
 	immutableSubject       = immutableSubjectPrefix + "ref:refs/heads/main"
 )
 
@@ -678,23 +678,23 @@ func TestValidateOIDCConfig_SubjectPrefixShape(t *testing.T) {
 		ok     bool
 	}{
 		{immutableSubjectPrefix, true},
-		{"repo:Concord-Voice/Hosted:", true},
+		{"repo:Concord-Voice/Self-Hosted:", true},
 		{"repo:some-operator/their.fork_name:", true},
 		{"repo:", false},
 		{"repo:Concord-Voice", false},
-		{"repo:Concord-Voice/Hosted", false},
+		{"repo:Concord-Voice/Self-Hosted", false},
 		{"repo:Concord-Voice@264583090:", false},
 		{"repo:Concord-Voice@264583090/", false},
-		{"repo:Concord-Voice@264583090/Hosted@1158152129", false},
-		{"repo:Concord-Voice@264583090/Hosted:", false},
-		{"repo:Concord-Voice/Hosted@1158152129:", false},
-		{"repo:Concord-Voice@abc/Hosted@1158152129:", false},
-		{"repo:Concord-Voice@264583090/Hosted@:", false},
-		{"repo:Concord-Voice@0264583090/Hosted@1158152129:", false},
-		{"repo:Concord-Voice@264583090/Hosted@01158152129:", false},
-		{"repo:Concord-Voice@264583090/Hosted@abc:", false},
-		{"xrepo:Concord-Voice@264583090/Hosted@1158152129:", false},
-		{"evil:repo:Concord-Voice/Hosted:", false},
+		{"repo:Concord-Voice@264583090/Self-Hosted@1158152129", false},
+		{"repo:Concord-Voice@264583090/Self-Hosted:", false},
+		{"repo:Concord-Voice/Self-Hosted@1158152129:", false},
+		{"repo:Concord-Voice@abc/Self-Hosted@1158152129:", false},
+		{"repo:Concord-Voice@264583090/Self-Hosted@:", false},
+		{"repo:Concord-Voice@0264583090/Self-Hosted@1158152129:", false},
+		{"repo:Concord-Voice@264583090/Self-Hosted@01158152129:", false},
+		{"repo:Concord-Voice@264583090/Self-Hosted@abc:", false},
+		{"xrepo:Concord-Voice@264583090/Self-Hosted@1158152129:", false},
+		{"evil:repo:Concord-Voice/Self-Hosted:", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.prefix, func(t *testing.T) {
@@ -736,10 +736,10 @@ func TestOIDCVerifier_ImmutableSubjectPrefix(t *testing.T) {
 
 	rejected := map[string]string{
 		"name-form token":     canonicalSubject,
-		"wrong owner id":      "repo:Concord-Voice@999999999/Hosted@1158152129:ref:refs/heads/main",
-		"wrong repo id":       "repo:Concord-Voice@264583090/Hosted@999:ref:refs/heads/main",
-		"repo id with suffix": "repo:Concord-Voice@264583090/Hosted@11581521290:ref:refs/heads/main",
-		"lookalike owner":     "repo:Concord-Voice-Evil@264583090/Hosted@1158152129:ref:refs/heads/main",
+		"wrong owner id":      "repo:Concord-Voice@999999999/Self-Hosted@1158152129:ref:refs/heads/main",
+		"wrong repo id":       "repo:Concord-Voice@264583090/Self-Hosted@999:ref:refs/heads/main",
+		"repo id with suffix": "repo:Concord-Voice@264583090/Self-Hosted@11581521290:ref:refs/heads/main",
+		"lookalike owner":     "repo:Concord-Voice-Evil@264583090/Self-Hosted@1158152129:ref:refs/heads/main",
 		// The prefix must match at offset zero, not anywhere in the subject.
 		"prefix not at start":  "repository_owner:x:" + immutableSubject,
 		"other repo, same org": "repo:Concord-Voice@264583090/Release-Ops@1426201867:ref:refs/heads/main",
