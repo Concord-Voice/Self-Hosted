@@ -71,6 +71,7 @@ later storage migration.
 
 ### Security
 
+- **Voice:** When a second session of the same account joins a DM or a channel, the replaced session's socket is now disconnected, and a user-wide revocation also disconnects that account's other sockets still in the room, so neither keeps receiving room events. Each account may hold at most 4 voice connections on each media-plane node, 200 of each node's 1,000 connection slots are kept for users who hold none, and a connection that stays outside a room for 30 seconds is released. `set-deafen` now requires the caller to be in the room, one member can move a room's camera layering gate at most twice in 30 seconds, media-plane log lines bound every logged value, and `consume` ids and handshake usernames are validated before use.
 - **Admin Console:** Enrollment reset now invalidates earlier enrollment tokens, ceremonies, and console sessions. WebAuthn sign-in persists the credential counter before issuing a session and rejects a stale nonzero counter; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
 - **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).

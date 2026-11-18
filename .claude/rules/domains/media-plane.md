@@ -57,6 +57,33 @@ paths:
   requires the immutable paired-artifact/boot receipt; the first family-aware
   CP/media pair remains the rollback floor even with empty queues. Permanent boot
   retirement prevents reuse; it does not prove pending delivery complete.
+- Per-user cap and new-user reserve (VULN-146). These limits are per media-plane
+  node: an account can hold 4 connections on each node. `reserve()` refuses an
+  account's fifth identity (`PER_USER_CONNECTIONS = 4`: one live socket plus three
+  reconnects whose releases are in flight). `CAPACITY` (1000) splits into an
+  800-identity general pool and a `NEW_USER_RESERVE` of 200. At 800 or more
+  retained identities, `reserve()` admits only a user holding no identity, and
+  `reserveRoom()` admits only a user's first room on its only connection. An
+  identity counts until its signed release lands, so a terminal identity awaiting
+  release still counts against its user and makes that user reserve-ineligible.
+  There is no separate counter: eligibility is derived from `retained` and
+  `userConnections`, which only the signed release decrements. Legacy room
+  reservations are unchanged; their only caller is the shutdown drain. A refused
+  handshake sees `Voice authentication unavailable`, as before.
+- Idle release (VULN-146). A connection outside an attached room is released after
+  `IDLE_RELEASE_MS` (30 s). `reserve()` starts the clock, `attachRoom()` (control-
+  plane room registration succeeded) stops it, and `releaseRoom()` restarts it when
+  it first makes an attached room terminal and no other attached, non-terminal room
+  remains; a room that never attached leaves the clock alone. `reserveRoom()`
+  refuses an overdue connection with `Voice connection idle`. `terminateIdle()`
+  releases a candidate only through `terminate()`, never by decrementing a
+  counter, and does nothing while draining. A candidate is overdue with every room
+  terminal, or idle for `IDLE_RELEASE_MS + IDLE_JOIN_GRACE_MS` (60 s) whatever its
+  unattached rooms are doing, because the join fence awaits without a timeout.
+  `index.ts` runs the sweep every `IDLE_SWEEP_INTERVAL_MS` (5 s) and clears that
+  interval before the shutdown drain starts, because `terminateAll()` clears
+  `draining` when it settles. A socket that never joins is released within 30 to
+  35 s; one with a join held in flight within 65 s.
 
 Read the ABI
 and protocol/control/lifecycle contract
@@ -483,6 +510,35 @@ fallback, new grace period or environment variable.
   policy'}` while the target producer is latched — this last ack is not authoritative for the UI
   (F6: the client's own `resume-producer` emit carries no ack callback today), so the client-side
   lock is the actual enforcement-visible mechanism; the ack exists for callers that do listen.
+- **Displaced-socket eviction (VULN-159).** `lib/roomAdmissionCommit.ts` is the only home of
+  `commitChannelAdmission` and `commitDMAdmission`. Both capture the same-user socket that the
+  promotion displaces before promoting, then, after a successful promotion and with no await in
+  between, call `evictDisplacedSocket`, which disconnects it with `disconnect(true)` for channels
+  and DMs alike. Eviction never throws: a failing disconnect is logged with `roomId` and
+  `displacedSocketId` only and never rolls back the committed promotion. A promotion that throws
+  rolls back socket membership and evicts nothing. The helper does not `leave()` the room or clear
+  `data.roomId` first; the displaced socket's own `disconnect` handler takes the ownership-guard
+  branch and releases its identities.
+- **User-wide revocation sweep (VULN-159).** A `handleForceDisconnect` command with no exact
+  `socketId` also disconnects every other socket of that user in the room's
+  `io.sockets.adapter.rooms` set, silently with `disconnect(true)` and no `force-disconnect`
+  payload. The adapter is the ground truth for who receives `io.to(room)` broadcasts. The set is
+  captured synchronously before the handler's first await, minus the exact participant and
+  provisional socket ids, so a successor that commits during the teardown awaits is never in it.
+  At action time a socket is skipped if its id now names a different `Socket` or it has become the
+  participant or provisional owner. The sweep runs after the exact teardown, and on the
+  already-left branch before `awaitNativeTermination`. Exact-socket commands, `stats_unavailable`,
+  and an `access_revoked` `callId` that differs from an existing room's call never sweep.
+  `ForceDisconnectIO.sockets.adapter` is required so no caller can fail open; the durable
+  voice-command dispatcher passes an empty room map because its command names one exact session.
+- **`set-deafen` admission (VULN-160).** Unless `getParticipant(roomId, userId)?.socketId ===
+  socket.id`, the handler acks `{ error: 'Not in a room' }`, mutates nothing and emits nothing.
+- **`consume` ids (VULN-147).** `parseConsumeRequest` (`lib/wireBounds.ts`) runs before any log
+  line. `producerId` must match `WIRE_ID_PATTERN` (`/^[A-Za-z0-9_-]{1,64}$/`), `transportId` must
+  be absent or match it (the resolved transport stays authoritative), and a non-object payload is
+  refused. A refusal acks `{ error: 'invalid_payload' }`.
+- **Handshake `username` (VULN-147).** `middleware/auth.ts` refuses a `username` longer than
+  `HANDSHAKE_USERNAME_MAX_CHARS` (64) with `Username too long`, in its own `deny()` branch.
 
 ## Socket.IO Origin Gate Parity (post-#830, codified by #894)
 
@@ -500,6 +556,10 @@ The Socket.IO `cors.origin` callback lives at `services/media-plane/src/lib/orig
 **Worker-count guard (#2178):** the same config loader fatal-exits when `NUM_WORKERS` is not an integer in `[1, MAX_MEDIASOUP_WORKERS]` (`parseWorkerCountEnv`; the ceiling is `32`). Both bounds are load-bearing and they fail differently. A zero or unparseable count builds an EMPTY worker pool, `init()` still resolves, `/health` answers 200 — and then worker placement throws a typed `NoWorkersAvailableError` (`lib/workerSelection.ts`, #3149) which the join handler returns as an ordinary join-error ack via `emitJoinError`. That last hop is verified by inspection, not by test: `src/index.ts` is in `vitest.config.ts`'s coverage `exclude`, so no test reaches the socket-ack seam. The typed error's `code` never crosses the wire — `emitJoinError` special-cases only `CryptoVersionMismatchError` — so do not describe it as a client-visible code. The process **does not crash**: it serves `/health` 200 indefinitely while failing every voice join, so nothing restarts it. An oversized count is the likelier typo, and absent the ceiling it would fork more subprocesses than the container cgroup can hold — `init()` would never resolve, `/health` would never answer, and a scoped deploy's `--wait --wait-timeout 180` would fail with the old container already gone. Both descriptions are of what the guard PREVENTS: since #2178 neither value reaches the worker loop, because the loader exits first. `NUM_WORKERS` is a **per-file compose literal**, never an interpolation: `"4"` in `docker-compose.yml` (which declares no `cpus` limit, so it matches the code default) and `"3"` in `docker-compose.production.yml`, sized to that file's `deploy.resources.limits.cpus: '3'`. A mediasoup worker is a single-threaded C++ subprocess pinned to one core, so N > cpus oversubscribes the CFS quota and surfaces as RTP jitter rather than as a failure. Nothing enforces agreement between the two — the compose comment is the coupling; change them together.
 
 **Do NOT re-introduce** an unconditional allow for `'null'` or `'file://'` — these were the pre-#830 mental model that #894 retired. If a future Electron change needs a new privileged scheme, register it (see `app://concord` in `.claude/rules/electron.md` (in Desktop)) and add it to `ALLOWED_ORIGINS`, do not carve a gate exemption.
+
+## Log bounds (VULN-157)
+
+`boundedFields()` in `lib/logBounds.ts` is the single bound for every log line. `createLogFormat()` in `lib/logger.ts` places it after `errors({ stack: true })` and before the final `json()` or `printf()`, so call sites do not bound values themselves. Limits: 256 characters per string field (`LOG_FIELD_MAX_CHARS`), 2048 for the message, 8192 for a stack, depth 4, 32 entries per object or array, 64 characters per key, and 256 nodes per line. A cut string carries a marker stating the dropped length and never splits a surrogate pair. Values past the depth become `[Object]` or `[Array]`, ancestor cycles `[Circular]`, and values past the node budget `[Truncated]`. The format never mutates the caller's object and never throws: if bounding throws (a throwing getter or `toJSON`, a `Proxy`), the line is still written with the level, the bounded message and `logBoundFailure: true`. `Error` values in meta keep their existing output. Never log `username` or a raw client payload: `Client connected` logs only `socketId` and `userId`, and `consume` validates its ids before any log line.
 
 ## mediasoup Patterns
 - One router per room via `MediasoupService.getOrCreateRouter()`
@@ -732,8 +792,10 @@ notifications are still pending; the existing OFF debounce bridges a normal repl
 
 - Store demand by consumer ID after validating ownership/video/camera source and applying the receiver's entitlement cap. Use physical pixels (`cssWidth`/`cssHeight` × `devicePixelRatio`) when deriving the maximum useful spatial layer so HiDPI clients and server clamping agree.
 - Recompute `camera-layering-gate` from stored demand, active camera producer count, codec family (`svc` vs. simulcast fallback), and hysteresis. SVC can enable when visible demand benefits from lower layers; simulcast fallback additionally requires enough camera producers to justify multi-encode cost.
-- **Camera gate-OFF debounce (reproduce-gap guard).** Gate-ON is immediate. When live demand would turn an enabled room camera gate OFF, defer the decision for `CAMERA_GATE_OFF_DEBOUNCE_MS` (1500ms), then recompute from current producers and demands. Any ON recompute cancels the pending OFF. The timer belongs to its room and is cleared when that room closes; never emit OFF from stale demand captured before the debounce.
+- **Camera gate-OFF debounce (reproduce-gap guard).** Gate-ON is immediate, except when the member whose change moved the gate is over its flip budget (below). When live demand would turn an enabled room camera gate OFF, defer the decision for `CAMERA_GATE_OFF_DEBOUNCE_MS` (1500ms), then recompute from current producers and demands. Any ON recompute cancels the pending OFF. The timer belongs to its room and is cleared when that room closes; never emit OFF from stale demand captured before the debounce.
 - Demand cleanup is part of the consumer/producer/participant lifecycle. Closing a consumer or losing the associated camera producer must remove its demand and recompute the gate.
+- **Distinct viewers (VULN-158).** Stored demand is a `ViewerCameraLayerDemand` carrying the viewer's `userId`. `computeCameraLayeringGate` applies its threshold (2 to enable, 1 to stay enabled) to distinct `userId`s among visible demands, so one viewer's many consumers count once.
+- **Per-member flip budget (VULN-158).** A member may cause at most `CAMERA_GATE_MEMBER_FLIP_LIMIT` (2) applied gate transitions per `CAMERA_GATE_MEMBER_FLIP_WINDOW_MS` (30 s); the `set-preferred-layers` event budget does not bound flips. The state is `room.cameraGateBudget`, created lazily beside `cameraGateOffTimer`: flip times per member, the last computed gate value, the member whose change last moved it, and one defer timer. A transition is charged to the member whose change moved the computed value, not to whichever recompute applies it, so another member's later recompute never applies or pays for a pending transition. Every recompute call site passes the member whose state it changed; only the OFF and defer timers pass none. An over-budget transition is deferred, not refused: the demand is still stored and applied, and the ack is unchanged, because Desktop does not resend an unchanged payload. A change the OFF debounce absorbs costs nothing. The gate lags by at most 30 s (31.5 s for OFF). Charging prunes every member's times to the window. The budget and its timer are cleared when the room is torn down, and a defer timer recomputes only if its room is still the current room for that id.
 - **The join-room ack carries `cameraSpatialCap` — the cap the participant was ADMITTED under (#3279).** The desktop predicts, client-side, how many IGNIS pressure steps remain, and a prediction made against a different cap than the one `validateAndClampLayerDemand` clamps to spends a step moving the forwarded layer to where it already was. Every client-side derivation of this number disagreed somewhere: a live subscription-store read is wrong after a mid-call upgrade (`Participant.tier` is written once at join and `tierchange.go` deliberately leaves the SFU session alone); a store snapshot taken at join is wrong on a recovery rejoin, where `recoveryReset()` preserves the previous subscription by design (#2199); and even the renderer's own REST `media_entitlements` is wrong when a tier changes between that call and the media plane's **separate** `validateChannelAccess` re-authorization at join-room. Sending the admitted value is what ends the sequence — it is resolved by the party that clamps against it, at the moment it clamps. `cameraSpatialCapForParticipant` is module-level precisely so the advertised value and `maxCameraSpatialLayerForParticipant` are one expression rather than two copies of a rule; a test asserts the ack value equals the layer the clamp actually applies, at 1080p so the premium half cannot agree for a reason unrelated to entitlement. The field is **optional**: a participant that cannot be resolved omits it, and the client keeps its own fallback chain (ack → REST `media_entitlements` → subscription store, in `resolveSessionCameraCap`) rather than being handed a guess. Do NOT reintroduce a client-side derivation as the primary source.
 - Do not let a failed or invalid mediasoup `setPreferredLayers()` call prevent gate recomputation for simple single-layer consumers. The API is only valid for simulcast/SVC consumers; single-layer consumers still provide useful demand for deciding when layered production should turn on.
 
