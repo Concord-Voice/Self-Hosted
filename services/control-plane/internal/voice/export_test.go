@@ -189,7 +189,7 @@ func (s *NATSSubscriber) DeleteServerVoiceParticipantForTest(
 		subscriber: s, serverID: serverID, channelID: channelID,
 		senderID: participantID, eventAt: eventAt,
 	}
-	return mutation.apply(ctx)
+	return mutation.apply(withLifecycleOrigin(ctx, TestMediaBootID))
 }
 
 // HandlePresenceErasureClearedForTest delivers a remote erasure clear to this
@@ -236,7 +236,9 @@ func (s *NATSSubscriber) UpsertServerVoiceParticipantForTest(
 	channelID, senderID uuid.UUID,
 	eventAt time.Time,
 ) (TestServerVoiceMutationResult, error) {
-	result, err := s.upsertServerVoiceParticipant(ctx, channelID, senderID, eventAt, nil)
+	result, err := s.upsertServerVoiceParticipant(
+		withLifecycleOrigin(ctx, TestMediaBootID), channelID, senderID, eventAt, nil,
+	)
 	return TestServerVoiceMutationResult{
 		Applied:                result.applied,
 		Added:                  result.added,
@@ -349,34 +351,83 @@ func (s *TempGrantSweeper) RevokeOrphanedTempGrantForTest(
 	return s.mgr.revokeOrphanedTemporaryChannelAccess(ctx, serverID, channelID, userID)
 }
 
+// TestMediaBootID is the media boot the exported lifecycle hooks below model
+// when a fixture's payload names none. Every pre-#174 fixture describes one
+// media plane, so they share it; a test of the boot binding itself names its
+// boots explicitly in the payload, and that value is never replaced.
+var TestMediaBootID = uuid.MustParse("6f0c2a4e-1d3b-4c5a-9e7f-8a9b0c1d2e3f")
+
+// withTestMediaBoot adds TestMediaBootID to a lifecycle payload that lacks a
+// nodeBootId. A payload that is not a JSON object is returned unchanged, so
+// malformed-event fixtures still exercise their parse failure.
+func withTestMediaBoot(data []byte) []byte {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || fields == nil {
+		return data
+	}
+	if _, named := fields["nodeBootId"]; named {
+		return data
+	}
+	fields["nodeBootId"] = json.RawMessage(`"` + TestMediaBootID.String() + `"`)
+	stamped, err := json.Marshal(fields)
+	if err != nil {
+		return data
+	}
+	return stamped
+}
+
+// WithLifecycleOriginForTest binds a context to a media boot, as a lifecycle
+// handler does with the decoded nodeBootId.
+func WithLifecycleOriginForTest(ctx context.Context, boot uuid.UUID, receivedAt time.Time) context.Context {
+	return withLifecycleReceivedAt(withLifecycleOrigin(ctx, boot), receivedAt)
+}
+
+// MutateServerVoiceParticipantForTest calls the Server Voice write sink with
+// the caller's context exactly as given and no admission.
+func (s *NATSSubscriber) MutateServerVoiceParticipantForTest(
+	ctx context.Context,
+	channelID, senderID uuid.UUID,
+	eventAt time.Time,
+) (bool, error) {
+	_, applied, _, err := s.mutateServerVoiceParticipant(ctx, channelID, senderID, eventAt, nil)
+	return applied, err
+}
+
+// ClearClaimResolverForTest models a subscriber built without a resolver.
+func (s *NATSSubscriber) ClearClaimResolverForTest() { s.resolver = nil }
+
 // HandleJoined exposes handleJoined for testing.
-func (s *NATSSubscriber) HandleJoined(data []byte) { s.handleJoined(data, time.Now()) }
+func (s *NATSSubscriber) HandleJoined(data []byte) {
+	s.handleJoined(withTestMediaBoot(data), time.Now())
+}
 
 // HandleJoinedAt exposes handleJoined with an explicit NATS receipt time.
 func (s *NATSSubscriber) HandleJoinedAt(data []byte, receivedAt time.Time) {
-	s.handleJoined(data, receivedAt)
+	s.handleJoined(withTestMediaBoot(data), receivedAt)
 }
 
 // HandleLeft exposes handleLeft for testing.
-func (s *NATSSubscriber) HandleLeft(data []byte) { s.handleLeft(data, time.Now()) }
+func (s *NATSSubscriber) HandleLeft(data []byte) { s.handleLeft(withTestMediaBoot(data), time.Now()) }
 
 // HandleLeftAt exposes handleLeft with an explicit NATS receipt time.
 func (s *NATSSubscriber) HandleLeftAt(data []byte, receivedAt time.Time) {
-	s.handleLeft(data, receivedAt)
+	s.handleLeft(withTestMediaBoot(data), receivedAt)
 }
 
 // HandleVoiceLifecycleEventForTest exercises the same placement dispatcher
 // used for NATS lifecycle delivery.
 func (s *NATSSubscriber) HandleVoiceLifecycleEventForTest(subject string, data []byte, receivedAt time.Time) {
-	s.handleVoiceLifecycleEvent(subject, data, receivedAt)
+	s.handleVoiceLifecycleEvent(subject, withTestMediaBoot(data), receivedAt)
 }
 
 // HandleRoomEmpty exposes handleRoomEmpty for testing.
-func (s *NATSSubscriber) HandleRoomEmpty(data []byte) { s.handleRoomEmpty(data, time.Now()) }
+func (s *NATSSubscriber) HandleRoomEmpty(data []byte) {
+	s.handleRoomEmpty(withTestMediaBoot(data), time.Now())
+}
 
 // HandleRoomEmptyAt exposes handleRoomEmpty with an explicit NATS receipt time.
 func (s *NATSSubscriber) HandleRoomEmptyAt(data []byte, receivedAt time.Time) {
-	s.handleRoomEmpty(data, receivedAt)
+	s.handleRoomEmpty(withTestMediaBoot(data), receivedAt)
 }
 
 // HandleDMRoomEmptyReplicaForTest exercises one remote replica's terminal path
@@ -401,11 +452,13 @@ func (s *NATSSubscriber) HandleDMRoomEmptyReplicaForTest(
 }
 
 // HandleHeartbeat exposes handleHeartbeat for testing.
-func (s *NATSSubscriber) HandleHeartbeat(data []byte) { s.handleHeartbeat(data, time.Now()) }
+func (s *NATSSubscriber) HandleHeartbeat(data []byte) {
+	s.handleHeartbeat(withTestMediaBoot(data), time.Now())
+}
 
 // HandleHeartbeatAt exposes handleHeartbeat with an explicit NATS receipt time.
 func (s *NATSSubscriber) HandleHeartbeatAt(data []byte, receivedAt time.Time) {
-	s.handleHeartbeat(data, receivedAt)
+	s.handleHeartbeat(withTestMediaBoot(data), receivedAt)
 }
 
 // SetDisconnectAllRichPresenceClientsHookForTest prevents the conservative
@@ -472,6 +525,9 @@ func (s *NATSSubscriber) RenewObservedLeaseForFutureStampedRowsForTest(
 	channelID uuid.UUID,
 	participantIDs []uuid.UUID,
 ) {
+	if _, named := lifecycleOrigin(ctx); !named {
+		ctx = withLifecycleOrigin(ctx, TestMediaBootID)
+	}
 	s.renewObservedLeaseForFutureStampedRows(ctx, channelID, participantIDs)
 }
 

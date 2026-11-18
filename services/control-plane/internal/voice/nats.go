@@ -39,14 +39,19 @@ import (
 // NATSSubscriber listens for voice events from the media plane and
 // updates the database + broadcasts WebSocket messages to clients.
 type NATSSubscriber struct {
-	db                  *sql.DB
-	log                 *logger.Logger
-	hub                 *websocket.Hub
-	nats                *natsclient.Client
-	redis               *redis.Client
-	roomPlacement       *roomplacement.Selector
-	tempGrant           *tempGrantManager
-	activity            *presence.ActivityService
+	db            *sql.DB
+	log           *logger.Logger
+	hub           *websocket.Hub
+	nats          *natsclient.Client
+	redis         *redis.Client
+	roomPlacement *roomplacement.Selector
+	tempGrant     *tempGrantManager
+	activity      *presence.ActivityService
+	// resolver decides a heartbeat claim's CONNECT. Nil means no claim passes.
+	resolver *rbac.Resolver
+	// replicaID names this process in server_voice_room_terminals. Zero in a
+	// struct literal.
+	replicaID           uuid.UUID
 	erasureClearKey     []byte
 	opsCounters         *opsmetrics.Counters
 	lifecycleDispatchMu sync.Mutex
@@ -3823,6 +3828,12 @@ func (s *NATSSubscriber) mutateServerVoiceParticipant(
 	admission *voiceJoinedAdmission,
 ) (serverVoiceMutationResult, bool, voiceLifecycleClaimStatus, error) {
 	var mutationResult serverVoiceMutationResult
+	// Every caller is a lifecycle path. Without a decoded boot the write cannot
+	// be bound to the media plane that owns it, so it writes nothing.
+	origin, hasOrigin := lifecycleOrigin(ctx)
+	if !hasOrigin {
+		return mutationResult, false, voiceLifecycleRejected, nil
+	}
 	applied, claimStatus, err := s.withVoiceLifecycleClaimStatus(
 		ctx,
 		presence.CategoryServerVoice,
@@ -3835,14 +3846,120 @@ func (s *NATSSubscriber) mutateServerVoiceParticipant(
 			tx *sql.Tx,
 			_ voiceLifecycleClaimStatus,
 		) (bool, error) {
+			moveCtx, allowed, claimErr := s.authorizeServerVoiceClaimTx(
+				ctx, tx, channelID, senderID, origin, admission,
+			)
+			if claimErr != nil || !allowed {
+				return false, claimErr
+			}
 			var mutationErr error
 			mutationResult, mutationErr = moveServerVoiceParticipant(
-				ctx, tx, channelID, senderID, eventAt, admission,
+				moveCtx, tx, channelID, senderID, eventAt, admission,
 			)
 			return mutationResult.applied, mutationErr
 		},
 	)
 	return mutationResult, applied, claimStatus, err
+}
+
+// authorizeServerVoiceClaimTx is the claim rule for a write that carries no
+// admission: a heartbeat naming the user. A row this boot already stamped is a
+// refresh. Any other case (no row, an unstamped row, another boot's row, an
+// expired row) needs the user's CONNECT on the channel, resolved in this
+// transaction; moveServerVoiceParticipant then holds the membership row FOR
+// SHARE until commit. A refusal leaves the row, its lease and the user's other
+// rows untouched. A joined event that consumed its admission needs neither.
+func (s *NATSSubscriber) authorizeServerVoiceClaimTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	channelID, senderID, origin uuid.UUID,
+	admission *voiceJoinedAdmission,
+) (context.Context, bool, error) {
+	if admission != nil {
+		return ctx, true, nil
+	}
+	var stamp uuid.NullUUID
+	err := tx.QueryRowContext(ctx, `
+		SELECT media_boot_id FROM voice_participants
+		WHERE channel_id = $1 AND user_id = $2
+	`, channelID, senderID).Scan(&stamp)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return ctx, false, fmt.Errorf("read server voice row stamp: %w", err)
+	}
+	if err == nil && stamp.Valid && stamp.UUID == origin {
+		return ctx, true, nil
+	}
+	allowed, err := s.serverVoiceClaimConnectTx(ctx, tx, channelID, senderID)
+	if err != nil {
+		return ctx, false, err
+	}
+	if !allowed {
+		s.log.Warn("Refused server voice heartbeat claim",
+			"failure_class", "claim_refused", "count", 1)
+		return ctx, false, nil
+	}
+	return withServerVoiceClaimAuthorized(ctx), true, nil
+}
+
+// serverVoiceClaimConnectTx resolves CONNECT (view and join voice) through the
+// resolver the join-authorization path uses. A nil resolver, a channel without
+// a server, and a non-member all refuse.
+func (s *NATSSubscriber) serverVoiceClaimConnectTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	channelID, senderID uuid.UUID,
+) (bool, error) {
+	if s.resolver == nil {
+		return false, nil
+	}
+	var serverID uuid.NullUUID
+	err := tx.QueryRowContext(ctx, `SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read server voice claim channel: %w", err)
+	}
+	if !serverID.Valid {
+		return false, nil
+	}
+	permissions, err := s.resolver.ResolveChannelPermissionsTx(
+		ctx, tx, serverID.UUID.String(), senderID.String(), channelID.String(),
+	)
+	if errors.Is(err, rbac.ErrNotMember) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve server voice claim permissions: %w", err)
+	}
+	return permissions.Has(rbac.PermViewVoiceChannels) && permissions.Has(rbac.PermJoinVoice), nil
+}
+
+// lockServerVoiceMembershipTx holds the user's server_members row FOR SHARE for
+// the rest of the transaction, so a concurrent removal waits for this write
+// and its own cleanup then sees the row.
+func lockServerVoiceMembershipTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	serverID uuid.NullUUID,
+	senderID uuid.UUID,
+) (bool, error) {
+	if !serverID.Valid {
+		return false, nil
+	}
+	var member int
+	err := tx.QueryRowContext(ctx, `
+		SELECT 1 FROM server_members
+		WHERE server_id = $1 AND user_id = $2
+		FOR SHARE
+	`, serverID.UUID, senderID).Scan(&member)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock server voice membership: %w", err)
+	}
+	return true, nil
 }
 
 func (s *NATSSubscriber) finishServerVoiceParticipantUpsert(
@@ -3883,9 +4000,25 @@ func moveServerVoiceParticipant(
 	eventAt time.Time,
 	admission *voiceJoinedAdmission,
 ) (serverVoiceMutationResult, error) {
-	var lockedChannelID uuid.UUID
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM channels WHERE id = $1 FOR UPDATE`, channelID).Scan(&lockedChannelID); err != nil {
+	origin, hasOrigin := lifecycleOrigin(ctx)
+	if !hasOrigin {
+		return serverVoiceMutationResult{}, nil
+	}
+	// The claim rule (authorizeServerVoiceClaimTx): an admission, a CONNECT
+	// resolve that passed in this transaction, or this boot's own row.
+	claimAuthorized := admission != nil || serverVoiceClaimAuthorized(ctx)
+	var (
+		lockedChannelID uuid.UUID
+		lockedServerID  uuid.NullUUID
+	)
+	if err := tx.QueryRowContext(ctx, `SELECT id, server_id FROM channels WHERE id = $1 FOR UPDATE`, channelID).Scan(&lockedChannelID, &lockedServerID); err != nil {
 		return serverVoiceMutationResult{}, fmt.Errorf("lock server voice channel for capacity: %w", err)
+	}
+	if admission == nil {
+		member, err := lockServerVoiceMembershipTx(ctx, tx, lockedServerID, senderID)
+		if err != nil || !member {
+			return serverVoiceMutationResult{}, err
+		}
 	}
 	var (
 		participantCount int
@@ -3913,9 +4046,13 @@ func moveServerVoiceParticipant(
 	}
 	err := tx.QueryRowContext(ctx, `
 		WITH prior_target AS MATERIALIZED (
-			SELECT admission_id, admission_socket_id
+			SELECT admission_id, admission_socket_id, media_boot_id
 			FROM voice_participants
 			WHERE channel_id = $1 AND user_id = $2
+		), authorized AS MATERIALIZED (
+			SELECT 1
+			WHERE $8::bool
+			   OR EXISTS (SELECT 1 FROM prior_target WHERE media_boot_id = $7::uuid)
 		), blocked AS MATERIALIZED (
 			SELECT 1
 			FROM voice_participants
@@ -3927,19 +4064,23 @@ func moveServerVoiceParticipant(
 			WHERE user_id = $2 AND channel_id <> $1
 			  AND lifecycle_event_at < $3
 			  AND NOT EXISTS (SELECT 1 FROM blocked)
+			  AND EXISTS (SELECT 1 FROM authorized)
 			RETURNING channel_id
 		), upserted AS (
 			INSERT INTO voice_participants AS participant
 				(channel_id, user_id, joined_at, lifecycle_event_at,
-				 admission_id, admission_socket_id)
-			SELECT $1, $2, $3, $3, $5::uuid, $6::text
+				 admission_id, admission_socket_id, media_boot_id)
+			SELECT $1, $2, $3, $3, $5::uuid, $6::text, $7::uuid
 			WHERE NOT EXISTS (SELECT 1 FROM blocked)
+			  AND EXISTS (SELECT 1 FROM authorized)
 			ON CONFLICT (channel_id, user_id) DO UPDATE
 			SET lifecycle_event_at = EXCLUDED.lifecycle_event_at,
 			    admission_id = COALESCE(EXCLUDED.admission_id, participant.admission_id),
 			    admission_socket_id = CASE WHEN EXCLUDED.admission_id IS NULL
-			        THEN participant.admission_socket_id ELSE EXCLUDED.admission_socket_id END
+			        THEN participant.admission_socket_id ELSE EXCLUDED.admission_socket_id END,
+			    media_boot_id = EXCLUDED.media_boot_id
 			WHERE participant.lifecycle_event_at <= EXCLUDED.lifecycle_event_at
+			  AND ($8::bool OR participant.media_boot_id = EXCLUDED.media_boot_id)
 			RETURNING 1
 		)
 		SELECT
@@ -3953,7 +4094,8 @@ func moveServerVoiceParticipant(
 				ORDER BY channel_id
 				LIMIT $4
 			), ARRAY[]::text[])
-	`, channelID, senderID, eventAt, maxVoiceReplayRemovedRooms+1, admissionParam, socketParam).Scan(
+	`, channelID, senderID, eventAt, maxVoiceReplayRemovedRooms+1, admissionParam, socketParam,
+		origin, claimAuthorized).Scan(
 		&upsertedCount, &priorTarget, &priorAdmitted, pq.Array(&removedRaw),
 	)
 	if err != nil {
@@ -4105,6 +4247,8 @@ func NewNATSSubscriber(
 		roomPlacement: &roomplacement.Selector{Redis: redisClient},
 		tempGrant:     newTempGrantManager(db, log, hub, resolver, nats),
 		activity:      activity,
+		resolver:      resolver,
+		replicaID:     uuid.New(),
 		// #2854 B1. Wired here and only here; a nil gate is a silent no-op, so
 		// TestNewNATSSubscriberWiresTheIngressGates asserts all three are set.
 		// That test proves the gates EXIST. What proves the voice gate is
@@ -5006,16 +5150,17 @@ func (s *NATSSubscriber) handleDMVoiceDependencyFailure(_ string, err error) {
 
 // voiceJoinedEvent matches the media plane's voice.joined NATS payload.
 type voiceJoinedEvent struct {
-	ChannelID   string `json:"channelId"`
-	Colour      string `json:"colour"`
-	InstanceID  string `json:"instance_id"`
-	CallID      string `json:"callId"`
-	UserID      string `json:"userId"`
-	Username    string `json:"username"`
-	DisplayName string `json:"displayName,omitempty"`
-	AdmissionID string `json:"admissionId,omitempty"`
-	SocketID    string `json:"socketId,omitempty"`
-	Timestamp   string `json:"timestamp"`
+	ChannelID   string    `json:"channelId"`
+	Colour      string    `json:"colour"`
+	InstanceID  string    `json:"instance_id"`
+	CallID      string    `json:"callId"`
+	UserID      string    `json:"userId"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"displayName,omitempty"`
+	AdmissionID string    `json:"admissionId,omitempty"`
+	SocketID    string    `json:"socketId,omitempty"`
+	Timestamp   string    `json:"timestamp"`
+	NodeBootID  uuid.UUID `json:"nodeBootId"`
 }
 
 type voiceJoinedAdmission struct {
@@ -5039,38 +5184,41 @@ func parseVoiceJoinedAdmission(event voiceJoinedEvent) (*voiceJoinedAdmission, e
 
 // voiceLeftEvent matches the media plane's voice.left NATS payload.
 type voiceLeftEvent struct {
-	ChannelID  string `json:"channelId"`
-	Colour     string `json:"colour"`
-	InstanceID string `json:"instance_id"`
-	CallID     string `json:"callId"`
-	UserID     string `json:"userId"`
-	Timestamp  string `json:"timestamp"`
+	ChannelID  string    `json:"channelId"`
+	Colour     string    `json:"colour"`
+	InstanceID string    `json:"instance_id"`
+	CallID     string    `json:"callId"`
+	UserID     string    `json:"userId"`
+	Timestamp  string    `json:"timestamp"`
+	NodeBootID uuid.UUID `json:"nodeBootId"`
 }
 
 // voiceRoomEmptyEvent matches the media plane's voice.room_empty NATS payload.
 type voiceRoomEmptyEvent struct {
-	ChannelID          string   `json:"channelId"`
-	Colour             string   `json:"colour"`
-	InstanceID         string   `json:"instance_id"`
-	CallID             string   `json:"callId"`
-	RingID             string   `json:"ringId"`
-	CallerUserID       string   `json:"callerUserId"`
-	ParticipantUserIDs []string `json:"participantUserIds"`
-	StartedAt          string   `json:"startedAt"`
-	Timestamp          string   `json:"timestamp"`
+	ChannelID          string    `json:"channelId"`
+	Colour             string    `json:"colour"`
+	InstanceID         string    `json:"instance_id"`
+	CallID             string    `json:"callId"`
+	RingID             string    `json:"ringId"`
+	CallerUserID       string    `json:"callerUserId"`
+	ParticipantUserIDs []string  `json:"participantUserIds"`
+	StartedAt          string    `json:"startedAt"`
+	Timestamp          string    `json:"timestamp"`
+	NodeBootID         uuid.UUID `json:"nodeBootId"`
 }
 
 // voiceHeartbeatEvent is the per-room heartbeat from the media plane.
 type voiceHeartbeatEvent struct {
-	ChannelID                 string   `json:"channelId"`
-	Colour                    string   `json:"colour"`
-	InstanceID                string   `json:"instance_id"`
-	ParticipantsAuthoritative bool     `json:"participants_authoritative"`
-	CallID                    string   `json:"callId"`
-	RingID                    string   `json:"ringId"`
-	CallerUserID              string   `json:"callerUserId"`
-	UserIDs                   []string `json:"userIds"`
-	Timestamp                 string   `json:"timestamp"`
+	ChannelID                 string    `json:"channelId"`
+	Colour                    string    `json:"colour"`
+	InstanceID                string    `json:"instance_id"`
+	ParticipantsAuthoritative bool      `json:"participants_authoritative"`
+	CallID                    string    `json:"callId"`
+	RingID                    string    `json:"ringId"`
+	CallerUserID              string    `json:"callerUserId"`
+	UserIDs                   []string  `json:"userIds"`
+	Timestamp                 string    `json:"timestamp"`
+	NodeBootID                uuid.UUID `json:"nodeBootId"`
 }
 
 // parseVoiceEventTime validates a producer stamp and bounds it above by the
@@ -6200,6 +6348,7 @@ func (s *NATSSubscriber) handleJoined(data []byte, receivedAt time.Time) {
 	defer cancelActivity()
 	activityCtx = s.withLifecycleGeneration(activityCtx, event.ChannelID, event.Colour, event.InstanceID)
 	activityCtx = presence.WithActivityBuildCache(activityCtx)
+	activityCtx = withLifecycleReceivedAt(withLifecycleOrigin(activityCtx, event.NodeBootID), receivedAt)
 	ctx, err := s.resolveRoom(activityCtx, event.ChannelID)
 	if err != nil {
 		s.log.Error("Failed to resolve room for voice.joined", "failure_class", "state_read")
@@ -6572,6 +6721,7 @@ func (s *NATSSubscriber) handleLeft(data []byte, receivedAt time.Time) {
 	defer cancelActivity()
 	activityCtx = s.withLifecycleGeneration(activityCtx, event.ChannelID, event.Colour, event.InstanceID)
 	activityCtx = presence.WithActivityBuildCache(activityCtx)
+	activityCtx = withLifecycleReceivedAt(withLifecycleOrigin(activityCtx, event.NodeBootID), receivedAt)
 	ctx, err := s.resolveRoom(activityCtx, event.ChannelID)
 	if err != nil {
 		s.log.Error("Failed to resolve room for voice.left", "failure_class", "state_read")
@@ -6842,24 +6992,65 @@ func (mutation *serverVoiceLeaveMutation) deleteRow(
 	ctx context.Context,
 	tx *sql.Tx,
 ) (bool, error) {
+	removed, foreign, err := deleteServerVoiceParticipantRowTx(
+		ctx, tx, mutation.channelID, mutation.senderID, mutation.eventAt,
+	)
+	if foreign {
+		mutation.subscriber.log.Warn("Kept a live server voice row of another media boot",
+			"action", "foreign_boot", "count", 1)
+	}
+	return removed, err
+}
+
+// deleteServerVoiceParticipantRowTx removes one Server Voice row under the
+// removal rule (serverVoiceRowRemovable) for the event origin on ctx. The row is
+// locked before the decision, so the stamp and lease it judged are the ones it
+// deletes. foreign reports a live row of another boot that was kept.
+func deleteServerVoiceParticipantRowTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	channelID, participantID uuid.UUID,
+	eventAt time.Time,
+) (removed bool, foreign bool, err error) {
+	var (
+		stamp      uuid.NullUUID
+		observedAt time.Time
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT media_boot_id, lifecycle_observed_at
+		FROM voice_participants
+		WHERE channel_id = $1 AND user_id = $2
+		  AND lifecycle_event_at <= $3
+		FOR UPDATE
+	`, channelID, participantID, eventAt).Scan(&stamp, &observedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read server voice participant stamp: %w", err)
+	}
+	origin, _ := lifecycleOrigin(ctx)
+	if !serverVoiceRowRemovable(stamp, observedAt, lifecycleReceivedAt(ctx), origin) {
+		return false, true, nil
+	}
 	result, err := tx.ExecContext(ctx, `
 		DELETE FROM voice_participants
 		WHERE channel_id = $1 AND user_id = $2
 		  AND lifecycle_event_at <= $3
-	`, mutation.channelID, mutation.senderID, mutation.eventAt)
+	`, channelID, participantID, eventAt)
 	if err != nil {
-		return false, fmt.Errorf("delete server voice participant: %w", err)
+		return false, false, fmt.Errorf("delete server voice participant: %w", err)
 	}
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("read server voice participant delete result: %w", err)
+		return false, false, fmt.Errorf("read server voice participant delete result: %w", err)
 	}
 	if rowsAffected > 1 {
-		return false, fmt.Errorf(
+		return false, false, fmt.Errorf(
 			"server voice participant delete affected %d rows", rowsAffected,
 		)
 	}
-	return rowsAffected == 1, nil
+	return rowsAffected == 1, false, nil
 }
 
 func (mutation *serverVoiceLeaveMutation) apply(ctx context.Context) (bool, error) {
@@ -7544,6 +7735,7 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte, receivedAt time.Time) {
 	defer cancelActivity()
 	activityCtx = s.withLifecycleGeneration(activityCtx, event.ChannelID, event.Colour, event.InstanceID)
 	activityCtx = presence.WithActivityBuildCache(activityCtx)
+	activityCtx = withLifecycleReceivedAt(withLifecycleOrigin(activityCtx, event.NodeBootID), receivedAt)
 	ctx, err := s.resolveRoom(activityCtx, event.ChannelID)
 	if err != nil {
 		s.log.Error("Failed to resolve room for voice.room_empty", "failure_class", "state_read")
@@ -8034,6 +8226,7 @@ func (s *NATSSubscriber) handleHeartbeat(data []byte, receivedAt time.Time) {
 	defer cancelActivity()
 	activityCtx = s.withLifecycleGeneration(activityCtx, event.ChannelID, event.Colour, event.InstanceID)
 	activityCtx = presence.WithActivityBuildCache(activityCtx)
+	activityCtx = withLifecycleReceivedAt(withLifecycleOrigin(activityCtx, event.NodeBootID), receivedAt)
 	ctx, err := s.resolveRoom(activityCtx, event.ChannelID)
 	if err != nil {
 		s.log.Error("Failed to resolve room for voice.heartbeat", "failure_class", "state_read")
@@ -8391,6 +8584,9 @@ func (s *NATSSubscriber) renewObservedLeaseForFutureStampedRows(
 	// DATABASE clock, not eventAt, because it bounds how far ahead of OUR clock a
 	// stamp may sit and still be credible.
 	skewSeconds := int64(maxVoiceLifecycleForwardSkew / time.Second)
+	// Only this boot's rows and unstamped rows: renewing another boot's live
+	// row would extend a lease this event has no claim on (Security#174 §5.6).
+	origin, _ := lifecycleOrigin(ctx)
 	// The result is deliberately discarded, unlike every other row-affecting Exec
 	// in this file. Those capture it to DRIVE something -- a conditional broadcast,
 	// a retry -- and this one has no such branch: zero renewed rows is the ordinary
@@ -8414,7 +8610,8 @@ func (s *NATSSubscriber) renewObservedLeaseForFutureStampedRows(
 		  AND lifecycle_event_at > statement_timestamp()
 		  AND lifecycle_event_at <=
 		      statement_timestamp() + ($3::bigint * INTERVAL '1 second')
-	`, channelID, pq.Array(ids), skewSeconds); err != nil {
+		  AND (media_boot_id IS NULL OR media_boot_id = $4::uuid)
+	`, channelID, pq.Array(ids), skewSeconds, origin); err != nil {
 		// A cancelled or expired context is convergent -- the next heartbeat is
 		// 30 s away against a 90 s lease, so two consecutive misses are free and
 		// nobody should be woken. Any other fault does not self-repair.
@@ -8717,10 +8914,16 @@ func (s *NATSSubscriber) reconcileServerHeartbeatParticipants(
 	var removed atomic.Bool
 	var broadcastFailed atomic.Bool
 	var reconcileErrors sync.Mutex
+	var foreignParticipantIDs []uuid.UUID
 	forEachServerHeartbeatParticipant(ctx, staleParticipantIDs, func(participantID uuid.UUID) {
-		applied, activityErr := s.clearStaleServerHeartbeatParticipant(
+		applied, foreign, activityErr := s.clearStaleServerHeartbeatParticipant(
 			ctx, room.serverUUID, channelID, participantID, eventAt,
 		)
+		if foreign {
+			reconcileErrors.Lock()
+			foreignParticipantIDs = append(foreignParticipantIDs, participantID)
+			reconcileErrors.Unlock()
+		}
 		if applied {
 			removed.Store(true)
 			if !s.broadcastServerVoiceParticipantContext(
@@ -8738,6 +8941,10 @@ func (s *NATSSubscriber) reconcileServerHeartbeatParticipants(
 	if broadcastFailed.Load() {
 		s.recoverServerHeartbeatBroadcastFailure()
 	}
+	if len(foreignParticipantIDs) > 0 {
+		s.log.Warn("Kept live server voice rows of another media boot",
+			"action", "foreign_boot", "count", len(foreignParticipantIDs))
+	}
 	removedAny = removed.Load()
 
 	remainingParticipantIDs, err := s.collectVoiceParticipantIDs(ctx, channelID, false)
@@ -8751,8 +8958,9 @@ func (s *NATSSubscriber) clearStaleServerHeartbeatParticipant(
 	ctx context.Context,
 	serverID, channelID, participantID uuid.UUID,
 	eventAt time.Time,
-) (bool, error) {
+) (bool, bool, error) {
 	var terminal serverVoiceTerminalResult
+	var foreign bool
 	activityErr := s.activity.ClearServerVoice(
 		ctx,
 		participantID,
@@ -8761,9 +8969,10 @@ func (s *NATSSubscriber) clearStaleServerHeartbeatParticipant(
 			LifecycleID: channelID, EventAt: eventAt,
 		},
 		func(mutationCtx context.Context) (bool, error) {
-			mutationApplied, mutationResult, mutationErr := s.deleteStaleServerHeartbeatParticipant(
+			mutationApplied, mutationResult, keptForeign, mutationErr := s.deleteStaleServerHeartbeatParticipant(
 				mutationCtx, serverID, channelID, participantID, eventAt,
 			)
+			foreign = keptForeign
 			if mutationErr == nil && mutationApplied {
 				presence.InvalidateActivityBuildCache(mutationCtx)
 			}
@@ -8776,16 +8985,17 @@ func (s *NATSSubscriber) clearStaleServerHeartbeatParticipant(
 			ctx, serverID.String(), channelID.String(), participantID.String(), terminal.plan, terminal.rotation,
 		)
 	}
-	return terminal.committed && terminal.participantRemoved, activityErr
+	return terminal.committed && terminal.participantRemoved, foreign, activityErr
 }
 
 func (s *NATSSubscriber) deleteStaleServerHeartbeatParticipant(
 	ctx context.Context,
 	serverID, channelID, participantID uuid.UUID,
 	eventAt time.Time,
-) (bool, serverVoiceTerminalResult, error) {
+) (bool, serverVoiceTerminalResult, bool, error) {
 	var terminal serverVoiceTerminalResult
 	var err error
+	var foreign bool
 	applied, err := s.hub.ApplyServerVoiceChannelMutation(serverID, channelID, func() (bool, error) {
 		var claimApplied bool
 		terminal, claimApplied, err = s.withServerVoiceTerminalClaim(
@@ -8796,29 +9006,16 @@ func (s *NATSSubscriber) deleteStaleServerHeartbeatParticipant(
 			},
 			true,
 			func(ctx context.Context, tx *sql.Tx) (bool, error) {
-				result, execErr := tx.ExecContext(ctx, `
-				DELETE FROM voice_participants
-				WHERE channel_id = $1 AND user_id = $2
-				  AND lifecycle_event_at <= $3
-			`, channelID, participantID, eventAt)
-				if execErr != nil {
-					return false, fmt.Errorf("delete stale server voice participant: %w", execErr)
-				}
-				rowsAffected, rowsErr := result.RowsAffected()
-				if rowsErr != nil {
-					return false, fmt.Errorf("read server heartbeat delete result: %w", rowsErr)
-				}
-				if rowsAffected > 1 {
-					return false, fmt.Errorf(
-						"server heartbeat delete affected %d rows", rowsAffected,
-					)
-				}
-				return rowsAffected == 1, nil
+				removed, keptForeign, deleteErr := deleteServerVoiceParticipantRowTx(
+					ctx, tx, channelID, participantID, eventAt,
+				)
+				foreign = keptForeign
+				return removed, deleteErr
 			},
 		)
 		return claimApplied, err
 	})
-	return applied, terminal, err
+	return applied, terminal, foreign, err
 }
 
 func parseSortedVoiceParticipantIDs(rawIDs []string, participantLimit int) ([]uuid.UUID, error) {

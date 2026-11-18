@@ -93,8 +93,19 @@ forward-skewed stamp to its own receipt time (`parseVoiceEventTime`), so two
 deliveries of one join can carry different stamps, and a heartbeat can share a
 join's stamp. Not on the Redis claim's duplicate status: a claim can outlive a
 rolled-back first attempt that still owes the consume. A heartbeat upsert keeps
-the stored pair, and a row with no admission (a heartbeat insert, or one written
-before 000195) keeps the fail-closed eject. A replay whose clamped stamp is
+the stored pair, and a row with no admission (a heartbeat claim, or one written
+before 000195) keeps the fail-closed eject. A heartbeat writes a row with no
+admission only under the claim rule (Security#174 §5.6): it refreshes a row its
+own media boot stamped (`media_boot_id`, migration 000198), and any other case
+(no row, an unstamped row, another boot's row, an expired row) needs the user's
+membership locked `FOR SHARE` and CONNECT resolved through
+`ResolveChannelPermissionsTx` in the writing transaction; a refusal leaves the
+row and its lease untouched and logs `claim_refused`. A write with no decoded
+boot on its context writes nothing. Removal (`voice.left`, `room_empty`,
+heartbeat omission) deletes only a row stamped by the event's boot, an
+unstamped row, or one whose `lifecycle_observed_at` is older than the NATS
+receipt time minus `presence.ActivityStateTTL`; a live row of another boot is
+kept and logged as `action=foreign_boot`. A replay whose clamped stamp is
 later than the row's still advances `lifecycle_event_at` and so renews the
 lease, exactly as a heartbeat does; that is accepted. The rule
 depends on every `voice_participants` deleter holding the per-user lifecycle
