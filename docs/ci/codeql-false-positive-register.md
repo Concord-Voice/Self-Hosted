@@ -392,7 +392,9 @@ Stances on CodeQL rules whose mismatch with this project's idioms is **structura
 
 ### Rule-Calibration Notes
 
-_None yet._
+#### `py/file-not-closed` — descriptors closed through a list in `finally`
+
+GitHub Code Quality's `py/file-not-closed` does not follow a descriptor once it is appended to a list. It flags `descriptors.append(os.open(...))` even when the enclosing `try` has a `finally` that runs `for descriptor in descriptors: os.close(descriptor)`. This pattern is correct when the descriptors must stay open for the whole `try` body, for example FIFO ends that hold a pipe open while child processes run. Treat such a finding as a false positive only when the `finally` covers every append. A plain `with` block would close the descriptor too early. The Code Quality findings API is read-only (list and get only), so dismissal is a UI action and this register is the record.
 
 ### Instance-Specific Entries
 
@@ -406,3 +408,15 @@ _None yet._
 | Reason | `false positive` |
 | Justification | The SARIF code flow starts at `selection of PasswordLogin` (`authoritycontract/msg_published.go:153`) and crosses `m.spec()` at `codec.go:96`, the pattern in the legacy calibration note for this rule. The sink is the ECDSA P-384 pre-hash of a delegation or succession message, which the ceremony tool signs with an operator key file. The contract requires ECDSA P-384 over SHA-384, and `keySigner.sign` checks each signature with `VerifyP384`, so another hash would make the signature fail. |
 | Re-check | Reopen if `keySigner.sign` is ever given credential material, or if the operator signature algorithm changes. |
+
+#### Code Quality findings #51, #52, #53 — `py/file-not-closed` — `infrastructure/deploy/tests/selfhost_acceptance_support.py`
+
+| Field | Value |
+|---|---|
+| Findings | GitHub Code Quality #51 (line 1189 on `65646fc8`), #52 (line 1971), #53 (line 2430), all `py/file-not-closed` |
+| Location | On the PR head, `descriptors.append(os.open(fifo, os.O_RDWR \| os.O_NONBLOCK))` at lines 1181, 1963 and 2422. Each is closed by `for descriptor in descriptors: os.close(descriptor)` in the enclosing `finally` at lines 1200, 1986 and 2450 |
+| Decided | 2026-11-18, in the weekly Python hygiene PR (`fix/weekly-hygiene-python-quality`) |
+| Reason | `false positive` (see the rule-calibration note above) |
+| Justification | Each test opens the read-write end of one or more FIFOs so the pipes stay open while the queue scripts under test run as subprocesses in the `try` body. Every descriptor goes into `descriptors` right after `os.open`, and the `finally` closes all of them, on success and on failure. A `with` block per descriptor would close a FIFO before the subprocesses read it and change what the test exercises. CodeQL does not track the close through the list. |
+| Dismissal | The Code Quality findings API has no dismiss endpoint (2026-11-18), so the finding is dismissed in the repository UI. This entry is the record. |
+| Re-check | Reopen if any of these blocks moves an `os.open` outside the `try`, or stops closing `descriptors` in `finally`. |

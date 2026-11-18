@@ -10,7 +10,6 @@ from __future__ import annotations
 import importlib.util
 import builtins
 import io
-import json
 import os
 from pathlib import Path
 import shutil
@@ -394,7 +393,7 @@ class LoopbackTLS(unittest.TestCase):
                     tls_conn.close()
                 except (OSError, ssl.SSLError):
                     try: conn.close()
-                    except OSError: pass
+                    except OSError: pass  # handshake already failed; a close error changes nothing
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start(); ready.wait(1)

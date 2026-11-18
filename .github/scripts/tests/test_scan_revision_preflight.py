@@ -1,5 +1,4 @@
 """Actual protected scanner preflight against bounded offline GitHub GET fixtures."""
-import copy
 import json
 from pathlib import Path
 import tempfile
@@ -17,7 +16,9 @@ class ScanRevisionPreflightTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.repo = Path(temporary.name)
-        self.base, self.head, self.event, self.selected = twin_merges(self.repo)
+        # twin_merges returns base, head, then two merges.
+        self.base, self.head, *merges = twin_merges(self.repo)
+        self.event, self.selected = merges
         self.selection = selection(dict(semgrep_custom=True, semgrep_community=True, eslint=True, govulncheck=True))
         merge_base = run_git(self.repo, 'show', '-s', '--format=%P', self.selected).split()[0]
         self.selection.update(base_sha=self.base, head_sha=self.head, merge_sha=self.selected,
@@ -66,7 +67,7 @@ class ScanRevisionPreflightTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            base, head, _event, _selected = twin_merges(repo)
+            base, head, *_merges = twin_merges(repo)
             run_git(repo, 'checkout', '-q', '--detach', base)
             merge_base = commit_files(repo, 'protected main advances', {'main-only.txt': 'trusted\n'})
             run_git(repo, 'update-ref', 'refs/heads/main', merge_base)
@@ -98,7 +99,7 @@ class ScanRevisionPreflightTests(unittest.TestCase):
     def test_nonprotected_merge_parent_and_missing_main_proof_refuse_before_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            base, head, _event, _selected = twin_merges(repo)
+            base, head, *_merges = twin_merges(repo)
             run_git(repo, 'checkout', '-q', '--detach', base)
             main = commit_files(repo, 'protected main advances', {'main-only.txt': 'trusted\n'})
             run_git(repo, 'update-ref', 'refs/heads/main', main)

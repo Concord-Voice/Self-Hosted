@@ -197,6 +197,14 @@ class AssociationStore:
     """Pinned private state under the already-held canonical deployment lock."""
     def __init__(self, lock_path):
         self.fds = []
+        try:
+            self.pin(lock_path)
+        except BaseException:
+            # A refused or failed setup must not leak the descriptors it opened.
+            self.close()
+            raise
+
+    def pin(self, lock_path):
         lock = Path(lock_path)
         if not lock.is_absolute() or str(lock) != lock_path or ".." in lock.parts:
             raise Refusal("invalid deployment lock")
@@ -252,9 +260,16 @@ class AssociationStore:
         if metadata(lock)[:6] != metadata(self.lock_info)[:6]:
             raise Refusal("deployment lock replaced")
         # Reopen ancestry to reject a renamed/replaced canonical parent.
-        canonical = self.open_trusted_directory(self.parent)
-        if namespace_identity(canonical) != namespace_identity(self.parent_fd):
-            raise Refusal("deployment parent replaced")
+        mark = len(self.fds)
+        try:
+            canonical = self.open_trusted_directory(self.parent)
+            if namespace_identity(canonical) != namespace_identity(self.parent_fd):
+                raise Refusal("deployment parent replaced")
+        finally:
+            # These descriptors serve only this check; the pinned ones stay open.
+            for fd in reversed(self.fds[mark:]):
+                os.close(fd)
+            del self.fds[mark:]
 
     def record_name(self, project, slot):
         if not isinstance(project, str) or not PROJECT.fullmatch(project) or slot not in SLOTS:
@@ -322,6 +337,7 @@ class AssociationStore:
             try:
                 os.unlink(temporary, dir_fd=self.directory_fd)
             except FileNotFoundError:
+                # The rename already moved the temporary file into place.
                 pass
 
     def consume(self, value, identity, slot, project, allow_dead=False):
@@ -426,8 +442,13 @@ class ContainerObservation:
             raise Refusal("unsupported namespace privileges")
         self.host_fd = self.open_fd("/proc/1/ns/pid")
         self.host_namespace = namespace_identity(self.host_fd)
-        own = self.open_fd("/proc/self/ns/pid")
-        if namespace_identity(own) != self.host_namespace:
+        # Same flags as open_fd, but closed at once: this descriptor serves only this check.
+        own = os.open("/proc/self/ns/pid", os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            same_namespace = namespace_identity(own) == self.host_namespace
+        finally:
+            os.close(own)
+        if not same_namespace:
             raise Refusal("not in host PID namespace")
         self.start_identity = process_start(self.pid)
         status = Path(f"/proc/{self.pid}/status").read_text(encoding="ascii")
@@ -507,6 +528,7 @@ class ContainerObservation:
             if process_start(self.pid) == self.start_identity:
                 raise Refusal("captured init has not exited")
         except FileNotFoundError:
+            # No /proc entry means the captured init has already exited.
             pass
         try:
             current = os.stat(self.cgroup_path)

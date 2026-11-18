@@ -331,3 +331,4 @@ class WorkflowConsumer:
                         commit, ref = self.context['github']['sha'], self.context['github']['ref']
                     self.uploads.append(dict(scanner=name, category=fields['category'],
                         commit_sha=commit, ref=ref, checked_out=run_git(self.repo, 'rev-parse', 'HEAD')))
+        return None
