@@ -516,3 +516,13 @@ func (t *TestTempGrantManager) GrantTemporaryChannelAccessForTest(ctx context.Co
 // ErrTemporaryGrantAuthorityRequiredForTest aliases the production
 // errTemporaryGrantAuthorityRequired.
 var ErrTemporaryGrantAuthorityRequiredForTest = errTemporaryGrantAuthorityRequired
+
+// RevokeWithAuthorizationForTest exposes the authority-fenced revoke with an
+// explicit credential-guard flag and authority closure (nil allowed).
+func (t *TestTempGrantManager) RevokeWithAuthorizationForTest(
+	ctx context.Context, serverID, channelID, userID string,
+	guardCredential bool, authority func(context.Context, *sql.Tx) error,
+) (bool, error) {
+	return t.m.revokeTemporaryChannelAccessWithCredential(ctx, serverID, channelID, userID,
+		temporaryGrantAuthorization{guardCredential: guardCredential, authority: authority})
+}

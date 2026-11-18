@@ -110,3 +110,38 @@ func TestServerMove_DestinationDeletedBeforeGrant(t *testing.T) {
 	assert.JSONEq(t, `{"error":"Insufficient permissions"}`, body, "must be the permission body, not 500 or the member body")
 	assert.False(t, f.grantExists(t))
 }
+
+// denySpeakForMover rewrites the mover's destination override to VIEW|JOIN
+// allowed and SPEAK denied: enough to see and join, not enough to grant.
+func (f midGrantFixture) denySpeakForMover(t *testing.T) {
+	t.Helper()
+	_, err := f.db.Exec(`UPDATE channel_permission_overrides SET allow = $3, deny = $4
+		WHERE channel_id = $1 AND target_type = 'user' AND target_id = $2`,
+		f.to, f.moverID, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice), int64(rbac.PermSpeak))
+	require.NoError(t, err)
+}
+
+// The grant transaction re-decides authority; losing only SPEAK between the
+// decision transaction and the grant must refuse with no grant written.
+func TestServerMove_SpeakRevokedBeforeGrant_403NoGrant(t *testing.T) {
+	f := newMidGrantFixture(t)
+	f.h.beforeTemporaryGrantForTest = func() { f.denySpeakForMover(t) }
+	code, body := f.move(t)
+	assert.Equal(t, http.StatusForbidden, code, body)
+	assert.JSONEq(t, `{"error":"Insufficient permissions"}`, body)
+	assert.False(t, f.grantExists(t))
+}
+
+// A mover that lacks SPEAK up front is refused in the decision transaction,
+// before the grant transaction is ever reached.
+func TestServerMove_LacksSpeak_RefusedBeforeGrantTx(t *testing.T) {
+	f := newMidGrantFixture(t)
+	f.denySpeakForMover(t)
+	var reached atomic.Bool
+	f.h.beforeTemporaryGrantForTest = func() { reached.Store(true) }
+	code, body := f.move(t)
+	assert.Equal(t, http.StatusForbidden, code, body)
+	assert.JSONEq(t, `{"error":"Insufficient permissions"}`, body)
+	assert.False(t, reached.Load(), "the refusal must happen before the grant transaction")
+	assert.False(t, f.grantExists(t))
+}

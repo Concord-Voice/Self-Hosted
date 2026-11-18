@@ -801,3 +801,23 @@ func TestGrantTemporaryChannelAccess_ClosureRunsWithoutCredentialGuard(t *testin
 	exists, _, _, _, _ := tgOverride(t, ts.DB, channelID, mover.ID)
 	assert.False(t, exists)
 }
+
+func TestRevokeTemporaryChannelAccess_ClosureRunsWithoutCredentialGuard(t *testing.T) {
+	ts := setupTS(t)
+	mgr := newTempGrantManager(t, ts)
+	owner := ts.CreateTestUser(t, "tg_rclosure_owner")
+	member := ts.CreateTestUser(t, "tg_rclosure_target")
+	serverID := ts.CreateTestServer(t, owner.ID, "TempGrant Revoke Closure")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+	channelID := ts.CreateVoiceChannel(t, serverID, "voice-tg-rclosure")
+	require.NoError(t, mgr.GrantTemporaryChannelAccessForTest(context.Background(), serverID, channelID, member.ID))
+	sentinel := errors.New("authority refused")
+
+	removed, err := mgr.RevokeWithAuthorizationForTest(context.Background(), serverID, channelID, member.ID, false,
+		func(context.Context, *sql.Tx) error { return sentinel })
+
+	require.ErrorIs(t, err, sentinel)
+	assert.False(t, removed)
+	exists, _, _, isTemp, _ := tgOverride(t, ts.DB, channelID, member.ID)
+	assert.True(t, exists && isTemp, "a refused revoke must leave the temporary grant row")
+}
