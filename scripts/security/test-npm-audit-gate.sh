@@ -144,6 +144,39 @@ cat >"$WORK/allow-ws-twice.json" <<'JSON'
   { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "reason": "no fix yet", "review_by": "2026-12-31" } ] }
 JSON
 
+# A package-less entry next to a packaged one, for the same GHSA.
+cat >"$WORK/allow-ws-plus-nopackage.json" <<'JSON'
+{ "accepted": [
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "reason": "no fix yet", "review_by": "2026-12-31" },
+  { "id": "GHSA-96hv-2xvq-fx4p", "scope": "dev", "reason": "dev-only build chain", "review_by": "2026-12-31" } ] }
+JSON
+# Two entries that are the same package once trimmed and lowercased.
+cat >"$WORK/allow-ws-twice-normalised.json" <<'JSON'
+{ "accepted": [
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "reason": "no fix yet", "review_by": "2026-12-31" },
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": " WS ", "reason": "no fix yet", "review_by": "2026-12-31" } ] }
+JSON
+# Entries for two packages, neither of which is the one npm reported.
+cat >"$WORK/allow-ws-and-aa.json" <<'JSON'
+{ "accepted": [
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "reason": "no fix yet", "review_by": "2026-12-31" },
+  { "id": "GHSA-96hv-2xvq-fx4p", "package": "aa-other", "reason": "no fix yet", "review_by": "2026-12-31" } ] }
+JSON
+# Scopes that are not strings, or blank.
+cat >"$WORK/allow-ws-scope-false.json" <<'JSON'
+{ "accepted": [ { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "scope": false, "reason": "dev-only build chain", "review_by": "2026-12-31" } ] }
+JSON
+cat >"$WORK/allow-ws-scope-blank.json" <<'JSON'
+{ "accepted": [ { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "scope": "  ", "reason": "dev-only build chain", "review_by": "2026-12-31" } ] }
+JSON
+cat >"$WORK/allow-ws-scope-null.json" <<'JSON'
+{ "accepted": [ { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "scope": null, "reason": "no fix yet", "review_by": "2026-12-31" } ] }
+JSON
+# A package value with a line break, followed by a workflow command.
+cat >"$WORK/allow-injected-package.json" <<'JSON'
+{ "accepted": [ { "id": "GHSA-96hv-2xvq-fx4p", "package": "zz\n::warning::INJECTED", "reason": "no fix yet", "review_by": "2026-12-31" } ] }
+JSON
+
 # Production report where the same GHSA reaches production only through
 # zz-other, not through ws.
 cat >"$WORK/prod-other-pkg.json" <<'JSON'
@@ -283,6 +316,13 @@ run_prod "dev-scoped entry blocks when advisory IS in the prod graph" \
 # One entry per package accepts both; two entries for one package accept none.
 run "one GHSA, one entry per package: both accepted" "$WORK/multi-pkg-allowed-first.json" "$WORK/allow-ws-and-other.json" 0 '2 HIGH/CRITICAL advisory\(ies\); 2 accepted, 0 blocking'
 run "two entries for one (GHSA, package) block" "$WORK/high.json" "$WORK/allow-ws-twice.json" 1 'allowlist has 2 entries for GHSA-96HV-2XVQ-FX4P scoped to package "ws"; keep one'
+run "package-less entry next to a packaged one blocks the id" "$WORK/high.json" "$WORK/allow-ws-plus-nopackage.json" 1 'no "package" field'
+run "entries equal after normalising count as duplicates" "$WORK/high.json" "$WORK/allow-ws-twice-normalised.json" 1 'allowlist has 2 entries for GHSA-96HV-2XVQ-FX4P'
+run "mismatch names every scoped package" "$WORK/multi-pkg-allowed-first.json" "$WORK/allow-ws-and-aa.json" 1 'scoped to package "ws", "aa-other" but npm reported it for "zz-other"'
+run "allowlist text cannot start a workflow command line" "$WORK/high.json" "$WORK/allow-injected-package.json" 1 'scoped to package "zz ::warning::INJECTED"'
+run "non-string scope blocks as unrecognized" "$WORK/high.json" "$WORK/allow-ws-scope-false.json" 1 'unrecognized scope false'
+run "blank scope blocks as unrecognized" "$WORK/high.json" "$WORK/allow-ws-scope-blank.json" 1 'unrecognized scope "  "'
+run "null scope means no scope" "$WORK/high.json" "$WORK/allow-ws-scope-null.json" 0 "1 accepted, 0 blocking"
 # A scope that is not "dev" must not read as no scope. "dev " is trimmed and
 # then verified like "dev"; anything else blocks.
 run_prod "scope \"dev \" is verified like \"dev\" (in prod: blocks)" \

@@ -195,14 +195,16 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
       continue;
     }
     // An entry with no `package` cannot be checked against what npm actually
-    // reported, so it does not match anything. Fail closed.
+    // reported. It is an error for the whole id, not an entry to skip: skipping
+    // it would let a reviewer read it while the gate applied a sibling entry.
     const scoped = entries.filter((e) => typeof e.package === 'string' && e.package.trim() !== '');
+    if (scoped.length < entries.length) {
+      blocked.push({ ...a, mismatch: `allowlist entry ${entries[0].id} has no "package" field — add "package": "${a.package}" to scope the exception` });
+      continue;
+    }
     const matches = scoped.filter((e) => normPkg(e.package) === normPkg(a.package));
     if (matches.length === 0) {
-      const mismatch = scoped.length === 0
-        ? `allowlist entry ${entries[0].id} has no "package" field — add "package": "${a.package}" to scope the exception`
-        : `allowlist entry ${entries[0].id} is scoped to package ${scoped.map((e) => `"${e.package}"`).join(', ')} but npm reported it for "${a.package}"`;
-      blocked.push({ ...a, mismatch });
+      blocked.push({ ...a, mismatch: `allowlist entry ${entries[0].id} is scoped to package ${scoped.map((e) => `"${e.package}"`).join(', ')} but npm reported it for "${a.package}"` });
       continue;
     }
     // Two entries for one (advisory, package) leave a reviewer reading one
@@ -212,13 +214,14 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
       continue;
     }
     const entry = matches[0];
-    // `scope` is absent or "dev". Any other value (a look-alike character,
+    // `scope` is absent (undefined or null) or "dev", trimmed and
+    // case-insensitive. Any other value (blank, a look-alike character,
     // "development", a non-string) is a claim the gate cannot verify. Reading
     // it as no scope would turn a dev-only exception into an unconditional
     // one, so it blocks.
     const scope = entry.scope === undefined || entry.scope === null
       ? ''
-      : (typeof entry.scope === 'string' ? entry.scope.trim().toLowerCase() : null);
+      : (typeof entry.scope === 'string' && entry.scope.trim() !== '' ? entry.scope.trim().toLowerCase() : null);
     if (scope !== '' && scope !== 'dev') {
       blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} has an unrecognized scope ${JSON.stringify(entry.scope)}; only "dev" is supported` });
       continue;
@@ -313,7 +316,10 @@ function readJson(path, label) {
   }
 }
 
-const log = (s) => process.stdout.write(`${s}\n`);
+// One call, one line. Messages embed allowlist and audit-report text, and a
+// line break in it could start a line with `::warning::` or another workflow
+// command, so line breaks become spaces.
+const log = (s) => process.stdout.write(`${String(s).replace(/[\r\n\u2028\u2029]+/g, ' ')}\n`);
 
 function runGate(args) {
   if (!args.audit || args.allowlists.length === 0) {
