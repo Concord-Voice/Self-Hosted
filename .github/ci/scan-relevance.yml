@@ -280,6 +280,7 @@ media_plane_tests:
   - 'services/media-plane/**'
   - 'scripts/test-tools/nats-server.sh'
   - 'services/control-plane/internal/voicecommand/testdata/**'
+  - 'services/control-plane/pkg/busmac/testdata/**'
   - 'packages/protocol/src/renderer/services/voice/remoteVideoLayerPolicy.ts'
   - 'packages/protocol/src/renderer/stores/voice/audioQualityTiers.ts'
   - 'packages/protocol/src/renderer/services/voice/fecHeadroom.ts'
