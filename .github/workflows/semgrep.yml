@@ -90,7 +90,7 @@ jobs:
       # Single source of truth for the Semgrep version. The install step
       # fails unless .github/semgrep/requirements.txt pins the same
       # version, so a bump changes this line and that file together.
-      SEMGREP_VERSION: '1.121.0'
+      SEMGREP_VERSION: '1.186.0'
       EXTERNAL_VERDICT: ${{ inputs.external-verdict }}
     steps:
       - name: Validate protected scan revision
@@ -207,7 +207,9 @@ jobs:
             echo "::error file=.github/semgrep/requirements.txt::.github/semgrep/requirements.txt does not pin semgrep==${SEMGREP_VERSION}. Set SEMGREP_VERSION in semgrep.yml and the file's semgrep pin to the same version (regenerate the file with the command in its header)."
             exit 1
           fi
-          python3 -m pip install --user --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r .github/semgrep/requirements.txt
+          # --no-deps: the lock overrides some of semgrep's own exact pins to fixed
+          # versions (see the file header), which pip's resolver would reject.
+          python3 -m pip install --user --quiet --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: -r .github/semgrep/requirements.txt
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run Semgrep (custom rules)
@@ -215,7 +217,9 @@ jobs:
         if: inputs.run-custom
         run: |
           set +e
-          semgrep scan --config=.semgrep/ --baseline-commit="${BASELINE_COMMIT}" --json-output=semgrep-custom.json --sarif-output=semgrep-custom.sarif
+          # --timeout=30: the default 5 s per-rule timeout times out on the larger Go
+          # handlers, and this step fails on any scanner error. 30 s clears every file.
+          semgrep scan --timeout=30 --config=.semgrep/ --baseline-commit="${BASELINE_COMMIT}" --json-output=semgrep-custom.json --sarif-output=semgrep-custom.sarif
           SCAN_EXIT=$?
           set -e
           # Exit code 0 = no findings, 1 = findings found, other = scan error

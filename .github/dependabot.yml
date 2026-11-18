@@ -339,9 +339,6 @@ updates:
   # carries the cp312-cp314 x86_64 wheel hashes. It was the repo's first pip manifest and
   # the sole pkg:pypi component in the CycloneDX SBOM, so it was the one
   # ecosystem in the SBOM with no dependabot coverage at all.
-  # .github/semgrep/requirements.txt (semgrep.yml) is NOT in this directory on purpose:
-  # it is a resolved hash lock that only a full regenerate can bump correctly. Its
-  # header holds the command and the reason.
   - package-ecosystem: "pip"
     directory: "/.github"
     schedule:
@@ -359,6 +356,31 @@ updates:
     open-pull-requests-limit: 5
     groups:
       python-tooling:
+        patterns:
+          - "*"
+
+  # .github/semgrep/requirements.txt is semgrep.yml's hash lock, installed with
+  # --no-deps because it overrides some of semgrep's own exact pins (see its
+  # header). One grouped PR keeps the set together; the semgrep workflow runs a
+  # real scan on it. A semgrep bump also needs SEMGREP_VERSION in semgrep.yml,
+  # and the install step fails with that hint until it matches.
+  - package-ecosystem: "pip"
+    directory: "/.github/semgrep"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    open-pull-requests-limit: 5
+    groups:
+      semgrep-tooling:
         patterns:
           - "*"
 
