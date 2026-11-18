@@ -909,10 +909,14 @@ const (
 	errMsgCannotTargetSelf       = "Cannot target yourself"
 )
 
-// voiceModContext holds the validated state from authorizeVoiceMod.
+// voiceModContext holds the validated state from authorizeVoiceModWith.
 type voiceModContext struct {
 	serverID string
 	targetID string
+	// self is true only when the route allows a self action and the actor is
+	// the target (compared canonically); the permission and hierarchy steps
+	// were skipped for it.
+	self bool
 }
 
 var (
@@ -990,38 +994,10 @@ func (h *Handler) guardVoiceModEffectTx(
 
 // authorizeVoiceMod validates params, membership, permission, and hierarchy.
 // ServerMove owns the sole ADR-0023 hierarchy exception and deliberately does
-// not call this helper.
+// not call this wrapper.
 // Returns nil and sends the HTTP error response if any check fails.
 func (h *Handler) authorizeVoiceMod(c *gin.Context, perm rbac.Permission) *voiceModContext {
-	actorID := c.GetString("user_id")
-	serverID, targetID, ok := canonicalVoiceModParams(c)
-	if !ok {
-		return nil
-	}
-
-	// Always verify actor is a member of the server
-	if !h.checkMembership(c, serverID, actorID) {
-		return nil
-	}
-
-	// Check permission
-	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, actorID, "", perm)
-	if err != nil {
-		h.log.Error(errMsgFailedCheckPerms, "error", err, "permission", perm)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPerms})
-		return nil
-	}
-	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
-		return nil
-	}
-
-	if h.resolver.CheckHierarchy(c.Request.Context(), serverID, actorID, targetID) != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgHierarchyViolation})
-		return nil
-	}
-
-	return &voiceModContext{serverID: serverID, targetID: targetID}
+	return h.authorizeVoiceModWith(c, voiceModPreamble{perm: perm, requireHierarchy: true})
 }
 
 func canonicalVoiceModParams(c *gin.Context) (string, string, bool) {
@@ -1053,22 +1029,6 @@ func (h *Handler) checkMembership(c *gin.Context, serverID, userID string) bool 
 		return false
 	}
 	return true
-}
-
-func findVoiceChannelTx(ctx context.Context, tx *sql.Tx, serverID, targetID string) (string, error) {
-	var channelID string
-	err := tx.QueryRowContext(ctx, `
-		SELECT vp.channel_id FROM voice_participants vp
-		JOIN channels c ON c.id = vp.channel_id
-		WHERE c.server_id = $1 AND vp.user_id = $2
-	`, serverID, targetID).Scan(&channelID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return channelID, nil
 }
 
 type serverEnforcementSnapshot struct {
@@ -1635,16 +1595,17 @@ func (h *Handler) ServerMove(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotVoiceInSrv})
 		return
 	}
-	fromChannelID, err := findVoiceChannelTx(c.Request.Context(), tx, serverID, targetID)
+	fromChannelIDs, err := findVoiceChannelsTx(c.Request.Context(), tx, serverID, targetID)
 	if err != nil {
 		h.log.Error("move: find current voice channel", "error", err, "server_id", serverID, "target_id", targetID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
 		return
 	}
-	if fromChannelID == "" {
+	if len(fromChannelIDs) == 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": errMsgTargetNotInVoice})
 		return
 	}
+	fromChannelID := fromChannelIDs[0]
 	if fromChannelID == req.TargetChannelID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgAlreadyInTarget})
 		return
