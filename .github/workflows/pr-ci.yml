@@ -1040,6 +1040,21 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      # The diff below and HEAD^1 assume GitHub's two-parent merge commit. A
+      # single-parent checkout (a merge-queue squash, or a change in how GitHub
+      # builds the ref) would make HEAD^1 a PR commit, so fail closed instead.
+      - name: Verify the checkout is the PR merge commit
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          read -r -a parents <<< "$(git rev-list --parents -n 1 HEAD)"
+          if [[ ! "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ || "${#parents[@]}" -ne 3 ||
+                "${parents[2]}" != "$PR_HEAD_SHA" ]]; then
+            echo "::error::HEAD is not the two-parent merge commit of PR head ${PR_HEAD_SHA:-<none>}."
+            exit 1
+          fi
+
       - name: Select changed up migrations
         id: select
         run: |
@@ -1054,15 +1069,23 @@ jobs:
             cat "$RUNNER_TEMP/migrations.txt"
           fi
 
-      # The config and the pinned requirements come from the base (HEAD^1), never
-      # the PR: a PR that widened excluded_rules or swapped the wheel hash would
-      # otherwise clear its own required check.
+      # Config and pinned requirements come from the protected base commit,
+      # fetched by SHA, never from the PR or from HEAD^1, so a PR cannot loosen
+      # the check it is judged by (a widened excluded_rules or a swapped hash).
       - name: Install squawk
         if: ${{ steps.select.outputs.count != '0' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git show HEAD^1:.squawk.toml > "$RUNNER_TEMP/squawk.toml"
-          git show HEAD^1:.github/requirements-squawk.txt > "$RUNNER_TEMP/requirements-squawk.txt"
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The PR base commit ${BASE_SHA:-<none>} is not a commit SHA."
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git show "$BASE_SHA:.squawk.toml" > "$RUNNER_TEMP/squawk.toml"
+          git show "$BASE_SHA:.github/requirements-squawk.txt" > "$RUNNER_TEMP/requirements-squawk.txt"
           python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/requirements-squawk.txt"
 
       - name: Lint changed migrations

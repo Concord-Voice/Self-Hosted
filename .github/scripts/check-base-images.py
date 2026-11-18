@@ -10,6 +10,9 @@ letter case. A FILE list replaces that set, so manifest entries that are not in
 the list are reported as stale. Standard library only; no Docker daemon, no
 network.
 
+With no FILE the manifest must also be tracked as a regular file (mode 100644
+or 100755). A manifest that is a symbolic link is refused in every mode.
+
 Exit 0: no violations. Exit 1: violations, one "<file>:<line>: <rule>: <message>"
 line each on stdout. Exit 2: the check could not complete, message on stderr.
 
@@ -96,7 +99,9 @@ def check_stage(path, where, stage):
 def load_manifest(path):
     """Return the manifest's "dockerfiles" object, or raise CheckError on a bad manifest."""
     try:
-        with open(path, encoding="utf-8") as fh:
+        # O_NOFOLLOW: a symbolic link here would let a later edit to its target
+        # change the manifest without the review the manifest path requires.
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8") as fh:
             data = json.load(fh)
     except OSError as err:
         raise CheckError(f"cannot read manifest {path}: {err}") from err
@@ -390,8 +395,12 @@ def names_dockerfile(path):
     return "dockerfile" in "".join(char for char in folded if not unicodedata.combining(char))
 
 
-def tracked_files(root):
-    """Return the tracked Dockerfile paths; a symbolic link or a submodule among them is a CheckError."""
+def tracked_files(root, manifest):
+    """Return the tracked Dockerfile paths; a symbolic link or a submodule among them is a CheckError.
+
+    manifest is the manifest path relative to root. It must be tracked as a
+    regular file too, or the check stops with a CheckError.
+    """
     try:
         proc = subprocess.run(["git", "-C", root, "ls-files", "-s", "-z"], capture_output=True, check=False)
     except OSError as err:
@@ -400,27 +409,35 @@ def tracked_files(root):
         detail = proc.stderr.decode(errors="replace").strip()
         raise CheckError(f"git ls-files failed in {root} (exit {proc.returncode}): {detail}")
     found = set()
+    manifest_mode = None
     for record in proc.stdout.split(b"\0"):
         if not record:
             continue
         meta, _, name = record.partition(b"\t")  # "<mode> <object> <stage>\t<path>"
         path = os.fsdecode(name)
+        if path == manifest:
+            manifest_mode = meta[:6]
         if not names_dockerfile(path):
             continue
         if not meta.startswith(b"100"):
             raise CheckError(f"{path} is tracked with mode {meta[:6].decode()}, not a regular file")
         found.add(path)
+    if manifest_mode is None:
+        raise CheckError(f"manifest {manifest} is not tracked in {root}")
+    if manifest_mode not in (b"100644", b"100755"):
+        raise CheckError(f"manifest {manifest} is tracked with mode {manifest_mode.decode()}, not a regular file")
     return found
 
 
 def run(root, manifest_path, files):
+    rel = os.path.relpath(manifest_path, root)
+    shown = manifest_path if rel.startswith("..") else rel
+    # The git mode check comes first, so a symlinked manifest is never read.
+    # A FILE list skips git entirely; the O_NOFOLLOW open still refuses a symlink.
+    tracked = None if files else tracked_files(root, rel)
     entries = load_manifest(manifest_path)
     if files:
         tracked = {os.path.relpath(os.path.join(root, name), root) for name in files}
-    else:
-        tracked = tracked_files(root)
-    rel = os.path.relpath(manifest_path, root)
-    shown = manifest_path if rel.startswith("..") else rel
     for path in sorted(tracked):
         if path not in entries:
             violation(path, 1, "unlisted-dockerfile", f"no entry for {path} in {shown}")

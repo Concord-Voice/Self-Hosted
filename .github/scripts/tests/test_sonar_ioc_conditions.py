@@ -1003,5 +1003,104 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
                     module.check_ioc_path_policies(mutant)
 
 
+def migration_lint_steps(workflow):
+    """Return the migration-lint steps of a checked-in workflow, keyed by step name."""
+    root = CHECKER.parents[3]
+    jobs = yaml.load((root / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)["jobs"]
+    steps = jobs["migration-lint"]["steps"]
+    return [step.get("name", "") for step in steps], {step["name"]: step for step in steps if "name" in step}
+
+
+class MigrationLintRevisionTests(unittest.TestCase):
+    """#265: the squawk config comes from the PR base commit, and the job refuses a non-merge checkout."""
+
+    WORKFLOWS = ("required-pr-build.yml", "pr-ci.yml")
+    VERIFY = "Verify the checkout is the PR merge commit"
+    INSTALL = "Install squawk"
+
+    def commit(self, repo, text, message):
+        (repo / ".squawk.toml").write_text(text)
+        (repo / ".github").mkdir(exist_ok=True)
+        (repo / ".github/requirements-squawk.txt").write_text(text)
+        git_revision(repo, "add", "-A")
+        git_revision(repo, "commit", "-qm", message)
+        return git_revision(repo, "rev-parse", "HEAD")
+
+    def scratch(self, directory):
+        """An upstream with base B and PR head H, and a clone whose HEAD is the merge M of H into B."""
+        upstream = Path(directory) / "upstream"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(upstream)], check=True)
+        for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid"),
+                           ("uploadpack.allowAnySHA1InWant", "true")):
+            git_revision(upstream, "config", key, value)
+        base = self.commit(upstream, "base\n", "base")
+        git_revision(upstream, "checkout", "-qb", "pr")
+        self.commit(upstream, "pr-early\n", "pr early")
+        head = self.commit(upstream, "pr\n", "pr")
+        git_revision(upstream, "checkout", "-q", "main")
+        (upstream / "other.txt").write_text("main moved\n")
+        git_revision(upstream, "add", "other.txt")
+        git_revision(upstream, "commit", "-qm", "main moved")
+        git_revision(upstream, "merge", "-q", "--no-ff", "-X", "theirs", "-m", "merge", "pr")
+        merge = git_revision(upstream, "rev-parse", "HEAD")
+        git_revision(upstream, "checkout", "-q", "-b", "squash", head)
+        squash = head  # single parent: HEAD^1 is the PR author's previous commit
+        checkout = Path(directory) / "checkout"
+        subprocess.run(["git", "clone", "-q", "--no-local", upstream.as_uri(), str(checkout)], check=True)
+        return checkout, base, head, merge, squash
+
+    def run_step(self, workflow, name, cwd, temp, **env):
+        _, steps = migration_lint_steps(workflow)
+        bindir = Path(temp) / "bin"
+        bindir.mkdir(exist_ok=True)
+        fake = bindir / "python3"  # stands in for pip; the test checks what pip would be given
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        environment = {**os.environ, "RUNNER_TEMP": str(temp), "PATH": f"{bindir}:{os.environ['PATH']}", **env}
+        return subprocess.run(["bash", "-c", steps[name]["run"]], cwd=cwd, env=environment,
+                              capture_output=True, text=True)
+
+    def test_job_shape(self):
+        for workflow in self.WORKFLOWS:
+            with self.subTest(workflow=workflow):
+                order, steps = migration_lint_steps(workflow)
+                self.assertLess(order.index(self.VERIFY), order.index("Select changed up migrations"))
+                self.assertNotIn("if", steps[self.VERIFY])
+                self.assertEqual("${{ github.event.pull_request.head.sha }}", steps[self.VERIFY]["env"]["PR_HEAD_SHA"])
+                self.assertEqual("${{ github.event.pull_request.base.sha }}", steps[self.INSTALL]["env"]["BASE_SHA"])
+                for step in steps.values():
+                    self.assertNotIn("HEAD^1:", step.get("run", ""), "config must not be read from HEAD^1")
+
+    def test_verify_accepts_only_the_two_parent_merge_of_the_pr_head(self):
+        for workflow in self.WORKFLOWS:
+            with tempfile.TemporaryDirectory() as directory:
+                checkout, base, head, merge, squash = self.scratch(directory)
+                cases = {"merge commit": (merge, head, 0), "single-parent commit": (squash, head, 1),
+                         "merge of another head": (merge, base, 1), "missing head SHA": (merge, "", 1)}
+                for label, (commit, pr_head, expected) in cases.items():
+                    with self.subTest(workflow=workflow, case=label):
+                        git_revision(checkout, "checkout", "-q", "--detach", commit)
+                        result = self.run_step(workflow, self.VERIFY, checkout, directory, PR_HEAD_SHA=pr_head)
+                        self.assertEqual(expected, result.returncode, result.stdout + result.stderr)
+
+    def test_install_reads_config_from_the_base_sha_not_head_parent(self):
+        for workflow in self.WORKFLOWS:
+            with tempfile.TemporaryDirectory() as directory:
+                checkout, base, head, merge, squash = self.scratch(directory)
+                # HEAD is a single-parent PR commit: HEAD^1 is the PR's earlier commit, not the base.
+                git_revision(checkout, "checkout", "-q", "--detach", squash)
+                temp = Path(directory) / "runner"
+                temp.mkdir()
+                with self.subTest(workflow=workflow, case="base SHA"):
+                    result = self.run_step(workflow, self.INSTALL, checkout, temp, BASE_SHA=base)
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertEqual("base\n", (temp / "squawk.toml").read_text())
+                    self.assertEqual("base\n", (temp / "requirements-squawk.txt").read_text())
+                for label, value in (("empty", ""), ("not a SHA", "main"), ("unknown SHA", "f" * 40)):
+                    with self.subTest(workflow=workflow, case=label):
+                        result = self.run_step(workflow, self.INSTALL, checkout, temp, BASE_SHA=value)
+                        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

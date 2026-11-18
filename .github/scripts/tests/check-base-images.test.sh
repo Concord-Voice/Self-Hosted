@@ -322,6 +322,28 @@ mv "$WORK/symlinked/Dockerfile" "$WORK/symlinked/real.txt"
 ln -s real.txt "$WORK/symlinked/Dockerfile"
 listed symlinked
 expect_exit2 "a Dockerfile that is a symbolic link is refused" "Dockerfile" "not a regular file"
+# The manifest is held to the same rule: a symbolic link would let a later edit
+# to its target change the manifest without a review of the manifest path.
+repo manifest-symlinked
+mv "$WORK/manifest-symlinked/manifest.json" "$WORK/manifest-symlinked/real.json"
+ln -s real.json "$WORK/manifest-symlinked/manifest.json"
+listed manifest-symlinked
+expect_exit2 "a manifest tracked as a symbolic link is refused" "manifest manifest.json" "mode 120000, not a regular file"
+repo manifest-untracked
+git -C "$WORK/manifest-untracked" add Dockerfile
+invoke --root "$WORK/manifest-untracked" --manifest "$WORK/manifest-untracked/manifest.json"
+expect_exit2 "an untracked manifest is refused" "manifest manifest.json is not tracked"
+repo manifest-index-link
+git -C "$WORK/manifest-index-link" add -A
+blob=$(printf 'real.json' | git -C "$WORK/manifest-index-link" hash-object -w --stdin)
+git -C "$WORK/manifest-index-link" update-index --cacheinfo "120000,$blob,manifest.json"
+invoke --root "$WORK/manifest-index-link" --manifest "$WORK/manifest-index-link/manifest.json"
+expect_exit2 "a manifest tracked as a symbolic link but a regular file on disk is refused" "mode 120000, not a regular file"
+dyn manifest-link-files 'FROM scratch\n'
+mv "$WORK/manifest-link-files/manifest.json" "$WORK/manifest-link-files/real.json"
+ln -s real.json "$WORK/manifest-link-files/manifest.json"
+run "$WORK/manifest-link-files"
+expect_exit2 "a symbolic-link manifest is refused with a FILE list too" "cannot read manifest"
 
 echo ""
 echo "── must pass (exit 0, no output) ──"
