@@ -101,7 +101,10 @@ repos:
         #     vectors_wrap_hygiene_test.go opens every wrap and refuses a
         #     recovered key that any other vector publishes or that a package test
         #     file or gen.mjs commits, so the openable keys stay single-use.
-        exclude: '((^|/)package-lock\.json|^services/control-plane/internal/age/testdata/.*|^services/control-plane/internal/authoritycontract/testdata/vectors\.json)$'
+        #   - pkg/busmac/testdata/vectors.json: HMAC-SHA256 test vectors computed
+        #     under public, test-only keys shared by the Go and TS bus MAC suites.
+        #     The MAC outputs are high-entropy by design and hold no secret.
+        exclude: '((^|/)package-lock\.json|^services/control-plane/internal/age/testdata/.*|^services/control-plane/internal/authoritycontract/testdata/vectors\.json|^services/control-plane/pkg/busmac/testdata/vectors\.json)$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # frozen: v5.0.0
