@@ -99,6 +99,24 @@ cat >"$WORK/dup-high.json" <<'JSON'
     "via": [ { "source": 2, "name": "ws", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] } } }
 JSON
 
+# One GHSA that npm reports for two DIFFERENT packages. An exception scoped to
+# one of them must not waive the other, in either report order.
+cat >"$WORK/multi-pkg-allowed-first.json" <<'JSON'
+{ "auditReportVersion": 2, "vulnerabilities": {
+  "ws": { "name": "ws", "severity": "high",
+    "via": [ { "source": 2, "name": "ws", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] },
+  "zz-other": { "name": "zz-other", "severity": "high",
+    "via": [ { "source": 5, "name": "zz-other", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] } } }
+JSON
+
+cat >"$WORK/multi-pkg-allowed-last.json" <<'JSON'
+{ "auditReportVersion": 2, "vulnerabilities": {
+  "aa-other": { "name": "aa-other", "severity": "high",
+    "via": [ { "source": 5, "name": "aa-other", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] },
+  "ws": { "name": "ws", "severity": "high",
+    "via": [ { "source": 2, "name": "ws", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] } } }
+JSON
+
 cat >"$WORK/allow-ws-valid.json" <<'JSON'
 { "accepted": [ { "id": "GHSA-96hv-2xvq-fx4p", "package": "ws", "reason": "no fix yet; tracked in #9999", "review_by": "2026-12-31" } ] }
 JSON
@@ -208,6 +226,8 @@ run "missing vulnerabilities key fails closed" "$WORK/no-vulns-key.json" "$WORK/
 # a dev-only claim must be verifiable. Every failure mode here BLOCKS.
 run "entry without package fails closed"  "$WORK/high.json" "$WORK/allow-ws-nopackage.json"    1 'no "package" field'
 run "entry scoped to another package blocks" "$WORK/high.json" "$WORK/allow-ws-wrongpackage.json" 1 'scoped to package "tmp" but npm reported it for "ws"'
+run "one GHSA, two packages: the other still blocks (allowed package first)" "$WORK/multi-pkg-allowed-first.json" "$WORK/allow-ws-valid.json" 1 'scoped to package "ws" but npm reported it for "zz-other"'
+run "one GHSA, two packages: the other still blocks (allowed package last)" "$WORK/multi-pkg-allowed-last.json" "$WORK/allow-ws-valid.json" 1 'scoped to package "ws" but npm reported it for "aa-other"'
 run "dev-scoped entry with no prod report fails closed" "$WORK/high.json" "$WORK/allow-ws-devscope.json" 1 "no production-only audit report was supplied"
 run_prod "dev-scoped entry passes when advisory is absent from prod graph" \
   "$WORK/high.json" "$WORK/prod-clean.json" "$WORK/allow-ws-devscope.json" 0 "1 accepted, 0 blocking"

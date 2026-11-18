@@ -77,12 +77,18 @@ export function extractHighCriticalAdvisories(audit) {
       // fall back to the full url as the dedupe + allowlist key — an operator
       // accepting such an advisory must list that exact url in the allowlist.
       const id = m ? m[0].toUpperCase() : via.url;
-      if (!found.has(id)) {
-        found.set(id, {
+      // Dedupe on (advisory, package), never on the id alone. One GHSA can
+      // list several packages, and keying on the id kept only the first one
+      // seen, so an exception scoped to that package silently waived every
+      // other package npm reported the same advisory for.
+      const pkg = String(via.name ?? node?.name ?? '');
+      const key = JSON.stringify([id, pkg.trim().toLowerCase()]);
+      if (!found.has(key)) {
+        found.set(key, {
           id,
           severity,
           title: String(via.title ?? ''),
-          package: String(via.name ?? node?.name ?? ''),
+          package: pkg,
           url: via.url,
         });
       }
