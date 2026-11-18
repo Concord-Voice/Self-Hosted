@@ -26,7 +26,7 @@ rewritten line blocks every later change until it is fixed here.
   git fetch -q origin main
   git diff --no-color --no-ext-diff --no-textconv --no-relative -U0 origin/main...HEAD -- \
       ':(top)client/admin' ':(top)docs/api' ':(top)infrastructure/deploy' ':(top)infrastructure/docker' ':(top)services' \
-    | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) ' | grep -F '[internal]'
+    | awk '/^diff --git /{h=0} /^@@/{h=1; next} h && /^[-+]/' | grep -F '[internal]'
   ```
 
   It prints any placeholder line you added, changed or deleted.
