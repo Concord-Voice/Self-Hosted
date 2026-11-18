@@ -274,3 +274,11 @@ In `packages/e2ee-client/tests/unit/` and `services/media-plane/tests/`.
 The module layout (a `mediaFrameAad.ts` for the canonical builders is suggested), helper and
 type names, the per-sender index structure for `frameKeyRequests`, fixture file format, and log
 wording. Expect a rebase onto the open media-plane PR that also edits `roomManager.ts`.
+
+## Decisions from the builder check
+
+1. **No partial v6 on `main`.** The version-6 stamp and the canonical AV1 and H.264 AAD ship in the same pull request. No commit on `main` produces a v6 frame without the full AAD, so there is exactly one v6 wire format. The Desktop copy follows that merge. *(Builder's call.)*
+2. **A rig mismatch blocks the whole change.** If the capture shows any canonical element differing between sender and receiver, nothing in this design ships. That includes whole-frame AAD, the key-cache and key-request bounds, and media-plane admission. The AV1 or H.264 element set is redesigned and re-captured first. This keeps one version bump (v6) and one rollout round. *(Decided by the project lead.)*
+3. **The rig runs locally, driven by the agent building this change.** The project lead approved this and is told before the client windows open. If the Mac has no usable AV1 or H.264 encode path for a codec, that codec's capture is recorded as not run, and its element set stays unfrozen. That blocks under decision 2. *(Builder's call, within the lead's approval.)*
+4. **Admission owner and minimum version.** The admission change ships here and as a companion pull request for the mirrored deployment's media plane, both built and verified by the same builder. Both must be deployed before any v6 client merges. The minimum server version in the Desktop release notes is the first release of this repository that contains the admission change. *(Builder's call, per the lead's one-PR-per-repository decision.)*
+5. **Desktop v6-only.** No v5 fallback. A server that does not admit v6 shows an actionable "this server needs an update" message. *(Decided by the project lead.)*
