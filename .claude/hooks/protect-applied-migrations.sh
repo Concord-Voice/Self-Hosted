@@ -13,6 +13,13 @@
 # is an overwrite and is blocked like Edit.
 #
 # Fails closed: any parsing failure blocks the tool invocation.
+#
+# Threat model: this guards against an automated editing tool changing a shipped
+# migration by accident, including through a path spelling the tool resolves
+# differently from this hook. It is not a security boundary: the Bash tool is not
+# guarded, so an agent set on changing a migration can always do it. Deliberate
+# constructions (a symlink plus a decoy file, rewriting .claude/repo-config.json
+# first, non-ASCII blanks before an apply_patch header) are out of scope.
 
 if ! command -v jq >/dev/null 2>&1 || ! command -v realpath >/dev/null 2>&1; then
     echo "BLOCKED: jq and realpath are required for protect-applied-migrations.sh but are not installed." >&2
@@ -66,10 +73,6 @@ PATCH_COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
 # project root, so resolve it the same way.
 HOOK_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty')
 REL_BASE="${HOOK_CWD:-$REPO_ROOT}"
-if [ ! -d "$REL_BASE" ]; then
-    echo "BLOCKED: Failed to resolve the session working directory. Failing closed." >&2
-    exit 2
-fi
 
 # One "mode<TAB>path" entry per path. A "create" may make a file that does not
 # exist yet; an "edit" must never reach an existing migration.
@@ -89,44 +92,47 @@ if [ -n "$PATCH_COMMAND" ]; then
     # and regardless of case. Add File overwrites an existing file: check it
     # like Write.
     PATCH_ENTRIES=$(printf '%s\n' "$PATCH_COMMAND" | awk '
-        { t = $0; sub(/^[ \t]+/, "", t); l = tolower(t) }
+        { t = $0; sub(/^[[:space:]]+/, "", t); l = tolower(t) }
         index(l, "*** add file: ") == 1    { print "create\t" substr(t, 15); next }
         index(l, "*** update file: ") == 1 { print "edit\t" substr(t, 18); next }
         index(l, "*** delete file: ") == 1 { print "edit\t" substr(t, 18); next }
-        index(l, "*** move to: ") == 1     { print "edit\t" substr(t, 14); next }
+        index(l, "*** move to: ") == 1     { print "create\t" substr(t, 14); next }
     ')
     ENTRIES="${ENTRIES}${ENTRIES:+$'\n'}${PATCH_ENTRIES}"
-elif [ -z "$ENTRIES" ]; then
+elif [[ -z "$ENTRIES" ]]; then
     fail_parse
 fi
 
-[ -z "$ENTRIES" ] && exit 0
+[[ -z "$ENTRIES" ]] && exit 0
 
-# True (exit 0) when the path starts or ends with a character an editing tool may
-# trim: the union of JavaScript trim() and Rust trim() (Unicode White_Space plus
-# U+FEFF), and U+200B. Checked by code point in jq, because bash's [[:space:]]
-# depends on the locale and misses U+00A0 and the like. Exit 4 = no such edge.
-edge_blank() {
-    printf '%s' "$1" | jq -Rse 'explode | (.[0], .[-1])
-        | select((. >= 9 and . <= 13) or . == 32 or . == 133 or . == 160 or . == 5760
-                 or (. >= 8192 and . <= 8203) or . == 8232 or . == 8233 or . == 8239
-                 or . == 8287 or . == 12288 or . == 65279)' >/dev/null 2>&1
+# Refuse a path that starts or ends with a character an editing tool may trim:
+# the union of JavaScript trim() and Rust trim() (Unicode White_Space plus
+# U+FEFF), and U+200B. One jq call checks every entry by code point, because
+# bash's [[:space:]] depends on the locale and misses U+00A0 and the like.
+printf '%s\n' "$ENTRIES" | jq -Rne '
+    [inputs | sub("^[^\t]*\t"; "") | explode | (.[0], .[-1])
+        | (. != null) and ((. >= 9 and . <= 13) or . == 32 or . == 133 or . == 160 or . == 5760
+            or (. >= 8192 and . <= 8203) or . == 8232 or . == 8233 or . == 8239
+            or . == 8287 or . == 12288 or . == 65279)]
+    | any | not' >/dev/null 2>&1 || {
+    echo "BLOCKED: A hook path starts or ends with a blank the editing tool may trim. Failing closed." >&2
+    exit 2
 }
 
 canonicalize_path() {
-    local raw_path=$1 mode=$2 candidate parent base canonical_parent next_parent segment rc
+    local raw_path=$1 mode=$2 candidate parent base canonical_parent next_parent segment
 
     # Refuse spellings the editing tool resolves differently from this hook:
     # it trims surrounding whitespace and expands a leading ~ to $HOME, and a
     # control character has no place in a real path.
     [[ -n "$raw_path" ]] || return 1
     [[ "$raw_path" != *[[:cntrl:]]* ]] || return 1
-    edge_blank "$raw_path"; rc=$?
-    [[ "$rc" -eq 4 ]] || return 1   # 0 = blank edge, anything else = jq failed: fail closed
     [[ "$raw_path" != "~"* ]] || return 1
 
     candidate=$raw_path
     if [[ "$candidate" != /* ]]; then
+        # Only a relative path needs the session cwd; it must be an existing absolute directory.
+        [[ "$REL_BASE" = /* && -d "$REL_BASE" ]] || return 1
         candidate="$REL_BASE/$candidate"
     fi
 
@@ -168,9 +174,9 @@ canonicalize_path() {
 # Same file (device + inode) as a shipped migration, whatever the spelling:
 # covers MIGRATIONS/ vs migrations/ and other case-folded names.
 is_existing_migration() {
-    local m
+    local target=$1 m
     for m in "$MIGRATIONS_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9]_*.up.sql "$MIGRATIONS_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9]_*.down.sql; do
-        [[ -e "$m" && "$1" -ef "$m" ]] && return 0
+        [[ -e "$m" && "$target" -ef "$m" ]] && return 0
     done
     return 1
 }
