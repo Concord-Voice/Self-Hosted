@@ -25,6 +25,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/stripe/stripe-go/v87 v87.1.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
+	go.opentelemetry.io/otel/sdk v1.47.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/image v0.48.0
 	golang.org/x/net v0.62.0
@@ -84,8 +85,6 @@ require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.10.0 // indirect
-	go.opentelemetry.io/otel/metric v1.47.0 // indirect
-	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/arch v0.33.0 // indirect
@@ -96,13 +95,4 @@ require (
 	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
-)
-
-// golang-migrate's go.mod requires otel/sdk v1.45.0, which CVE-2026-128085 affects
-// (fixed in v1.47.0). No package of otel/sdk is compiled. Excluding the vulnerable
-// versions drops that requirement from the module graph, and `go mod tidy` keeps
-// the exclusion. Remove it once golang-migrate requires v1.47.0 or later.
-exclude (
-	go.opentelemetry.io/otel/sdk v1.45.0
-	go.opentelemetry.io/otel/sdk v1.46.0
 )
