@@ -822,7 +822,8 @@ paths:
         to an older server and must offer 6-digit entry.
 
         One recovery email per account is live at a time, in either format. While it is live a later begin
-        sends nothing. Its secret expires when the resend wait ends: 15 minutes for the first three emails
+        sends nothing, except that a begin with format "token" replaces a live 6-digit code once and makes
+        that code invalid. Its secret expires when the resend wait ends: 15 minutes for the first three emails
         in 24 hours, then 60 minutes. Redeeming the secret, or spending a code''s five attempts, ends the
         wait at once.
 
@@ -861,7 +862,8 @@ paths:
                   format:
                     type: string
                     enum: [token, code]
-                    description: What the recovery email carries, if an account exists.
+                    description: What the server emails for this request when an account exists and no
+                      recovery email is already live. It depends only on the request and RECOVERY_LEGACY_CODE.
         '400':
           $ref: '#/components/responses/BadRequest'
         '429':

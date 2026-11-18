@@ -3928,7 +3928,9 @@ func parseRecoveryVerifyRequest(c *gin.Context, legacyEnabled bool) (recoveryVer
 		return recoveryVerifyRequest{}, false
 	}
 	if body.Token != nil {
-		token := strings.TrimSpace(*body.Token)
+		// A key copied out of an email can carry line breaks inside it, and
+		// base64url never contains whitespace, so drop all of it.
+		token := strings.Join(strings.Fields(*body.Token), "")
 		if !validRecoveryEmailToken(token) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery key format"})
 			return recoveryVerifyRequest{}, false

@@ -168,6 +168,9 @@ func TestRecoveryBeginTokenAfterCodeSendsKey(t *testing.T) {
 	require.False(t, mini.Exists(recoveryRedisKey("owner@example.test")))
 }
 
+// A Redis that refuses the call leaves no state. This covers a failure before
+// the script runs; a failure inside it is handled by write order (record
+// before slot), which miniredis cannot inject.
 func TestIssueRecoveryRecordRedisFailureLeavesNoState(t *testing.T) {
 	rdb, mini := newRecoveryRedis(t)
 	h := NewHandler(nil, rdb, logger.New("test"), "test", nil)
@@ -397,6 +400,7 @@ func TestParseRecoveryVerifyRequest(t *testing.T) {
 	}{
 		{name: "token", body: `{"token":"` + token + `"}`, ok: true, wantToken: token},
 		{name: "token with pasted whitespace", body: `{"token":"  ` + token + `\n"}`, ok: true, wantToken: token},
+		{name: "token split across lines", body: `{"token":"` + token[:20] + `\r\n ` + token[20:] + `"}`, ok: true, wantToken: token},
 		{name: "token ignores email", body: `{"email":"x","token":"` + token + `"}`, ok: true, wantToken: token},
 		{name: "code", body: `{"email":"a@b.test","code":"123-456"}`, ok: true, wantCode: "123456"},
 		{name: "both", body: `{"email":"a@b.test","code":"123456","token":"` + token + `"}`, errText: "exactly one"},

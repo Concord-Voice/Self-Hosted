@@ -457,6 +457,21 @@ type Config struct {
 	RedemptionAdminToken string // #nosec G117 -- config field name, secret loaded from env
 }
 
+// recoveryLegacyCodeDisabled reads RECOVERY_LEGACY_CODE. Only "false" turns the
+// 6-digit code off; any other value keeps it on, and a value that is not "true"
+// is logged so the operator knows the switch did nothing.
+func recoveryLegacyCodeDisabled(raw string) bool {
+	switch v := strings.TrimSpace(raw); v {
+	case "false":
+		return true
+	case "true", "":
+		return false
+	default:
+		log.Printf("WARN: RECOVERY_LEGACY_CODE=%q is not \"true\" or \"false\"; the 6-digit recovery code stays on", v)
+		return false
+	}
+}
+
 // Load reads configuration from environment variables
 func Load() (*Config, error) {
 	// Load .env file if it exists (development)
@@ -489,55 +504,54 @@ func Load() (*Config, error) {
 		// running with development behaviour (codes logged or returned, SMS
 		// enrolment, SMTP dev mode). Local development sets it explicitly
 		// (.env.example, concord-dev.sh).
-		Environment:                getEnv("ENVIRONMENT", "production"),
-		SiteID:                     getEnv("SITE_ID", ""),
-		HSTSHeaderValue:            getEnv("HSTS_HEADER_VALUE", ""),
-		Port:                       getEnv("PORT", "8080"),
-		DatabaseURL:                getEnv("DATABASE_URL", defaultDevDatabaseURL()),
-		RedisURL:                   getEnv("REDIS_URL", defaultDevRedisURL()),
-		RedisCredentialMode:        getEnv("REDIS_CREDENTIAL_MODE", "legacy"),
-		RedisEndpoint:              getEnv("REDIS_ENDPOINT", ""),
-		RedisTLS:                   redisTLS == "true",
-		RedisTLSCAFile:             getEnv("REDIS_TLS_CA_FILE", ""),
-		RedisInfisicalURL:          getEnv("REDIS_INFISICAL_URL", "https://app.infisical.com"),
-		RedisInfisicalProjectID:    getEnv("REDIS_INFISICAL_PROJECT_ID", ""),
-		RedisInfisicalEnvironment:  getEnv("REDIS_INFISICAL_ENVIRONMENT", ""),
-		RedisInfisicalPath:         getEnv("REDIS_INFISICAL_PATH", ""),
-		RedisInfisicalClientID:     getEnv("REDIS_INFISICAL_CLIENT_ID", ""),
-		JWTSecret:                  getEnv("JWT_SECRET", devJWTSecret),
-		NATSUrl:                    getEnv("NATS_URL", "nats://localhost:4222"),
-		OpsMetrics:                 opsMetrics,
-		MediaPlaneURL:              getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
-		TURNServerHost:             getEnv("TURN_SERVER_HOST", ""),
-		TURNSecret:                 getEnv("TURN_SECRET", ""),
-		TURNSecretFile:             getEnv("TURN_SECRET_FILE", ""),
-		TURNRealm:                  getEnv("TURN_REALM", "localhost"),
-		AllowedOrigins:             parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord,app://concord-mobile,spa-cache://concord")),
-		ClientMinVersion:           strings.TrimSpace(getEnv("CLIENT_MIN_VERSION", "")),
-		RecoveryLegacyCodeDisabled: strings.TrimSpace(getEnv("RECOVERY_LEGACY_CODE", "true")) == "false",
-		ClientMinVersionIOS:        strings.TrimSpace(getEnv("CLIENT_MIN_VERSION_IOS", "")),
-		ClientMinVersionAndroid:    strings.TrimSpace(getEnv("CLIENT_MIN_VERSION_ANDROID", "")),
-		SpaURL:                     getEnv("SPA_URL", ""),
-		SpaIpcContract:             getEnvInt("SPA_IPC_CONTRACT", 0),
-		SpaVersion:                 getEnv("SPA_VERSION", ""),
-		SpaPrereleaseURL:           getEnv("SPA_PRERELEASE_URL", ""),
-		SpaPrereleaseIpcContract:   getEnvInt("SPA_PRERELEASE_IPC_CONTRACT", 0),
-		SpaPrereleaseVersion:       getEnv("SPA_PRERELEASE_VERSION", ""),
-		SpaConfigFile:              getEnv("SPA_CONFIG_FILE", ""),
-		PublicMediaBaseURL:         strings.TrimRight(getEnv("PUBLIC_MEDIA_BASE_URL", ""), "/"),
-		InstanceType:               getEnv("INSTANCE_TYPE", "saas"),
-		ServerVersion:              getEnv("SERVER_VERSION", "dev"),
-		ReleasesDir:                getEnv("RELEASES_DIR", ""),
-		SMTPHost:                   getEnv("SMTP_HOST", ""),
-		SMTPPort:                   getEnvInt("SMTP_PORT", 587),
-		SMTPUsername:               getEnv("SMTP_USERNAME", ""),
-		SMTPPassword:               getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
-		SMTPFrom:                   getEnv("SMTP_FROM", "Concord Voice <noreply@example.com>"),
-		MFAEncryptionKey:           getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
-		MFAEncryptionKeyVersion:    mfaEncryptionKeyVersion,
-		MFAEncryptionKeysRetired:   getEnv("MFA_ENCRYPTION_KEYS_RETIRED", ""),
-		WebAuthnRPID:               getEnv("WEBAUTHN_RP_ID", "localhost"),
-		WebAuthnRPOrigins:          parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
+		Environment:               getEnv("ENVIRONMENT", "production"),
+		SiteID:                    getEnv("SITE_ID", ""),
+		HSTSHeaderValue:           getEnv("HSTS_HEADER_VALUE", ""),
+		Port:                      getEnv("PORT", "8080"),
+		DatabaseURL:               getEnv("DATABASE_URL", defaultDevDatabaseURL()),
+		RedisURL:                  getEnv("REDIS_URL", defaultDevRedisURL()),
+		RedisCredentialMode:       getEnv("REDIS_CREDENTIAL_MODE", "legacy"),
+		RedisEndpoint:             getEnv("REDIS_ENDPOINT", ""),
+		RedisTLS:                  redisTLS == "true",
+		RedisTLSCAFile:            getEnv("REDIS_TLS_CA_FILE", ""),
+		RedisInfisicalURL:         getEnv("REDIS_INFISICAL_URL", "https://app.infisical.com"),
+		RedisInfisicalProjectID:   getEnv("REDIS_INFISICAL_PROJECT_ID", ""),
+		RedisInfisicalEnvironment: getEnv("REDIS_INFISICAL_ENVIRONMENT", ""),
+		RedisInfisicalPath:        getEnv("REDIS_INFISICAL_PATH", ""),
+		RedisInfisicalClientID:    getEnv("REDIS_INFISICAL_CLIENT_ID", ""),
+		JWTSecret:                 getEnv("JWT_SECRET", devJWTSecret),
+		NATSUrl:                   getEnv("NATS_URL", "nats://localhost:4222"),
+		OpsMetrics:                opsMetrics,
+		MediaPlaneURL:             getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
+		TURNServerHost:            getEnv("TURN_SERVER_HOST", ""),
+		TURNSecret:                getEnv("TURN_SECRET", ""),
+		TURNSecretFile:            getEnv("TURN_SECRET_FILE", ""),
+		TURNRealm:                 getEnv("TURN_REALM", "localhost"),
+		AllowedOrigins:            parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord,app://concord-mobile,spa-cache://concord")),
+		ClientMinVersion:          strings.TrimSpace(getEnv("CLIENT_MIN_VERSION", "")),
+		ClientMinVersionIOS:       strings.TrimSpace(getEnv("CLIENT_MIN_VERSION_IOS", "")),
+		ClientMinVersionAndroid:   strings.TrimSpace(getEnv("CLIENT_MIN_VERSION_ANDROID", "")),
+		SpaURL:                    getEnv("SPA_URL", ""),
+		SpaIpcContract:            getEnvInt("SPA_IPC_CONTRACT", 0),
+		SpaVersion:                getEnv("SPA_VERSION", ""),
+		SpaPrereleaseURL:          getEnv("SPA_PRERELEASE_URL", ""),
+		SpaPrereleaseIpcContract:  getEnvInt("SPA_PRERELEASE_IPC_CONTRACT", 0),
+		SpaPrereleaseVersion:      getEnv("SPA_PRERELEASE_VERSION", ""),
+		SpaConfigFile:             getEnv("SPA_CONFIG_FILE", ""),
+		PublicMediaBaseURL:        strings.TrimRight(getEnv("PUBLIC_MEDIA_BASE_URL", ""), "/"),
+		InstanceType:              getEnv("INSTANCE_TYPE", "saas"),
+		ServerVersion:             getEnv("SERVER_VERSION", "dev"),
+		ReleasesDir:               getEnv("RELEASES_DIR", ""),
+		SMTPHost:                  getEnv("SMTP_HOST", ""),
+		SMTPPort:                  getEnvInt("SMTP_PORT", 587),
+		SMTPUsername:              getEnv("SMTP_USERNAME", ""),
+		SMTPPassword:              getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
+		SMTPFrom:                  getEnv("SMTP_FROM", "Concord Voice <noreply@example.com>"),
+		MFAEncryptionKey:          getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
+		MFAEncryptionKeyVersion:   mfaEncryptionKeyVersion,
+		MFAEncryptionKeysRetired:  getEnv("MFA_ENCRYPTION_KEYS_RETIRED", ""),
+		WebAuthnRPID:              getEnv("WEBAUTHN_RP_ID", "localhost"),
+		WebAuthnRPOrigins:         parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
 		// Admin console (#1688) — dormant by default; the dev RP defaults point at
 		// https-localhost (the console requires Secure for the __Host- session
 		// cookie); the allowed-AAGUIDs default is empty (operator opts in to the gate).
@@ -630,6 +644,7 @@ func Load() (*Config, error) {
 		OIDCBinaryWorkflow: getEnv("ATTESTATION_OIDC_BINARY_WORKFLOW", "build-desktop.yml"),
 		OIDCBinaryRef:      getEnv("ATTESTATION_OIDC_BINARY_REF", "refs/heads/main"),
 	}
+	cfg.RecoveryLegacyCodeDisabled = recoveryLegacyCodeDisabled(getEnv("RECOVERY_LEGACY_CODE", "true"))
 
 	if err := loadActivityHistoryConfig(cfg); err != nil {
 		return nil, err

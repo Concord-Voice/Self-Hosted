@@ -28,7 +28,7 @@
 1. A token with surrounding whitespace or a trailing newline pasted from email — expected to be accepted (trim before the shape check). Test in Task 4.
 2. Begin with `format: "token"` and an email in mixed case — slot and counter shared with the lower-case spelling (keyed by `user_id`). Test in Task 3.
 3. Redis down during begin — generic `200`, no partial keys, failure logged with a fixed class. Test in Task 3.
-4. A legacy code record live when a token begin arrives — no second email (slot held). Test in Task 3.
+4. A legacy code record live when a token begin arrives — originally "no second email (slot held)"; revised after review: the key replaces the code. Test in Task 3.
 5. JSON `token: null` or a number — `400`, not a panic or `500`. Test in Task 4.
 
 ---

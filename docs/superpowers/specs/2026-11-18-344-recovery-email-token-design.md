@@ -30,7 +30,8 @@ scope and does not change.
    `RecoveryBegin` keeps its queued, timing-uniform delivery.
 4. A bounded number of recovery emails for each account, on both paths
    together.
-5. The newest recovery email always holds a usable secret.
+5. The newest recovery email always holds a secret that a key-capable client
+   can use.
 6. Clients that submit a 6-digit code keep working during a compatibility
    window.
 
@@ -144,7 +145,9 @@ Worker, both formats:
    - Tier = 15 min if the count is 1 to 3, else 60 min.
    - `SET` the slot (`send_id`) and the record, both with `PX` = tier.
    - Return the tier.
-   One script means no partial state: either all three keys change or none.
+   Redis does not roll back a script that fails part way, so the script
+   writes the record before the slot: a partial run leaves a free slot, never
+   a held slot with nothing behind it (revised after review).
    The slot and the record always share one TTL, so the record never expires
    before the slot.
 4. Deliver on the existing detached delivery goroutine, tracked for shutdown.
@@ -205,8 +208,11 @@ owner.
 - The tier sets the slot TTL, which is the resend cooldown, and the record TTL.
   They are equal by construction (one script), so the newest email's secret is
   valid for exactly as long as no new email can be sent. Goal 5.
-- Bound: 3 + 21 = 24 emails in 24 hours for one account across both formats
-  (45 min for three fast sends, then 23 h 15 min at 60 min).
+- Bound: at most two emails per cooldown (a code, then one key that replaces
+  it), so 2 x (3 + 21) = 48 emails in 24 hours for one account across both
+  formats (45 min for three fast sends, then 23 h 15 min at 60 min). Only a
+  client that asks for both formats in turn reaches it; one format alone stays
+  at 24 (revised after review).
 - No hard daily cap. A cap would let a third party use it up and leave the
   owner with no way to get a key, which is the same defect in a new place.
 - The legacy record TTL becomes the tier (was 10 min). Its guessing bound is
@@ -224,6 +230,14 @@ owner.
 - **What the window fixes.** An owner on a new client cannot be blocked: the
   token path ignores the legacy budget. An owner on an old client keeps
   today's behaviour until they update.
+- **Accepted residual (post-implementation review).** Anyone who knows an
+  address can make its live recovery email a key, which a client older than
+  this change cannot enter, and can renew that at each cooldown. Such clients
+  could already be blocked through the code budget, so this adds no new class
+  of exposure for them, and updating the app removes both. A key replaces only
+  the code stored under the request's address: if the account's email changed
+  while a code was live, the old address's code stays until its TTL, and only
+  that old mailbox has it.
 - **Switch:** `RECOVERY_LEGACY_CODE` (default `true`). When `false`:
   - begin always issues a token and answers `format: "token"`;
   - verify with `code` answers `400` (`This app version cannot complete
@@ -330,6 +344,13 @@ A security review and a builder check read the first draft. Changes made:
 - Post-implementation security review: a slot held by a 6-digit code that
   the owner cannot use could delay the owner's recovery key. Fixed: a key
   replaces a code-held slot (once) and deletes the code.
+
+- Post-implementation review, second pass: (1) the old-client residual above
+  is recorded instead of sending both a key and a code in every email, because
+  the code budget already allows the same block for old clients; (2) keys
+  copied with line breaks inside them are accepted; (3) an unrecognised
+  `RECOVERY_LEGACY_CODE` value is logged; (4) the issue script writes the
+  record before the slot.
 
 ## Decisions for the approver
 

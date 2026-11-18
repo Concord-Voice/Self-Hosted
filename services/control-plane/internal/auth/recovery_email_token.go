@@ -107,6 +107,9 @@ type recoveryIssue struct {
 
 // issueRecoveryRecordLua takes the account's send slot, counts the send, picks
 // the tier, and stores the record with the slot's TTL, all in one command.
+// Redis does not roll back a script that fails part way, so the record is
+// written before the slot: a partial run leaves a usable record and a free
+// slot, never a held slot with nothing behind it.
 // A held slot refuses the send, except that a key (ARGV[7] == "1") replaces a
 // slot held by a 6-digit code and deletes that code (KEYS[4]): an attacker
 // must not hold the slot with a code its owner cannot use.
@@ -122,8 +125,8 @@ local n = redis.call("INCR", KEYS[2])
 if redis.call("PTTL", KEYS[2]) < 0 then redis.call("PEXPIRE", KEYS[2], ARGV[6]) end
 local ttl = ARGV[3]
 if n > tonumber(ARGV[5]) then ttl = ARGV[4] end
-redis.call("SET", KEYS[1], ARGV[1], "PX", ttl)
 redis.call("SET", KEYS[3], ARGV[2], "PX", ttl)
+redis.call("SET", KEYS[1], ARGV[1], "PX", ttl)
 return tonumber(ttl)
 `)
 

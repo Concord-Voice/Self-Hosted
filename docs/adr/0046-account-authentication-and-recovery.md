@@ -22,7 +22,12 @@ use it: five wrong guesses delete a code, and a ten-failure, twenty-four-hour
 budget keyed by normalized email bounds total guesses; only a completed
 recovery clears it. Both formats share one live recovery email per account,
 valid until the resend wait ends (15 minutes for the first three emails in 24
-hours, then 60 minutes), so the newest email always holds a usable secret.
+hours, then 60 minutes). A key request replaces a live code once, so a code
+the owner cannot use never blocks the owner's key. Accepted residual while the
+code path exists: anyone who knows an address can make its live recovery email
+a key, which clients older than this change cannot enter. Such clients could
+already be blocked through the code budget, and updating the app removes
+both.
 The per-IP limit is a separate bound.
 
 **Registration code issuance:** each registration code admits four guesses, and

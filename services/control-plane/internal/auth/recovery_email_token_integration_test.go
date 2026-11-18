@@ -117,6 +117,33 @@ func TestRecoveryKeySurvivesWrongSubmissionsFromManyAddresses(t *testing.T) {
 	require.NotEmpty(t, body["recovery_token"])
 }
 
+// A code email someone else requested holds the account's send slot, and the
+// owner may be unable to use it. The owner's key request must still send a key,
+// and that key replaces the code.
+func TestRecoveryKeySurvivesACodeHoldingTheSlot(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverykeyslot")
+	logs := ts.CaptureLogs(t)
+	w := postFrom(t, ts, "203.0.113.20", pathRecoveryBegin, map[string]string{"email": user.Email})
+	require.Equal(t, http.StatusOK, w.Code)
+	codeLog := regexp.MustCompile(`account recovery code.*\bcode=(\d{6})\b`)
+	var code string
+	require.Eventually(t, func() bool {
+		m := codeLog.FindStringSubmatch(logs.String())
+		if m == nil {
+			return false
+		}
+		code = m[1]
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+
+	key := requestRecoveryKey(t, ts, "198.51.100.70", user.Email)
+	stale := postFrom(t, ts, "198.51.100.71", pathRecoveryVerifyCode, map[string]string{"email": user.Email, "code": code})
+	require.Equal(t, http.StatusUnauthorized, stale.Code, "the key replaced the code")
+	owner := postFrom(t, ts, "198.51.100.72", pathRecoveryVerifyCode, map[string]string{"token": key})
+	require.Equal(t, http.StatusOK, owner.Code, owner.Body.String())
+}
+
 func TestRecoveryKeyUniformFailures(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoverykeyuniform")
