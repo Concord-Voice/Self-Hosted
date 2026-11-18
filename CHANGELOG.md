@@ -36,7 +36,7 @@ repository, and operators can set separate minimum app versions for iOS and
 Android. Backup-code readers now accept the versioned formats needed for a
 later storage migration.
 
-**22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
+**23 Total Changes** | 8 Added | 6 Changed | 7 Fixed | 2 Security
 
 ### Added
 
@@ -79,6 +79,7 @@ later storage migration.
 
 ### Changed
 
+- **Developer:** The control plane's Go module path is now `github.com/Concord-Voice/Self-Hosted/services/control-plane`. Code that imports a control-plane package must use the new path.
 - **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.
 - **Self-hosted setup:** Fresh installs now write `WS_EVENT_BUDGET_ENABLED=false`, so budgets stay off until an operator sets `true`. The `concord-selfhost`, `concord-ctl.sh` and installer entrypoints, and the TLS helper's reader shell, start Bash in privileged mode, so shell functions and `BASH_ENV` from the calling environment cannot bypass their environment cleanup. Run the wrapper directly, not as `bash concord-selfhost`.
 - **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
