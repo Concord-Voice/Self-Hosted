@@ -52,12 +52,42 @@ const GHSA_RE = /GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}/i;
  * @returns {boolean}
  */
 export function isUsableAuditReport(a) {
-  return !!a && typeof a === 'object' && !a.error && typeof a.vulnerabilities === 'object';
+  // `typeof null` and `typeof []` are both 'object', so test for a plain
+  // object: `{"vulnerabilities": null}` is a broken report, not a clean one.
+  const v = a?.vulnerabilities;
+  return !!a && typeof a === 'object' && !a.error
+    && !!v && typeof v === 'object' && !Array.isArray(v);
 }
 
 /**
- * Extract the set of distinct HIGH/CRITICAL advisories from an
- * `npm audit --json` report. Only object-form `via` entries are real
+ * Package names compare trimmed and case-insensitive, everywhere: the dedupe
+ * key, the production check and the allowlist match must agree, or a record
+ * merged under one rule is judged under another.
+ *
+ * @param {unknown} pkg
+ * @returns {string}
+ */
+function normPkg(pkg) {
+  return String(pkg).trim().toLowerCase();
+}
+
+/**
+ * Key for one advisory reported for one package, normalised the way
+ * `evaluate` compares ids (case-insensitive) and packages (`normPkg`), so two
+ * records share a key only when the gate would treat them as the same.
+ *
+ * @param {string} id GHSA id, or the advisory url when it has none
+ * @param {string} pkg package name npm reported
+ * @returns {string}
+ */
+function advisoryKey(id, pkg) {
+  return JSON.stringify([String(id).toUpperCase(), normPkg(pkg)]);
+}
+
+/**
+ * Extract the distinct HIGH/CRITICAL (advisory, package) pairs from an
+ * `npm audit --json` report. One GHSA reported for two packages is two
+ * records. Only object-form `via` entries are real
  * advisories; string-form `via` entries are transitive chain references whose
  * advisory is counted at the dependency that actually carries it.
  *
@@ -73,16 +103,17 @@ export function extractHighCriticalAdvisories(audit) {
       const severity = String(via.severity ?? '').toLowerCase();
       if (severity !== 'high' && severity !== 'critical') continue;
       const m = GHSA_RE.exec(via.url);
-      // Canonical key is the GHSA id. If a non-GHSA advisory url ever appears,
-      // fall back to the full url as the dedupe + allowlist key — an operator
-      // accepting such an advisory must list that exact url in the allowlist.
+      // The advisory id is the GHSA id. If a non-GHSA advisory url ever
+      // appears, the full url stands in as the id (the allowlist key, and half
+      // of the dedupe key): an operator accepting such an advisory must list
+      // that exact url in the allowlist.
       const id = m ? m[0].toUpperCase() : via.url;
       // Dedupe on (advisory, package), never on the id alone. One GHSA can
       // list several packages, and keying on the id kept only the first one
       // seen, so an exception scoped to that package silently waived every
       // other package npm reported the same advisory for.
       const pkg = String(via.name ?? node?.name ?? '');
-      const key = JSON.stringify([id, pkg.trim().toLowerCase()]);
+      const key = advisoryKey(id, pkg);
       if (!found.has(key)) {
         found.set(key, {
           id,
@@ -124,7 +155,11 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
     if (e && typeof e.id === 'string') accepted.set(e.id.toUpperCase(), e);
   }
 
-  // Advisory ids present in the PRODUCTION-only dependency graph. `null` means
+  // (advisory, package) pairs present in the PRODUCTION-only dependency graph.
+  // Keyed per package like the main report: a dev waiver for package A is void
+  // when A carries the advisory in production. Another package carrying the
+  // same GHSA in production does not void it; that package blocks on its own
+  // record, which the main report also holds. `null` means
   // we have no TRUSTWORTHY production report, which is emphatically not the
   // same as an empty one — see the dev-scope check below, which fails closed on
   // `null` and passes only on a genuine, verified absence.
@@ -139,8 +174,8 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
   const prodUsable = prodAudit === undefined || prodAudit === null
     ? 'absent'
     : (isUsableAuditReport(prodAudit) ? 'usable' : 'unusable');
-  const prodIds = prodUsable === 'usable'
-    ? new Set(extractHighCriticalAdvisories(prodAudit).map((a) => a.id.toUpperCase()))
+  const prodKeys = prodUsable === 'usable'
+    ? new Set(extractHighCriticalAdvisories(prodAudit).map((a) => advisoryKey(a.id, a.package)))
     : null;
 
   const now = nowISO ? Date.parse(nowISO) : Date.now();
@@ -160,22 +195,22 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
       blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} has no "package" field — add "package": "${a.package}" to scope the exception` });
       continue;
     }
-    if (entry.package.trim().toLowerCase() !== String(a.package).trim().toLowerCase()) {
+    if (normPkg(entry.package) !== normPkg(a.package)) {
       blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} is scoped to package "${entry.package}" but npm reported it for "${a.package}"` });
       continue;
     }
-    // A dev-scoped waiver is void the moment the same advisory appears in the
-    // production graph. With no production report we cannot check the claim, so
-    // it blocks rather than passing vacuously.
+    // A dev-scoped waiver is void the moment npm reports the advisory for the
+    // same package in the production graph. With no production report we
+    // cannot check the claim, so it blocks rather than passing vacuously.
     if (String(entry.scope ?? '').toLowerCase() === 'dev') {
-      if (!prodIds) {
+      if (!prodKeys) {
         const why = prodUsable === 'unusable'
           ? 'the production-only audit report was unusable (npm likely failed), so the claim could not be verified'
           : 'no production-only audit report was supplied to verify it';
         blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} claims scope "dev" but ${why}` });
         continue;
       }
-      if (prodIds.has(a.id.toUpperCase())) {
+      if (prodKeys.has(advisoryKey(a.id, a.package))) {
         blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} claims scope "dev" but ${a.package} is reachable in the PRODUCTION dependency graph` });
         continue;
       }

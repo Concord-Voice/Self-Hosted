@@ -90,7 +90,8 @@ cat >"$WORK/two-high.json" <<'JSON'
     "via": [ { "source": 4, "name": "tmp", "title": "Path traversal", "url": "https://github.com/advisories/GHSA-7c78-jf6q-g5cm", "severity": "high" } ] } } }
 JSON
 
-# Same GHSA appearing under two package nodes — must be counted once.
+# Same GHSA reported for the same package (via.name) under two nodes: counted
+# once. Compare the multi-pkg fixtures below, where via.name differs.
 cat >"$WORK/dup-high.json" <<'JSON'
 { "auditReportVersion": 2, "vulnerabilities": {
   "ws": { "name": "ws", "severity": "high",
@@ -115,6 +116,19 @@ cat >"$WORK/multi-pkg-allowed-last.json" <<'JSON'
     "via": [ { "source": 5, "name": "aa-other", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] },
   "ws": { "name": "ws", "severity": "high",
     "via": [ { "source": 2, "name": "ws", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] } } }
+JSON
+
+# Production report where the same GHSA reaches production only through
+# zz-other, not through ws.
+cat >"$WORK/prod-other-pkg.json" <<'JSON'
+{ "auditReportVersion": 2, "vulnerabilities": {
+  "zz-other": { "name": "zz-other", "severity": "high",
+    "via": [ { "source": 5, "name": "zz-other", "title": "Memory exhaustion DoS", "url": "https://github.com/advisories/GHSA-96hv-2xvq-fx4p", "severity": "high" } ] } } }
+JSON
+
+# `vulnerabilities: null` parses, but it is a broken report, not an empty one.
+cat >"$WORK/null-vulns.json" <<'JSON'
+{ "auditReportVersion": 2, "vulnerabilities": null }
 JSON
 
 cat >"$WORK/allow-ws-valid.json" <<'JSON'
@@ -212,12 +226,13 @@ run "un-accepted CRITICAL blocks"         "$WORK/critical.json"     "$WORK/empty
 run "accepted HIGH passes"                "$WORK/high.json"         "$WORK/allow-ws-valid.json" 0 "accepted"
 run "expired exception warns not blocks"  "$WORK/high.json"         "$WORK/allow-ws-expired.json" 0 "::warning::.*review_by"
 run "partial allowlist still blocks rest" "$WORK/two-high.json"     "$WORK/allow-ws-only.json"  1 "::error::.*GHSA-7C78-JF6Q-G5CM"
-run "duplicate GHSA counted once"         "$WORK/dup-high.json"     "$WORK/allow-ws-only.json"  0 "1 accepted, 0 blocking"
+run "same GHSA, same package, counted once"         "$WORK/dup-high.json"     "$WORK/allow-ws-only.json"  0 "1 accepted, 0 blocking"
 run "invalid audit JSON errors (exit 2)"  "$WORK/bad.json"          "$WORK/empty-allow.json"    2 "not valid JSON"
 
 # Fail-closed: a valid-JSON report that is not a real npm-audit result must NOT pass.
 run "error-object report fails closed"    "$WORK/error-report.json" "$WORK/empty-allow.json"    2 "refusing to pass"
 run "missing vulnerabilities key fails closed" "$WORK/no-vulns-key.json" "$WORK/empty-allow.json" 2 "refusing to pass"
+run "null vulnerabilities fails closed"   "$WORK/null-vulns.json"   "$WORK/empty-allow.json"    2 "refusing to pass"
 
 # ── exception scoping ───────────────────────────────────────────────────────
 # A bare GHSA id is a standing waiver much broader than any reviewed reason:
@@ -227,12 +242,25 @@ run "missing vulnerabilities key fails closed" "$WORK/no-vulns-key.json" "$WORK/
 run "entry without package fails closed"  "$WORK/high.json" "$WORK/allow-ws-nopackage.json"    1 'no "package" field'
 run "entry scoped to another package blocks" "$WORK/high.json" "$WORK/allow-ws-wrongpackage.json" 1 'scoped to package "tmp" but npm reported it for "ws"'
 run "one GHSA, two packages: the other still blocks (allowed package first)" "$WORK/multi-pkg-allowed-first.json" "$WORK/allow-ws-valid.json" 1 'scoped to package "ws" but npm reported it for "zz-other"'
+# The old id-only dedupe kept the first record, so the blocking case above is
+# the one that catches it. This one catches a dedupe that keeps the last record
+# instead. The two summary cases pin that ws is still accepted: the old gate
+# printed "1 ...; 1 accepted, 0 blocking" and "1 ...; 0 accepted, 1 blocking".
 run "one GHSA, two packages: the other still blocks (allowed package last)" "$WORK/multi-pkg-allowed-last.json" "$WORK/allow-ws-valid.json" 1 'scoped to package "ws" but npm reported it for "aa-other"'
+run "one GHSA, two packages: ws still accepted (allowed package first)" "$WORK/multi-pkg-allowed-first.json" "$WORK/allow-ws-valid.json" 1 '2 HIGH/CRITICAL advisory\(ies\); 1 accepted, 1 blocking'
+run "one GHSA, two packages: ws still accepted (allowed package last)" "$WORK/multi-pkg-allowed-last.json" "$WORK/allow-ws-valid.json" 1 '2 HIGH/CRITICAL advisory\(ies\); 1 accepted, 1 blocking'
 run "dev-scoped entry with no prod report fails closed" "$WORK/high.json" "$WORK/allow-ws-devscope.json" 1 "no production-only audit report was supplied"
 run_prod "dev-scoped entry passes when advisory is absent from prod graph" \
   "$WORK/high.json" "$WORK/prod-clean.json" "$WORK/allow-ws-devscope.json" 0 "1 accepted, 0 blocking"
 run_prod "dev-scoped entry blocks when advisory IS in the prod graph" \
   "$WORK/high.json" "$WORK/high.json" "$WORK/allow-ws-devscope.json" 1 "reachable in the PRODUCTION dependency graph"
+# The prod check is per package too: the GHSA reaching production through
+# zz-other must not void the dev waiver for ws. zz-other blocks on its own
+# record; ws stays accepted (the id-only check printed "0 accepted, 2 blocking").
+run_prod "dev-scoped entry holds when only another package carries the GHSA in prod" \
+  "$WORK/multi-pkg-allowed-first.json" "$WORK/prod-other-pkg.json" "$WORK/allow-ws-devscope.json" 1 '2 HIGH/CRITICAL advisory\(ies\); 1 accepted, 1 blocking'
+run_prod "dev-scoped entry blocks on a null-vulnerabilities prod report" \
+  "$WORK/high.json" "$WORK/null-vulns.json" "$WORK/allow-ws-devscope.json" 1 "production-only audit report was unusable"
 # FAIL-OPEN REGRESSION: an `{error:...}` or truncated PRODUCTION report is truthy
 # and parses, but carries no `vulnerabilities` key — so a naive extract yields an
 # EMPTY set and every dev-scoped entry reads as "absent from production" and
