@@ -62,7 +62,7 @@ func TestExecuteRevocationEmitsOnlyAfterDurableUpdate(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, failed.Code, failed.Body.String())
 	require.JSONEq(t, `{"error":"Authentication temporarily unavailable"}`, failed.Body.String())
 	rig.requireFailedCommit(t, failed)
-	tracking, err := rig.redis.Exists(context.Background(), revokeTrackingKey(rig.user), simpleAuthWindowKey(rig.user)).Result()
+	tracking, err := rig.redis.Exists(context.Background(), revokeTrackingKey(rig.user), simpleAuthWindowKey(rig.user, rig.familyID(t))).Result()
 	require.NoError(t, err)
 	require.Zero(t, tracking)
 	removeFault()
@@ -121,7 +121,7 @@ func TestRevokeAllSessionsEmitsOnlyAfterCommittedBulkRevoke(t *testing.T) {
 	rig.router.POST("/api/v1/sessions/revoke-all", rig.handler.RevokeAllSessions)
 	ctx := context.Background()
 	require.NoError(t, rig.redis.ZAdd(ctx, revokeTrackingKey(rig.user), redis.Z{Score: 1, Member: "existing-revoke"}).Err())
-	require.NoError(t, rig.redis.Set(ctx, simpleAuthWindowKey(rig.user), "1", 0).Err())
+	require.NoError(t, rig.redis.Set(ctx, simpleAuthWindowKey(rig.user, rig.familyID(t)), "1", 0).Err())
 	removeFault := installSecurityEventCommitFault(t, rig.db)
 	body := `{"password":"` + privacyPassword + `","include_current":true}`
 	failed := rig.request(http.MethodPost, "/api/v1/sessions/revoke-all", body)
@@ -131,7 +131,7 @@ func TestRevokeAllSessionsEmitsOnlyAfterCommittedBulkRevoke(t *testing.T) {
 	members, err := rig.redis.ZRange(ctx, revokeTrackingKey(rig.user), 0, -1).Result()
 	require.NoError(t, err)
 	require.Equal(t, []string{"existing-revoke"}, members)
-	window, err := rig.redis.Get(ctx, simpleAuthWindowKey(rig.user)).Result()
+	window, err := rig.redis.Get(ctx, simpleAuthWindowKey(rig.user, rig.familyID(t))).Result()
 	require.NoError(t, err)
 	require.Equal(t, "1", window)
 	removeFault()
@@ -141,7 +141,7 @@ func TestRevokeAllSessionsEmitsOnlyAfterCommittedBulkRevoke(t *testing.T) {
 	require.Equal(t, []securityevent.Event{{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonSessionsRevoked, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionsRevokeAll}}, rig.recorder.events)
 	rig.requireCommittedOwner(t)
 	requireSerializedEventPrivacy(t, rig.recorder.events, rig.user, rig.sid, privacyPassword, rig.access, rig.refresh)
-	remaining, err := rig.redis.Exists(ctx, revokeTrackingKey(rig.user), simpleAuthWindowKey(rig.user)).Result()
+	remaining, err := rig.redis.Exists(ctx, revokeTrackingKey(rig.user), simpleAuthWindowKey(rig.user, rig.familyID(t))).Result()
 	require.NoError(t, err)
 	require.Zero(t, remaining)
 	cookies := succeeded.Result().Cookies()
@@ -201,6 +201,14 @@ func newSecurityEventFamilyRig(t *testing.T) securityEventFamilyRig {
 	router := gin.New()
 	router.Use(middleware.AuthRequired(secret, rdb, db, nil))
 	return securityEventFamilyRig{db: db, redis: rdb, router: router, handler: handler, recorder: recorder, disconnector: disconnector, user: user, sid: sid, access: access, refresh: refresh}
+}
+
+// familyID returns the login family that owns the rig's session.
+func (r securityEventFamilyRig) familyID(t *testing.T) string {
+	t.Helper()
+	var family string
+	require.NoError(t, r.db.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid = $1`, r.sid).Scan(&family))
+	return family
 }
 
 func (r securityEventFamilyRig) request(method, path, body string) *httptest.ResponseRecorder {

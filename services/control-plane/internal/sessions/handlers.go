@@ -177,8 +177,23 @@ func revokeTrackingKey(userID string) string {
 	return fmt.Sprintf("session_revokes:%s", userID)
 }
 
-func simpleAuthWindowKey(userID string) string {
-	return fmt.Sprintf("session_revoke_auth:%s", userID)
+// simpleAuthWindowKey names one login family's Simple-mode window. The family
+// that proved its credentials is the only one that can spend the window, so a
+// second session of the same account cannot revoke on another's proof.
+func simpleAuthWindowKey(userID, familyID string) string {
+	return fmt.Sprintf("session_revoke_auth:%s:%s", userID, familyID)
+}
+
+// authenticatingFamily returns the login family AuthRequired verified for this
+// request's bearer token, or "" when there is no verified family. It never
+// reads a request header or the target session ID. An empty family earns and
+// spends no window, so a request without verified provenance must prove.
+func authenticatingFamily(c *gin.Context, userID string) string {
+	identity, grant, ok := middleware.VerifiedAccessFromContext(c)
+	if !ok || grant.FamilyID == uuid.Nil || identity.UserID.String() != userID {
+		return ""
+	}
+	return grant.FamilyID.String()
 }
 
 // countActiveSessions returns the number of non-revoked, non-expired sessions for a user.
@@ -209,21 +224,40 @@ func (h *Handler) recordRevoke(ctx context.Context, userID, sessionID string) er
 	return nil
 }
 
-// hasSimpleAuthWindow checks if the user has an active 5-minute authentication window (Simple mode).
-func (h *Handler) hasSimpleAuthWindow(ctx context.Context, userID string) bool {
-	val, err := h.redis.Get(ctx, simpleAuthWindowKey(userID)).Result()
+// hasSimpleAuthWindow checks if this login family has an active 5-minute
+// authentication window (Simple mode). No verified family has no window.
+func (h *Handler) hasSimpleAuthWindow(ctx context.Context, userID, familyID string) bool {
+	if familyID == "" {
+		return false
+	}
+	val, err := h.redis.Get(ctx, simpleAuthWindowKey(userID, familyID)).Result()
 	return err == nil && val == "1"
 }
 
-// grantSimpleAuthWindow sets a 5-minute authentication window in Redis.
-func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID string) {
-	h.redis.Set(ctx, simpleAuthWindowKey(userID), "1", simpleAuthWindowTTL)
+// grantSimpleAuthWindow sets a 5-minute authentication window for the login
+// family that just proved its credentials.
+func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID, familyID string) {
+	if familyID == "" {
+		return
+	}
+	h.redis.Set(ctx, simpleAuthWindowKey(userID, familyID), "1", simpleAuthWindowTTL)
 }
 
-// resetRevokeTracking clears both the revoke tracking set and the auth window.
-func (h *Handler) resetRevokeTracking(ctx context.Context, userID string) {
+// clearSimpleAuthWindow removes the requesting family's window. Other families'
+// windows were each earned by that family's own proof, and are inert while the
+// mode is secure or once their family is revoked.
+func (h *Handler) clearSimpleAuthWindow(ctx context.Context, userID, familyID string) {
+	if familyID == "" {
+		return
+	}
+	h.redis.Del(ctx, simpleAuthWindowKey(userID, familyID))
+}
+
+// resetRevokeTracking clears both the revoke tracking set and the requesting
+// family's auth window.
+func (h *Handler) resetRevokeTracking(ctx context.Context, userID, familyID string) {
 	h.redis.Del(ctx, revokeTrackingKey(userID))
-	h.redis.Del(ctx, simpleAuthWindowKey(userID))
+	h.clearSimpleAuthWindow(ctx, userID, familyID)
 }
 
 // getUserRevocationMode fetches the user's revocation_mode from the database.
@@ -410,7 +444,8 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		return
 	}
 
-	needsPassword, mode, freeRevokeReservationScore := h.determineAuthRequired(ctx, uid, sessionID)
+	family := authenticatingFamily(c, uid)
+	needsPassword, mode, freeRevokeReservationScore := h.determineAuthRequired(ctx, uid, family, sessionID)
 
 	// Parse optional password from request body
 	var req struct {
@@ -429,7 +464,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 			return
 		}
 		if mode == "simple" {
-			h.grantSimpleAuthWindow(ctx, uid)
+			h.grantSimpleAuthWindow(ctx, uid, family)
 		}
 	}
 
@@ -466,7 +501,10 @@ func (h *Handler) verifySessionOwnership(ctx context.Context, c *gin.Context, se
 // determineAuthRequired uses server-authoritative policy checks to decide if password is needed.
 // A non-empty reservation score means this request atomically consumed the one
 // free revoke and must either retain or conclusively release that exact entry.
-func (h *Handler) determineAuthRequired(ctx context.Context, uid, sessionID string) (needsPassword bool, mode, reservationScore string) {
+//
+// family is the requester's verified login family: only its own Simple-mode
+// window can waive the password.
+func (h *Handler) determineAuthRequired(ctx context.Context, uid, family, sessionID string) (needsPassword bool, mode, reservationScore string) {
 	activeCount, err := h.countActiveSessions(ctx, uid)
 	if err != nil {
 		h.log.Error("Failed to count active sessions", "error", err)
@@ -475,7 +513,7 @@ func (h *Handler) determineAuthRequired(ctx context.Context, uid, sessionID stri
 
 	mode = h.getUserRevocationMode(ctx, uid)
 
-	if mode == "simple" && h.hasSimpleAuthWindow(ctx, uid) {
+	if mode == "simple" && h.hasSimpleAuthWindow(ctx, uid, family) {
 		return false, mode, ""
 	}
 	if activeCount < freeRevokeSessionThreshold {
@@ -707,7 +745,7 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 		h.clearRevokeMFABudget(ctx, uid)
 	}
 
-	h.resetRevokeTracking(ctx, uid)
+	h.resetRevokeTracking(ctx, uid, authenticatingFamily(c, uid))
 	h.log.Info("Sessions revoked", "user_id", uid, "count", rowsAffected, "include_current", req.IncludeCurrent)
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonSessionsRevoked, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionsRevokeAll})
 
@@ -823,7 +861,7 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	}
 
 	if req.Mode == "secure" {
-		h.redis.Del(ctx, simpleAuthWindowKey(uid))
+		h.clearSimpleAuthWindow(ctx, uid, authenticatingFamily(c, uid))
 	}
 	if mfaVerified {
 		h.clearRevokeMFABudget(ctx, uid)

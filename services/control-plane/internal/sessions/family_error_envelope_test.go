@@ -38,7 +38,7 @@ func TestFamilyErrorEnvelope_SessionRoutes(t *testing.T) {
 				}
 				ctx := context.Background()
 				require.NoError(t, rig.redis.ZAdd(ctx, revokeTrackingKey(rig.user), redis.Z{Score: float64(time.Now().Unix()), Member: "existing-revoke"}).Err())
-				require.NoError(t, rig.redis.Set(ctx, simpleAuthWindowKey(rig.user), "fixture-window", 0).Err())
+				require.NoError(t, rig.redis.Set(ctx, simpleAuthWindowKey(rig.user, rig.familyID(t)), "fixture-window", 0).Err())
 				before := familyEnvelopeSessionState(t, rig)
 				reached := false
 				switch failure {
@@ -78,7 +78,7 @@ func TestFamilyErrorEnvelope_SessionRoutes(t *testing.T) {
 				members, err := rig.redis.ZRange(ctx, revokeTrackingKey(rig.user), 0, -1).Result()
 				require.NoError(t, err)
 				assert.Equal(t, []string{"existing-revoke"}, members)
-				window, err := rig.redis.Get(ctx, simpleAuthWindowKey(rig.user)).Result()
+				window, err := rig.redis.Get(ctx, simpleAuthWindowKey(rig.user, rig.familyID(t))).Result()
 				require.NoError(t, err)
 				assert.Equal(t, "fixture-window", window)
 				if failure == "commit acknowledged lost" {
