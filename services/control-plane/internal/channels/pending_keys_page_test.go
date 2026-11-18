@@ -237,6 +237,49 @@ func TestPendingKeys_ScanCapAdvancesCursor(t *testing.T) {
 	assert.Empty(t, p2.next)
 }
 
+// setupHiddenChannelCaller returns a caller who holds the keys of ch1 and ch2
+// and can view ch1, but whom a user deny override stops from viewing ch2, so
+// every ch2 request is hidden from the caller and visible to the owner.
+func setupHiddenChannelCaller(t *testing.T) (ts *testhelpers.TestServer, owner, caller testhelpers.TestUser, serverID, ch1, ch2 string) {
+	t.Helper()
+	ts, owner, serverID, ch1 = setupEncryptedChannel(t)
+	caller = ts.CreateTestUser(t, "pkhiddencaller")
+	ts.AddMemberToServer(t, serverID, caller.ID, roleMember)
+	dist := ts.DoRequest("POST", pathChannelsPrefix+ch1+pathKeys, map[string]interface{}{
+		keyWrappedKeys: map[string]string{caller.ID: testhelpers.ValidCiphertext()},
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, dist.Code, dist.Body.String())
+	ch2 = createKeyedChannel(t, ts, owner, serverID, "text", caller.ID)
+	ts.CreateChannelOverride(t, ch2, "user", caller.ID, 0, int64(rbac.PermViewTextChannels))
+	return ts, owner, caller, serverID, ch1, ch2
+}
+
+// A full page always carries a cursor, so whether next_cursor is set cannot
+// tell the caller that a row it cannot see follows its last visible row.
+func TestPendingKeys_FullPageCursorIndependentOfHiddenRows(t *testing.T) {
+	ts, _, caller, serverID, ch1, ch2 := setupHiddenChannelCaller(t)
+	anchor := seedPendingRequesters(t, ts, serverID, ch1, 1, pendingSeedBase, time.Millisecond, true)
+
+	alone := getPendingPage(t, ts, caller.AccessToken, pendingQuery(1, ""))
+	require.Equal(t, anchor, alone.ids)
+
+	hidden := seedPendingRequesters(t, ts, serverID, ch2, 1, pendingSeedBase.Add(time.Hour), time.Millisecond, true)
+	followed := getPendingPage(t, ts, caller.AccessToken, pendingQuery(1, ""))
+	require.Equal(t, anchor, followed.ids, "the hidden row is never returned")
+
+	assert.NotEmpty(t, alone.next, "a full page carries a cursor with nothing after it")
+	assert.NotEmpty(t, followed.next, "a full page carries a cursor with a hidden row after it")
+	for name, page := range map[string]pendingPage{"alone": alone, "followed": followed} {
+		if page.next == "" {
+			continue
+		}
+		last := getPendingPage(t, ts, caller.AccessToken, pendingQuery(1, page.next))
+		assert.Empty(t, last.ids, "%s: nothing visible follows the anchor", name)
+		assert.NotContains(t, last.ids, hidden[0], name)
+		assert.Empty(t, last.next, "%s: the empty page after it ends the sweep", name)
+	}
+}
+
 func TestPendingKeys_ForgedCursorStillFiltered(t *testing.T) {
 	ts, owner, serverID, ch1 := setupEncryptedChannel(t)
 	caller := ts.CreateTestUser(t, "pkforgecaller")

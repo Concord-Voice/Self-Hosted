@@ -196,7 +196,8 @@ func (h *Handler) readPendingCandidates(ctx context.Context, callerID string, af
 
 // pendingKeyRequestsPage returns up to limit visible pending requests after
 // the cursor, examining at most pendingKeysScanCap candidates. next is the
-// last examined candidate when more rows may exist, and nil otherwise.
+// last examined candidate when the page is full or the scan cap ended it, and
+// nil only when the candidates ran out first.
 // Visibility does not depend on the cursor, so a forged or foreign cursor can
 // only skip rows, never reveal one.
 func (h *Handler) pendingKeyRequestsPage(ctx context.Context, callerID string, after *pendingCursor, limit int) ([]pendingKeyRequest, *pendingCursor, error) {
@@ -222,10 +223,9 @@ func (h *Handler) pendingKeyRequestsPage(ctx context.Context, callerID string, a
 				continue
 			}
 			page = append(page, batch[i].req)
+			// A full page always carries a cursor. Whether more candidates
+			// follow is not looked at: they may all be hidden from the caller.
 			if len(page) == limit {
-				if exhausted && i == len(batch)-1 {
-					return page, nil, nil
-				}
 				return page, cursor, nil
 			}
 		}

@@ -7168,7 +7168,8 @@ paths:
         before DM), then ID. Follow `next_cursor` until it is null. A page can hold
         fewer than `limit` rows, or none, while `next_cursor` is still set: one
         request examines a bounded number of rows, and only rows the caller may
-        see are returned.
+        see are returned. A full page always has a `next_cursor`, so the last
+        page can be empty.
 
         Rate limit: 30 requests per minute.
 
