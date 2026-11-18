@@ -184,7 +184,7 @@ func TestVerifyProofRejectsBadProofs(t *testing.T) {
 		{"sibling split repository", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {
 			// The split repos share this verifier; a proof minted for a sibling
 			// repository (its own id and name) must fail.
-			c["repository_id"] = "1158152129"
+			c["repository_id"] = "1359565267"
 			c["repository"] = "Concord-Voice/sibling-repo"
 			return f.key
 		}},

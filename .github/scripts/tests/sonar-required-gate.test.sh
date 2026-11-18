@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix="pr-ci-owner-") as temporary:
     rules = tmp / "rules.json"
     output = tmp / "output"
     active = [{"type": "workflows", "parameters": {"workflows": [{
-        "repository_id": 1158152129, "path": ".github/workflows/required-pr-build.yml", "ref": "main"}]}}]
+        "repository_id": 1359565266, "path": ".github/workflows/required-pr-build.yml", "ref": "main"}]}}]
     for mode, hotfix, fixture, failure, expected in (
         ("legacy", False, active, False, False),
         ("required-full", False, active, False, True),
@@ -899,7 +899,7 @@ ruleset = json.loads(ruleset_path.read_text())
 assert ruleset["name"] == "Alpha Required PR Build"
 assert ruleset["enforcement"] == "active"
 assert ruleset["conditions"] == {
-    "repository_id": {"repository_ids": [1158152129]},
+    "repository_id": {"repository_ids": [1359565266]},
     "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
 }
 assert ruleset["bypass_actors"] == [
@@ -917,7 +917,7 @@ assert sorted(ruleset["rules"], key=lambda rule: rule["type"]) == [{
     "parameters": {
         "do_not_enforce_on_create": False,
         "workflows": [{
-            "repository_id": 1158152129,
+            "repository_id": 1359565266,
             "path": ".github/workflows/required-pr-build.yml",
             "ref": "refs/heads/main",
         }],
@@ -1179,7 +1179,7 @@ else:
         [{**rule, "ruleset_id": 17153062} for rule in org_rule["rules"]],
         [{**rule, "ruleset_id": 17541948} for rule in repo_rule["rules"]] + [
             {"type": "workflows", "ruleset_id": 123, "parameters": {"workflows": [
-                {"repository_id": 1158152129, "path": ".github/workflows/required-pr-build.yml",
+                {"repository_id": 1359565266, "path": ".github/workflows/required-pr-build.yml",
                  "ref": "refs/heads/main"}]}},
             {"type": "file_path_restriction", "ruleset_id": 24555855,
              "parameters": {"ignored_file_paths": [], "restricted_file_paths": [".github/workflows/**/*"]}}],
@@ -1366,16 +1366,16 @@ else:
             "path": ".github/workflows/required-pr-build.yml", "event": "pull_request",
             "head_sha": head_sha, "conclusion": conclusion, "check_suite_id": run_id + 1000,
             "repository": {"full_name": "Concord-Voice/Self-Hosted"},
-            "pull_requests": [{"number": number, "head": {"sha": head_sha, "repo": {"id": 1158152129}},
-                               "base": {"sha": main_sha, "ref": "main", "repo": {"id": 1158152129}}}],
+            "pull_requests": [{"number": number, "head": {"sha": head_sha, "repo": {"id": 1359565266}},
+                               "base": {"sha": main_sha, "ref": "main", "repo": {"id": 1359565266}}}],
             "referenced_workflows": [{"path": f"Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@{pinned_pr_ci_sha}",
                 "sha": pinned_pr_ci_sha}]}
         pr_data[str(number)] = {"number": number, "state": "open", "head": {"ref": f"canary-{number}", "sha": head_sha,
-            "repo": {"id": 1158152129}},
-            "base": {"ref": "main", "repo": {"id": 1158152129,
+            "repo": {"id": 1359565266}},
+            "base": {"ref": "main", "repo": {"id": 1359565266,
                 "full_name": "Concord-Voice/Self-Hosted"}, "sha": main_sha},
             "merge_commit_sha": check_sha, "changed_files": len(changed)}
-    evidence = {"schema_version": 3, "repository_id": 1158152129, "main_sha": main_sha,
+    evidence = {"schema_version": 3, "repository_id": 1359565266, "main_sha": main_sha,
         "protected": {"ruleset_id": 123, "source_path": ".github/workflows/required-pr-build.yml",
             "source_sha": main_sha, "mode": "required-full", "run_id": 2001,
             "run_attempt": 1, "conclusion": "success"},
@@ -1722,7 +1722,7 @@ elif "/commits/" in path and "/check-runs?filter=latest&per_page=100" in path:
                   if d["head"]["sha"] == head_sha)
     native_pr = {"number": detail["number"], "head": {"sha": head_sha},
         "base": {"sha": detail["base"]["sha"], "ref": "main",
-                 "repo": {"id": 1158152129}}}
+                 "repo": {"id": 1359565266}}}
     if case == "native-wrong-pr": native_pr["number"] += 1
     if case == "native-wrong-base": native_pr["base"]["sha"] = "0" * 40
     if case == "native-wrong-base-ref": native_pr["base"]["ref"] = "release"
