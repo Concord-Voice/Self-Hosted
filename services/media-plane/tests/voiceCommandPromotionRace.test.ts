@@ -114,7 +114,7 @@ describe('durable disconnect during channel promotion', () => {
     const roomEmit = vi.fn();
     const io = {
       to: () => ({ emit: roomEmit }),
-      sockets: { sockets: new Map([['captured-socket', socket]]) },
+      sockets: { sockets: new Map([['captured-socket', socket]]), adapter: { rooms: new Map() } },
     };
     let authorityCalls = 0;
     const dispatcher = new VoiceCommandDispatcher({

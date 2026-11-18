@@ -167,7 +167,7 @@ async function fixture(options: { retained?: boolean; receipt?: Receipt; recover
     FailureStateLogger, VoiceEnforcementHealth, voiceEnforcementLease: lease, voiceEnforcementNodeBootId: boot,
     voiceAuthConnections: connections, voiceEnforcementReleaseQueue: queue,
     snapshotVoiceEnforcementSessions, releaseVoiceEnforcementSessionsAfterClose,
-    io: { sockets: { sockets: new Map() } }, natsService: nats,
+    io: { sockets: { sockets: new Map(), adapter: { rooms: new Map() } } }, natsService: nats,
     mediasoupService: { isReady: () => true, close: async () => { events.push('native-await'); await native.promise; events.push('native-exited'); } },
     roomManager: { closeAll: async () => { events.push('rooms-closed'); } },
     voiceCommandOwner: { release: async () => { events.push('owner-await'); await owner.promise; events.push('owner-released'); } },

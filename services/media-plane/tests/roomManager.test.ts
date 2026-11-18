@@ -1209,6 +1209,7 @@ describe('RoomManager', () => {
         const io = {
           sockets: {
             sockets: new Map([['sock-new', { emit, disconnect }]]),
+            adapter: { rooms: new Map() },
           },
         } as unknown as ForceDisconnectIO;
 

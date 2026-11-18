@@ -77,6 +77,7 @@ function createFakeIo(socketId: string) {
     to,
     sockets: {
       sockets: new Map([[socketId, { emit: ownerEmit, disconnect }]]),
+      adapter: { rooms: new Map() },
     },
   } as unknown as MediaPolicerIO;
   return { io, to, except, peerEmit, ownerEmit, disconnect };
