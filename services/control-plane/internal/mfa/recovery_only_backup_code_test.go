@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,7 +50,7 @@ func TestVerifyRefusesTOTPFamilyCodesWhenTOTPIsRecoveryOnly(t *testing.T) {
 			f := newVerifyFixture(t)
 			f.state.mfaMethods = tc.mfaMethods
 			f.state.recoveryOnly = tc.recoveryOnly
-			f.state.backupHashes = "{" + strings.Join(hashes, ",") + "}"
+			f.state.backupHashes = textArray(t, hashes)
 			f.state.backupUsed = used
 			code := f.right
 			if tc.backup {
@@ -87,7 +88,7 @@ func TestVerifyRestrictedBackupCodesArmTheLockout(t *testing.T) {
 	require.NoError(t, err)
 	f := newVerifyFixture(t)
 	f.state.recoveryOnly = "{totp}"
-	f.state.backupHashes = "{" + strings.Join(hashes, ",") + "}"
+	f.state.backupHashes = textArray(t, hashes)
 	f.state.backupUsed = "{" + strings.TrimSuffix(strings.Repeat("f,", len(hashes)), ",") + "}"
 
 	for i := 0; i < failedAttemptLimit; i++ {
@@ -110,4 +111,14 @@ func backupCodesSpent(state *mfaEventDB) int {
 		}
 	}
 	return n
+}
+
+// textArray renders hashes as the PostgreSQL text-array literal the driver
+// would send. A v2 hash holds commas ("m=19456,t=2,p=1"), so each element must
+// be quoted; joining them bare would split one hash into several.
+func textArray(t *testing.T, hashes []string) string {
+	t.Helper()
+	literal, err := pq.StringArray(hashes).Value()
+	require.NoError(t, err)
+	return literal.(string)
 }
