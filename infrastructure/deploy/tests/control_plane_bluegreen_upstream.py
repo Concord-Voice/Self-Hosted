@@ -107,6 +107,7 @@ def hangup(conn):
     try:
         conn.shutdown(socket.SHUT_RDWR)
     except OSError:
+        # The peer may already be gone; hangup is best effort.
         pass
 
 
@@ -167,6 +168,8 @@ class Upstream:
                 if close:
                     break
         except (OSError, ValueError):
+            # Peer reset or malformed request: drop this connection only.
+            # The finally block below still cleans up.
             pass
         finally:
             with self.cond:

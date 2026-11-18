@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import time
+from typing import NoReturn
 
 
 IMAGE = "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e"
@@ -46,7 +47,7 @@ class TLSRefusalError(Exception):
     """Fixed, sanitized refusal class for expected admission and observation failures."""
 
 
-def _refuse(reason: str) -> None:
+def _refuse(reason: str) -> NoReturn:
     raise TLSRefusalError(reason)
 
 
@@ -271,6 +272,7 @@ def _read_public_leaf(path: str) -> tuple[bytes, str]:
         raise
     except Exception:
         _refuse("self-host TLS certificate refused")
+        return None  # not reached: _refuse always raises
 
 
 def _tls_context(first_leaf_pem: str) -> ssl.SSLContext:
@@ -290,6 +292,7 @@ def _tls_context(first_leaf_pem: str) -> ssl.SSLContext:
         raise
     except Exception:
         _refuse("self-host TLS prerequisite unavailable")
+        return None  # not reached: _refuse always raises
 
 
 def _remaining(deadline: float, reason: str = "self-host TLS deadline exceeded") -> float:
@@ -375,6 +378,7 @@ def _observe_tls_until(cert_path: str, domain: str, port: int, deadline: float) 
                 elif raw_socket is not None:
                     raw_socket.close()
             except OSError:
+                # Close is best effort; the retry or refusal path does not depend on it.
                 pass
         if retry:
             remaining = deadline - time.monotonic()
@@ -420,6 +424,7 @@ def _run_bounded(argv: list[str], deadline: float, *, cwd: str | None = None,
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
+            # The process group may already be gone; draining below handles both cases.
             pass
         try:
             process.communicate(timeout=0.05)
@@ -429,16 +434,19 @@ def _run_bounded(argv: list[str], deadline: float, *, cwd: str | None = None,
                     try:
                         pipe.close()
                     except OSError:
+                        # Closing a pipe is best effort; the deadline refusal below still runs.
                         pass
             try:
                 process.wait(timeout=0.05)
             except subprocess.TimeoutExpired:
+                # Best effort only; the deadline refusal below still runs.
                 pass
         _refuse("self-host TLS deadline exceeded")
     except Exception:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
+            # The process group may already be gone; the refusal below still runs.
             pass
         _refuse(refusal)
     _remaining(deadline)
@@ -484,6 +492,7 @@ def _read_tls_data(root: str, deadline: float, env: dict[str, str]) -> tuple[str
         raise
     except Exception:
         _refuse("self-host TLS environment refused")
+        return None  # not reached: _refuse always raises
 
 
 def _compose_model(root: str, project: str, compose_args: list[str], deadline: float,
@@ -507,6 +516,7 @@ def _compose_model(root: str, project: str, compose_args: list[str], deadline: f
         raise
     except Exception:
         _refuse("self-host TLS model refused")
+        return None  # not reached: _refuse always raises
 
 
 def _selected_container(root: str, project: str, compose_args: list[str], deadline: float,
@@ -544,6 +554,7 @@ def _positive_budget(value: str) -> float:
         raise
     except Exception:
         _refuse("self-host TLS caller deadline refused")
+        return None  # not reached: _refuse always raises
 
 
 def _main(argv: list[str]) -> int:
