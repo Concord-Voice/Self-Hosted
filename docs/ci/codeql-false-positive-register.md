@@ -406,3 +406,27 @@ _None yet._
 | Reason | `false positive` |
 | Justification | The SARIF code flow starts at `selection of PasswordLogin` (`authoritycontract/msg_published.go:153`) and crosses `m.spec()` at `codec.go:96`, the pattern in the legacy calibration note for this rule. The sink is the ECDSA P-384 pre-hash of a delegation or succession message, which the ceremony tool signs with an operator key file. The contract requires ECDSA P-384 over SHA-384, and `keySigner.sign` checks each signature with `VerifyP384`, so another hash would make the signature fail. |
 | Re-check | Reopen if `keySigner.sign` is ever given credential material, or if the operator signature algorithm changes. |
+
+#### Code Quality #1 and #2 — `js/missing-await` — `services/media-plane/src/lib/nats.ts:473`, `services/media-plane/src/lib/redis.ts:368`
+
+| Field | Value |
+|---|---|
+| Findings | GitHub Code Quality #1 (`nats.ts:473`, value `operation`) and #2 (`redis.ts:368`, value `attempt`) |
+| Location | `nats.ts` `pullVoiceCommands`: `if (runtime.inFlight === operation) runtime.inFlight = undefined;`. `redis.ts` `refreshManagedCredential`: `if (this.managedRefresh === attempt) this.managedRefresh = null;` |
+| Recorded | 2026-11-18, weekly hygiene sweep (branch `fix/weekly-hygiene-code-smells`) |
+| Reason | `false positive` |
+| Justification | Each flagged line is in the `finally` of a `try { await <promise>; }`. The `try` already awaits the promise, so its rejection reaches the caller and no rejection goes unhandled. The `===` compares promise identity on purpose: it clears the single-flight slot (`managedRefresh`) or the in-flight slot (`inFlight`) only if a later call has not replaced it. Awaiting the promise again there would compare a resolved value with a promise and never match. The slot would then never clear, and every later refresh or command pull would be blocked. |
+| Dismissal | Not dismissed in GitHub. The Code Quality findings API is read-only (`PATCH .../code-quality/findings/{n}` returns 404), and these findings have no code-scanning alert to dismiss. Recorded here only. |
+| Re-check | Reopen if either `try` stops awaiting the promise, or if the slot ever gets something other than the promise it is compared with. |
+
+#### Code Quality #3 — `js/comparison-between-incompatible-types` — `services/media-plane/src/lib/voiceAuthReceiver.ts:49`
+
+| Field | Value |
+|---|---|
+| Finding | GitHub Code Quality #3 (`value === null` in `legacyEnvelope`) |
+| Location | `if (typeof value !== 'object' \|\| value === null \|\| Array.isArray(value)) reject();` |
+| Recorded | 2026-11-18, weekly hygiene sweep (branch `fix/weekly-hygiene-code-smells`) |
+| Reason | `false positive` |
+| Justification | `value` comes from `JSON.parse` of untrusted envelope text, and `JSON.parse('null')` returns `null`. Because `typeof null === 'object'`, the `typeof` check alone does not reject `null`. The `value === null` check is what keeps this validation fail-closed on a `null` envelope. CodeQL's type inference wrongly treats the narrowed value as non-null. Removing the check would let `null` reach `Object.keys`-style access and throw an unexpected `TypeError` there, outside the defined `reject()` path. |
+| Dismissal | Not dismissed in GitHub. The Code Quality findings API is read-only (see above). Recorded here only. |
+| Re-check | Reopen if the value stops coming from `JSON.parse`, or if this guard is replaced by a decoder that already rejects `null`. |
