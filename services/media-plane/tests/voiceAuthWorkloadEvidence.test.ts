@@ -115,7 +115,7 @@ describe('Task 8 retained workload measurements', () => {
       memory(`round${round}:mixed1000`, f.owners.retainedIdentityCount(), 0);
       const calls = f.calls.length;
       for (let n = 0; n < 300; n++) expect(() => f.reserve(`overflow-${n}`)).toThrow();
-      expect(f.calls.length).toBe(calls);
+      expect(f.calls).toHaveLength(calls);
       let unsigned = true;
       f.answer(exchange => response(exchange, unsigned && exchange.request.endpoint() === 'room_release'));
       const terminal = f.owners.releaseRoom(first);

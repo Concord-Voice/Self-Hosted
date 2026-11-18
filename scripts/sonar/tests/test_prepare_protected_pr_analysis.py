@@ -188,14 +188,14 @@ class PrepareTest(unittest.TestCase):
                         "jobs": {key: "success" for key in ("ioc", "build", "semgrep", "eslint", "govulncheck")},
                         "coverage": {key: True for key in MODULE.COMPONENTS}}
         self.verified = {"payload": self.payload,
-                         "claims": {"repository": MODULE.REPO, "repository_id": "1158152129",
+                         "claims": {"repository": MODULE.REPO, "repository_id": "1359565266",
                                     "event_name": "pull_request", "run_id": "42", "run_attempt": "2",
                                     "workflow_ref": MODULE.REPO + "/.github/workflows/required-pr-build.yml@refs/heads/main",
                                     "workflow_sha": self.base}}
         self.run_data = {"id": 42, "run_attempt": 2, "event": "pull_request", "head_sha": self.head,
                          "status": "in_progress", "conclusion": None,
                          "path": ".github/workflows/required-pr-build.yml",
-                         "repository": {"full_name": MODULE.REPO, "id": 1158152129},
+                         "repository": {"full_name": MODULE.REPO, "id": 1359565266},
                          "pull_requests": [{"number": 7}], "run_started_at": "2026-10-17T00:00:00Z"}
         self.pr_data = {"number": 7, "state": "open", "head": {"sha": self.head, "ref": "feature/a:b"},
                         "base": {"sha": self.base, "ref": "main"}, "merge_commit_sha": self.head}

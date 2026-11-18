@@ -69,12 +69,33 @@ func TestNewRouter_SelfHostedSSODeploymentBoundary(t *testing.T) {
 		for _, provider := range []string{"google", "apple", "unlisted"} {
 			t.Run(route.name+"/"+provider, func(t *testing.T) {
 				w := httptest.NewRecorder()
-				router.ServeHTTP(w, httptest.NewRequest(route.method, "/api/v1/auth/sso/"+provider+route.suffix, nil))
+				req := httptest.NewRequest(route.method, "/api/v1/auth/sso/"+provider+route.suffix, nil)
+				if route.method == http.MethodPost {
+					req.Header.Set("Content-Type", "application/json")
+				}
+				router.ServeHTTP(w, req)
 				require.Equal(t, http.StatusForbidden, w.Code)
 				assert.JSONEq(t, `{"error_code":"sso_disabled_self_hosted"}`, w.Body.String())
 			})
 		}
 	}
+	t.Run("public cookie routes mount login CSRF guard", func(t *testing.T) {
+		for _, path := range []string{
+			"/api/v1/auth/register/confirm", "/api/v1/auth/login", "/api/v1/auth/mfa/verify",
+			"/api/v1/auth/sso/google/session", "/api/v1/auth/sso/google/complete-link",
+			"/api/v1/auth/sso/google/complete-registration",
+		} {
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, nil))
+			require.Equal(t, http.StatusUnsupportedMediaType, w.Code, path)
+			assert.JSONEq(t, `{"error":"unsupported_media_type"}`, w.Body.String())
+		}
+		for _, path := range []string{"/api/v1/auth/refresh", "/api/v1/auth/logout"} {
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, nil))
+			assert.NotEqual(t, http.StatusUnsupportedMediaType, w.Code, path)
+		}
+	})
 	t.Run("descriptor agrees with boundary", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/server/capabilities", nil))

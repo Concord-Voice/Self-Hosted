@@ -167,7 +167,7 @@ func RateLimitByUserFailClosed(redis *redis.Client, requests int, window time.Du
 // first-hit Expire but returns (allowed, err) instead of touching gin: a Redis backend
 // error returns (false, err) so the caller treats an outage as DENY — the same fail-closed
 // posture as RateLimitByUserFailClosed. The caller owns key construction and the deny action.
-func AllowUserAction(ctx context.Context, rdb *redis.Client, key string, limit int, window time.Duration) (bool, error) {
+func AllowUserAction(ctx context.Context, rdb redis.Cmdable, key string, limit int, window time.Duration) (bool, error) {
 	count, err := rdb.Incr(ctx, key).Result()
 	if err != nil {
 		return false, err // fail-closed: a backend error denies

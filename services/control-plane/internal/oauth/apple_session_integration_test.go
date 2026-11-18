@@ -181,12 +181,13 @@ func seedAppleSessionState(t *testing.T, rdb redis.Cmdable, provider, nonce stri
 	t.Helper()
 	state := fmt.Sprintf("session-state-%s-%d", provider, time.Now().UnixNano())
 	payload, err := json.Marshal(map[string]any{
-		"provider":      provider,
-		"state":         state,
-		"nonce":         nonce,
-		"code_verifier": "",
-		"redirect_uri":  "http://127.0.0.1:51620/oauth/callback",
-		"created_at":    time.Now().UTC(),
+		"provider":              provider,
+		"state":                 state,
+		"nonce":                 nonce,
+		"client_binding_digest": testSSOClientBindingDigest(t),
+		"code_verifier":         "",
+		"redirect_uri":          "http://127.0.0.1:51620/oauth/callback",
+		"created_at":            time.Now().UTC(),
 	})
 	require.NoError(t, err)
 	require.NoError(t, rdb.Set(context.Background(), "sso_state:"+state, payload, 10*time.Minute).Err())
@@ -194,13 +195,56 @@ func seedAppleSessionState(t *testing.T, rdb redis.Cmdable, provider, nonce stri
 }
 
 func postAppleSession(rig *appleSessionRig, provider string, body map[string]any) *httptest.ResponseRecorder {
+	return postAppleSessionWithBinding(rig, provider, body, testSSOClientBinding)
+}
+
+func postAppleSessionWithBinding(rig *appleSessionRig, provider string, body map[string]any, binding string) *httptest.ResponseRecorder {
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(appleSessionPath, provider), bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
+	if binding != "" {
+		req.Header.Set("X-Concord-SSO-Client-Binding", binding)
+	}
 	req.RemoteAddr = "203.0.113.9:50000"
 	w := httptest.NewRecorder()
 	rig.Engine.ServeHTTP(w, req)
 	return w
+}
+
+func TestAppleSession_ClientBindingConsumesStateBeforeProviderWork(t *testing.T) {
+	rig := newAppleSessionRig(t, false)
+	for name, binding := range map[string]string{
+		"missing": "", "short": strings.Repeat("A", 42),
+		"mismatch": strings.Repeat("B", 43), "padded": testSSOClientBinding + "=",
+		"noncanonical": strings.Repeat("A", 42) + "B",
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := seedAppleSessionState(t, rig.Redis, "apple", "nonce")
+			w := postAppleSessionWithBinding(rig, "apple", map[string]any{"id_token": "invalid", "state": state}, binding)
+			require.Equal(t, http.StatusUnauthorized, w.Code)
+			assert.Contains(t, w.Body.String(), "invalid_state")
+			assert.NotContains(t, w.Body.String(), testSSOClientBinding)
+			_, err := rig.Redis.Get(context.Background(), "sso_state:"+state).Result()
+			assert.ErrorIs(t, err, redis.Nil)
+		})
+	}
+	state := seedAppleSessionState(t, rig.Redis, "apple", "nonce")
+	w := postAppleSession(rig, "apple", map[string]any{"id_token": "invalid", "state": state})
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid_id_token", "valid binding must reach provider token validation")
+
+	state = seedAppleSessionState(t, rig.Redis, "apple", "nonce")
+	raw, err := rig.Redis.Get(context.Background(), "sso_state:"+state).Bytes()
+	require.NoError(t, err)
+	var legacy map[string]any
+	require.NoError(t, json.Unmarshal(raw, &legacy))
+	delete(legacy, "client_binding_digest")
+	raw, err = json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, rig.Redis.Set(context.Background(), "sso_state:"+state, raw, time.Minute).Err())
+	w = postAppleSession(rig, "apple", map[string]any{"id_token": "invalid", "state": state})
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid_state", "pre-binding state must fail closed")
 }
 
 // ───────────────────────── happy paths ─────────────────────────
@@ -436,13 +480,14 @@ func TestAppleSession_JWKSRotation(t *testing.T) {
 	w1 := postAppleSession(rig, "apple", map[string]any{"id_token": tok1, "state": state1})
 	require.Equal(t, http.StatusOK, w1.Code, w1.Body.String())
 
-	// Rotate JWKS: the cached kid-1 must not satisfy kid-2 → refetch.
+	// A newly rotated kid is rejected during the one-minute provider fetch bound.
 	rig.JWKS.rotate(t)
 	state2 := seedAppleSessionState(t, rig.Redis, "apple", "nonce-rot-2")
 	tok2 := rig.JWKS.sign(t, appleSessionClaims(time.Now(), "nonce-rot-2",
 		map[string]any{"email": "rot2@example.com", "sub": "sub-rot-2"}))
 	w2 := postAppleSession(rig, "apple", map[string]any{"id_token": tok2, "state": state2})
-	require.Equal(t, http.StatusOK, w2.Code, "kid miss after rotation must re-fetch JWKS")
+	require.Equal(t, http.StatusUnauthorized, w2.Code, "unknown kid must wait for the next bounded JWKS fetch")
+	assert.Contains(t, w2.Body.String(), "invalid_id_token")
 }
 
 // ───────────────────────── state-class rejections (invalid_state) ─────────────────────────

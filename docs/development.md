@@ -225,6 +225,10 @@ check compares every `FROM`, every `COPY --from=` or `ADD --from=`, and every
 python3 .github/scripts/check-base-images.py
 ```
 
+With no file arguments it reads `.github/base-images.json` as staged in the
+git index, not the copy on disk, so `git add` a manifest edit before you run it
+by hand. The manifest must be tracked as a regular file inside the repository.
+
 It checks every tracked path that contains `dockerfile` in any letter case. It
 needs no Docker daemon and no network. It runs as a pre-commit hook on every
 commit, so deleting or renaming a Dockerfile is caught too. In CI it runs
@@ -240,8 +244,9 @@ twice:
   it is where a change to the checker is tested.
 
 Each violation is one line, `<file>:<line>: <rule>: <message>`, and the exit
-code is 1. Exit code 2 means the check could not complete, for example because
-it cannot parse the manifest. Fix that first.
+code is 1. Exit code 2 means the check could not complete: the manifest cannot
+be parsed, or it is untracked, a symbolic link, outside the repository, or in
+an unresolved merge. Fix that first.
 
 An entry is keyed by the Dockerfile's path from the repository root:
 
@@ -818,6 +823,35 @@ npm install --global windows-build-tools
 - Allocate enough resources in Docker Desktop
 - Minimum: 4 CPU cores, 8 GB RAM
 - Use volumes for faster I/O
+
+## SSO security cutover
+
+An observable shipped Desktop build with IPC contract 34 must precede mandatory server enforcement. Its main
+process sends the same 32-byte, canonical base64url value in
+`X-Concord-SSO-Client-Binding` on both SSO initiation and session exchange, and
+its MFA modal completes an account link through `/auth/mfa/verify`. Advance the
+supported Desktop minimum to that build before deploying this server change;
+`SPA_MIN_CONTRACT` metadata or a green source build alone does not prove the
+client floor is live.
+Old in-flight SSO states and MFA challenges restart after deployment; older
+Desktop builds cannot initiate Apple or Google SSO once the header is required.
+
+Run focused server regressions from `services/control-plane` with an isolated
+`DATABASE_URL` and `REDIS_URL` (never the shared `concord` database):
+
+```sh
+go test -p 1 ./internal/oauth ./internal/auth ./internal/mfa ./internal/middleware ./internal/api -run 'Test.*(SSOLink|CompletionKind|ClientBinding|JWKS|LoginCSRF|InitiateGlobalLimit|KeyMaterialLimit)' -count=1
+go test -race -p 1 ./internal/oauth ./internal/auth ./internal/mfa -run 'Test.*(SSOLink|CompletionKind|JWKS)' -count=1
+```
+
+SSO initiation keeps the per-IP 10/15-minute cap and adds a fail-closed
+600/minute budget per provider before state or Apple bridge allocation.
+Password and SSO registration reject encoded wrapped keys above 43,692 characters
+or salts above 88 characters, and decoded values above 32 KiB or 64 bytes,
+respectively.
+Provider JWKS snapshots replace withdrawn keys; an unknown key ID gets at most
+one refresh opportunity per provider per minute, including failed fetches.
+That bound may delay use of a newly rotated key for up to a minute.
 
 ## Next Steps
 

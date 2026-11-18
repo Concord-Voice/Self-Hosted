@@ -198,7 +198,7 @@ case "${1:-}" in
       fi
     }
     emit_inspect_set() {
-      local image="coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e" status=running running=true paused=false restarting=false inspect_records=""
+      local image="coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e" status=running running=true paused=false restarting=false inspect_records=""
       local project=concordvoice id=2504c0ffee01
       case "${DOCKER_MODE:-}" in
         created) status=created; running=false ;;

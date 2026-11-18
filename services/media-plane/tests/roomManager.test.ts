@@ -97,7 +97,6 @@ function createMockMediasoupService(router = createMockRouter()) {
   const worker = createMockWorker();
   const webRtcServer = { closed: false };
   return {
-    getWebRtcServer: () => undefined,
     getOrCreateRouter: vi.fn().mockResolvedValue(router),
     getWebRtcServer: vi.fn().mockReturnValue(webRtcServer),
     removeRouter: vi.fn(),
@@ -239,7 +238,7 @@ async function joinRoomWithSupportedCrypto(
     roomContext?.roomKind === 'dm'
       ? { ...roomContext, callId: roomContext.callId ?? `call-${roomId}` }
       : roomContext;
-  const result = await manager.joinRoom(roomId, userId, socketId, identity, rtpCapabilities, {
+  await manager.joinRoom(roomId, userId, socketId, identity, rtpCapabilities, {
     entitlement,
     mediaFrameCryptoVersion: SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION,
     credentialEpoch,
@@ -3165,8 +3164,8 @@ describe('RoomManager', () => {
       const fulfilled = results.filter((r) => r.status === 'fulfilled');
       const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
       // Exactly the cap is admitted; the surplus is rejected — the cap holds.
-      expect(fulfilled.length).toBe(8);
-      expect(rejected.length).toBe(1);
+      expect(fulfilled).toHaveLength(8);
+      expect(rejected).toHaveLength(1);
       expect(rejected[0].reason.message).toContain('Video participant limit reached (max 8)');
     });
 
@@ -3388,8 +3387,8 @@ describe('RoomManager', () => {
       );
       const fulfilled = results.filter((r) => r.status === 'fulfilled');
       const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-      expect(fulfilled.length).toBe(1);
-      expect(rejected.length).toBe(2);
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(2);
       expect(rejected[0].reason.message).toContain('Screen share limit reached (max 1)');
     });
 
@@ -9832,9 +9831,9 @@ describe('RoomManager #2153 — ProducerEntry and monotonic stamps', () => {
     await joinRoomWithSupportedCrypto(h.manager, POLICER_ROOM, POLICER_USER, 'sock-u-1', {
       username: 'alice',
     });
-    expect(h.manager.getParticipant(POLICER_ROOM, POLICER_USER)?.sendTransportCreatedAtMs).toBe(
-      null
-    );
+    expect(
+      h.manager.getParticipant(POLICER_ROOM, POLICER_USER)?.sendTransportCreatedAtMs
+    ).toBeNull();
   });
 
   it('stamps the send transport and each producer from the injected clock', async () => {

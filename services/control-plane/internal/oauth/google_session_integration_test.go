@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -167,13 +168,35 @@ func newGoogleSessionRig(t *testing.T) *googleSessionRig {
 }
 
 func postGoogleSession(rig *googleSessionRig, provider string, body map[string]any) *httptest.ResponseRecorder {
+	return postGoogleSessionWithBinding(rig, provider, body, testSSOClientBinding)
+}
+
+func postGoogleSessionWithBinding(rig *googleSessionRig, provider string, body map[string]any, binding string) *httptest.ResponseRecorder {
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(googleSessionPath, provider), bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
+	if binding != "" {
+		req.Header.Set("X-Concord-SSO-Client-Binding", binding)
+	}
 	req.RemoteAddr = "203.0.113.9:50000"
 	w := httptest.NewRecorder()
 	rig.Engine.ServeHTTP(w, req)
 	return w
+}
+
+func TestGoogleSession_ClientBindingConsumesStateBeforeProviderWork(t *testing.T) {
+	rig := newGoogleSessionRig(t)
+	state := seedAppleSessionState(t, rig.Redis, "google", "nonce")
+	w := postGoogleSessionWithBinding(rig, "google", map[string]any{"id_token": "invalid", "state": state}, strings.Repeat("B", 43))
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid_state")
+	_, err := rig.Redis.Get(context.Background(), "sso_state:"+state).Result()
+	assert.ErrorIs(t, err, redis.Nil)
+
+	state = seedAppleSessionState(t, rig.Redis, "google", "nonce")
+	w = postGoogleSession(rig, "google", map[string]any{"id_token": "invalid", "state": state})
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid_id_token")
 }
 
 // ───────────────────────── happy paths ─────────────────────────
@@ -277,13 +300,14 @@ func TestGoogleSession_JWKSRotation(t *testing.T) {
 	w1 := postGoogleSession(rig, "google", map[string]any{"id_token": tok1, "state": state1})
 	require.Equal(t, http.StatusOK, w1.Code, w1.Body.String())
 
-	// Rotate JWKS: the cached kid-1 must not satisfy kid-2 → refetch.
+	// A newly rotated kid is rejected during the one-minute provider fetch bound.
 	rig.JWKS.rotate(t)
 	state2 := seedAppleSessionState(t, rig.Redis, "google", "nonce-grot-2")
 	tok2 := rig.JWKS.sign(t, googleSessionClaims(time.Now(), "nonce-grot-2",
 		map[string]any{"email": "grot2@example.com", "sub": "sub-grot-2"}))
 	w2 := postGoogleSession(rig, "google", map[string]any{"id_token": tok2, "state": state2})
-	require.Equal(t, http.StatusOK, w2.Code, "kid miss after rotation must re-fetch JWKS")
+	require.Equal(t, http.StatusUnauthorized, w2.Code, "unknown kid must wait for the next bounded JWKS fetch")
+	assert.Contains(t, w2.Body.String(), "invalid_id_token")
 }
 
 // ───────────────────────── state-class rejections (invalid_state) ─────────────────────────

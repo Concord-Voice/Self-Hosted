@@ -1919,8 +1919,7 @@ func (h *Handler) removeActiveMemberTx(
 	ctx context.Context,
 	convID string,
 	targetID uuid.UUID,
-	callerUserID string,
-	credentialEpoch string,
+	callerUserID, credentialEpoch string,
 	preflight memberRemovalPreflight,
 ) (string, int, error) {
 	if h.activePlans == nil {
@@ -1978,8 +1977,7 @@ func (h *Handler) removeInactiveMemberTx(
 	ctx context.Context,
 	convID string,
 	targetID uuid.UUID,
-	callerUserID string,
-	credentialEpoch string,
+	callerUserID, credentialEpoch string,
 	preflight memberRemovalPreflight,
 ) (string, int, error) {
 	tx, err := h.db.BeginTx(ctx, nil)
@@ -2141,8 +2139,7 @@ func (h *Handler) transferMemberRemovalCreator(
 	tx *sql.Tx,
 	convID string,
 	targetID uuid.UUID,
-	createdBy string,
-	preflightSuccessorID string,
+	createdBy, preflightSuccessorID string,
 ) (string, error) {
 	if targetID.String() != createdBy {
 		return "", nil
@@ -5239,8 +5236,9 @@ func (h *Handler) AuthorizeDMVoiceForMediaPlane(c *gin.Context) {
 	// round-trip. The media-plane uses username/display_name/avatar_url from here
 	// instead of the client-supplied socket.handshake.auth values, closing the
 	// display-identity spoof for DM voice rooms (mirrors the server-channel path).
-	identity, authorized := h.loadDMVoiceAuthorizeIdentity(c, convID, userID)
-	if !authorized {
+	// This unlocked read is a fast-path membership gate; the identity used in the
+	// response is re-read under the DM topology transaction below.
+	if _, authorized := h.loadDMVoiceAuthorizeIdentity(c, convID, userID); !authorized {
 		return
 	}
 
