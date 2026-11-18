@@ -3927,7 +3927,7 @@ func (h *Handler) validateAndConsumeRecoveryToken(c *gin.Context, tokenStr strin
 	}
 
 	ctx := c.Request.Context()
-	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
+	recoveryUsedKey := recoveryTokenUsedKey(claims.JTI)
 	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: RecoveryTokenTTL, Mode: "NX"}).Result()
 	if errors.Is(err, redis.Nil) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
@@ -4546,8 +4546,29 @@ func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, row.Wire())
 }
 
-// Device routes use Bearer recovery-purpose authentication only. They deliberately
-// do not consume reset tokens or apply access-token credential epochs.
+// recoveryTokenUsedKey names the spent marker a reset reserves for a token jti.
+func recoveryTokenUsedKey(jti string) string {
+	return "recovery_token_used:" + jti
+}
+
+// recoveryTokenSpent reads the spent marker without setting, deleting or
+// extending it. A missing client or any Redis error is an error, never false.
+func (h *Handler) recoveryTokenSpent(ctx context.Context, jti string) (bool, error) {
+	if h.redis == nil {
+		return false, errors.New("recovery spent state unavailable")
+	}
+	n, err := h.redis.Exists(ctx, recoveryTokenUsedKey(jti)).Result()
+	if err != nil {
+		return false, fmt.Errorf("read recovery spent state: %w", err)
+	}
+	return n > 0, nil
+}
+
+// Device routes use Bearer recovery-purpose authentication only and never spend
+// the token, but refuse one a reset has spent. The spent read stays outside SQL
+// because the epoch comparison in recoveryGuard is the linearization point: a
+// reset that reserves the marker after this read either commits first, so the
+// guard sees the rotated epoch, or commits after the device operation.
 func (h *Handler) validateDeviceRecoveryToken(c *gin.Context, token string) *RecoveryClaims {
 	if token == "" || len(token) > 4096 {
 		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
@@ -4562,6 +4583,16 @@ func (h *Handler) validateDeviceRecoveryToken(c *gin.Context, token string) *Rec
 		return nil
 	}
 	if err != nil || claims == nil || !devicerecovery.CanonicalUUID(claims.UserID) || claims.JTI == "" || claims.ExpiresAt.IsZero() {
+		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
+		return nil
+	}
+	spent, err := h.recoveryTokenSpent(c.Request.Context(), claims.JTI)
+	if err != nil {
+		h.log.Error("Failed to read recovery token spent state", "error_class", "token_usage_check")
+		writeRecoveryPolicyError(c, ErrRecoveryPolicyUnavailable)
+		return nil
+	}
+	if spent {
 		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
 		return nil
 	}

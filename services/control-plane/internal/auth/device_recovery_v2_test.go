@@ -3,14 +3,19 @@ package auth_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/devicerecovery"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,12 +63,14 @@ func (s binaryString) Scan(src any) error {
 	return nil
 }
 
-func TestDeviceRecoveryV2ActualRoutesCompleteAndResetTokenSurvives(t *testing.T) {
+// TestDeviceCeremonyThenResetWithSameToken proves the ceremony does not spend
+// the recovery token, the reset then succeeds with it, and the device routes
+// refuse it once the reset has spent it and rotated the credential epoch.
+func TestDeviceCeremonyThenResetWithSameToken(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "devv2routes")
 	token := getRecoveryToken2(t, ts, user)
-	_, err := ts.DB.Exec(`INSERT INTO trusted_recovery_devices(user_id,device_name,machine_id) VALUES($1,'device',$2)`, user.ID, uuid.NewString())
-	require.NoError(t, err)
+	access := testhelpers.AuthHeaders(trustedDeviceSession(t, ts, user))
 	create := ts.DoRequest("POST", pathDeviceReqCreate, deviceCreateV2(t, user.ID, token), nil)
 	require.Equal(t, 200, create.Code, create.Body.String())
 	var pending struct {
@@ -77,7 +84,6 @@ func TestDeviceRecoveryV2ActualRoutesCompleteAndResetTokenSurvives(t *testing.T)
 	require.NoError(t, err)
 	digest := devicerecovery.Encode(h)
 	route := "/api/v1/mfa/recovery-requests/" + pending.RequestID + "/respond"
-	access := testhelpers.AuthHeaders(user.AccessToken)
 	offered := ts.DoRequest("POST", route, map[string]any{"action": "offer", "protocol_version": 2, "responder_public_key": o.ResponderPublicKey, "responder_nonce": o.ResponderNonce, "transcript_hash": digest}, access)
 	require.Equal(t, 200, offered.Code, offered.Body.String())
 	approved := ts.DoRequest("POST", route, map[string]any{"action": "approve", "protocol_version": 2, "transcript_hash": digest, "encrypted_payload": payload}, access)
@@ -103,4 +109,91 @@ func TestDeviceRecoveryV2ActualRoutesCompleteAndResetTokenSurvives(t *testing.T)
 	used, err = ts.Redis.Exists(context.Background(), "recovery_token_used:"+claims.ID).Result()
 	require.NoError(t, err)
 	require.Zero(t, used)
+
+	_, wrappedKey, salt := testhelpers.E2EETestKeys()
+	reset := ts.DoRequest("POST", pathRecoveryResetPwd, map[string]any{
+		"recovery_token": token, "new_password": testNewPassword,
+		"wrapped_private_key": wrappedKey, "key_derivation_salt": salt, "key_derivation_alg": testKeyDerivationAlg,
+	}, nil)
+	require.Equal(t, http.StatusOK, reset.Code, reset.Body.String())
+	poll = ts.DoRequest("GET", pathDeviceReqPoll+pending.RequestID, nil, headers)
+	require.Equal(t, http.StatusUnauthorized, poll.Code, poll.Body.String())
+}
+
+// spentStateFault fails every Redis read of a recovery token's spent marker.
+type spentStateFault struct{}
+
+func (spentStateFault) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (spentStateFault) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if args := cmd.Args(); len(args) > 1 {
+			if key, ok := args[1].(string); ok && strings.HasPrefix(key, "recovery_token_used:") {
+				return errors.New("spent state unavailable")
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (spentStateFault) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// deviceRouteResponses runs create, poll and complete with token for user.
+func deviceRouteResponses(t *testing.T, ts *testhelpers.TestServer, userID, token string) map[string]*httptest.ResponseRecorder {
+	t.Helper()
+	headers := http.Header{"Authorization": []string{"Bearer " + token}}
+	id := uuid.NewString()
+	return map[string]*httptest.ResponseRecorder{
+		"create": ts.DoRequest("POST", pathDeviceReqCreate, deviceCreateV2(t, userID, token), nil),
+		"poll":   ts.DoRequest("GET", pathDeviceReqPoll+id, nil, headers),
+		"complete": ts.DoRequest("POST", pathDeviceReqPoll+id+"/complete",
+			devicerecovery.CompleteBody{ProtocolVersion: 2, TranscriptHash: devicerecovery.Encode(make([]byte, 32))}, headers),
+	}
+}
+
+func countRecoveryRequests(t *testing.T, ts *testhelpers.TestServer, userID string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM recovery_requests WHERE user_id = $1`, userID).Scan(&n))
+	return n
+}
+
+func TestDeviceRoutesRejectSpentRecoveryToken(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "devspent")
+	_ = trustedDeviceSession(t, ts, user)
+	token := recoveryTokenFor(t, ts, user)
+	claims, err := mfa.ValidateChallengeToken(token, testhelpers.TestJWTSecret, mfa.PurposeRecovery)
+	require.NoError(t, err)
+	ctx := context.Background()
+	key := "recovery_token_used:" + claims.ID
+	require.NoError(t, ts.Redis.Set(ctx, key, "1", 10*time.Minute).Err())
+	generic := ts.DoRequest("GET", pathDeviceReqPoll+uuid.NewString(), nil, http.Header{"Authorization": []string{"Bearer not-a-token"}})
+	require.Equal(t, http.StatusUnauthorized, generic.Code)
+
+	for route, w := range deviceRouteResponses(t, ts, user.ID, token) {
+		require.Equal(t, http.StatusUnauthorized, w.Code, route+": "+w.Body.String())
+		require.JSONEq(t, generic.Body.String(), w.Body.String(), route+" must not reveal why the token was refused")
+	}
+	require.Zero(t, countRecoveryRequests(t, ts, user.ID))
+	exists, err := ts.Redis.Exists(ctx, key).Result()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, exists, "a device route never deletes the spent marker")
+	ttl, err := ts.Redis.TTL(ctx, key).Result()
+	require.NoError(t, err)
+	require.True(t, ttl > 0 && ttl <= 10*time.Minute, "a device route never extends the spent marker: %s", ttl)
+}
+
+func TestDeviceRoutesFailClosedWhenSpentStateUnreadable(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "devspentfault")
+	_ = trustedDeviceSession(t, ts, user)
+	token := recoveryTokenFor(t, ts, user)
+	ts.Redis.AddHook(spentStateFault{})
+	for route, w := range deviceRouteResponses(t, ts, user.ID, token) {
+		require.Equal(t, http.StatusServiceUnavailable, w.Code, route+": "+w.Body.String())
+	}
+	require.Zero(t, countRecoveryRequests(t, ts, user.ID))
 }
