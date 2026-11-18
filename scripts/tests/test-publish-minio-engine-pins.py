@@ -23,7 +23,7 @@ PACKAGES = (
     "docker-ce=5:29.9.2-1~ubuntu.24.04~noble",
     "docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble",
     "docker-ce-rootless-extras=5:29.9.2-1~ubuntu.24.04~noble",
-    "containerd.io=2.4.2-3~ubuntu.24.04~noble",
+    "containerd.io=2.4.2-4~ubuntu.24.04~noble",
     "docker-buildx-plugin=0.36.1-1~ubuntu.24.04~noble",
     "docker-compose-plugin=5.5.0-1~ubuntu.24.04~noble",
 )
