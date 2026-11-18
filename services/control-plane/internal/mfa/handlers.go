@@ -1417,19 +1417,18 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password and MFA code are required"})
 		return
 	}
-	// A missing TOTP factor is an idempotent no-op, so no code was verified.
-	// Keep the locked read below for factors that change after this probe.
-	var enrolled bool
-	if err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&enrolled); err != nil {
+	// Probe enrollment before beginning the locked transaction. A Redis charge
+	// while LockSubjectTx holds the users row would let a slow Redis consume a
+	// scarce SQL connection and block factor writers. A missing factor is an
+	// idempotent no-op that judges no code, so it is not charged; the locked
+	// recheck below is still authoritative.
+	var preflightTOTPExists bool
+	if err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&preflightTOTPExists); err != nil {
 		h.log.Error("Failed to read TOTP enrollment", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	if !enrolled {
-		c.JSON(http.StatusOK, gin.H{"message": "TOTP MFA has been disabled"})
-		return
-	}
-	if !h.chargeMFASettingsCode(c, userID, req.Code) {
+	if preflightTOTPExists && !h.chargeMFASettingsCode(c, userID, req.Code) {
 		return
 	}
 
@@ -1462,11 +1461,20 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, attempt, req.Password, req.Code, stepup.PurposeTOTPDisable); e != nil {
-		h.refuseMFASettingsStepUp(c, e, factorRemovalStage(e, req.Password, req.Code))
-		return
-	}
+	// Row gone but mfa_methods may still list 'totp': the sync below cleans
+	// the denormalized flags either way, and removes no factor.
 	if totpExists {
+		// A factor appearing after the preflight has not been charged. Refuse it
+		// for a retry instead of offering a free verifier guess; charging here
+		// would reintroduce a Redis round trip while the users row is locked.
+		if !preflightTOTPExists {
+			c.JSON(http.StatusConflict, gin.H{"error": "TOTP enrollment changed; retry"})
+			return
+		}
+		if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, attempt, req.Password, req.Code, stepup.PurposeTOTPDisable); e != nil {
+			h.refuseMFASettingsStepUp(c, e, factorRemovalStage(e, req.Password, req.Code))
+			return
+		}
 		if !h.deleteTOTPTx(c, tx, userID, es) {
 			return
 		}
