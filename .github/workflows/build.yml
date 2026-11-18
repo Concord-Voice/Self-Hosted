@@ -953,7 +953,7 @@ jobs:
       # Tier-1 cache-WARM job ONLY - never add it to the cache-cold sibling
       # job below, whose value depends on a genuinely cold builder (ADR-0016).
       - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184 # v2.2.0
+        uses: useblacksmith/setup-docker-builder@06dd9c83a5d541274d2e3ac67625560979275267 # v2.3.0
         with:
           cache-key: services/media-plane/Dockerfile
           nofallback: true
