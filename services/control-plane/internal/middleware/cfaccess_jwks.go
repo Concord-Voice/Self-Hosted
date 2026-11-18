@@ -19,9 +19,18 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// Stale-key policy: a cached key verifies only while its key set is younger
+// than jwksTTL. An expired key is never served without a successful refresh,
+// whether that refresh failed or was throttled behind a failure, because the
+// issuer may have withdrawn it. Availability comes from refreshing ahead of
+// expiry instead: inside the last jwksRefreshAhead of the TTL a still-valid
+// key keeps verifying while one background refresh runs, so a transient
+// outage near the hour gets retries without extending any key's maximum age.
 const (
 	jwksTTL             = time.Hour
+	jwksRefreshAhead    = 10 * time.Minute
 	jwksRefreshInterval = time.Second
+	jwksRefreshKey      = "jwks"
 	negativeKIDTTL      = time.Minute
 	maxNegativeKIDs     = 256
 	maxJWKSBody         = 1 << 20
@@ -71,12 +80,22 @@ type accessVerifier struct {
 	aud     string
 	client  *http.Client
 
-	mu           sync.RWMutex
-	keys         map[string]*rsa.PublicKey
-	fetchedAt    time.Time
-	lastAttempt  time.Time
-	negativeKIDs map[string]time.Time
-	refreshGroup singleflight.Group
+	mu             sync.RWMutex
+	keys           map[string]*rsa.PublicKey
+	fetchedAt      time.Time
+	lastAttempt    time.Time
+	lastRefreshErr error
+	negativeKIDs   map[string]time.Time
+	refreshGroup   singleflight.Group
+}
+
+// cachedKey is one consistent read of the cache for a KID.
+type cachedKey struct {
+	key       *rsa.PublicKey
+	known     bool
+	age       time.Duration
+	negative  bool
+	throttled bool
 }
 
 func newAccessVerifier(teamDomain, aud string) *accessVerifier {
@@ -159,65 +178,104 @@ func (v *accessVerifier) lookupKey(kid string) (*rsa.PublicKey, error) {
 		return nil, errUnknownKID
 	}
 
-	now := nowFunc()
-	v.mu.RLock()
-	k, ok := v.keys[kid]
-	fresh := now.Sub(v.fetchedAt) < jwksTTL
-	negativeUntil, negative := v.negativeKIDs[kid]
-	v.mu.RUnlock()
-	if ok && fresh {
-		return k, nil
+	c := v.cached(kid, nowFunc())
+	if c.known && c.age < jwksTTL {
+		if c.age >= jwksTTL-jwksRefreshAhead && !c.throttled {
+			// Refresh ahead without blocking this still-valid key. DoChan joins an
+			// in-flight refresh, and its buffered result needs no reader.
+			v.refreshGroup.DoChan(jwksRefreshKey, v.refreshResult)
+		}
+		return c.key, nil
 	}
-	if negative && now.Before(negativeUntil) {
+	if !c.known && c.negative {
 		return nil, errUnknownKID
 	}
 
-	if err := v.refresh(); err != nil {
+	fetched, err := v.refresh()
+	c = v.cached(kid, nowFunc())
+	switch {
+	case c.known && c.age < jwksTTL:
+		return c.key, nil
+	case c.known || err != nil:
+		// The key set is still expired, or this KID's refresh failed: fail closed.
 		return nil, fmt.Errorf("%w: jwks unavailable", errUnknownKID)
-	}
-
-	v.mu.RLock()
-	k, ok = v.keys[kid]
-	v.mu.RUnlock()
-	if !ok {
+	case fetched:
+		// A completed fetch confirmed the issuer does not publish this KID.
 		v.cacheNegativeKID(kid, nowFunc())
 		return nil, errUnknownKID
+	default:
+		// The refresh was throttled and fetched nothing for this KID, so it is
+		// not negatively cached; the next permitted refresh may find it.
+		return nil, errUnknownKID
 	}
-	return k, nil
 }
 
-func (v *accessVerifier) refresh() error {
-	_, err, _ := v.refreshGroup.Do("jwks", func() (any, error) {
-		return nil, v.refreshOnce()
-	})
-	return err
+func (v *accessVerifier) cached(kid string, now time.Time) cachedKey {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	key, known := v.keys[kid]
+	negativeUntil, negative := v.negativeKIDs[kid]
+	return cachedKey{
+		key:       key,
+		known:     known,
+		age:       now.Sub(v.fetchedAt),
+		negative:  negative && now.Before(negativeUntil),
+		throttled: now.Sub(v.lastAttempt) < jwksRefreshInterval,
+	}
 }
 
-func (v *accessVerifier) refreshOnce() error {
+// refresh reports whether a fetch completed successfully for this call or the
+// singleflight call it joined. A throttled call fetches nothing and returns the
+// previous attempt's error, so a failure is not masked during the interval.
+func (v *accessVerifier) refresh() (bool, error) {
+	result, err, _ := v.refreshGroup.Do(jwksRefreshKey, v.refreshResult)
+	fetched, _ := result.(bool)
+	return fetched, err
+}
+
+func (v *accessVerifier) refreshResult() (any, error) {
+	return v.refreshOnce()
+}
+
+func (v *accessVerifier) refreshOnce() (bool, error) {
 	now := nowFunc()
 	v.mu.Lock()
 	if now.Sub(v.lastAttempt) < jwksRefreshInterval {
+		err := v.lastRefreshErr
 		v.mu.Unlock()
-		return nil
+		return false, err
 	}
 	v.lastAttempt = now
 	v.mu.Unlock()
 
+	next, err := v.fetchKeys()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.lastRefreshErr = err
+	if err != nil {
+		return false, err
+	}
+	v.keys = next
+	v.fetchedAt = nowFunc()
+	return true, nil
+}
+
+func (v *accessVerifier) fetchKeys() (map[string]*rsa.PublicKey, error) {
 	resp, err := v.client.Get(v.jwksURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("jwks status %d", resp.StatusCode)
+		return nil, fmt.Errorf("jwks status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSBody+1))
 	if err != nil {
-		return fmt.Errorf("read jwks: %w", err)
+		return nil, fmt.Errorf("read jwks: %w", err)
 	}
 	if len(body) > maxJWKSBody {
-		return errors.New("jwks response too large")
+		return nil, errors.New("jwks response too large")
 	}
 	var doc struct {
 		Keys []struct {
@@ -230,10 +288,10 @@ func (v *accessVerifier) refreshOnce() error {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&doc); err != nil {
-		return fmt.Errorf("decode jwks: %w", err)
+		return nil, fmt.Errorf("decode jwks: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("jwks has trailing data")
+		return nil, errors.New("jwks has trailing data")
 	}
 
 	next := make(map[string]*rsa.PublicKey, len(doc.Keys))
@@ -244,13 +302,9 @@ func (v *accessVerifier) refreshOnce() error {
 		}
 	}
 	if len(next) == 0 {
-		return errors.New("jwks empty")
+		return nil, errors.New("jwks empty")
 	}
-	v.mu.Lock()
-	v.keys = next
-	v.fetchedAt = nowFunc()
-	v.mu.Unlock()
-	return nil
+	return next, nil
 }
 
 func (v *accessVerifier) cacheNegativeKID(kid string, now time.Time) {
