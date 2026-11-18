@@ -61,7 +61,7 @@ Verbs:
   logs [<service>] [-n N] [--no-follow] [--errors] [--clear]
                       Tail logs (services: all, control-plane, media-plane, vite, client [N], docker [svc])
   restart             Stop + start without rebuild
-  rebuild             Stop + start with rebuild (go build + npm install)
+  rebuild             Stop + start with rebuild (go build + forced npm ci)
   freshstart          Wipe all data (DB, Redis, client data) and start fresh
   validate-config     Validate base + dev compose overlay
   dev-code [email]    Print the latest dev-mode email verification code from the
@@ -1571,6 +1571,66 @@ _up_control_plane() {
   fi
 }
 
+# Lock-exact dependency sync for `up`. `npm ci` installs exactly what
+# package-lock.json pins and never rewrites it, but it always wipes
+# node_modules/ first. A stamp in node_modules/ records the hash of
+# package.json + package-lock.json at the last successful `npm ci`, so a warm
+# tree whose manifests and installed tree have not moved skips the install at
+# zero cost (see _npm_tree_sha256). Hashing
+# package.json too means a manifest edit without a lockfile change still runs
+# `npm ci`, which then fails loudly on the mismatch instead of starting with a
+# missing module. The stamp is written only after every pass has succeeded; a
+# failed run leaves no stamp, so the next `up` installs again. `rebuild` sets
+# CONCORD_FORCE_NPM_CI=1 to ignore the stamp and always reinstall.
+# Usage: _npm_ci_if_lock_changed <label> <npm ci args...> [-- <post command...>]
+_lock_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    cat "$@" | sha256sum | awk '{print $1}'
+  else
+    cat "$@" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+# The manifests, plus npm's own record of the installed tree when it exists.
+# npm rewrites node_modules/.package-lock.json on every install or uninstall,
+# so an out-of-band `npm install --no-save` or `npm uninstall` also breaks the
+# match. Deleting files inside node_modules/ by hand does not; `rebuild` is the
+# repair verb for that.
+_npm_tree_sha256() {
+  local files=(package.json package-lock.json)
+  [[ -f node_modules/.package-lock.json ]] && files+=(node_modules/.package-lock.json)
+  _lock_sha256 "${files[@]}"
+}
+
+_npm_ci_if_lock_changed() {
+  local label="$1"
+  shift
+  local ci_args=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    ci_args+=("$1")
+    shift
+  done
+  [[ "${1:-}" == "--" ]] && shift
+
+  local stamp="node_modules/.concord-lock.sha256"
+  local lock_sha
+  lock_sha="$(_npm_tree_sha256)" || return 1
+  if [[ "${CONCORD_FORCE_NPM_CI:-0}" -eq 0 && -d node_modules && -f "$stamp" && "$(<"$stamp")" == "$lock_sha" ]]; then
+    return 0
+  fi
+
+  [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}🔧 npm ci (${label})${NC}"
+  rm -f "$stamp"  # a failed run must never leave a stamp that matches
+  npm ci ${ci_args[@]+"${ci_args[@]}"} >/dev/null || return 1
+  if [[ "$#" -gt 0 ]]; then
+    "$@" >/dev/null || return 1
+  fi
+  mkdir -p node_modules || return 1
+  # Re-hash: npm ci has just rewritten node_modules/.package-lock.json.
+  lock_sha="$(_npm_tree_sha256)" || return 1
+  printf '%s\n' "$lock_sha" >"$stamp"
+}
+
 _up_media_plane() {
   local no_rebuild="$1"
 
@@ -1578,31 +1638,29 @@ _up_media_plane() {
 
   cd "$PROJECT_ROOT/services/media-plane" || return 1
   # Install if --no-rebuild was NOT passed, OR if node_modules is missing
-  # (fresh-checkout case — CI smoke + first-time developer).
+  # (fresh-checkout case — CI smoke + first-time developer). The helper skips
+  # the install when node_modules/ already matches package-lock.json.
   if [[ "$no_rebuild" -eq 0 || ! -d node_modules ]]; then
-    [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}🔧 npm install (media-plane, two-pass)${NC}"
     # Two-pass install defeats the mediasoup-postinstall ordering race
     # documented in `[internal]rules/media-plane.md` "Docker Build Context
     # Invariant" section.
     #
-    # On a fresh checkout with no `node_modules/`, the standard `npm install`
-    # runs postinstall scripts concurrently with dependency installation, so
-    # mediasoup's postinstall (`node npm-scripts.mjs postinstall`) can fire
-    # BEFORE npm has wired the `node-domexception` file:./stubs override
-    # symlink. mediasoup's hook then imports something that pulls fetch-blob,
-    # which imports node-domexception, and ERR_MODULE_NOT_FOUND aborts the
-    # whole install. Locally-warm caches mask this because the symlink
-    # persists across runs.
+    # A single-pass install runs postinstall scripts concurrently with
+    # dependency installation, so mediasoup's postinstall
+    # (`node npm-scripts.mjs postinstall`) can fire BEFORE npm has wired the
+    # `node-domexception` file:./stubs override symlink. mediasoup's hook then
+    # imports something that pulls fetch-blob, which imports node-domexception,
+    # and ERR_MODULE_NOT_FOUND aborts the whole install. `npm ci` always starts
+    # from an empty node_modules/, so it always hits this race.
     #
-    # Pass 1 (`--ignore-scripts`): resolve all deps + create override
-    # symlinks, defer ALL lifecycle scripts.
+    # Pass 1 (`npm ci --ignore-scripts`): install the locked tree + create
+    # override symlinks, defer ALL lifecycle scripts.
     # Pass 2 (`npm rebuild`): re-run install hooks in a context where every
     # override target is already in place.
     #
-    # Cost: ~3-5s extra on fresh `rm -rf node_modules`; zero cost on warm
-    # cache (both passes short-circuit when deps + symlinks are current).
-    npm install --ignore-scripts >/dev/null || return 1
-    npm rebuild >/dev/null || return 1
+    # Cost: a full reinstall only when package-lock.json changed (or no stamp
+    # exists yet); zero cost on a warm tree whose stamp matches the lockfile.
+    _npm_ci_if_lock_changed "media-plane, two-pass" --ignore-scripts -- npm rebuild || return 1
   fi
 
   # Explicit lifecycle verbs own replacement. Stage the complete actual build
@@ -1635,21 +1693,17 @@ _up_clients() {
 
   cd "$PROJECT_ROOT/client/desktop" || return 1
   # See _up_media_plane note — install when missing node_modules even with --no-rebuild.
-  # A tree with no node_modules is where dependency RESOLUTION actually happens, so
-  # that path is lock-exact (`npm ci`). An existing tree keeps `npm install` so the
-  # normal dev loop does not pay for a full wipe-and-reinstall on every `up`.
-  if [[ ! -d node_modules ]]; then
-    [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}🔧 npm ci (client/desktop)${NC}"
-    npm ci >/dev/null || return 1
-  elif [[ "$no_rebuild" -eq 0 ]]; then
-    [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}🔧 npm install (client/desktop)${NC}"
-    npm install >/dev/null || return 1
+  # Both a fresh and an existing tree go through the lock-exact `npm ci` helper;
+  # its lockfile-hash stamp keeps the normal dev loop from paying for a full
+  # wipe-and-reinstall on every `up`.
+  if [[ "$no_rebuild" -eq 0 || ! -d node_modules ]]; then
+    _npm_ci_if_lock_changed "client/desktop" || return 1
   fi
 
   # The native addon is a BUILD ARTEFACT, not a checked-in binary, so a fresh
   # clone has no concord_audiocap.node at all and the audiocap host reports
   # `load-fault` -- which reads as a packaging defect and is not one. Gated
-  # exactly like npm install above: skipped under --no-rebuild UNLESS the
+  # exactly like npm ci above: skipped under --no-rebuild UNLESS the
   # artefact is actually missing, because "I asked you not to rebuild" cannot
   # sensibly mean "leave the client unable to start".
   if [[ "$no_rebuild" -eq 0 || ! -f native/concord-audiocap/build/Release/concord_audiocap.node ]]; then
@@ -2063,6 +2117,9 @@ verb_restart() {
 verb_rebuild() {
   [[ $# -gt 0 ]] && { echo "verb_rebuild: takes no args, got '$1'" >&2; return 2; }
   verb_down --keep-docker || return $?
+  # The stamp skip is for the plain `up` loop; `rebuild` is the repair verb, so
+  # it always reinstalls (dynamic scope makes this visible to the helper).
+  local CONCORD_FORCE_NPM_CI=1
   verb_up  # rebuild = default
 }
 

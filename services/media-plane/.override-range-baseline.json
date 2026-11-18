@@ -16,7 +16,7 @@
     {
       "consumer": "node_modules/eslint",
       "dep": "minimatch",
-      "range": "^10.2.5",
+      "range": "^10.2.6",
       "resolved": "11.0.3"
     },
     {
