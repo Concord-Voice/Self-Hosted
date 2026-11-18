@@ -93,6 +93,14 @@ func TestGraceEligiblePurposes_ClosedSet(t *testing.T) {
 		"", "not.a.purpose",
 	} {
 		require.False(t, p.GraceEligible(), "%q must always ask for a fresh confirmation", p)
+	}
+
+	// The fresh-proof purposes verify a password and code in their own
+	// transaction; none may accept a password token. PurposeDMClear is
+	// deliberately own-rule, so it is not in this list.
+	for _, p := range []Purpose{
+		PurposeAccountErase, PurposeWebAuthnDelete, PurposeSSOUnlink, PurposeSSOTrustEnable, PurposeOwnershipTransferConfirm,
+	} {
 		require.False(t, p.OwnRule(), "%q must never accept a password token", p)
 	}
 

@@ -278,6 +278,10 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 	type entry struct {
 		owners []string
 		seam   string
+		// ownerDir names the package holding owners when they charge and
+		// verify through calls into the site's package, as the erasure
+		// handler does through the account service.
+		ownerDir string
 	}
 	want := map[string]entry{
 		"dm/message_delete_softlock.go:confirmDMDeleteTx:VerifyOwnRuleTx":             {owners: []string{"confirmDMMessageDelete"}},
@@ -304,6 +308,7 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx":                         {seam: "the own-rule seam; each VerifyOwnRuleTx caller is censused"},
 		"stepup/stepup.go:VerifyMFAFactor:VerifyCode":                                 {seam: "the pool-side factor seam; each VerifyMFAFactor caller is censused"},
 		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx":                             {seam: "the in-transaction factor seam; each VerifyMFAFactorTx caller is censused"},
+		"users/delete_account.go:verifyErasureStepUpTx:VerifyMFAFactorTx":             {owners: []string{"EraseAccount"}, ownerDir: "privacy"},
 		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx":                   {owners: []string{"UpdatePrivacySettings"}},
 		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx":                      {owners: []string{"ChangePassword", "ReplaceMyKeys"}},
 		"users/handlers.go:verifySSOStepUpLockedTx:VerifyMFAFactorTx":                 {owners: []string{"PatchSecurity", "DeleteSSOIdentity"}},
@@ -330,6 +335,20 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 			continue
 		}
 		require.NotEmpty(t, e.owners, "%s: name the functions that charge the budget before it", site)
+		if e.ownerDir != "" {
+			owning := packages[e.ownerDir]
+			for _, owner := range e.owners {
+				_, ok := owning[owner]
+				if !assert.True(t, ok, "%s: owner %s is not a function in %s", site, owner, e.ownerDir) {
+					continue
+				}
+				assert.True(t, owning.reachesInto(owner, pkg, func(name string) bool { return name == s.fn }),
+					"%s: owner %s does not reach %s through %s", site, owner, s.fn, s.dir)
+				assert.True(t, owning.reachesInto(owner, pkg, func(name string) bool { return pkg[name].charges }),
+					"%s: owner %s reaches no %s function that charges a budget", site, owner, s.dir)
+			}
+			continue
+		}
 		for _, owner := range e.owners {
 			_, ok := pkg[owner]
 			if !assert.True(t, ok, "%s: owner %s is not a function in %s", site, owner, s.dir) {
@@ -387,6 +406,22 @@ func (p censusPackage) reaches(from string, match func(string) bool) bool {
 		}
 	}
 	return false
+}
+
+// reachesInto reports whether from, or any function it transitively references
+// within p, references a function of target that reaches match there. It
+// crosses one package boundary, for a handler that charges and verifies through
+// calls into a service package. Names are matched as in reaches, so a shared
+// name can only add edges.
+func (p censusPackage) reachesInto(from string, target censusPackage, match func(string) bool) bool {
+	return p.reaches(from, func(name string) bool {
+		for ref := range p[name].refs {
+			if _, ok := target[ref]; ok && target.reaches(ref, match) {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // chargingReachers lists the package functions that reach both target and a
