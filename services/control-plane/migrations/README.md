@@ -62,7 +62,8 @@ make migrate-version
 4. **Know the runner's transaction boundary** - The runner uses golang-migrate v4 (version pinned in `services/control-plane/go.mod`) with the default PostgreSQL driver configuration. Each file is sent as one simple-query `Exec`; PostgreSQL wraps a multi-statement query in one implicit transaction. Put each `CREATE INDEX CONCURRENTLY` in its own one-statement file, because it cannot run inside a transaction block.
 5. **Avoid data migrations in schema migrations** - Consider separate data migration scripts
 6. **Never modify committed migrations** - Create new migrations to fix issues
-7. **Pass squawk** - The `squawk` pre-commit hook and the `migration-lint` PR CI job lint new and changed `*.up.sql` files against `.squawk.toml` (PostgreSQL 16). Run it by hand with `pre-commit run squawk --files <file>`. Suppress a false positive on one statement with a whole-line `-- squawk-ignore <rule>` and a reason (CI refuses `squawk-ignore-file` and ignores in trailing or block comments); see `[internal]rules/migrations.md` § Migration linting (squawk)
+7. **Pass squawk** - The `squawk` pre-commit hook and the `migration-lint` PR CI job lint new and changed `*.up.sql` files against `.squawk.toml` (PostgreSQL 16). Run it by hand with `pre-commit run squawk --files <file>`. Suppress a false positive on one statement with `-- squawk-ignore <rule>` and a reason; see `[internal]rules/migrations.md` § Migration linting (squawk)
+   - The ignore line must be exactly `-- squawk-ignore <rule>[, <rule>]`, directly above the statement, with the reason on its own comment line above it. CI refuses any other line that mentions `squawk-ignore`: `squawk-ignore-file`, a bare ignore with no rule, text after the rules, or an ignore in a trailing or block comment.
 
 ## Migration Structure
 
