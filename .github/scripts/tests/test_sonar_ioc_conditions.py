@@ -1101,6 +1101,92 @@ class MigrationLintRevisionTests(unittest.TestCase):
                         result = self.run_step(workflow, self.INSTALL, checkout, temp, BASE_SHA=value)
                         self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def merge_repo(self, directory, change):
+        """A repository whose HEAD merges a PR branch, changed by change(repo), into main."""
+        repo = Path(directory) / "select"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        git_revision(repo, "config", "user.name", "Test")
+        git_revision(repo, "config", "user.email", "test@example.invalid")
+        migrations = repo / "services/control-plane/migrations"
+        migrations.mkdir(parents=True)
+        (migrations / "000001_init.up.sql").write_text("CREATE TABLE t (id int);\n")
+        git_revision(repo, "add", "-A")
+        git_revision(repo, "commit", "-qm", "base")
+        git_revision(repo, "checkout", "-qb", "pr")
+        change(repo, migrations)
+        git_revision(repo, "add", "-A")
+        git_revision(repo, "commit", "-qm", "pr")
+        git_revision(repo, "checkout", "-q", "main")
+        git_revision(repo, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+        return repo
+
+    def test_select_refuses_files_routed_around_the_lint(self):
+        def write(name, text="ALTER TABLE t DROP COLUMN id;\n"):
+            return lambda repo, migrations: (migrations / name).write_text(text)
+
+        def link_file(repo, migrations):
+            (migrations / "real.txt").write_text("ALTER TABLE t DROP COLUMN id;\n")
+            (migrations / "000002_x.up.sql").symlink_to("real.txt")
+
+        def link_directory(repo, migrations):
+            target = repo / "elsewhere"
+            migrations.rename(target)
+            (repo / "services/control-plane/migrations").symlink_to("../../elsewhere")
+
+        refused = {"other extension": write("000002_x.up.psql"), "glob name": write("000002_[x].up.sql"),
+                   "non-ASCII name": write("000002_\u00e9.up.sql"), "symlinked migration": link_file,
+                   "symlinked directory": link_directory}
+        for workflow in self.WORKFLOWS:
+            for label, change in refused.items():
+                with self.subTest(workflow=workflow, case=label), tempfile.TemporaryDirectory() as directory:
+                    repo = self.merge_repo(directory, change)
+                    output = Path(directory) / "output"
+                    result = self.run_step(workflow, "Select changed up migrations", repo, directory,
+                                           GITHUB_OUTPUT=str(output))
+                    self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+            for label, change, selected in (("new up migration", write("000002_drop.up.sql"),
+                                             "services/control-plane/migrations/000002_drop.up.sql\n"),
+                                            ("down migration only", write("000002_drop.down.sql"), "")):
+                with self.subTest(workflow=workflow, case=label), tempfile.TemporaryDirectory() as directory:
+                    repo = self.merge_repo(directory, change)
+                    output = Path(directory) / "output"
+                    result = self.run_step(workflow, "Select changed up migrations", repo, directory,
+                                           GITHUB_OUTPUT=str(output))
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertEqual(selected, (Path(directory) / "migrations.txt").read_text())
+                    self.assertIn(f"count={selected.count(chr(10))}", output.read_text())
+
+    def test_lint_accepts_only_whole_line_rule_ignores(self):
+        statement = "ALTER TABLE t DROP COLUMN id;\n"
+        cases = {
+            "no ignore": (statement, 0),
+            "whole-line rule ignore": ("-- reason\n-- squawk-ignore ban-drop-column\n" + statement, 0),
+            "two rules": ("  -- squawk-ignore ban-drop-column, adding-not-nullable-field\n" + statement, 0),
+            "file-wide ignore": ("-- squawk-ignore-file\n" + statement, 1),
+            "bare ignore": ("-- squawk-ignore\n" + statement, 1),
+            "no space after dashes": ("--squawk-ignore ban-drop-column\n" + statement, 1),
+            "block comment": ("/* squawk-ignore ban-drop-column */\n" + statement, 1),
+            "trailing comment": ("ALTER TABLE t DROP COLUMN id; -- squawk-ignore ban-drop-column\n", 1),
+        }
+        for workflow in self.WORKFLOWS:
+            for label, (text, expected) in cases.items():
+                for count in (1, 2):  # grep prints no file name for a single file unless told to
+                    with self.subTest(workflow=workflow, case=label, files=count), \
+                            tempfile.TemporaryDirectory() as directory:
+                        temp = Path(directory)
+                        squawk = temp / "home/.local/bin/squawk"
+                        squawk.parent.mkdir(parents=True)
+                        squawk.write_text("#!/bin/sh\nexit 0\n")
+                        squawk.chmod(0o755)
+                        files = [temp / "000002_a.up.sql", temp / "000003_b.up.sql"][:count]
+                        files[0].write_text(text)
+                        if count == 2:
+                            files[1].write_text(statement)
+                        (temp / "migrations.txt").write_text("".join(f"{f}\n" for f in files))
+                        result = self.run_step(workflow, "Lint changed migrations", temp, temp,
+                                               HOME=str(temp / "home"))
+                        self.assertEqual(expected, result.returncode, result.stdout + result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -11,7 +11,8 @@ the list are reported as stale. Standard library only; no Docker daemon, no
 network.
 
 With no FILE the manifest must also be tracked as a regular file (mode 100644
-or 100755). A manifest that is a symbolic link is refused in every mode.
+or 100755), and its indexed blob is parsed rather than the file on disk. A
+manifest that is a symbolic link is refused in every mode.
 
 Exit 0: no violations. Exit 1: violations, one "<file>:<line>: <rule>: <message>"
 line each on stdout. Exit 2: the check could not complete, message on stderr.
@@ -96,13 +97,17 @@ def check_stage(path, where, stage):
             bad(path, where, f"tag pattern {tag} does not compile: {err}")
 
 
-def load_manifest(path):
-    """Return the manifest's "dockerfiles" object, or raise CheckError on a bad manifest."""
+def load_manifest(path, raw=None):
+    """Return the manifest's "dockerfiles" object, or raise CheckError on a bad manifest.
+
+    raw is the tracked blob when the caller read it from git; without it the
+    file is opened and a symbolic link is refused.
+    """
     try:
-        # O_NOFOLLOW: a symbolic link here would let a later edit to its target
-        # change the manifest without the review the manifest path requires.
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8") as fh:
-            data = json.load(fh)
+        if raw is None:
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as fh:
+                raw = fh.read()
+        data = json.loads(raw.decode("utf-8"))
     except OSError as err:
         raise CheckError(f"cannot read manifest {path}: {err}") from err
     except ValueError as err:  # JSONDecodeError and UnicodeDecodeError
@@ -396,10 +401,11 @@ def names_dockerfile(path):
 
 
 def tracked_files(root, manifest):
-    """Return the tracked Dockerfile paths; a symbolic link or a submodule among them is a CheckError.
+    """Return (tracked Dockerfile paths, manifest blob bytes).
 
-    manifest is the manifest path relative to root. It must be tracked as a
-    regular file too, or the check stops with a CheckError.
+    A symbolic link or a submodule among the Dockerfiles is a CheckError.
+    manifest is the manifest path relative to root. It must be tracked once, as
+    a regular file, or the check stops with a CheckError.
     """
     try:
         proc = subprocess.run(["git", "-C", root, "ls-files", "-s", "-z"], capture_output=True, check=False)
@@ -409,14 +415,16 @@ def tracked_files(root, manifest):
         detail = proc.stderr.decode(errors="replace").strip()
         raise CheckError(f"git ls-files failed in {root} (exit {proc.returncode}): {detail}")
     found = set()
-    manifest_mode = None
+    manifest_mode = manifest_oid = None
     for record in proc.stdout.split(b"\0"):
         if not record:
             continue
         meta, _, name = record.partition(b"\t")  # "<mode> <object> <stage>\t<path>"
         path = os.fsdecode(name)
         if path == manifest:
-            manifest_mode = meta[:6]
+            if manifest_mode is not None:  # several index stages: an unresolved merge
+                raise CheckError(f"manifest {manifest} has an unresolved merge in the index")
+            manifest_mode, manifest_oid = meta.split(b" ")[:2]
         if not names_dockerfile(path):
             continue
         if not meta.startswith(b"100"):
@@ -426,7 +434,13 @@ def tracked_files(root, manifest):
         raise CheckError(f"manifest {manifest} is not tracked in {root}")
     if manifest_mode not in (b"100644", b"100755"):
         raise CheckError(f"manifest {manifest} is tracked with mode {manifest_mode.decode()}, not a regular file")
-    return found
+    # Parse the blob whose mode was checked, not the working-tree path: on a
+    # case-insensitive checkout a colliding name, a .gitattributes conversion
+    # or a later write can put other bytes there.
+    blob = subprocess.run(["git", "-C", root, "cat-file", "blob", manifest_oid.decode()], capture_output=True, check=False)
+    if blob.returncode != 0:
+        raise CheckError(f"cannot read manifest {manifest} from the index: {blob.stderr.decode(errors='replace').strip()}")
+    return found, blob.stdout
 
 
 def run(root, manifest_path, files):
@@ -434,8 +448,8 @@ def run(root, manifest_path, files):
     shown = manifest_path if rel.startswith("..") else rel
     # The git mode check comes first, so a symlinked manifest is never read.
     # A FILE list skips git entirely; the O_NOFOLLOW open still refuses a symlink.
-    tracked = None if files else tracked_files(root, rel)
-    entries = load_manifest(manifest_path)
+    tracked, raw = (None, None) if files else tracked_files(root, rel)
+    entries = load_manifest(manifest_path, raw)
     if files:
         tracked = {os.path.relpath(os.path.join(root, name), root) for name in files}
     for path in sorted(tracked):

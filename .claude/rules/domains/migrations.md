@@ -1090,10 +1090,25 @@ applied in prod, so they are baselined, not rewritten. The version is pinned in
 the hook's `additional_dependencies` and in `.github/requirements-squawk.txt`
 (hashed, for CI). Bump both together.
 
-CI reads `.squawk.toml` and `.github/requirements-squawk.txt` from main, not
-from the PR, so a PR cannot loosen the check it is judged by. A change to
-either takes effect in CI only after it merges; until then the hook (which
-reads the working tree) is the only place to see its effect.
+CI reads `.squawk.toml` and `.github/requirements-squawk.txt` from the PR's
+base commit (`github.event.pull_request.base.sha`, fetched by SHA), not from the
+PR, so a PR cannot loosen the check it is judged by. A change to either takes
+effect in CI only after it merges; until then the hook (which reads the working
+tree) is the only place to see its effect.
+
+The CI job also refuses, before squawk runs:
+
+- a checkout that is not GitHub's two-parent merge commit of the PR head, since
+  the changed-file selection diffs `HEAD^1..HEAD`;
+- a `migrations/` directory that is not a tree of regular files (no symlinked
+  file or directory, no submodule), because the runner follows symlinks;
+- a changed file that golang-migrate would run (`<digits>_*.up.*` or `.down.*`,
+  any extension) whose name is not `NNNNNN_name.up.sql` or `.down.sql` in lower
+  case, because squawk reads each argument as a glob and the runner reads any
+  extension;
+- any `squawk-ignore` other than the whole-line form shown below. A file-wide
+  `squawk-ignore-file`, a bare ignore, or one in a trailing or block comment
+  fails the job.
 
 What `.squawk.toml` sets, and why:
 
@@ -1122,7 +1137,8 @@ indisvalid`) and either drop it with `DROP INDEX CONCURRENTLY` or rebuild it wit
 
 When a warning is wrong for one statement, for example a validated
 `ADD CONSTRAINT` on a table known to be small (000193), suppress it on that
-statement only, with the reason beside it:
+statement only, with the reason beside it. The ignore must be a whole line of
+its own, `-- squawk-ignore <rule>[, <rule>]`, directly above the statement:
 
 ```sql
 -- subscription_seats holds at most one open seat per subscription.

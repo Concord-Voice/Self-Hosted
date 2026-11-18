@@ -339,6 +339,28 @@ blob=$(printf 'real.json' | git -C "$WORK/manifest-index-link" hash-object -w --
 git -C "$WORK/manifest-index-link" update-index --cacheinfo "120000,$blob,manifest.json"
 invoke --root "$WORK/manifest-index-link" --manifest "$WORK/manifest-index-link/manifest.json"
 expect_exit2 "a manifest tracked as a symbolic link but a regular file on disk is refused" "mode 120000, not a regular file"
+# The checker parses the manifest blob whose mode it checked, not the file on
+# disk: on a case-insensitive checkout a colliding name can overwrite that file.
+repo manifest-index-blob
+sed 's#library/golang#library/other#' "$WORK/manifest-index-blob/manifest.json" > "$WORK/manifest-index-blob/strict.json"
+cp "$WORK/manifest-index-blob/manifest.json" "$WORK/manifest-index-blob/disk.json"
+cp "$WORK/manifest-index-blob/strict.json" "$WORK/manifest-index-blob/manifest.json"
+git -C "$WORK/manifest-index-blob" add Dockerfile manifest.json
+cp "$WORK/manifest-index-blob/disk.json" "$WORK/manifest-index-blob/manifest.json"
+invoke --root "$WORK/manifest-index-blob" --manifest "$WORK/manifest-index-blob/manifest.json"
+assert_fail identity-mismatch "the indexed manifest is checked, not a different file on disk" "library/other"
+repo manifest-conflict
+git -C "$WORK/manifest-conflict" add -A
+git -C "$WORK/manifest-conflict" -c user.name=t -c user.email=t@example.invalid commit -qm base
+git -C "$WORK/manifest-conflict" checkout -qb side
+printf '{"side":1}\n' > "$WORK/manifest-conflict/manifest.json"
+git -C "$WORK/manifest-conflict" -c user.name=t -c user.email=t@example.invalid commit -qam side
+git -C "$WORK/manifest-conflict" checkout -q -
+printf '{"main":1}\n' > "$WORK/manifest-conflict/manifest.json"
+git -C "$WORK/manifest-conflict" -c user.name=t -c user.email=t@example.invalid commit -qam main
+git -C "$WORK/manifest-conflict" -c user.name=t -c user.email=t@example.invalid merge -q side >/dev/null 2>&1 || true
+invoke --root "$WORK/manifest-conflict" --manifest "$WORK/manifest-conflict/manifest.json"
+expect_exit2 "a manifest with an unresolved merge in the index is refused" "unresolved merge"
 dyn manifest-link-files 'FROM scratch\n'
 mv "$WORK/manifest-link-files/manifest.json" "$WORK/manifest-link-files/real.json"
 ln -s real.json "$WORK/manifest-link-files/manifest.json"
