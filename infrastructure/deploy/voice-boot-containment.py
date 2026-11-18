@@ -267,9 +267,9 @@ class AssociationStore:
                 raise Refusal("deployment parent replaced")
         finally:
             # These descriptors serve only this check; the pinned ones stay open.
-            for fd in reversed(self.fds[mark:]):
-                os.close(fd)
-            del self.fds[mark:]
+            # Pop before close, so a failed close never leaves a closed number listed.
+            while len(self.fds) > mark:
+                os.close(self.fds.pop())
 
     def record_name(self, project, slot):
         if not isinstance(project, str) or not PROJECT.fullmatch(project) or slot not in SLOTS:
@@ -365,6 +365,14 @@ class ContainerObservation:
         self.identity, self.slot, self.project = identity, slot, project
         self.fds = []
         self.physical_error = None
+        try:
+            self.observe(identity, slot)
+        except BaseException:
+            # A refused capture must not leak the descriptors it already pinned.
+            self.close()
+            raise
+
+    def observe(self, identity, slot):
         self.before = inspect_container(identity)
         self.validate_membership(self.before)
         state = self.before["State"]
@@ -586,11 +594,12 @@ POST_STOP_SECONDS = 60
 
 def hold_container(args):
     store = AssociationStore(args.lock_path) if getattr(args, "lock_path", None) else None
-    if store:
-        store.read(args.compose_project, args.slot, missing_ok=True)
-    owner = ContainerObservation(args.container_id, args.slot, args.compose_project)
+    owner = None
     published = None
     try:
+        if store:
+            store.read(args.compose_project, args.slot, missing_ok=True)
+        owner = ContainerObservation(args.container_id, args.slot, args.compose_project)
         # Fail before the boot line: the caller stops nothing until it reads it.
         retirement_route(owner)
         print(owner.boot, flush=True)
@@ -625,7 +634,8 @@ def hold_container(args):
             verified = True
             print("\n".join(values), flush=True)
     finally:
-        owner.close()
+        if owner:
+            owner.close()
         if store:
             store.close()
 
