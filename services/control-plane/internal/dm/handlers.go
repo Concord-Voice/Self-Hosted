@@ -26,6 +26,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/roomplacement"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voicecommand"
@@ -3969,14 +3970,21 @@ func (h *Handler) respondDMVoiceTopologyEffectError(c *gin.Context, err error, l
 }
 
 // DMUserMute queues a soft mute for exact sessions of an in-call participant.
+// Any participant of the conversation may soft-mute an in-call peer; no admin
+// role is required; applies to 1:1 and group conversations.
+// Both path IDs are canonicalised before use, so every comparison and query
+// sees one spelling; actorID is canonical by construction (AuthRequired).
 // POST /dm/conversations/:id/voice/:userId/user-mute
 func (h *Handler) DMUserMute(c *gin.Context) {
 	actorID := c.GetString("user_id")
-	convID := c.Param("id")
-	targetID := c.Param("userId")
-
-	if _, err := uuid.Parse(convID); err != nil {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+	targetID, err := requestid.Param(c, "userId")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
 	target, err := uuid.Parse(targetID)

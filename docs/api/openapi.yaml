@@ -6790,7 +6790,7 @@ paths:
         - Voice
       summary: Request user-level mute of a DM voice participant
       description: >-
-        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
+        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself. Any participant of the conversation may soft-mute an in-call peer; no admin role is required; applies to 1:1 and group conversations. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
       operationId: dmVoiceUserMute
       security:
         - BearerAuth: []
