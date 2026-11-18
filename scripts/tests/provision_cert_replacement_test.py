@@ -430,8 +430,8 @@ class CertificateReplacement(unittest.TestCase):
             self.assertEqual(1,effects.count(name),"already-valid positive control must reach "+name)
         self.assertLess(effects.index("delivery-key-write"),effects.index("coturn-restart"))
         self.assertLess(effects.index("coturn-restart"),effects.index("nginx-reload"))
-        self.assertTrue((self.fanout/"cert.pem").read_bytes() == (self.live/"fullchain.pem").read_bytes())
-        self.assertTrue((self.fanout/"key.pem").read_bytes() == (self.live/"privkey.pem").read_bytes())
+        self.assertEqual((self.fanout/"cert.pem").read_bytes(), (self.live/"fullchain.pem").read_bytes())
+        self.assertEqual((self.fanout/"key.pem").read_bytes(), (self.live/"privkey.pem").read_bytes())
 
     def test_already_valid_import_activates_delivers_and_restarts(self):
         self.env["PAIR_RUNNING_CONSUMERS"] = "1"
@@ -620,7 +620,7 @@ class CertificateReplacement(unittest.TestCase):
         self.assertEqual(0, rc, output)
         self.assertEqual("", (self.root/"effects").read_text(),
                          "completed helper activation must still bind the selected lineage before service effects")
-        self.assertTrue(before == self.renewal_snapshot(self.fanout.parent))
+        self.assertEqual(before, self.renewal_snapshot(self.fanout.parent))
 
     def test_failed_renewal_hook_rename_preserves_working_target_before_certbot(self):
         hook = self.provision_installed_renewal_hook()
@@ -717,10 +717,10 @@ class CertificateReplacement(unittest.TestCase):
         self.assertNotIn("consumer-observed-mixed-pair", (self.root/"effects").read_text(),
                          "canonical consumer must never see cert/key from different generations")
         self.assertNotIn("consumer-observed-incomplete-pair", (self.root/"effects").read_text())
-        self.assertTrue((self.live/"fullchain.pem").read_bytes() == (self.root/"next"/"fullchain.pem").read_bytes())
-        self.assertTrue((self.live/"privkey.pem").read_bytes() == (self.root/"next"/"privkey.pem").read_bytes())
+        self.assertEqual((self.live/"fullchain.pem").read_bytes(), (self.root/"next"/"fullchain.pem").read_bytes())
+        self.assertEqual((self.live/"privkey.pem").read_bytes(), (self.root/"next"/"privkey.pem").read_bytes())
         self.assertTrue((self.live/"fullchain.pem").read_bytes() == (self.fanout/"cert.pem").read_bytes(), "actual Coturn hook must consume active generation")
-        self.assertTrue((self.live/"privkey.pem").read_bytes() == (self.fanout/"key.pem").read_bytes())
+        self.assertEqual((self.live/"privkey.pem").read_bytes(), (self.fanout/"key.pem").read_bytes())
         self.assertEqual(0o600, stat.S_IMODE((self.live/"privkey.pem").stat().st_mode))
         retained = []
         for cert in (self.root/"live").rglob("fullchain.pem"):
@@ -763,7 +763,7 @@ class CertificateReplacement(unittest.TestCase):
         self.assertNotIn("Certificate source and coturn delivery complete.", output)
         self.assert_previous_pair()
         self.assertTrue((self.fanout/"cert.pem").read_bytes() == (self.inputs/"previous"/"fullchain.pem").read_bytes(), "failed delivery must restore previous Coturn certificate")
-        self.assertTrue((self.fanout/"key.pem").read_bytes() == (self.inputs/"previous"/"privkey.pem").read_bytes())
+        self.assertEqual((self.fanout/"key.pem").read_bytes(), (self.inputs/"previous"/"privkey.pem").read_bytes())
         (self.root/"effects").write_text("")
         self.assert_success("import")
 
@@ -785,7 +785,7 @@ class CertificateReplacement(unittest.TestCase):
         self.assertNotIn("Certificate source and coturn delivery complete.",output)
         self.assert_previous_pair()
         self.assertTrue((self.fanout/"cert.pem").read_bytes() == (self.inputs/"previous"/"fullchain.pem").read_bytes(), "interrupted delivery must restore previous Coturn certificate")
-        self.assertTrue((self.fanout/"key.pem").read_bytes() == (self.inputs/"previous"/"privkey.pem").read_bytes())
+        self.assertEqual((self.fanout/"key.pem").read_bytes(), (self.inputs/"previous"/"privkey.pem").read_bytes())
 
     def test_persistent_recovery_hook_failure_preserves_source_without_claiming_delivery(self):
         rc,output = self.invoke(fault="delivery-key-persistent-fail")
@@ -809,8 +809,8 @@ class CertificateReplacement(unittest.TestCase):
         self.assertIn("atomic certificate activation",output)
         self.assert_previous_pair()
         self.assertNotIn("coturn-discovery",(self.root/"effects").read_text(), "failed activation must not reach delivery")
-        self.assertTrue((self.fanout/"cert.pem").read_bytes() == (self.inputs/"previous"/"fullchain.pem").read_bytes())
-        self.assertTrue((self.fanout/"key.pem").read_bytes() == (self.inputs/"previous"/"privkey.pem").read_bytes())
+        self.assertEqual((self.fanout/"cert.pem").read_bytes(), (self.inputs/"previous"/"fullchain.pem").read_bytes())
+        self.assertEqual((self.fanout/"key.pem").read_bytes(), (self.inputs/"previous"/"privkey.pem").read_bytes())
 
     def test_interruption_after_atomic_exchange_recovers_using_actual_directory_state(self):
         self.exchange_interruption("activation-interrupt")
@@ -824,8 +824,8 @@ class CertificateReplacement(unittest.TestCase):
         self.assertNotEqual(0,rc)
         self.assert_previous_pair()
         self.assertNotIn("Certificate source and coturn delivery complete.",output)
-        self.assertTrue((self.fanout/"cert.pem").read_bytes() == (self.inputs/"previous"/"fullchain.pem").read_bytes())
-        self.assertTrue((self.fanout/"key.pem").read_bytes() == (self.inputs/"previous"/"privkey.pem").read_bytes())
+        self.assertEqual((self.fanout/"cert.pem").read_bytes(), (self.inputs/"previous"/"fullchain.pem").read_bytes())
+        self.assertEqual((self.fanout/"key.pem").read_bytes(), (self.inputs/"previous"/"privkey.pem").read_bytes())
 
     def test_untrusted_retained_lock_refuses_before_staging_or_activation(self):
         lock = self.root/"live"/("."+BASE+".lock")
@@ -944,10 +944,10 @@ class CertificateReplacement(unittest.TestCase):
             self.assertEqual("0:0:700",checked.stdout.decode().strip(),"fresh directories must have virtual root ownership and private modes")
         self.assertEqual(0o600,stat.S_IMODE((self.live/"privkey.pem").stat().st_mode))
         self.assertEqual(0o644,stat.S_IMODE((self.live/"fullchain.pem").stat().st_mode))
-        self.assertTrue((self.live/"fullchain.pem").read_bytes() == (self.root/"next/fullchain.pem").read_bytes())
-        self.assertTrue((self.live/"privkey.pem").read_bytes() == (self.root/"next/privkey.pem").read_bytes())
-        self.assertTrue((self.fanout/"cert.pem").read_bytes() == (self.live/"fullchain.pem").read_bytes())
-        self.assertTrue((self.fanout/"key.pem").read_bytes() == (self.live/"privkey.pem").read_bytes())
+        self.assertEqual((self.live/"fullchain.pem").read_bytes(), (self.root/"next/fullchain.pem").read_bytes())
+        self.assertEqual((self.live/"privkey.pem").read_bytes(), (self.root/"next/privkey.pem").read_bytes())
+        self.assertEqual((self.fanout/"cert.pem").read_bytes(), (self.live/"fullchain.pem").read_bytes())
+        self.assertEqual((self.fanout/"key.pem").read_bytes(), (self.live/"privkey.pem").read_bytes())
         effects = (self.root/"effects").read_text()
         self.assertNotIn("consumer-observed-incomplete-pair",effects)
         self.assertNotIn("consumer-observed-mixed-pair",effects)
@@ -966,8 +966,8 @@ class CertificateReplacement(unittest.TestCase):
         previous_cert, previous_key = self.expire_previous_generation()
         rc,output = self.invoke()
         self.assertEqual(0,rc,output)
-        self.assertTrue((self.live/"fullchain.pem").read_bytes() == (self.root/"next/fullchain.pem").read_bytes())
-        self.assertTrue((self.fanout/"cert.pem").read_bytes() == (self.root/"next/fullchain.pem").read_bytes())
+        self.assertEqual((self.live/"fullchain.pem").read_bytes(), (self.root/"next/fullchain.pem").read_bytes())
+        self.assertEqual((self.fanout/"cert.pem").read_bytes(), (self.root/"next/fullchain.pem").read_bytes())
         retained = [p for p in (self.root/"live").rglob("fullchain.pem") if p.read_bytes() == previous_cert and (p.parent/"privkey.pem").read_bytes() == previous_key]
         self.assertTrue(retained,"expired but complete previous generation must be retained")
 
@@ -977,7 +977,7 @@ class CertificateReplacement(unittest.TestCase):
         self.assertTrue((self.root/"fault-fired").is_file())
         self.assertNotEqual(0,rc)
         self.assertTrue((self.live/"fullchain.pem").read_bytes() == previous_cert,"failed delivery must restore expired previous source certificate")
-        self.assertTrue((self.live/"privkey.pem").read_bytes() == previous_key)
+        self.assertEqual((self.live/"privkey.pem").read_bytes(), previous_key)
         self.assertRegex(output.lower(),"recovery failed|recovery unavailable")
         self.assertNotIn("Certificate source and coturn delivery complete.",output)
 
@@ -997,7 +997,7 @@ class CertificateReplacement(unittest.TestCase):
         self.assertEqual(0, rc, output)
         self.assertIn("certbot-managed-lineage", (self.root/"effects").read_text())
         self.assertEqual(links, [os.readlink(self.live/name) for name in ("fullchain.pem", "privkey.pem")])
-        self.assertTrue((self.fanout/"cert.pem").read_bytes() == (archive/"fullchain.pem").read_bytes())
+        self.assertEqual((self.fanout/"cert.pem").read_bytes(), (archive/"fullchain.pem").read_bytes())
         self.assertTrue((renewal/(BASE+".conf")).is_file())
 
     def test_nonroot_refusal_control_precedes_replacement_and_delivery(self):

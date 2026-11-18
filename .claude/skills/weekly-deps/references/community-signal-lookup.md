@@ -13,7 +13,7 @@ It checks three sources:
 It does NOT:
 
 - Scan social media, Reddit, HN, or chat servers for vibe checks. Those are noisy and don't programmatically reduce to a yes/no signal.
-- Run `npm audit` or `go list -m -u` against the local lockfile. The PR's CI already does that and the result lives in `statusCheckRollup`.
+- Run `npm audit` or `go list -m -u` against the local lockfile. The PR's CI already does that and the result lives in the PR's checks (read with `pr_ci`, SKILL.md Phase 3.1).
 - Attempt to read package source-code diffs for malicious patterns. That's a `/review-pr` / subagent responsibility, not a routine check.
 
 ## Signal 1: GitHub Advisory Database
@@ -29,6 +29,8 @@ Query the `/advisories` endpoint per ecosystem and package. The `ecosystem` para
 | `cargo` | `rust` |
 | `rubygems` | `rubygems` |
 | `composer` | `composer` |
+| `gradle` | `maven` |
+| `docker` | none — skip Signal 1 and record `not available (docker)`; the bundled-engine rule already makes the PR Tier C |
 
 ```bash
 # Per package, scoped to advisories published in the last 30 days
@@ -49,8 +51,12 @@ case "$ECOSYSTEM" in
   gomod)          ADVISORY_ECO="go" ;;
   github-actions) ADVISORY_ECO="actions" ;;
   cargo)          ADVISORY_ECO="rust" ;;
+  gradle)         ADVISORY_ECO="maven" ;;   # package name is group:artifact
+  docker)         ADVISORY_ECO="" ;;        # no advisory ecosystem: skip Signal 1 for this PR
   *)              ADVISORY_ECO="$ECOSYSTEM" ;;   # npm, pip, rubygems, composer map 1:1
 esac
+# An empty value would make the query below return every ecosystem. Skip the query instead.
+[ -n "$ADVISORY_ECO" ] || echo "Signal 1: not available ($ECOSYSTEM)"
 
 # --paginate prints one array per page; jq -s + add merges them before filtering.
 gh api --paginate "/advisories?ecosystem=$ADVISORY_ECO&published=>$SINCE&per_page=100" \
@@ -74,7 +80,7 @@ The two-step pattern (server-side ecosystem+date filter, then client-side packag
 For grouped PRs (`chore: bump the X group ...`), extract package names from the PR body's bullet list first:
 
 ```bash
-gh pr view $PR --json body --jq '.body' | \
+gh pr view $PR -R "$OWNER_REPO" --json body --jq '.body' | \
   grep -oE '(Updates? `[^`]+` from|Bumps `[^`]+` from)' | \
   grep -oE '`[^`]+`' | tr -d '`' | sort -u
 ```
@@ -95,7 +101,7 @@ For each extracted package, run the advisory query.
 The dependabot PR body already contains the release notes for the new version. Scan that body ONLY for unambiguous yank / advisory markers. Generic version keywords ("major version", "deprecated", "BREAKING CHANGE in some other version") produce too many false positives because dependabot release-note summaries routinely include phrases like "if you have a major version requirement..." or "this fixes a regression that was introduced in 1.x".
 
 ```bash
-gh pr view $PR --json body --jq '.body' > /tmp/pr-body.txt
+gh pr view $PR -R "$OWNER_REPO" --json body --jq '.body' > /tmp/pr-body.txt
 
 # Strong negative signals (any match → LOW confidence)
 # Must be unambiguous: explicit yank, do-not-use, or reverted-in-version markers.

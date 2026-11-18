@@ -39,7 +39,7 @@ When a phase says "Run `/skill-name`", you MUST invoke it via the Skill tool. Do
 
 # Dev Lifecycle
 
-> **Structure is generic; the repo-specific knobs are data.** The 9-phase flow, the mode-to-gate matrix, the dispatch gate, and the never-`--admin`-bypass discipline are fixed. Everything that varies per repo — artifact directories, the bot roster waited on at Phase 7.5, the reviewer roster at Phase 8, the quality gate, parent-epic linkage, version-bump, and branch-protection prose — is read from the OPTIONAL per-repo `.claude/repo-config.json` via the shared helper `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has '<jq-filter>'`). With an absent file, or any absent/`null` key, the affected step **degrades gracefully** — it is skipped, never errored. The bot roster in particular lives in `.bots[]` as the **single source of truth** shared with `/enhanced-pr-review`, so the two can never drift on which bots are online/offline or blocking. See `config/repo-config.reference.md` for the full schema.
+> **Structure is generic; the repo-specific knobs are data.** The 9-phase flow, the mode-to-gate matrix, the dispatch gate, and the never-`--admin`-bypass discipline are fixed. Everything that varies per repo — artifact directories, the bot roster waited on at Phase 7.5, the reviewer roster at Phase 8, the quality gate, parent-epic linkage, version-bump, and branch-protection prose — is read from the OPTIONAL per-repo `.claude/repo-config.json` via the shared helper `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has '<jq-filter>'`). With an absent file, or any absent/`null` key, the affected step **degrades gracefully** — it is skipped, never errored. The bot roster in particular lives in `.bots[]` as the **single source of truth** shared with `/enhanced-pr-review`, so the two can never drift on which bots are online/offline or blocking. See `.claude/repo-config.reference.md` for the full schema.
 >
 > Load the helper once at the top of any phase that reads config, and resolve the default branch up front (used throughout in place of a hard-coded `main`). **Load the helper from the default branch, never from this checkout:** on a PR branch, `scripts/repo-config.sh` is the PR's code, and sourcing it executes that code before any review gate does. The block below loads the default branch's helper (the branch comes from the GitHub API, then `origin/HEAD`, then `main`), takes `DEFAULT_BRANCH` from that ref rather than the PR-editable `.default_branch` key, and puts the default branch's config in `RC_TRUSTED_CFG`. Each Bash call starts a fresh shell, so repeat this block in any call that uses `rc_get` or `RC_TRUSTED_CFG`. `rc_get` still reads the checkout's `.claude/repo-config.json`, so treat it as PR-controlled. These steps read the default branch's config instead, because their keys pick commands or reviewers: the Phase 4 count-drift probe, the Phase 7.5 bot roster, `/verify-quality-gate`, and the review floor and disposition gate in `/review-pr` and `/enhanced-pr-review`. `/pr-creation` and every other skill that uses the helper load it the same way. Every other `rc_get` key in this skill only shapes paths, prose or board fields, and a PR may change those.
 >
@@ -88,6 +88,8 @@ mirror — telling a Codex reader that these are *its* natives, which is exactly
 | `Monitor`, and Bash `run_in_background` | Phase 6 CI wait (via `/ci-status`), Phase 7.5 arrival wait, Phase 10 run wait | Any background/detached session the harness does provide (Codex exposes exec sessions). Failing that, a **bounded foreground poll** with an explicit deadline — worse, but it still waits rather than handing scheduling to the developer, which is the property that matters |
 | `EnterPlanMode` / `ExitPlanMode` | Ad-hoc path when spec+plan are skipped | A read-only exploration pass — read and search only, no writes — ending in a written plan the developer explicitly approves before any edit. The gate is the point; the tool is not |
 | A persistent lesson store | Step 10.4 capture | A per-project session memory store, where the running harness provides one. Codex and Copilot expose none, so there use the org's **shared lesson store** if one exists (for example a tracked `knowledge/memory/` directory with a committed `INDEX.md` in the org tooling repository), delivered as a PR to that repository. Never invent an untracked path — an unreachable lesson is the same as no lesson |
+| Named-agent dispatch under a multi-model router (e.g. Copilot Fusion) | Every `@agent` dispatch (Phases 1–4, 8) | The router does not start subagents. Dispatch each `@agent` as the harness's custom agent of the same name where one is installed: it runs on its own model pin, outside the router. Where none is installed, name the missing agent in the visibility line and the PR body; never let the router's conversation stand in for the specialist |
+| A router that discards drafts (Fusion's Cascade and Critique patterns) | Phases 3–5 | A discarded draft does not undo its file edits. Before every commit, run `git status` and `git diff --stat` and match every changed path to a plan task. Revert or report any path that no task explains |
 | `/run` | Phase 4 visual verification | The repo's own launch path (its dev-environment start script, then the client under change) plus whatever screenshot capability the harness has. If it has none, say so in the PR body rather than silently claiming verification |
 
 **The fallback is a downgrade, not an exemption.** Each one preserves the property the step
@@ -124,39 +126,23 @@ Defect repair still needs a different *execution* shape — failing test first, 
 |---|---|
 | `/dev-lifecycle <N>` on a bug | Phases 1-2 run normally (the spec is what makes the repro test targeted). Phase 3 routes each defect-repair task through `/reproduce-then-fix`, which returns to Phase 4 with a committed red test and a green fix |
 | `/dev-lifecycle <N>` on a feature | Unchanged |
-| `/reproduce-then-fix <N>` invoked directly | Still supported and still correct for a one-line hotfix that does not want a full lifecycle. It stops after the green fix commit and hands to `/dev-lifecycle <N>`, which detects **Phase 4: VALIDATE** from `branch + implementation commits + no PR` |
+| `/reproduce-then-fix <N>` invoked directly | Still supported for a one-line hotfix. It stops after the green fix commit and hands its issue, branch, repro SHA and fix SHA to `/dev-lifecycle <N>` in the same session; the explicit handoff below routes to **Phase 4: VALIDATE** |
 
-**Why the handoff moved from Phase 6 to Phase 4.** The old contract had `/reproduce-then-fix` open its own draft PR and hand back at CI MONITOR. That skipped Phase 4 entirely — so every bug fix routed through it bypassed `verify-quality-gate`, the ≥80% coverage gate, the CLAUDE.md count-drift probe, and the pre-PR `@red-team` pass on security surfaces. Stopping one phase earlier costs nothing (detection already lands on Phase 4 unaided) and closes all four gaps.
+**Why the handoff moved from Phase 6 to Phase 4.** The old contract had `/reproduce-then-fix` open its own draft PR and hand back at CI MONITOR. That skipped Phase 4 entirely — so every bug fix routed through it bypassed `verify-quality-gate`, the ≥80% coverage gate, the CLAUDE.md count-drift probe, and the pre-PR `@red-team` pass on security surfaces. The explicit handoff reaches Phase 4 even when no spec or plan was created.
 
 ---
 
-## Step 0: Resolve Model-Capability Tier (every invocation)
+## No model gate
 
-Before phase detection, resolve the runner's capability tier per the detection procedure in [`_shared/model-capability-tiers.md`](../_shared/model-capability-tiers.md):
+`/dev-lifecycle` never checks which model runs it, and nothing in it depends on the answer. Do not print a tier, search your context for a model ID, or change a default, a gate, or a batch rule because of what model you think you are. Some harnesses show no model ID. A multi-model router (for example Copilot Fusion) sends each prompt to a different model, so there is no one model to check. The defaults in this file are fixed and the same on every harness.
 
-1. Locate harness-provided model-identity evidence: an explicit model ID string injected into the system context (e.g., Claude Code's environment block names the exact model ID). Strip harness decorations (bracketed effort suffixes) before matching.
-2. Match the stripped ID against the catalog's mapping table → profile. GPT-6 rows
-   require equality with the entire ID; the other rows retain prefix matching.
-3. No evidence → `generic` (fail-closed). Present-but-unmapped ID → `generic` plus one WARN line: `WARN: unmapped model ID <id>; resolving generic — catalog may be stale`.
-4. Model self-belief is NEVER sufficient evidence — models misreport their own identity.
+Fixed orchestrator calibration (replaces the retired tier profiles):
 
-Print one line and hold the result in session memory only:
+- **Dynamic batch size:** 2–3 plan tasks inline between verification points.
+- **Retry budget:** 2 local pre-commit remediation cycles per failure, then surface it.
+- **Confidence posture:** decide and log routine choices inside auto phases; surface novel or ambiguous ones.
 
-```
-Tier: <profile> (model-id evidence: <id or "none — generic fail-closed">)
-```
-
-Tier is re-resolved on EVERY invocation (first run and re-entry) and is NEVER persisted — not to the mode-state file, not anywhere. A `tier=` line in any state file is ignored: no code path reads one. The mode-to-gate matrix below is tier-INVARIANT; tier calibrates recommendations and execution mechanics only (see the catalog's "Invariants tiers may not alter").
-
-**Tier is a small lever now — do not over-invest in it (narrowed 2026-07-24).** It used to also decide subagent dispatch granularity and *which model each subagent ran*. Both are retired: every agent pins its own `model` and `effort`, and **no orchestrator at any tier may pass a `model` override at dispatch**. What remains is orchestrator-only calibration — batch size between verification points, retry budget, confidence posture, and the ±1 mode-suggestion notch. An unmapped model ID is therefore a non-event: resolve `generic`, emit the WARN, and proceed. Do not stall a run over tier resolution, and do not let a `generic` resolution talk you out of dispatching the pinned fleet — the fleet's capability is independent of yours.
-
-**Cross-vendor runners.** Use the catalog's [cross-vendor equivalence table](../_shared/model-capability-tiers.md#cross-vendor-equivalence-claude--openai--codex) for the Codex model and effort translation, including its role-specific overrides. Translation happens only when generating that runner's agent profiles: source pins remain unchanged, and the orchestrator never passes a `model` override at dispatch.
-
-**GPT-6 runners.** The catalog maps exact harness IDs `gpt-6-astra`, `gpt-6-sol`, and
-`gpt-6-luna` to the existing `fable-5`, `opus-5`, and `sonnet-5` profiles respectively.
-An unsuffixed `GPT-6` family label supplies no exact model identity; keep the existing
-`generic` fail-closed result in that case. Available models and agent pins do not identify
-the running orchestrator.
+Every agent keeps its own `model` and `effort` pins. Never pass a `model` override at dispatch. To generate agent profiles for a non-Claude runner, translate the pins with [`model-equivalence.md`](../_shared/model-equivalence.md).
 
 ---
 
@@ -723,6 +709,7 @@ change removes.
 | **A MERGED PR claims this issue AND its post-merge runs are green** | **MERGED — implementation complete; HALT** (Step 2.5) |
 | No branch | **Phase 1: UNDERSTAND** — but Steps 3/4 still run, and the report names any existing spec/plan (a `*-$0-*` artifact may already be on the default branch) |
 | Draft or ready PR exists (any spec/plan state) | Skip the spec and plan rows; use the PR rows below |
+| A trusted in-session repro handoff identifies this issue and branch, with the repro SHA and fix SHA recorded by the immediately preceding successful `/reproduce-then-fix` run; the current clean branch HEAD equals the fix SHA, the repro SHA is its ancestor, and no PR exists | **Phase 4: VALIDATE** — run every Phase 4 gate; no spec or plan is required for this handoff |
 | Branch + a matched artifact marked `PR n of m` (n < m) AND an earlier PR already merged | **Phase 2: PLAN** — the matched spec/plan is prior scope, not this lifecycle's (Step 4.5) |
 | Branch, no spec (`*-$0-*` in `SPEC_DIR`) | **Phase 2: PLAN** (brainstorming needed) |
 | Branch + spec, no plan (`*-$0-*` in `PLAN_DIR`) | **Phase 2: PLAN** (writing-plans needed) |
@@ -742,6 +729,12 @@ IMPL_COMMITS=$(git log "refs/remotes/origin/${DEFAULT_BRANCH}..${BRANCH}" --onel
 ```
 
 If `IMPL_COMMITS` > 0 → Phase 4. If `IMPL_COMMITS` = 0 → Phase 3.
+
+The repro handoff is context from the immediately preceding invocation, not a file, commit
+message, branch name or user-controlled marker. Verify both SHAs in Git, branch identity,
+clean status and absence of a PR before using it. If the session lacks that trusted context,
+or any check fails, ignore the handoff and use ordinary phase detection. Never reconstruct
+it from repository contents or skip the earlier failed-query/merged-PR halt conditions.
 
 Report detected phase:
 
@@ -862,7 +855,6 @@ single-issue lifecycle afterward.
 | # | Check | On failure |
 |---|---|---|
 | A1 | **Security-surface disclosure.** Any issue carrying `risk: security`, `risk: privacy`, or a security-sensitive `domain:` label | **LIST it in the admission report — do not exclude.** The security-label mode floor was retired (see Phase 1.5), so this is disclosure, not a gate: the developer sees what is in the batch and drops anything they would rather drive themselves. Reviewer dispatch is unaffected — `@security-reviewer`, `@red-team` and any domain reviewers in the repo's `.review_agents` roster still fire on those labels, and Phase 9 still gates each merge |
-| A2 | **Tier floor.** Resolved tier is `generic` | **ABORT the batch.** `Dynamic` degrades to a static split on `generic`, and a `generic` orchestrator must not run a lifecycle beyond trivial scope. Unattended work on the weakest runner is the worst available combination |
 | A3 | **Surface-conflict pre-check.** Two issues whose `@architect` Mode-1 blast-radius scouts predict the same migration sequence number, the same lockfile, or the same canonical-writer file | **SERIALIZE the conflicting pair** (the later issue waits for the earlier one to merge), or exclude if the overlap is deep. The scout already produces this prediction, so the check costs nothing extra |
 | A4 | **Batch cap.** More than 8 issues | **TRUNCATE to the first 8** and say so. An unbounded epic would otherwise spawn unbounded unattended work |
 | A5 | **Parent-epic linkage.** Missing epic for an issue's `release:` stream | WARN only, per the normal Phase-1 posture. Never blocks |
@@ -1087,8 +1079,7 @@ Display the brief, then run the parent-epic linkage check below (if the repo ena
 **Agent Dispatch:** consult `## Phase 1: UNDERSTAND` in [`lifecycle-agent-dispatch.md`](../_shared/lifecycle-agent-dispatch.md). Always: `@architect` (Mode 1 — blast-radius scout), dispatched via the Agent tool after `/issue-brief` returns. Its reviewer prediction feeds Phase 2's design, not just the log. Candidate: `@researcher` when a knowledge gap blocks scoping. Emit the `Dispatched agents (Phase 1): […]` visibility line.
 
 For Codex, Phase 1 agents use their generated Codex agent profiles' model and effort pins, with
-the source `model:` and `effort:` pins named alongside them. The orchestrator's GPT-6
-tier does not change an agent's pin; the repo's agent catalog, where one exists, records the active profile translation.
+the source `model:` and `effort:` pins named alongside them. The orchestrator's own model does not change an agent's pin; the repo's agent catalog, where one exists, records the active profile translation.
 
 ### Parent-epic linkage check
 
@@ -1160,15 +1151,11 @@ Both flags from the `argument-hint` are optional:
 
 | Option | When to recommend |
 |---|---|
-| `Inline` | Sequential work with shallow context. Bug fix, single-file change, simple refactor. Lower token cost. Recommended for trivial single-task scope on EVERY tier. |
+| `Inline` | Sequential work with shallow context. Bug fix, single-file change, simple refactor. Lower token cost. Recommended for trivial single-task scope. |
 | `Subagent Driven` | Parallelizable work, multiple independent tasks, deep context per task. Higher token cost, better isolation. |
-| `Dynamic` (default for capable tiers at nontrivial scope) | Per-task inline-vs-subagent decisions at Phase 3 execution time against criteria D1–D5 (see Phase 3). Replaces the retired plan-time Hybrid split; `--approach=hybrid` is a deprecated alias for `dynamic`. |
+| `Dynamic` (default at nontrivial scope) | Per-task inline-vs-subagent decisions at Phase 3 execution time against criteria D1–D5 (see Phase 3). Replaces the retired plan-time Hybrid split; `--approach=hybrid` is a deprecated alias for `dynamic`. |
 
-**Recommendation precedence: user flag → tier profile → default.**
-
-Tier-conditional defaults (per the [tier catalog](../_shared/model-capability-tiers.md), profile axes 1/1a):
-- `fable-5` / `opus-5` / `sonnet-5` → **Dynamic** for nontrivial scope; **Inline** for trivial single-task scope.
-- `generic` → legacy shape heuristics: single task or simple refactor → **Inline**; ≥3 sub-tasks → **Dynamic-degraded** (plan-time static split: each task pre-marked inline/subagent in the plan itself); 4+ orthogonal sub-issues or explicit parallelism → **Subagent Driven**.
+**Recommendation precedence: user flag → default.** Default: **Dynamic** for nontrivial scope; **Inline** for trivial single-task scope.
 
 ### Question 2: Task Handling Mode
 
@@ -1199,7 +1186,7 @@ The five-mode framework (Hand-Held / Careful / Trusted / Weekly Deps / Overnight
 
 **Phase 9 always gates.** Merge always requires explicit user approval regardless of selected mode. This is the universal floor.
 
-> **What changed (2026-06-20 consolidation).** The old per-phase recommendation table (a different recommended mode for security work, bot PRs, frontend polish, tooling changes, etc.) is gone — mode selection is now a plain default plus a deterministic tier notch (the security floor that accompanied them was itself retired 2026-07-24 — see the retirement note below). The flag-conditional `Auto*` cells went away with Weekly Deps: bot-dependency PRs run as `Automated End-to-End`, content flags surface through `/weekly-deps`'s own triage tiers, not through a mode-matrix special case. `In-the-Loop` no longer gates execution (Phase 3) or final-review fix-application (Phase 8) — it gates only the four shared-state visibility boundaries.
+> **What changed (2026-06-20 consolidation).** The old per-phase recommendation table (a different recommended mode for security work, bot PRs, frontend polish, tooling changes, etc.) is gone — mode selection is now a plain default (the security floor that accompanied them was itself retired 2026-07-24 — see the retirement note below). The flag-conditional `Auto*` cells went away with Weekly Deps: bot-dependency PRs run as `Automated End-to-End`, content flags surface through `/weekly-deps`'s own triage tiers, not through a mode-matrix special case. `In-the-Loop` no longer gates execution (Phase 3) or final-review fix-application (Phase 8) — it gates only the four shared-state visibility boundaries.
 
 > **What changed (2026-07-24 On-the-Loop re-anchoring).** `On-the-Loop` moved from gating `5, 9` to gating `2, 8, 9`. The two modes now differ in *kind*, not just in count: **`In-the-Loop` gates shared-state visibility boundaries** (what becomes visible to others — plan, push, ready, merge), while **`On-the-Loop` gates judgment boundaries** (what a human must decide — the design going in, the review outcome coming out). The mechanical middle runs unattended.
 >
@@ -1207,17 +1194,9 @@ The five-mode framework (Hand-Held / Careful / Trusted / Weekly Deps / Overnight
 >
 > Phase 8's gate in `On-the-Loop` is a **review-outcome** gate: `/enhanced-pr-review` still runs unconditionally (it is read-only triage), and the gate falls on accepting its triage table and fix-application — not on whether the review happens.
 
-### Mode suggestion (default + tier notch)
+### Mode suggestion (fixed default)
 
-There is no per-workflow-type recommendation table. The suggested mode is a plain default, adjusted by model tier. The developer always confirms at Phase 1.5 and can override.
-
-1. **Base default:** `On-the-Loop` (the middle rung — the dev approves the PR push and the merge, and autos the rest).
-2. **Tier notch (deterministic; never at the orchestrator's discretion):** shift the base by the profile's modifier (axis 5 of the [tier catalog](../_shared/model-capability-tiers.md)) along the ladder `In-the-Loop < On-the-Loop < Automated End-to-End`, clamped at the ladder ends:
-   - `fable-5` (+1) → `Automated End-to-End`
-   - `opus-5` / `sonnet-5` (0) → `On-the-Loop`
-   - `generic` (−1) → `In-the-Loop`
-3. **Suggestion-only:** the human confirms at Phase 1.5 exactly as before. The mode-to-gate matrix is untouched and tier-invariant.
-4. **Re-entry precedence:** a confirmed persisted mode-state file ALWAYS wins over a freshly tier-shifted suggestion. Tier seeds only the first Phase 1.5 prompt and the explicit `re-ask` path.
+There is no per-workflow-type recommendation table and no model-based adjustment. The suggested mode is always `On-the-Loop` (the middle rung: the dev approves the design and the review outcome, and the mechanical middle runs automated). The developer confirms at Phase 1.5 and can override. On re-entry, a confirmed persisted mode-state file ALWAYS wins over the suggestion.
 
 > **Retired 2026-07-24 — the security-label mode floor.** A rule previously pinned
 > `risk: security` / `risk: privacy` / security-sensitive `domain:` issues to a
@@ -1240,7 +1219,6 @@ Phase 1.5: AUTONOMY CONTRACT
 [1 ✅] [1.5 ◀] [2 ○] [3 ○] [4 ○] [5 ○] [6 ○] [7 ○] [8 ○] [9 ○]
 
 Issue #<N> characteristics: <labels-summary>
-Tier: <profile> (notch modifier applied: <+1 | 0 | −1 | none — carve-out>)
 Suggested approach: <Inline | Subagent Driven | Dynamic>
 Suggested mode: <In-the-Loop | On-the-Loop | Automated End-to-End>
 
@@ -1277,7 +1255,7 @@ mode=in-the-loop
 
 The state file is best-effort persistence; if it's missing or corrupt, fall through to interactive re-ask. The re-confirmation prompt above is independent of corruption — even a syntactically valid file requires confirmation.
 
-The file never contains a `tier=` key — tier is re-resolved live at Step 0 on every invocation, and a planted `tier=` line is ignored (no reader exists). On re-entry, the confirmed file's mode ALWAYS wins over a freshly tier-shifted suggestion (see "Tier-modulated mode suggestion").
+The file never contains a `tier=` key, and a planted one is ignored (no reader exists). On re-entry, the confirmed file's mode ALWAYS wins over the fixed suggestion (see "Mode suggestion").
 
 ---
 
@@ -1293,7 +1271,7 @@ The file never contains a `tier=` key — tier is re-resolved live at Step 0 on 
 
 **Agent Dispatch:** consult `## Phase 2: PLAN` in [`lifecycle-agent-dispatch.md`](../_shared/lifecycle-agent-dispatch.md). Phase 2 is the **design panel**: `@architect` (philosophy) → parallel `@system-engineer` / `@ui-designer` + `@ux-designer` → `@frontend-designer` (reconcile) → `@architect` (final spec). `@ui-designer` and `@ux-designer` dispatch as a **pair or not at all** — reconciliation exists to resolve their tension. Emit the `Dispatched agents (Phase 2): […]` visibility line, listing the seats **actually** dispatched.
 
-**The panel's canonical implementation is the `design-panel` Workflow** (`.claude/workflows/design-panel.js`), invoked by name via the Workflow tool. Subagents cannot dispatch subagents, so the team hierarchy is expressed as a Workflow script rather than nested delegation. Pass `{issue, brief, backend, frontend, philosophy?, libraryIds?}` as `args` — a real JSON object. Skip it only for a design so small the panel is pure overhead — then dispatch `@architect` alone and say so.
+**The panel's canonical implementation is the `design-panel` Workflow** (`.claude/workflows/design-panel.js`), invoked by name via the Workflow tool. Agentic-Dev-Tooling ships it at `plugins/core-lifecycle/workflows/design-panel.js`, and `install.sh` does not copy it, so a repo adds it itself. When the file is absent, dispatch the seats above directly with the Agent tool. Subagents cannot dispatch subagents, so the team hierarchy is expressed as a Workflow script rather than nested delegation. Pass `{issue, brief, backend, frontend, philosophy?, libraryIds?}` as `args` — a real JSON object. Skip it only for a design so small the panel is pure overhead — then dispatch `@architect` alone and say so.
 
 **Workflow-eager planning (Dynamic / Subagent Driven; default under ultracode).** For a genuinely hard design — wide solution space, several viable architectures — draft the plan from **multiple independent angles via a dynamic Workflow** (judge-panel pattern: N approaches scored by independent agents, synthesize from the winner) rather than committing to the first approach. `design-panel` is the standing instance of this pattern; author a bespoke Workflow when the solution space needs more than one architect voice. See the Phase 3 "Escalation rung" for when a Workflow is the right tool.
 
@@ -1385,7 +1363,7 @@ Execution is selected by the Phase 1.5 Implementation Approach:
 
 - **Inline** → run `/superpowers:executing-plans` for the whole plan.
 - **Subagent Driven** → run `/superpowers:subagent-driven-development` for the whole plan.
-- **Dynamic** → the orchestrator executes the plan task-by-task as the session spine (executing-plans discipline); for EACH task, decide inline vs subagent against the criteria below, batch-sized by the tier profile (axis 2). On the `generic` tier, Dynamic degrades to the plan-time static split (each task pre-marked in the plan).
+- **Dynamic** → the orchestrator executes the plan task-by-task as the session spine (executing-plans discipline); for EACH task, decide inline vs subagent against the criteria below, in batches of 2–3 tasks between verification points (see § No model gate).
 
 #### Task shape — construction or defect repair (evaluated FIRST, before D0)
 
@@ -1417,7 +1395,7 @@ When D0 binds — small task, files already in context, **and D3 does not apply*
 
 **Then check E1-E4 — the escalation criteria.** When the table has named `@backend-developer` or `@frontend-developer`, evaluate `## Escalation (E1-E4)` in [`lifecycle-agent-dispatch.md`](../_shared/lifecycle-agent-dispatch.md): **E1** novel logic with no in-repo precedent · **E2** auth / crypto / E2EE / RBAC / IPC-sender surface · **E3** one contract spanning frontend *and* backend · **E4** the same task already bounced twice off a producer. If one fires and the repo defines an escalation agent, that agent takes the task; with none defined, record the criterion and surface the task to the developer. Otherwise the producer does.
 
-Read the floor in that section before applying these — **volume, tedium, and unfamiliarity never escalate**, and a wide sweep is D6 (Workflow), not E3. This is agent selection, not a `model` override: never pass a `model` argument to `Agent`, at any tier, for any reason. Under `Automated End-to-End`, a genuinely borderline E1/E3 call resolves toward escalation.
+Read the floor in that section before applying these — **volume, tedium, and unfamiliarity never escalate**, and a wide sweep is D6 (Workflow), not E3. This is agent selection, not a `model` override: never pass a `model` argument to `Agent`, for any reason. Under `Automated End-to-End`, a genuinely borderline E1/E3 call resolves toward escalation.
 
 **Escalation rung — author a dynamic Workflow (sits ABOVE inline-vs-subagent).** This check applies to **both `Dynamic` and `Subagent Driven`** approaches — for `Subagent Driven` it OVERRIDES "run `subagent-driven-development` for the whole plan" whenever the plan (or a plan task) is a wide sweep; do not let a per-task or whole-plan subagent framing dissolve an aggregate wide sweep into "many narrow tasks" that each dodge D6. D1–D5 choose inline-vs-subagent for a SINGLE task. Before applying them, check whether the task — **or the plan in aggregate** — is a **wide, independent, parallelizable sweep**: many homogeneous units (dozens+ of routes / files / modules), a large migration, or work that benefits from cross-checking (security/correctness audits — missing-authz, IPC-sender, secret-leak). If so, the right tool is a **dynamic Workflow authored via the Workflow tool** (fan-out + adversarial cross-check), NOT a handful of hand-dispatched subagents.
 
@@ -1638,6 +1616,21 @@ This makes the PR visible to reviewers.
 ### Step 7.1 — Mark ready
 
 ```bash
+# GUARD THE STATE PATH FIRST, before `gh pr ready`. The end of this block writes the Phase 7.5
+# cutoff; refusing only there would leave the PR flipped ready with no cutoff on disk.
+# Never write THROUGH a link: `.claude/state/` is worktree content, and a branch can commit a
+# symlink here that checkout drops over the ignored file. A linked directory (`.claude` or
+# `.claude/state`) would redirect every write below, so refuse it before `mkdir` follows it;
+# a linked state file is removed and replaced with a regular file. A branch can equally commit a
+# regular FILE at `.claude/state` or a DIRECTORY at the state path. Either one makes the write
+# fail, and the monitor then reads "no state" and falls back to its -10 min direct-entry cutoff,
+# which can admit an old head's verdict. Refuse both.
+STATE=".claude/state/phase75-<PR>.env"
+if [ -L .claude ] || [ -L .claude/state ]; then echo "UNKNOWN: .claude or .claude/state is a symlink; refusing to write Phase 7.5 state"; return 2 2>/dev/null || exit 2; fi
+mkdir -p .claude/state || true   # a failure is reported by the type guard below
+[ ! -L "$STATE" ] || rm -f -- "$STATE"
+if [ ! -d .claude/state ] || { [ -e "$STATE" ] && [ ! -f "$STATE" ]; }; then echo "UNKNOWN: .claude/state is not a directory or $STATE is not a regular file; refusing to write Phase 7.5 state"; return 2 2>/dev/null || exit 2; fi
+
 # BASELINE FIRST — before the flip, not after. A ready_for_review-gated workflow can register in
 # the window between `gh pr ready` and the query, so a baseline taken afterwards already CONTAINS
 # the new check, `after` never exceeds it, and the lifecycle walks into Phase 7.5 with that check
@@ -1678,12 +1671,26 @@ done
 }
 # PERSIST these — each phase runs in its own shell, so a plain variable does not survive to
 # Phase 7.5 and the window would silently restart at 600 s on every re-arm. Write a state file
-# keyed by PR, and REWRITE it when Step 7.2 re-summons: that is the documented start of the
-# SECOND ten-minute window, not a continuation of the first.
-STATE=".claude/state/phase75-<PR>.env"
-mkdir -p .claude/state
-printf 'READY_AT=%s\nREADY_ISO=%s\n' "$(date +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE"
-# Phase 7.5 sources this file. Without it the window restarts arbitrarily AND a pre-push
+# keyed by PR ($STATE, guarded at the top of this block). Step 7.2 rewrites it on every summon: a
+# new READY_AT starts the window at the summon (on a re-summon, the decision table's second
+# window), while READY_ISO (the arrival cutoff) is kept with its READY_HEAD, so window-1 signals
+# for the same head still count.
+# READY_HEAD records the head READY_ISO was stamped for; the monitor drops the cutoff for any other
+# head. READ THE HEAD BEFORE THE STAMP, then read it again. Reading it only after the stamp let a
+# push that landed in between record the NEW head against a cutoff taken before that push, so the
+# old head's verdicts from that gap counted for the new head. Two equal reads around the stamp
+# prove the head did not move across it. Retry once on a race; a second mismatch is UNKNOWN.
+# An unreadable head on both reads records an empty READY_HEAD, which the monitor treats as a
+# moved head (fails closed).
+head_now() { gh pr view <PR> --json headRefOid --jq .headRefOid 2>/dev/null | grep -E '^[0-9a-f]{40}$' || true; }
+for try in 1 2; do
+  H1=$(head_now); STAMP_AT=$(date +%s); STAMP_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ); H2=$(head_now)
+  [ "$H1" = "$H2" ] && break
+done
+[ "$H1" = "$H2" ] || { echo "UNKNOWN: the PR head moved twice while Step 7.1 stamped the Phase 7.5 cutoff — re-run this step"; exit 2; }
+printf 'READY_AT=%s\nREADY_ISO=%s\nREADY_HEAD=%s\n' "$STAMP_AT" "$STAMP_ISO" "$H2" > "$STATE" \
+  || { echo "UNKNOWN: could not write $STATE — Phase 7.5 would run without this cutoff"; exit 2; }
+# Phase 7.5 parses this file. Without it the window restarts arbitrarily AND a pre-push
 # reviewer signal satisfies the new wait — the monitor reports ARRIVED before the current
 # review has begun.
 ```
@@ -1700,6 +1707,13 @@ request it. Add a mention back here when that bot returns — Step 7.5.4 lists t
 summon as one of the surfaces that carry a bot's OFFLINE state.
 
 ```bash
+# Refuse an unusable state path BEFORE posting (Step 7.1's guard): the restart block below must be
+# able to write READY_AT, and a summon posted without it starts a review no window is timing.
+STATE=".claude/state/phase75-<PR>.env"
+if [ -L .claude ] || [ -L .claude/state ]; then echo "UNKNOWN: .claude or .claude/state is a symlink; refusing to write Phase 7.5 state"; return 2 2>/dev/null || exit 2; fi
+mkdir -p .claude/state || true   # a failure is reported by the type guard below
+[ ! -L "$STATE" ] || rm -f -- "$STATE"
+if [ ! -d .claude/state ] || { [ -e "$STATE" ] && [ ! -f "$STATE" ]; }; then echo "UNKNOWN: .claude/state is not a directory or $STATE is not a regular file; refusing to write Phase 7.5 state"; return 2 2>/dev/null || exit 2; fi
 SUMMON_FILE=$(mktemp)
 cat > "$SUMMON_FILE" <<'BODY'
 PR is ready for review.
@@ -1710,20 +1724,46 @@ PR is ready for review.
 BODY
 gh pr comment <PR> --body-file "$SUMMON_FILE"
 rm -f "$SUMMON_FILE"
-
-# RESTART the window here. This is the only place that can: Step 7.1 stamps READY_AT once at
-# the ready flip, and a re-summon after the first window expires used to reload that expired
-# stamp, compute a non-positive remainder, and report "first window already elapsed" forever —
-# so the second ten-minute window the decision table grants was never actually granted. A
-# re-summon IS the start of a new window, so it writes one.
-STATE=".claude/state/phase75-<PR>.env"; mkdir -p .claude/state
-printf 'READY_AT=%s\nREADY_ISO=%s\n' "$(date +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE"
 ```
 
 Edit the mention line to the roster's mentionable, online reviewers before posting.
 
 Use `--body-file`, never an inline `--body` with a heredoc: a command-scanning
 PreToolUse hook inspects heredoc bodies and can block the call.
+
+**Restart the window, keep the cutoff.** Run this right after the summon is posted.
+
+```bash
+# RESTART the window here. This is the only place that can: Step 7.1 stamps READY_AT once at
+# the ready flip, and a re-summon after the first window expires used to reload that expired
+# stamp, compute a non-positive remainder, and report "first window already elapsed" forever —
+# so the second ten-minute window the decision table grants was never actually granted. A
+# re-summon IS the start of a new window, so it writes READY_AT.
+#
+# KEEP the cutoff. READY_ISO is the monitor's cutoff, not the window. Rewriting it here dropped
+# every window-1 signal for the same head: Gitar edits its re-review into the dashboard comment
+# it created before the summon, and that comment keeps its old createdAt, so a cutoff moved to
+# now hid the verdict. Keep READY_HEAD with it EXACTLY as it is, even when the head has
+# moved: this block does not decide a moved head's cutoff, the monitor does. It compares
+# READY_HEAD with the live head, drops a cutoff stamped for another head, and re-anchors at now,
+# the one boundary no push-time proxy can undercut. Only when no valid cutoff exists does this block write
+# now and the current head, read BEFORE the stamp as in Step 7.1. PARSE the file, never source
+# it. Truncating the file also drops any PHASE75_DONE or PHASE75_TIMEOUT line.
+STATE=".claude/state/phase75-<PR>.env"
+if [ -L .claude ] || [ -L .claude/state ]; then echo "UNKNOWN: .claude or .claude/state is a symlink; refusing to write Phase 7.5 state"; return 2 2>/dev/null || exit 2; fi   # see Step 7.1
+mkdir -p .claude/state || true   # a failure is reported by the type guard below
+[ ! -L "$STATE" ] || rm -f -- "$STATE"   # never read or write through a planted link (Step 7.1)
+if [ ! -d .claude/state ] || { [ -e "$STATE" ] && [ ! -f "$STATE" ]; }; then echo "UNKNOWN: .claude/state is not a directory or $STATE is not a regular file; refusing to write Phase 7.5 state"; return 2 2>/dev/null || exit 2; fi   # see Step 7.1
+KEPT_HEAD=$(grep -E '^READY_HEAD=' "$STATE" 2>/dev/null | tail -1 | cut -d= -f2- | grep -E '^[0-9a-f]{40}$' || true)
+KEPT_ISO=$(grep -E '^READY_ISO=' "$STATE" 2>/dev/null | tail -1 | cut -d= -f2- \
+             | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || true)
+if [ -z "$KEPT_ISO" ]; then
+  KEPT_HEAD=$(gh pr view <PR> --json headRefOid --jq .headRefOid 2>/dev/null | grep -E '^[0-9a-f]{40}$' || true)
+  KEPT_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+fi
+printf 'READY_AT=%s\nREADY_ISO=%s\nREADY_HEAD=%s\n' "$(date +%s)" "$KEPT_ISO" "$KEPT_HEAD" > "$STATE" \
+  || { echo "UNKNOWN: could not write $STATE — the re-summon's window was not restarted"; exit 2; }
+```
 
 **A mention summons Gitar. Do not add a separate `Gitar review` comment.** Both forms
 work: in a sample of mention-only comments, most were followed by a `Gitar` check-run
@@ -1751,6 +1791,14 @@ Then **continue straight into Phase 7.5 in this same invocation** and arm its ar
 > "PR marked ready and reviewers summoned. Holding at Phase 7.5 until the required bots arrive."
 
 ## Phase 7.5: WAIT FOR BOT REVIEWS (auto-run, STOP-on-anomaly)
+
+**Target-repository roster only.** Before waiting, confirm the current worktree and
+PR both belong to the repository being changed, then load that repository's
+default-branch `.claude/repo-config.json` as described above. A skill installed at
+user scope, its source repository, prior chats, historical examples below, and
+other repositories do not establish this PR's expected reviewers. A missing or
+empty `.bots` array means no bot wait; entries marked `offline: true` are not
+expected. This does not waive independent GitHub branch-protection requirements.
 
 **Mode-Aware Gate (per Phase 1.5):** Auto in all modes — this phase waits, it doesn't mutate state. The STOP-on-anomaly condition (no expected bot arrived within timeout) is mode-independent and forces a flag to the developer regardless of selected mode.
 
@@ -1883,7 +1931,7 @@ A bot is **DECLINED** when:
 **Known limits of this contract, accepted deliberately.** Each of these was raised, verified, and left as-is with a reason. They are recorded so the next reader does not re-litigate them or "fix" one blind.
 
 1. **A terminal `SKIPPED` / `CANCELLED` CheckRun still counts as arrival.** The decline mechanism cannot reach a check-run — that surface carries no description — so terminality is all the rollup leg has. Tightening to a `SUCCESS|FAILURE|ERROR` allowlist would turn a legitimately skipped blocking reviewer into a false STOP; a path-gated release classifier (`when: shippable`) skips by design. **The direction matters more than the rule**: leaving it risks a false arrival on a skipped check, changing it risks a false STOP on every PR outside the gated paths. Left permissive; revisit only with a per-bot notion of "skip is expected".
-2. **CodeRabbit's verdict can be invisible to the comment leg.** It edits its walkthrough **in place**, so `createdAt` predates the summon it answers and `gh pr view --json comments` exposes no edit timestamp at all (only REST `/issues/{n}/comments` carries `updated_at`). After a cutoff advance that verdict is unreachable here. **Do not "fix" this by switching the cutoff to `updated_at`** — that trades a false STOP for a false ARRIVAL, because any trivial edit to a stale comment would re-qualify it. It fails closed, and the status leg covers the ordinary case.
+2. **CodeRabbit's verdict can be invisible to the comment leg.** It edits its walkthrough **in place**, so `createdAt` predates the summon it answers and `gh pr view --json comments` exposes no edit timestamp at all (only REST `/issues/{n}/comments` carries `updated_at`). After a cutoff advance that verdict is unreachable here. **Do not "fix" this by switching the cutoff to `updated_at`** — that trades a false STOP for a false ARRIVAL, because any trivial edit to a stale comment would re-qualify it. It fails closed, and the status leg covers the ordinary case. **Gitar's dashboard verdict has the same shape:** Gitar edits it in place and it keeps its `createdAt`, so the cutoff Step 7.2 keeps helps only when that dashboard comment was created after the original cutoff. A dashboard created earlier is invisible to the comment leg, and Gitar can then arrive only through its other legs (its check or a formal review).
 3. **An `ACKNOWLEDGED` line can print in the same tick a bot also ARRIVES.** The ack echo runs before the arrival loop populates `seen`. Cosmetic only: the timeout re-checks `acked` against `missing`, so a bot that arrived is never reported as acked-and-missing.
 4. **These patterns are in-tree, so a PR editing them can be misclassified by them.** A reviewer summarising this very file could quote `Review rate limited` in its walkthrough and be marked DECLINED while having genuinely reviewed. Fails closed (a loud STOP, not a false green). If it bites often, move the comment surface onto CodeRabbit's `<!-- … skip review by coderabbit.ai -->` marker and reserve bare prose for the status description, which is vendor-written and cannot quote a diff.
 
@@ -1923,7 +1971,7 @@ It does **not** update the global OFFLINE list (Step 7.5.4) — a quota reset re
 |---|---|
 | All **REQUIRED** bots ARRIVED | Proceed to Phase 8 — regardless of optional-bot state |
 | A **REQUIRED** bot IN-PROGRESS **or still MISSING inside the window** | Arm the arrival monitor below and wait — never hand the wait to the developer. MISSING is the *normal* state in the first minutes after the ready flip: a comment-only reviewer emits no check at all, and a check-emitting one has not registered yet. Both resolve into the same wait, so do not treat pre-timeout MISSING as a separate case with no instruction |
-| After timeout (10 min since `gh pr ready`), a **REQUIRED** bot still MISSING | Re-summon it once per Step 7.2, restart the 10-min window; if still MISSING after the second window → **STOP and flag** |
+| After timeout (10 min since the latest summon: the ready flip at Step 7.1 or a Step 7.2 re-summon), a **REQUIRED** bot still MISSING | Re-summon it once per Step 7.2, restart the 10-min window; if still MISSING after the second window → **STOP and flag** |
 | After timeout, a **REQUIRED** bot ACKNOWLEDGED but never delivered | Same mechanics — re-summon once, restart the window, STOP after the second. The *message* differs: report it as "acknowledged but never delivered" and skip the configuration causes, which an ack disproves. A re-summon is still the right first move, because for Gitar a fresh `Gitar review` starts a new review rather than re-asking for one already queued |
 | A **REQUIRED** bot EXHAUSTED | Treat as ARRIVED-with-no-findings, log the quota line, proceed. A quota wall is not a review gap the developer can resolve by waiting |
 | An **OPTIONAL** bot MISSING or EXHAUSTED at timeout | **Do not STOP.** Log one line and proceed to Phase 8 |
@@ -1948,22 +1996,36 @@ Reviewers arrive **independently and minutes apart**, so this wait wants one not
 ```bash
 # Monitor: description "PR <N> required-reviewer arrivals", timeout_ms 600000
 # Emits one line per NEW required-bot signal; exits when both have arrived or the window closes.
-# The window is 10 MINUTES to match the decision table above, measured from the ready flip —
-# not from when this monitor happened to be armed. Step 7.1 records READY_AT for exactly this;
-# derive the remainder from it so a re-arm consumes the table's SECOND window rather than a
-# fresh one. Falls back to a full window when READY_AT is unset (direct entry at Phase 7.5).
-# Source the timestamps Step 7.1 persisted; a missing file means direct entry at Phase 7.5.
+# The window is 10 MINUTES to match the decision table above, measured from the latest summon
+# (the ready flip at Step 7.1, or a Step 7.2 re-summon) — not from when this monitor happened to
+# be armed. Steps 7.1 and 7.2 record READY_AT for exactly this; derive the remainder from it so a
+# re-arm consumes the rest of the current window rather than a fresh one. Falls back to a full
+# window when READY_AT is unset (direct entry at Phase 7.5).
+# Parse what Steps 7.1/7.2 persisted and this monitor's moved-head re-anchor appended; a missing
+# file means direct entry at Phase 7.5.
 STATE=".claude/state/phase75-<PR>.env"
+if [ -L .claude ] || [ -L .claude/state ]; then echo "UNKNOWN: .claude or .claude/state is a symlink; refusing to write Phase 7.5 state"; return 2 2>/dev/null || exit 2; fi   # see Step 7.1
+[ ! -L "$STATE" ] || rm -f -- "$STATE"   # never read or append through a planted link
+# Direct entry has no state path yet, so only a path that EXISTS with the wrong type is refused. A
+# regular file at `.claude/state` or a directory at the state path both read as "no state", and
+# the -10 min direct-entry cutoff below could then admit an old head's verdict (see Step 7.1).
+if { [ -e .claude ] && [ ! -d .claude ]; } || { [ -e .claude/state ] && [ ! -d .claude/state ]; } \
+   || { [ -e "$STATE" ] && [ ! -f "$STATE" ]; }; then
+  echo "UNKNOWN: .claude or .claude/state is not a directory, or $STATE is not a regular file; refusing to read Phase 7.5 state"; return 2 2>/dev/null || exit 2
+fi
 # PARSE the state file; never `.`-source it. Sourcing executes whatever the file contains, and
 # `.claude/state/` is ordinary worktree content — a checked-out branch, another tool, or a stale
 # artifact can put shell there, and this path runs automatically before any review. Read only the
 # keys this step expects and validate each one's shape; anything malformed is dropped, not run.
 read_state() {  # $1 = key, $2 = validating ERE
   [ -f "$STATE" ] || return 0
-  # tail -1, NOT grep -m1: the completion writer APPENDS (`>>`) while the Step 7.1/7.2 writer
-  # truncates (`>`), so several PHASE75_DONE lines accumulate between re-summons and the LAST is
-  # the current one. Sourcing took the last too, so this preserves the old semantics; -m1 would
-  # read a stale SHA, fail the head check and re-arm — safe, but it defeats the record's purpose.
+  # tail -1, NOT grep -m1: two writers APPEND (`>>`) while the Step 7.1/7.2 writer truncates
+  # (`>`). The completion writer appends PHASE75_DONE / PHASE75_TIMEOUT lines, and the moved-head
+  # re-anchor below appends a new READY_ISO / READY_HEAD pair. So a key can repeat between
+  # re-summons and the LAST line is the current one: READY_ISO and READY_HEAD rely on last-wins
+  # exactly as PHASE75_DONE does. Sourcing took the last too, so this preserves the old semantics;
+  # -m1 would read a stale value — for PHASE75_DONE a stale SHA that fails the head check and
+  # re-arms, and for READY_ISO / READY_HEAD the superseded cutoff.
   v=$(grep -E "^$1=" "$STATE" 2>/dev/null | tail -1 | cut -d= -f2-)
   printf '%s' "$v" | grep -Eq "$2" && printf '%s' "$v"
   # `|| true`: an absent or shape-invalid key is the NORMAL case (no completion recorded yet),
@@ -1987,20 +2049,34 @@ case "$HEAD_SHA" in
   *) HEAD_SHA="" ;;
 esac
 [ -n "$HEAD_SHA" ] || { echo "UNKNOWN: could not read headRefOid — cannot honour or record a completion"; exit 2; }
+# Bind the kept cutoff to THIS head. This is the only place that decides a moved head's cutoff:
+# Step 7.2 keeps READY_ISO with its READY_HEAD unchanged, and a push can land at any point before
+# this run, so without the check the new head would start with the old head's cutoff and that
+# head's verdicts would satisfy the wait. A state file with READY_ lines whose READY_HEAD is not
+# this head — another head, none recorded, or a READY_ISO that failed to parse — is MOVED: its cutoff is DROPPED and re-anchored below at now (see there for why no
+# push-time proxy is safe). The new cutoff is persisted with its head below, so a later same-head
+# re-arm (after a probe failure, say) reuses it instead of moving it again.
+READY_HEAD=$(read_state READY_HEAD '^[0-9a-f]{40}$')
+HEAD_MOVED=""
+if grep -Eq '^READY_(AT|ISO|HEAD)=' "$STATE" 2>/dev/null && [ "${READY_HEAD:-}" != "$HEAD_SHA" ]; then
+  READY_ISO=""; HEAD_MOVED=1
+fi
 
 # Honour a completion already recorded for THIS head SHA — otherwise re-entry re-arms a wait
 # that has already succeeded. A new push changes the SHA, which correctly invalidates it.
 if [ -n "${PHASE75_DONE:-}" ] && [ "$PHASE75_DONE" = "$HEAD_SHA" ]; then
   echo "ALL REQUIRED ARRIVED (recorded for this HEAD) — proceed to Phase 8"; exit 0
 fi
-READY_ISO="${READY_ISO:-$(date -u -v-10M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-10 min' +%Y-%m-%dT%H:%M:%SZ)}"
+# A moved head gets no -10 min default: that could reach back before the push and admit the old
+# head's verdicts. Its cutoff is re-anchored below at now.
+[ -n "$HEAD_MOVED" ] || READY_ISO="${READY_ISO:-$(date -u -v-10M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-10 min' +%Y-%m-%dT%H:%M:%SZ)}"
 # ADVANCE the cutoff to the newest push when that is later. Step 7.1 stamps READY_ISO at the
-# flip and Step 7.2 rewrites it on a re-summon, but a FIX PUSH does neither — so every review
+# flip (a Step 7.2 re-summon keeps it), but a FIX PUSH moves neither — so every review
 # and completed check from before that push stays newer than the cutoff and satisfies the
 # re-armed monitor before a single reviewer has looked at the new HEAD. The cycle starts at the
 # newest push. ISO-8601 Z sorts lexicographically in chronological order, so this is max().
 # `// empty`, matching PUSH_ISO below. Without it an empty `commits` prints the literal string
-# `null`, and `null` sorts AFTER every ISO-8601 stamp — so the max() three lines down picks it,
+# `null`, and `null` sorts AFTER every ISO-8601 stamp — so the max() below picks it,
 # READY_ISO becomes "null", and every `.createdAt > $since` goes false because "2026…" < "null".
 # Nothing is then ever in-cycle: every bot reads MISSING and a blocking one produces a false
 # STOP. It is the one timestamp in this block that was not shape-validated.
@@ -2009,26 +2085,46 @@ HEAD_ISO=$(gh pr view <PR> --json commits | jq -r '.commits | last | .committedD
 # committed before the old-head reviewers finish but pushed after their comments land leaves
 # those comments newer than the commit stamp, so they satisfy the wait and Phase 8 starts with
 # neither reviewer having seen the new HEAD. CI starts on push, so the earliest `startedAt`
-# across the current head's rollup is a push-time proxy — measured 21 s after `committedDate`
+# across the current head's checks is a push-time proxy — measured 21 s after `committedDate`
 # on this PR's own head, i.e. reliably later.
-# `min // empty` yields EMPTY when no check has completed yet, so on a PR with no CI the cutoff
+# Read it through `gh pr checks`, not `gh pr view --json statusCheckRollup`: some tokens are
+# refused the rollup field, and the `|| true` then hid that as "no push time". `gh pr checks`
+# reports a check that has not started as null or as Go's zero time `0001-01-01T00:00:00Z`,
+# which would sort first and win the min, so both are dropped.
+# `min // empty` yields EMPTY when no check has started yet, so on a PR with no CI the cutoff
 # silently degrades back to `committedDate` — authored time, not push time — which is precisely
 # the gap this line exists to close. There is no better proxy available on such a PR (GraphQL
 # `pushedDate` is usually null), so the degradation is accepted, not hidden: on a check-less PR,
 # treat a reviewer signal timestamped between authoring and pushing as UNVERIFIED and re-summon
-# rather than counting it as an arrival for the current head.
-PUSH_ISO=$(gh pr view <PR> --json statusCheckRollup \
-  --jq '[.statusCheckRollup[].startedAt | select(. != null)] | min // empty' 2>/dev/null || true)
-READY_ISO=$(printf '%s\n%s\n%s\n' "$READY_ISO" "$HEAD_ISO" "$PUSH_ISO" | grep -v '^$' | sort | tail -1)
+# rather than counting it as an arrival for the current head (a head that moved since the cutoff
+# was stamped takes the moved-head path below, which fails closed at now with no started check).
+PUSH_ISO=$(gh pr checks <PR> --json startedAt \
+  --jq '[.[].startedAt | select(. != null and (startswith("0001-") | not))] | min // empty' 2>/dev/null || true)
+# `{ grep || true; }`: with every input empty grep exits 1, and under `set -e -o pipefail` that
+# kills the monitor silently on the assignment. The `:-now` fallback below handles the empty case.
+READY_ISO=$(printf '%s\n%s\n%s\n' "$READY_ISO" "$HEAD_ISO" "$PUSH_ISO" | { grep -v '^$' || true; } | sort | tail -1)
+READY_ISO=${READY_ISO:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+if [ -n "$HEAD_MOVED" ]; then
+  # READY_AT is left alone: the window still runs from the latest summon (Step 7.1/7.2).
+  # Re-anchor at NOW, the time this run first saw the head. No GitHub signal says when this PR
+  # adopted the head: a check's `startedAt` can predate the push (the SHA can run CI on another
+  # branch first, or a run can be forged), and committedDate is author-set. Any of them can fall
+  # before an old-head verdict and let it count for the new head, so none is used. The cost is
+  # liveness only: a new-head verdict that landed between the push and this run reads as MISSING
+  # and costs a re-summon, never a false arrival.
+  READY_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  { mkdir -p "$(dirname "$STATE")" && printf 'READY_ISO=%s\nREADY_HEAD=%s\n' "$READY_ISO" "$HEAD_SHA" >> "$STATE"; } \
+    || { echo "UNKNOWN: could not record the re-anchored cutoff in $STATE — refusing to wait on an unrecorded cutoff"; exit 2; }
+fi
 WINDOW=${WINDOW:-$( [ -n "${READY_AT:-}" ] && echo $(( 600 - ( $(date +%s) - READY_AT ) )) || echo 600 )}
 # A non-positive remainder means the first window is already spent — the STOP-and-resummon
 # condition from the decision table, NOT a one-second window; clamping it to 1 would report a
 # false timeout instantly. But do not exit on it either: exiting without querying reported a
-# timeout even when every expected bot had already arrived, and the re-summon that message
-# suggests rewrites READY_ISO to a LATER stamp, so the arrivals it should have counted fall
-# outside the new cycle and Phase 8 stays unreachable. WINDOW=0 makes the loop check arrivals
-# exactly once and then hit its deadline test, which still emits the STOP-and-resummon timeout
-# whenever anyone is genuinely missing.
+# timeout even when every expected bot had already arrived, and a re-summon used to rewrite
+# READY_ISO to a LATER stamp, so the arrivals it should have counted fell outside the new cycle
+# and Phase 8 stayed unreachable (Step 7.2 now keeps READY_ISO). WINDOW=0 makes
+# the loop check arrivals exactly once and then hit its deadline test, which still emits the
+# STOP-and-resummon timeout whenever anyone is genuinely missing.
 [ "$WINDOW" -gt 0 ] || WINDOW=0
 
 # The wait set comes from the ROSTER, not from a pair of logins typed into a regex. Hardcoding
@@ -2184,7 +2280,7 @@ while :; do
   # Scope to THIS cycle, not the whole PR. `seen` resets on every re-arm, so an unfiltered
   # query lets a Gitar or CodeRabbit signal from BEFORE the latest push satisfy the new wait —
   # the monitor exits ARRIVED while the current review has not started. Filter every source by
-  # READY_ISO (recorded at Step 7.1) and query all three declared signal surfaces, including
+  # READY_ISO (the cutoff computed above) and query all three declared signal surfaces, including
   # `/pulls/<PR>/comments`, which carries inline review comments the contract counts as arrival.
   # `gh` has NO `--arg`; pipe into standalone jq, which is where it lives.
   # KEEP the required-bot filter on BOTH programs. Without it `now` carries every commenter and
@@ -2382,7 +2478,10 @@ while :; do
                      and ([ ($c.body // "") | match($b.head; "gi") | .captures[0].string // ""
                             | ascii_downcase ]
                           | any(. as $s | ($s | length) >= 7 and ($head | startswith($s)))));
-                 [ (.reviews[]?      | select(.submittedAt  > $since) | who(.author.login)),
+                 # A review also binds to its COMMIT: one submitted after a push but for the
+                 # superseded head (an in-flight review finishing late) is not about this head.
+                 [ (.reviews[]?      | select(.submittedAt  > $since and (.commit.oid // "") == $head)
+                                     | who(.author.login)),
                    (.comments[]?     | select(.createdAt    > $since or at_head(.))
                       | . as $c
                       # BIND the ack element before piping. `|` rebinds `.`, so a bare
@@ -2619,8 +2718,8 @@ cannot fix an auth failure. The probe now exits UNKNOWN instead: unobserved is n
 starts, so it re-reads the head after every probe. When a push has landed, it prints `HEAD MOVED`,
 exits 4 and records nothing, because the signals it just read may describe the superseded head.
 Re-arm the monitor (run this block again). The new run reads the new head and moves the cutoff to
-the new push. `READY_AT` is unchanged, so the re-arm uses the rest of the current window rather
-than a fresh one. If that window is already spent, the re-arm checks once and then applies the
+the time it runs (now), because no GitHub signal reliably says when the PR adopted a head. `READY_AT` is
+unchanged, so the re-arm uses the rest of the current window rather than a fresh one. If that window is already spent, the re-arm checks once and then applies the
 decision table: a blocking reviewer that has not yet seen the new head reads as missing, which
 leads to the re-summon path.
 
@@ -3185,7 +3284,7 @@ prematurely or to name a file that does not exist yet.
 - Never commits spec/plan files without first being on a feature branch
 - Never BLOCKS on a missing linked issue — one issue per branch is the default, not a hard gate; it offers `/issue-creation` once at Phase 5 and honors a decline (see § Ad-hoc / issueless invocation)
 - Never runs more than 2 fix commits in a single bot review cycle (soft guideline; does not apply to merge-blocking findings)
-- Never lets the model-capability tier alter a gate or persist itself — tier is calibration, not authority (the security-label mode floor was retired 2026-07-24; see Phase 1.5)
+- Never checks, prints, or gates on the running model's identity — defaults are fixed on every harness (see § No model gate)
 - Never attempts post-merge local cleanup (`git branch -D`, `git checkout <default-branch> && git pull`, `git worktree remove`) — blocked by the destructive-commands hook in agent context. Always handed off to the developer as a copy-paste block (Phase 9, "Post-merge cleanup handoff")
 
 ## Why This Skill Exists
