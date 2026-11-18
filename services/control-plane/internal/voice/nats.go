@@ -4007,6 +4007,10 @@ func moveServerVoiceParticipant(
 	// The claim rule (authorizeServerVoiceClaimTx): an admission, a CONNECT
 	// resolve that passed in this transaction, or this boot's own row.
 	claimAuthorized := admission != nil || serverVoiceClaimAuthorized(ctx)
+	// A move deletes the user's rows in other channels, which is a removal. A
+	// claim with no admission is blocked by a live row of another boot there
+	// ($9, $10 in the blocked CTE). A consumed admission is the user's own
+	// authenticated join, so it still moves them off a row of any boot.
 	var (
 		lockedChannelID uuid.UUID
 		lockedServerID  uuid.NullUUID
@@ -4057,7 +4061,11 @@ func moveServerVoiceParticipant(
 			SELECT 1
 			FROM voice_participants
 			WHERE user_id = $2 AND channel_id <> $1
-			  AND lifecycle_event_at >= $3
+			  AND (lifecycle_event_at >= $3
+			       OR (NOT $9::bool
+			           AND media_boot_id IS NOT NULL
+			           AND media_boot_id <> $7::uuid
+			           AND ($10::timestamptz IS NULL OR lifecycle_observed_at >= $10::timestamptz)))
 			LIMIT 1
 		), removed AS (
 			DELETE FROM voice_participants
@@ -4095,7 +4103,7 @@ func moveServerVoiceParticipant(
 				LIMIT $4
 			), ARRAY[]::text[])
 	`, channelID, senderID, eventAt, maxVoiceReplayRemovedRooms+1, admissionParam, socketParam,
-		origin, claimAuthorized).Scan(
+		origin, claimAuthorized, admission != nil, serverVoiceLeaseCutoff(ctx)).Scan(
 		&upsertedCount, &priorTarget, &priorAdmitted, pq.Array(&removedRaw),
 	)
 	if err != nil {
@@ -6001,6 +6009,7 @@ type refreshOnlyLifecycleFrame struct {
 	timestamp string
 	userIDs   []string
 	admission *voiceJoinedAdmission
+	origin    uuid.UUID
 }
 
 func parseRefreshOnlyLifecycleFrame(subject string, data []byte) (refreshOnlyLifecycleFrame, bool) {
@@ -6015,17 +6024,19 @@ func parseRefreshOnlyLifecycleFrame(subject string, data []byte) (refreshOnlyLif
 		if err != nil {
 			return frame, false
 		}
-		frame = refreshOnlyLifecycleFrame{event.ChannelID, event.Timestamp, []string{event.UserID}, admission}
+		frame = refreshOnlyLifecycleFrame{event.ChannelID, event.Timestamp, []string{event.UserID}, admission, event.NodeBootID}
 	case natsSubjectVoiceHeartbeat:
 		var event voiceHeartbeatEvent
 		if json.Unmarshal(data, &event) != nil || len(event.UserIDs) > maxServerVoiceParticipantIDs {
 			return frame, false
 		}
-		frame = refreshOnlyLifecycleFrame{event.ChannelID, event.Timestamp, event.UserIDs, nil}
+		frame = refreshOnlyLifecycleFrame{event.ChannelID, event.Timestamp, event.UserIDs, nil, event.NodeBootID}
 	default:
 		return frame, false
 	}
-	return frame, true
+	// Refresh-only authority is a write path too: a frame that names no boot
+	// cannot be bound to the media plane that owns the rows it would refresh.
+	return frame, frame.origin != uuid.Nil
 }
 
 func (s *NATSSubscriber) handleRefreshOnlyLifecycleEvent(
@@ -6037,6 +6048,7 @@ func (s *NATSSubscriber) handleRefreshOnlyLifecycleEvent(
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), richPresenceLifecycleTimeout)
 	defer cancel()
+	ctx = withLifecycleReceivedAt(withLifecycleOrigin(ctx, frame.origin), receivedAt)
 	eventAt, err := s.clampVoiceEventTime(frame.timestamp, receivedAt)
 	if err != nil {
 		return
@@ -6076,6 +6088,11 @@ func (s *NATSSubscriber) handleRefreshOnlyLifecycleEvent(
 func (s *NATSSubscriber) refreshOnlyHeartbeat(
 	ctx context.Context, channelID uuid.UUID, participantIDs []uuid.UUID, eventAt time.Time,
 ) (returnErr error) {
+	// Refresh only this boot's rows and unstamped rows; never another boot's.
+	origin, hasOrigin := lifecycleOrigin(ctx)
+	if !hasOrigin {
+		return nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin refresh-only heartbeat: %w", err)
@@ -6095,7 +6112,8 @@ func (s *NATSSubscriber) refreshOnlyHeartbeat(
 		SET lifecycle_event_at = $3
 		WHERE channel_id = $1 AND user_id = ANY($2::uuid[])
 		  AND lifecycle_event_at <= $3
-	`, channelID, pq.Array(ids), eventAt); err != nil {
+		  AND (media_boot_id IS NULL OR media_boot_id = $4::uuid)
+	`, channelID, pq.Array(ids), eventAt, origin); err != nil {
 		return fmt.Errorf("refresh-only voice heartbeat: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -6108,6 +6126,10 @@ func (s *NATSSubscriber) refreshOnlyJoined(
 	ctx context.Context, channelID, senderID uuid.UUID, eventAt time.Time,
 	admission *voiceJoinedAdmission,
 ) (returnErr error) {
+	origin, hasOrigin := lifecycleOrigin(ctx)
+	if !hasOrigin {
+		return errors.New("refresh-only join has no lifecycle origin")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin refresh-only join: %w", err)
@@ -6126,7 +6148,8 @@ func (s *NATSSubscriber) refreshOnlyJoined(
 		SET lifecycle_event_at = $3
 		WHERE channel_id = $1 AND user_id = $2
 		  AND lifecycle_event_at <= $3
-	`, channelID, senderID, eventAt)
+		  AND (media_boot_id IS NULL OR media_boot_id = $4::uuid)
+	`, channelID, senderID, eventAt, origin)
 	if err != nil {
 		return fmt.Errorf("refresh existing voice participant: %w", err)
 	}
@@ -6172,6 +6195,10 @@ func (s *NATSSubscriber) insertRefreshOnlyJoined(
 	ctx context.Context, tx *sql.Tx, channelID, senderID uuid.UUID, eventAt time.Time,
 	admission *voiceJoinedAdmission,
 ) (bool, error) {
+	origin, hasOrigin := lifecycleOrigin(ctx)
+	if !hasOrigin {
+		return false, errors.New("refresh-only join has no lifecycle origin")
+	}
 	var exists bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS(SELECT 1 FROM voice_participants
@@ -6214,8 +6241,8 @@ func (s *NATSSubscriber) insertRefreshOnlyJoined(
 			SELECT id, server_id FROM channels WHERE id = $1
 		)
 		INSERT INTO voice_participants
-			(channel_id, user_id, joined_at, lifecycle_event_at)
-		SELECT target.id, $2, $3, $3 FROM target
+			(channel_id, user_id, joined_at, lifecycle_event_at, media_boot_id)
+		SELECT target.id, $2, $3, $3, $5::uuid FROM target
 		JOIN server_members AS member
 		  ON member.server_id = target.server_id AND member.user_id = $2
 		WHERE NOT EXISTS (
@@ -6224,7 +6251,7 @@ func (s *NATSSubscriber) insertRefreshOnlyJoined(
 		)
 		  AND (SELECT COUNT(*) FROM voice_participants WHERE channel_id = $1) < $4
 		ON CONFLICT (channel_id, user_id) DO NOTHING
-	`, channelID, senderID, eventAt, maxServerVoiceParticipantIDs)
+	`, channelID, senderID, eventAt, maxServerVoiceParticipantIDs, origin)
 	if err != nil {
 		return false, fmt.Errorf("insert refresh-only voice participant: %w", err)
 	}

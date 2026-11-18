@@ -32,7 +32,7 @@ func TestGuardLifecycleEventRequiresD8FieldsAndHonorsNonAuthoritativeHeartbeat(t
 	server.SetTTL("voice:room_owner:"+roomID, 5*time.Second)
 	require.NoError(t, server.Set("voice:room_live:"+roomID, "blue-42"))
 	frame, err := json.Marshal(map[string]any{
-		"channelId": roomID, "colour": "blue", "instance_id": "blue-42",
+		"channelId": roomID, "colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 		"participants_authoritative": false,
 	})
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestGuardLifecycleEventRequiresD8FieldsAndHonorsNonAuthoritativeHeartbeat(t
 		"a non-authoritative heartbeat renews placement but does not reconcile participant state")
 	server.SetTTL("voice:room_owner:"+roomID, 5*time.Second)
 	frame, err = json.Marshal(map[string]any{
-		"channelId": roomID, "colour": "blue", "instance_id": "blue-42",
+		"channelId": roomID, "colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 	})
 	require.NoError(t, err)
 	require.Equal(t, roomplacement.LifecycleRefuse, subscriber.guardLifecycleEvent(natsSubjectVoiceHeartbeat, frame))
@@ -55,7 +55,7 @@ func TestGuardLifecycleEventRequiresD8FieldsAndHonorsNonAuthoritativeHeartbeat(t
 		t.Context(), roomID, userID,
 	))
 	firstJoin, err := json.Marshal(map[string]any{
-		"channelId": roomID, "userId": userID, "colour": "blue", "instance_id": "blue-42",
+		"channelId": roomID, "userId": userID, "colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 	})
 	require.NoError(t, err)
 	require.Equal(t, roomplacement.LifecycleRefreshOnly, subscriber.guardLifecycleEvent(natsSubjectVoiceJoined, firstJoin))
@@ -64,7 +64,7 @@ func TestGuardLifecycleEventRequiresD8FieldsAndHonorsNonAuthoritativeHeartbeat(t
 	// receive full authority. A stale generation remains fenced.
 	require.NoError(t, server.Set("voice:room_live:"+roomID, "blue-42"))
 	fullJoin, err := json.Marshal(map[string]any{
-		"channelId": roomID, "userId": userID, "colour": "blue", "instance_id": "blue-42",
+		"channelId": roomID, "userId": userID, "colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 	})
 	require.NoError(t, err)
 	require.Equal(t, roomplacement.LifecycleFull, subscriber.guardLifecycleEvent(natsSubjectVoiceJoined, fullJoin))
@@ -75,7 +75,7 @@ func TestGuardLifecycleEventRequiresD8FieldsAndHonorsNonAuthoritativeHeartbeat(t
 	require.Equal(t, roomplacement.LifecycleRefreshOnly, subscriber.guardLifecycleEvent(natsSubjectVoiceLeft, stale))
 
 	frame, err = json.Marshal(map[string]any{
-		"channelId": roomID, "colour": "blue", "instance_id": "blue-42",
+		"channelId": roomID, "colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 	})
 	require.NoError(t, err)
 	require.Equal(t, roomplacement.LifecycleFull, subscriber.guardLifecycleEvent(natsSubjectVoiceJoined, frame))
@@ -97,7 +97,7 @@ func TestRefreshOnlyTerminalEventsNeverEnterFullHandlers(t *testing.T) {
 			frame, err := json.Marshal(map[string]any{
 				"channelId": roomID,
 				"userId":    "550e8400-e29b-41d4-a716-446655440011",
-				"colour":    "blue", "instance_id": "blue-42",
+				"colour":    "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 				"timestamp": now.Format(time.RFC3339Nano),
 			})
 			require.NoError(t, err)
@@ -112,6 +112,9 @@ func TestRefreshOnlyTerminalEventsNeverEnterFullHandlers(t *testing.T) {
 		})
 	}
 }
+
+// refreshOnlyTestBoot is the media boot these refresh-only fixtures model.
+var refreshOnlyTestBoot = uuid.MustParse("3b8e1f2a-6c4d-4e5f-8a7b-9c0d1e2f3a4b")
 
 func refreshOnlyTestSubscriber(t *testing.T) (*NATSSubscriber, *sql.DB, *miniredis.Miniredis, uuid.UUID, uuid.UUID) {
 	t.Helper()
@@ -150,7 +153,7 @@ func TestRefreshOnlyJoinCannotRemoveAnotherChannel(t *testing.T) {
 	require.NoError(t, subscriber.roomPlacement.MintJoinIntent(t.Context(), target.String(), userID.String()))
 	frame, err := json.Marshal(map[string]any{
 		"channelId": target.String(), "userId": userID.String(),
-		"colour": "blue", "instance_id": "blue-42",
+		"colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 		"admissionId": admissionID.String(), "socketId": "socket-test",
 		"timestamp": now.Format(time.RFC3339Nano),
 	})
@@ -175,7 +178,7 @@ func TestRefreshOnlyJoinConsumesExactIntentAndAdmission(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	frame, err := json.Marshal(map[string]any{
 		"channelId": target.String(), "userId": userID.String(),
-		"colour": "blue", "instance_id": "blue-42",
+		"colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 		"admissionId": admissionID.String(), "socketId": "socket-test",
 		"timestamp": now.Format(time.RFC3339Nano),
 	})
@@ -218,7 +221,7 @@ func TestRefreshOnlyJoinSpendsIntentAfterDatabaseRollback(t *testing.T) {
 	require.NoError(t, err)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	admission := &voiceJoinedAdmission{admissionID: admissionID, socketID: "socket-test"}
-	err = subscriber.refreshOnlyJoined(t.Context(), target, userID, now, admission)
+	err = subscriber.refreshOnlyJoined(withLifecycleOrigin(t.Context(), refreshOnlyTestBoot), target, userID, now, admission)
 	require.ErrorContains(t, err, "injected_refresh_only_failure")
 	intentKey := "voice:join_intent:" + target.String() + ":" + userID.String()
 	require.False(t, server.Exists(intentKey), "failed insert still spends the one-use intent")
@@ -253,7 +256,7 @@ func TestRefreshOnlyJoinSpendsIntentAfterDatabaseRollback(t *testing.T) {
 	require.NoError(t, subscriber.roomPlacement.MintJoinIntent(t.Context(), target.String(), userID.String()))
 	frame, err := json.Marshal(map[string]any{
 		"channelId": target.String(), "userId": userID.String(),
-		"colour": "blue", "instance_id": "blue-42",
+		"colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 		"admissionId": admissionID.String(), "socketId": "socket-test",
 		"timestamp": now.Format(time.RFC3339Nano),
 	})
@@ -273,7 +276,7 @@ func TestRefreshOnlyJoinSpendsIntentAfterDatabaseRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, subscriber.roomPlacement.MintJoinIntent(t.Context(), target.String(), userID.String()),
 		"a fresh client authorization may mint a new intent")
-	err = subscriber.refreshOnlyJoined(t.Context(), target, userID, now, admission)
+	err = subscriber.refreshOnlyJoined(withLifecycleOrigin(t.Context(), refreshOnlyTestBoot), target, userID, now, admission)
 	require.NoError(t, err)
 	require.False(t, server.Exists(intentKey))
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM voice_participants WHERE channel_id = $1 AND user_id = $2`, target, userID).Scan(&participantCount))
@@ -303,7 +306,7 @@ func TestRefreshOnlyJoinExistingRowConsumesExactAdmission(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Microsecond)
 			frame, err := json.Marshal(map[string]any{
 				"channelId": target.String(), "userId": userID.String(),
-				"colour": "blue", "instance_id": "blue-42",
+				"colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 				"admissionId": eventAdmissionID.String(), "socketId": "socket-test",
 				"timestamp": now.Format(time.RFC3339Nano),
 			})
@@ -359,7 +362,7 @@ func TestRefreshOnlyJoinRejectsMismatchedAdmissionAtExactSocket(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	frame, err := json.Marshal(map[string]any{
 		"channelId": target.String(), "userId": userID.String(),
-		"colour": "blue", "instance_id": "blue-42",
+		"colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 		"admissionId": staleAdmission.String(), "socketId": "stale-socket",
 		"timestamp": now.Format(time.RFC3339Nano),
 	})
@@ -397,7 +400,7 @@ func TestRefreshOnlyHeartbeatUpdatesOnlyExistingRowsInItsChannel(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	frame, err := json.Marshal(map[string]any{
 		"channelId": target.String(), "userIds": []string{userID.String(), otherUser.String()},
-		"colour": "blue", "instance_id": "blue-42",
+		"colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 		"participants_authoritative": true, "timestamp": now.Format(time.RFC3339Nano),
 	})
 	require.NoError(t, err)
@@ -423,7 +426,7 @@ func TestRefreshOnlyHeartbeatWaitsForParticipantLifecycleLock(t *testing.T) {
 	require.NoError(t, LockServerVoiceLifecycleTx(t.Context(), lockTx, userID))
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	err = subscriber.refreshOnlyHeartbeat(ctx, target, []uuid.UUID{userID}, time.Now().UTC())
+	err = subscriber.refreshOnlyHeartbeat(withLifecycleOrigin(ctx, refreshOnlyTestBoot), target, []uuid.UUID{userID}, time.Now().UTC())
 	require.Error(t, err)
 	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
 	var watermark time.Time
@@ -468,7 +471,7 @@ func TestRefreshOnlyDMDoesNotMutateParticipantRows(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	frame, err := json.Marshal(map[string]any{
 		"channelId": conversationID.String(), "userIds": []string{userID.String()},
-		"colour": "blue", "instance_id": "blue-42",
+		"colour": "blue", "instance_id": "blue-42", "nodeBootId": refreshOnlyTestBoot.String(),
 		"participants_authoritative": true, "timestamp": now.Format(time.RFC3339Nano),
 	})
 	require.NoError(t, err)

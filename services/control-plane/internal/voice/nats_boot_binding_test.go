@@ -319,3 +319,40 @@ func TestConcurrentMemberRemovalAndClaim(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, applied, "a claim after the membership was removed wrote a row")
 }
+
+// A heartbeat claim that moves a user must not delete the user's live row of
+// another boot in another channel: that is a removal, bound by the same rule.
+func TestHeartbeatClaimDoesNotMoveUserOffAnotherBootsLiveRow(t *testing.T) {
+	f := newBootBindingFixture(t)
+	elsewhere := f.ts.CreateVoiceChannel(t, f.serverID, "voice-boot-binding-elsewhere")
+	at := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Microsecond)
+	_, err := f.ts.DB.Exec(`
+		INSERT INTO voice_participants (channel_id, user_id, joined_at, lifecycle_event_at, media_boot_id)
+		VALUES ($1, $2, $3, $3, $4)
+	`, elsewhere, f.owner.ID, at, f.bootY)
+	require.NoError(t, err)
+
+	now := bootBindingNow()
+	f.subscriber.HandleHeartbeatAt(f.heartbeat(t, f.bootX, now, f.owner.ID), now)
+
+	var kept int
+	require.NoError(t, f.ts.DB.QueryRow(`
+		SELECT COUNT(*) FROM voice_participants WHERE channel_id = $1 AND user_id = $2
+	`, elsewhere, f.owner.ID).Scan(&kept))
+	assert.Equal(t, 1, kept, "a heartbeat claim from boot X removed boot Y's live row in another channel")
+	_, moved := f.stamp(t, f.owner.ID)
+	assert.False(t, moved, "the claim moved the user while boot Y's live row stands")
+	assert.Zero(t, f.hooks.Load())
+
+	// Once boot Y's lease has expired the move proceeds.
+	_, err = f.ts.DB.Exec(`
+		UPDATE voice_participants SET lifecycle_observed_at = clock_timestamp() - INTERVAL '91 seconds'
+		WHERE channel_id = $1 AND user_id = $2
+	`, elsewhere, f.owner.ID)
+	require.NoError(t, err)
+	later := now.Add(time.Second)
+	f.subscriber.HandleHeartbeatAt(f.heartbeat(t, f.bootX, later, f.owner.ID), later)
+	stamp, moved := f.stamp(t, f.owner.ID)
+	require.True(t, moved, "an expired row of another boot must not block the move")
+	assert.Equal(t, f.bootX, stamp.UUID)
+}

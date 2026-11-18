@@ -2,6 +2,7 @@ package voice
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,4 +96,15 @@ func serverVoiceRowRemovable(
 		return false
 	}
 	return observedAt.Before(receivedAt.Add(-presence.ActivityStateTTL))
+}
+
+// serverVoiceLeaseCutoff is the observed-lease instant before which a row of
+// another boot counts as expired for the event on ctx. Without a receipt time
+// no row is expired (NULL, which the SQL reads as "never").
+func serverVoiceLeaseCutoff(ctx context.Context) sql.NullTime {
+	receivedAt := lifecycleReceivedAt(ctx)
+	if receivedAt.IsZero() {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: receivedAt.Add(-presence.ActivityStateTTL), Valid: true}
 }
