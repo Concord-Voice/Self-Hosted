@@ -1,0 +1,183 @@
+package auth_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"testing"
+	"time"
+
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/stretchr/testify/require"
+)
+
+var recoveryKeyLog = regexp.MustCompile(`account recovery key.*\bkey=([A-Za-z0-9_-]{43})\b`)
+
+// postFrom sends a JSON request from a chosen client address, so a test can
+// spread requests over many addresses the way a distributed attacker would.
+func postFrom(t *testing.T, ts *testhelpers.TestServer, ip, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = ip + ":40000"
+	w := httptest.NewRecorder()
+	ts.Router.ServeHTTP(w, req)
+	return w
+}
+
+// requestRecoveryKey runs begin with format=token and returns the emailed key,
+// read from the development-mode mail log.
+func requestRecoveryKey(t *testing.T, ts *testhelpers.TestServer, ip, addr string) string {
+	t.Helper()
+	logs := ts.CaptureLogs(t)
+	w := postFrom(t, ts, ip, pathRecoveryBegin, map[string]string{"email": addr, "format": "token"})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var body map[string]any
+	testhelpers.ParseJSON(t, w, &body)
+	require.Equal(t, "token", body["format"])
+	var key string
+	require.Eventually(t, func() bool {
+		m := recoveryKeyLog.FindStringSubmatch(logs.String())
+		if m == nil {
+			return false
+		}
+		key = m[1]
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+	return key
+}
+
+func randomRecoveryKey(t *testing.T) string {
+	t.Helper()
+	var b [32]byte
+	_, err := rand.Read(b[:])
+	require.NoError(t, err)
+	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func TestRecoveryKeyCompletesRecovery(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverykey1")
+	key := requestRecoveryKey(t, ts, "198.51.100.1", user.Email)
+
+	w := postFrom(t, ts, "198.51.100.2", pathRecoveryVerifyCode, map[string]string{"token": key})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var body map[string]any
+	testhelpers.ParseJSON(t, w, &body)
+	require.NotEmpty(t, body["recovery_token"])
+
+	again := postFrom(t, ts, "198.51.100.3", pathRecoveryVerifyCode, map[string]string{"token": key})
+	require.Equal(t, http.StatusUnauthorized, again.Code, "a recovery key works once")
+}
+
+// The regression this change exists for: wrong submissions for an address,
+// from one client address or from many, in either format, cannot stop the
+// mailbox owner from completing recovery with the key in their email.
+func TestRecoveryKeySurvivesWrongSubmissionsFromManyAddresses(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverykeyflood")
+	key := requestRecoveryKey(t, ts, "198.51.100.10", user.Email)
+
+	// One attacker address: the route limiter and the address ban refuse it
+	// quickly; neither is keyed by the target account.
+	for range 50 {
+		w := postFrom(t, ts, "203.0.113.1", pathRecoveryVerifyCode, map[string]string{"email": user.Email, "token": randomRecoveryKey(t)})
+		require.Contains(t, []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusForbidden}, w.Code)
+	}
+	// Many attacker addresses: 1,000 wrong keys, each from its own address, so
+	// every one reaches the handler.
+	for i := range 1000 {
+		ip := fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256+1)
+		w := postFrom(t, ts, ip, pathRecoveryVerifyCode, map[string]string{"email": user.Email, "token": randomRecoveryKey(t)})
+		require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	}
+	// And enough wrong legacy codes to spend the address's whole code budget.
+	for i := range 11 {
+		ip := fmt.Sprintf("172.31.0.%d", i+1)
+		w := postFrom(t, ts, ip, pathRecoveryVerifyCode, map[string]string{"email": user.Email, "code": "000000"})
+		require.Contains(t, []int{http.StatusUnauthorized, http.StatusTooManyRequests}, w.Code)
+	}
+	last := postFrom(t, ts, "172.31.1.1", pathRecoveryVerifyCode, map[string]string{"email": user.Email, "code": "000000"})
+	require.Equal(t, http.StatusTooManyRequests, last.Code, "precondition: the legacy code budget is spent")
+
+	owner := postFrom(t, ts, "198.51.100.11", pathRecoveryVerifyCode, map[string]string{"token": key})
+	require.Equal(t, http.StatusOK, owner.Code, owner.Body.String())
+	var body map[string]any
+	testhelpers.ParseJSON(t, owner, &body)
+	require.NotEmpty(t, body["recovery_token"])
+}
+
+func TestRecoveryKeyUniformFailures(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverykeyuniform")
+	key := requestRecoveryKey(t, ts, "198.51.100.20", user.Email)
+	sum := sha256.Sum256([]byte(key))
+	require.NoError(t, ts.Redis.PExpire(context.Background(), "recovery_code:token:"+hex.EncodeToString(sum[:]), time.Millisecond).Err())
+	time.Sleep(20 * time.Millisecond)
+
+	bodies := make([]string, 0, 2)
+	for i, token := range []string{key, randomRecoveryKey(t)} {
+		w := postFrom(t, ts, fmt.Sprintf("198.51.100.%d", 30+i), pathRecoveryVerifyCode, map[string]string{"token": token})
+		require.Equal(t, http.StatusUnauthorized, w.Code)
+		bodies = append(bodies, w.Body.String())
+	}
+	require.Equal(t, bodies[0], bodies[1], "an expired key and a key never issued answer alike")
+
+	known := postFrom(t, ts, "198.51.100.40", pathRecoveryBegin, map[string]string{"email": user.Email, "format": "token"})
+	unknown := postFrom(t, ts, "198.51.100.41", pathRecoveryBegin, map[string]string{"email": "nobody@test.concord.chat", "format": "token"})
+	require.Equal(t, known.Code, unknown.Code)
+	require.Equal(t, known.Body.String(), unknown.Body.String())
+}
+
+func TestRecoveryKeyMFAAccountGetsChallenge(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverykeymfa")
+	_, err := ts.DB.Exec(`UPDATE users SET mfa_enabled = TRUE, mfa_methods = '{totp,email}', recovery_only_methods = '{totp}' WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(`INSERT INTO user_mfa_totp (user_id, totp_secret_enc, totp_secret_nonce, enabled, confirmed) VALUES ($1, $2, $3, TRUE, TRUE)`, user.ID, []byte("sealed-test-secret"), []byte("test-nonce"))
+	require.NoError(t, err)
+	key := requestRecoveryKey(t, ts, "198.51.100.50", user.Email)
+
+	w := postFrom(t, ts, "198.51.100.51", pathRecoveryVerifyCode, map[string]string{"token": key})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var body map[string]any
+	testhelpers.ParseJSON(t, w, &body)
+	require.NotContains(t, body, "recovery_token", "a recovery key alone must not grant reset authority")
+	require.Equal(t, true, body["mfa_required"])
+	require.NotEmpty(t, body["mfa_challenge_token"])
+}
+
+func TestRecoveryLegacyCodeStillCompletes(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoverylegacy")
+	logs := ts.CaptureLogs(t)
+	w := postFrom(t, ts, "198.51.100.60", pathRecoveryBegin, map[string]string{"email": user.Email})
+	require.Equal(t, http.StatusOK, w.Code)
+	var begin map[string]any
+	testhelpers.ParseJSON(t, w, &begin)
+	require.Equal(t, "code", begin["format"])
+
+	codeLog := regexp.MustCompile(`account recovery code.*\bcode=(\d{6})\b`)
+	var code string
+	require.Eventually(t, func() bool {
+		m := codeLog.FindStringSubmatch(logs.String())
+		if m == nil {
+			return false
+		}
+		code = m[1]
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+
+	v := postFrom(t, ts, "198.51.100.61", pathRecoveryVerifyCode, map[string]string{"email": user.Email, "code": code})
+	require.Equal(t, http.StatusOK, v.Code, v.Body.String())
+}
