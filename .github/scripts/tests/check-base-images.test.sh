@@ -366,6 +366,39 @@ mv "$WORK/manifest-link-files/manifest.json" "$WORK/manifest-link-files/real.jso
 ln -s real.json "$WORK/manifest-link-files/manifest.json"
 run "$WORK/manifest-link-files"
 expect_exit2 "a symbolic-link manifest is refused with a FILE list too" "cannot read manifest"
+# A rename/delete conflict can leave a single stage; the stage number, not a
+# second record, marks it unresolved.
+repo manifest-one-stage
+git -C "$WORK/manifest-one-stage" add -A
+oid=$(git -C "$WORK/manifest-one-stage" rev-parse :manifest.json)
+printf '0 %s\tmanifest.json\n100644 %s 2\tmanifest.json\n' "$(printf '0%.0s' {1..40})" "$oid" \
+  | git -C "$WORK/manifest-one-stage" update-index --index-info
+invoke --root "$WORK/manifest-one-stage" --manifest "$WORK/manifest-one-stage/manifest.json"
+expect_exit2 "a manifest with one conflict stage only is refused" "unresolved merge"
+repo manifest-gitlink
+git -C "$WORK/manifest-gitlink" add Dockerfile
+git -C "$WORK/manifest-gitlink" update-index --add --cacheinfo "160000,$(printf 'a%.0s' {1..40}),manifest.json"
+invoke --root "$WORK/manifest-gitlink" --manifest "$WORK/manifest-gitlink/manifest.json"
+expect_exit2 "a manifest tracked as a submodule is refused" "mode 160000, not a regular file"
+repo manifest-missing-blob
+git -C "$WORK/manifest-missing-blob" add Dockerfile
+git -C "$WORK/manifest-missing-blob" update-index --add --info-only --cacheinfo "100644,$(printf 'b%.0s' {1..40}),manifest.json"
+invoke --root "$WORK/manifest-missing-blob" --manifest "$WORK/manifest-missing-blob/manifest.json"
+expect_exit2 "a manifest whose indexed blob cannot be read is refused" "cannot read manifest manifest.json from the index"
+repo manifest-outside
+git -C "$WORK/manifest-outside" add -A
+cp "$WORK/manifest-outside/manifest.json" "$WORK/outside-manifest.json"
+invoke --root "$WORK/manifest-outside" --manifest "$WORK/outside-manifest.json"
+expect_exit2 "a manifest outside --root is refused" "is outside --root"
+repo manifest-executable
+git -C "$WORK/manifest-executable" add -A
+git -C "$WORK/manifest-executable" update-index --chmod=+x manifest.json
+invoke --root "$WORK/manifest-executable" --manifest "$WORK/manifest-executable/manifest.json"
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && [ -z "$err" ]; then
+  ok "a manifest tracked with mode 100755 is accepted"
+else
+  ko "a manifest tracked with mode 100755 is accepted ($(detail))"
+fi
 
 echo ""
 echo "── must pass (exit 0, no output) ──"

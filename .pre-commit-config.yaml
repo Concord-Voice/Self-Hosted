@@ -435,8 +435,8 @@ repos:
         name: squawk (PostgreSQL migration lint)
         entry: squawk
         language: python
-        additional_dependencies: ['squawk-cli==2.70.0']
-        files: '^services/control-plane/migrations/[0-9]{6}_[^/]+\.up\.sql$'
+        additional_dependencies: ['squawk-cli==2.71.0']
+        files: '^services/control-plane/(migrations|internal/authority/store/migrations)/[0-9]{6}_[^/]+\.up\.sql$'
 
   # ── TypeScript / React (Desktop Client) ───────────────────────────────────
   - repo: local

@@ -101,7 +101,9 @@ def load_manifest(path, raw=None):
     """Return the manifest's "dockerfiles" object, or raise CheckError on a bad manifest.
 
     raw is the tracked blob when the caller read it from git; without it the
-    file is opened and a symbolic link is refused.
+    file is opened and a symbolic link is refused. O_NOFOLLOW guards only the
+    last path component, so a symlinked parent directory is still followed in
+    that mode; the protected no-FILE run reads the blob from git instead.
     """
     try:
         if raw is None:
@@ -422,9 +424,11 @@ def tracked_files(root, manifest):
         meta, _, name = record.partition(b"\t")  # "<mode> <object> <stage>\t<path>"
         path = os.fsdecode(name)
         if path == manifest:
-            if manifest_mode is not None:  # several index stages: an unresolved merge
+            mode, oid, stage = meta.split(b" ")
+            # A conflict can leave one stage only (rename/delete), so read the stage.
+            if manifest_mode is not None or stage != b"0":
                 raise CheckError(f"manifest {manifest} has an unresolved merge in the index")
-            manifest_mode, manifest_oid = meta.split(b" ")[:2]
+            manifest_mode, manifest_oid = mode, oid
         if not names_dockerfile(path):
             continue
         if not meta.startswith(b"100"):
@@ -437,15 +441,23 @@ def tracked_files(root, manifest):
     # Parse the blob whose mode was checked, not the working-tree path: on a
     # case-insensitive checkout a colliding name, a .gitattributes conversion
     # or a later write can put other bytes there.
-    blob = subprocess.run(["git", "-C", root, "cat-file", "blob", manifest_oid.decode()], capture_output=True, check=False)
+    try:
+        blob = subprocess.run(["git", "-C", root, "cat-file", "blob", manifest_oid.decode()], capture_output=True, check=False)
+    except OSError as err:
+        raise CheckError(f"cannot run git cat-file in {root}: {err}") from err
     if blob.returncode != 0:
         raise CheckError(f"cannot read manifest {manifest} from the index: {blob.stderr.decode(errors='replace').strip()}")
     return found, blob.stdout
 
 
 def run(root, manifest_path, files):
-    rel = os.path.relpath(manifest_path, root)
-    shown = manifest_path if rel.startswith("..") else rel
+    # Resolve the directories, never the manifest itself: git must judge its own mode.
+    parent, base = os.path.split(os.path.abspath(manifest_path))
+    rel = os.path.relpath(os.path.join(os.path.realpath(parent), base), os.path.realpath(root))
+    outside = rel == ".." or rel.startswith(".." + os.sep)
+    if outside and not files:
+        raise CheckError(f"manifest {manifest_path} is outside --root {root}, so git cannot vouch for it")
+    shown = manifest_path if outside else rel
     # The git mode check comes first, so a symlinked manifest is never read.
     # A FILE list skips git entirely; the O_NOFOLLOW open still refuses a symlink.
     tracked, raw = (None, None) if files else tracked_files(root, rel)
