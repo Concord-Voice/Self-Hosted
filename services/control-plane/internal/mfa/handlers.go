@@ -3845,13 +3845,8 @@ func isValidEmail(email string) bool {
 
 // ── Recovery Token Methods ──────────────────────────────────────────────────
 
-// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
-// Implements auth.MFAChecker interface.
-func (h *Handler) GenerateRecoveryToken(userID, verifiedFactor string) (string, string, error) {
-	return GenerateRecoveryToken(userID, verifiedFactor, JWTSecret(h.jwtSecret), "")
-}
-
-// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
+// ValidateRecoveryToken validates a recovery_v3 JWT against current policy and
+// the stored credential epoch, and returns epoch-bound claims.
 // Implements auth.MFAChecker interface.
 func (h *Handler) ValidateRecoveryToken(ctx context.Context, tokenString string) (*auth.RecoveryClaims, error) {
 	claims, err := ValidateChallengeToken(tokenString, h.jwtSecret, PurposeRecovery)
@@ -3861,17 +3856,26 @@ func (h *Handler) ValidateRecoveryToken(ctx context.Context, tokenString string)
 	if claims.ExpiresAt == nil {
 		return nil, errors.New("recovery expiry missing")
 	}
-	if claims.RecoveryFactor != "email" && claims.RecoveryFactor != "totp" && claims.RecoveryFactor != "webauthn" {
+	if !isRecoveryFactor(claims.RecoveryFactor) {
 		return nil, errors.New("recovery proof missing")
 	}
-	methods, err := h.GetRecoveryMethods(ctx, claims.UserID)
+	methods, credEpoch, err := h.readRecoveryPolicy(ctx, claims.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
+	}
+	// Unlocked pre-check, so a stale token is refused before any side effect
+	// (spent-marker reservation, credential fence, hashing). The comparison
+	// under the users lock in ValidateRecoveryClaimsTx stays the authority.
+	if !sameRecoveryEpoch(claims.CredentialEpoch, credEpoch) {
+		return nil, errors.New("recovery token predates a credential change")
 	}
 	if len(methods) > 0 && !containsStr(methods, claims.RecoveryFactor) {
 		return nil, errors.New("recovery proof no longer satisfies policy")
 	}
-	return &auth.RecoveryClaims{RecoveryFactor: claims.RecoveryFactor, UserID: claims.UserID, JTI: claims.ID, ExpiresAt: claims.ExpiresAt.Time}, nil
+	return &auth.RecoveryClaims{
+		RecoveryFactor: claims.RecoveryFactor, UserID: claims.UserID, JTI: claims.ID, ExpiresAt: claims.ExpiresAt.Time,
+		CredentialEpoch: claims.CredentialEpoch, EpochBound: true,
+	}, nil
 }
 
 // ── Recovery Key Endpoints ──────────────────────────────────────────────────

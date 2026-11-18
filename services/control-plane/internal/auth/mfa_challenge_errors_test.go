@@ -86,7 +86,7 @@ func (s *mfaMethodsStub) GenerateUpgradeChallenge(_ context.Context, _, refreshS
 func (s *mfaMethodsStub) BeginWebAuthnLogin(context.Context, string, string) (interface{}, error) {
 	return nil, nil
 }
-func (s *mfaMethodsStub) GenerateRecoveryToken(string, string) (string, string, error) {
+func (s *mfaMethodsStub) IssueRecoveryTokenTx(context.Context, *sql.Tx, string, string) (string, string, error) {
 	return "", "", nil
 }
 func (*mfaMethodsStub) GetRecoveryMethods(context.Context, string) ([]string, error) {

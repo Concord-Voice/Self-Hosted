@@ -90,7 +90,7 @@ func (*ambiguousRecoveryMFAChecker) BeginWebAuthnLogin(context.Context, string, 
 	return nil, nil
 }
 
-func (*ambiguousRecoveryMFAChecker) GenerateRecoveryToken(string, string) (string, string, error) {
+func (*ambiguousRecoveryMFAChecker) IssueRecoveryTokenTx(context.Context, *sql.Tx, string, string) (string, string, error) {
 	return "", "", nil
 }
 func (*ambiguousRecoveryMFAChecker) GetRecoveryMethods(context.Context, string) ([]string, error) {

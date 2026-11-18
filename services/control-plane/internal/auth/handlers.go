@@ -101,8 +101,11 @@ type MFAChecker interface {
 	// in Redis keyed by the challenge JTI. Returns credential request options for the client.
 	// Returns nil options if user has no WebAuthn credentials.
 	BeginWebAuthnLogin(ctx context.Context, userID string, jti string) (options interface{}, err error)
-	// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
-	GenerateRecoveryToken(userID, verifiedFactor string) (token string, jti string, err error)
+	// IssueRecoveryTokenTx locks the users row, re-evaluates recovery policy for
+	// verifiedFactor and mints a RecoveryTokenTTL token stamped with the
+	// credential epoch read under that lock. Errors wrap ErrRecoveryProofInvalid
+	// or ErrRecoveryPolicyUnavailable when policy refused or could not be read.
+	IssueRecoveryTokenTx(ctx context.Context, tx *sql.Tx, userID, verifiedFactor string) (token string, jti string, err error)
 	// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
 	ValidateRecoveryToken(ctx context.Context, tokenString string) (*RecoveryClaims, error)
 	ValidateRecoveryClaimsTx(ctx context.Context, tx *sql.Tx, claims *RecoveryClaims) error
@@ -3828,15 +3831,21 @@ func (h *Handler) CompleteRecovery(c *gin.Context, userID, verifiedFactor string
 		return false
 	}
 	// The email or MFA verifier supplies this proof before final token issuance.
-	tx := h.beginRecoveryPolicyTx(c, &RecoveryClaims{UserID: userID, RecoveryFactor: verifiedFactor})
-	if tx == nil {
+	tx, err := h.db.BeginTx(c.Request.Context(), &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		writeRecoveryPolicyError(c, ErrRecoveryPolicyUnavailable)
 		return false
 	}
 	defer h.rollbackRecoveryPolicyTx(tx)
 
-	recoveryToken, _, err := h.mfaChecker.GenerateRecoveryToken(userID, verifiedFactor)
+	// Policy, the users lock and the stamped credential epoch are one decision.
+	recoveryToken, _, err := h.mfaChecker.IssueRecoveryTokenTx(c.Request.Context(), tx, userID, verifiedFactor)
 	if err != nil {
-		h.log.Error("Failed to generate recovery token", "error", err)
+		h.rollbackRecoveryPolicyTx(tx)
+		if writeRecoveryPolicyError(c, err) {
+			return false
+		}
+		h.log.Error("Failed to generate recovery token", "error_class", "recovery_token_issue")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return false
 	}

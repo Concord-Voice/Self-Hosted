@@ -190,3 +190,17 @@ func TestRecoveryPolicyReservedFactorCompletionClearsEmailBudget(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, exists, "a completed MFA-backed recovery clears the email-code budget")
 }
+
+// TestRecoveryIssuanceBindsCurrentEpoch proves the real verify-code route stamps
+// the credential epoch stored at issuance into the recovery token.
+func TestRecoveryIssuanceBindsCurrentEpoch(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoveryepochbind")
+	const stored = "0123456789abcdef0123456789abcdef"
+	_, err := ts.DB.Exec(`UPDATE users SET credential_epoch = $1 WHERE id = $2`, stored, user.ID)
+	require.NoError(t, err)
+	claims, err := mfa.ValidateChallengeToken(recoveryTokenFor(t, ts, user), testhelpers.TestJWTSecret, mfa.PurposeRecovery)
+	require.NoError(t, err)
+	require.Equal(t, stored, claims.CredentialEpoch)
+	require.Equal(t, "email", claims.RecoveryFactor)
+}

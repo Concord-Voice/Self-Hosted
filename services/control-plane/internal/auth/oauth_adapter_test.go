@@ -438,7 +438,7 @@ func (s *stubMFAChecker) GenerateUpgradeChallenge(_ context.Context, _, _ string
 func (s *stubMFAChecker) BeginWebAuthnLogin(_ context.Context, _ string, _ string) (interface{}, error) {
 	return s.WebAuthnOptions, s.WebAuthnErr
 }
-func (s *stubMFAChecker) GenerateRecoveryToken(_, _ string) (string, string, error) {
+func (s *stubMFAChecker) IssueRecoveryTokenTx(context.Context, *sql.Tx, string, string) (string, string, error) {
 	return s.RecoveryTokenStub, s.RecoveryTokenJTI, nil
 }
 func (*stubMFAChecker) GetRecoveryMethods(context.Context, string) ([]string, error) {
