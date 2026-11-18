@@ -239,6 +239,8 @@ func TestCreateAdmin_StepUpOrdering(t *testing.T) {
 	// The same handle still works after the 400; a taken username is a 409.
 	rec = postJSON(engine, "/admin/api/v1/admins", createBody(actingName, handle, assertion))
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, adminCreatedRows(t, db, actingID, admin.AuditFailure),
+		"a verified step-up spent on a taken username is audited")
 
 	handle, challenge = stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
 	username := uniqueAdminUsername("after")

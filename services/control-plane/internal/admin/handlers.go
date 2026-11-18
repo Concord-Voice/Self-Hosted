@@ -864,6 +864,8 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	created, err := h.repo.CreatePending(ctx, req.Username, hash)
 	if err != nil {
 		if errors.Is(err, ErrDuplicateUsername) {
+			// The step-up was spent on this attempt, so it is audited too.
+			h.auditCreateAdmin(ctx, c.GetString(adminIDContextKey), req.Username, AuditFailure, "username_taken")
 			c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
 			return
 		}
