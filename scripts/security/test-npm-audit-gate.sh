@@ -287,6 +287,15 @@ run "expired exception warns not blocks"  "$WORK/high.json"         "$WORK/allow
 run "partial allowlist still blocks rest" "$WORK/two-high.json"     "$WORK/allow-ws-only.json"  1 "::error::.*GHSA-7C78-JF6Q-G5CM"
 run "same GHSA, same package, counted once"         "$WORK/dup-high.json"     "$WORK/allow-ws-only.json"  0 "1 accepted, 0 blocking"
 run "invalid audit JSON errors (exit 2)"  "$WORK/bad.json"          "$WORK/empty-allow.json"    2 "not valid JSON"
+# The parse error quotes the start of the file on stderr (V8 keeps about ten
+# characters, so the payload is short). Text in a malformed file must not
+# start a workflow-command line there either. No line this path prints starts
+# with "::" of its own.
+printf 'x\n::warning::Z' >"$WORK/bad-injected.json"
+out="$(node "$GATE" --audit "$WORK/bad-injected.json" --allowlist "$WORK/empty-allow.json" 2>&1)"
+got=$?
+if grep -q '^::' <<<"$out"; then got=99; out="a quoted line started a workflow command: $out"; fi
+assert "malformed file text cannot start a workflow command line" "$got" 2 "$out" "not valid JSON"
 
 # Fail-closed: a valid-JSON report that is not a real npm-audit result must NOT pass.
 run "error-object report fails closed"    "$WORK/error-report.json" "$WORK/empty-allow.json"    2 "refusing to pass"

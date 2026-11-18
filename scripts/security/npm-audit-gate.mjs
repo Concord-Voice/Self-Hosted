@@ -300,30 +300,34 @@ function parseArgs(argv) {
   return out;
 }
 
+// One call, one line, on stdout and stderr alike. Messages embed allowlist
+// and audit-report text (a JSON parse error quotes the file), and a line break
+// in it could start a line with `::warning::` or another workflow command,
+// which the runner reads from both streams. So line breaks become spaces.
+const oneLine = (s) => String(s).replace(/[\r\n\u2028\u2029]+/g, ' ');
+const log = (s) => process.stdout.write(`${oneLine(s)}\n`);
+const logErr = (s) => process.stderr.write(`${oneLine(s)}\n`);
+
 function readJson(path, label) {
   let raw;
   try {
     raw = readFileSync(path, 'utf8');
   } catch (err) {
-    process.stderr.write(`npm-audit-gate: cannot read ${label} at ${path}: ${(err instanceof Error ? err.message : String(err))}\n`);
+    logErr(`npm-audit-gate: cannot read ${label} at ${path}: ${(err instanceof Error ? err.message : String(err))}`);
     process.exit(2);
   }
   try {
     return JSON.parse(raw);
   } catch (err) {
-    process.stderr.write(`npm-audit-gate: ${label} at ${path} is not valid JSON: ${(err instanceof Error ? err.message : String(err))}\n`);
+    logErr(`npm-audit-gate: ${label} at ${path} is not valid JSON: ${(err instanceof Error ? err.message : String(err))}`);
     process.exit(2);
   }
 }
 
-// One call, one line. Messages embed allowlist and audit-report text, and a
-// line break in it could start a line with `::warning::` or another workflow
-// command, so line breaks become spaces.
-const log = (s) => process.stdout.write(`${String(s).replace(/[\r\n\u2028\u2029]+/g, ' ')}\n`);
 
 function runGate(args) {
   if (!args.audit || args.allowlists.length === 0) {
-    process.stderr.write('npm-audit-gate: --audit <file> and --allowlist <file> are required\n');
+    logErr('npm-audit-gate: --audit <file> and --allowlist <file> are required');
     process.exit(2);
   }
   const audit = readJson(args.audit, 'audit report');
@@ -370,7 +374,7 @@ function runGate(args) {
 
 function runExpiryScan(args) {
   if (args.allowlists.length === 0) {
-    process.stderr.write('npm-audit-gate: --expiry-scan requires at least one --allowlist <file>\n');
+    logErr('npm-audit-gate: --expiry-scan requires at least one --allowlist <file>');
     process.exit(2);
   }
   let expiredTotal = 0;
