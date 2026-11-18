@@ -1334,8 +1334,7 @@ func (h *Hub) spawnRichPresenceSuppression(userID uuid.UUID, forced ...bool) {
 // Shutdown established after stopping the Run loop from accepting new work.
 func (h *Hub) spawnRichPresenceSuppressionDuringShutdown(
 	userID uuid.UUID,
-	allowStopping bool,
-	forced bool,
+	allowStopping, forced bool,
 ) {
 	if h == nil || h.richPresenceHiddenSuppressor == nil {
 		return
@@ -1634,7 +1633,9 @@ func (h *Hub) handleRegister(client *Client) {
 	isFirstConnection := h.registerClient(client)
 
 	if isFirstConnection {
-		ctx := context.Background()
+		// Presence persistence must not be cancelled with the client's async
+		// work, so detach from that context's cancellation.
+		ctx := context.WithoutCancel(ctx)
 		recovery := presenceRecoveryState{status: statusOnline}
 		if err := h.redis.Set(ctx, presence.StatusRedisKey(client.UserID), statusOnline, presence.StatusTTL).Err(); err != nil {
 			log.Printf("[hub] failed to persist initial presence for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
@@ -5761,12 +5762,12 @@ func (h *Hub) enforceDMEpoch(msg IncomingMessage, convUUID uuid.UUID, keyVersion
 	return false
 }
 
-func (h *Hub) persistDMMessage(convUUID uuid.UUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, []models.AttachmentSummary, error) {
+func (h *Hub) persistDMMessage(convUUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, []models.AttachmentSummary, error) {
 	messageID, createdAt, updatedAt, _, attachments, err := h.persistDMMessageWithExpiry(convUUID, userID, credEpoch, input)
 	return messageID, createdAt, updatedAt, attachments, err
 }
 
-func (h *Hub) persistDMMessageWithExpiry(convUUID uuid.UUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, *time.Time, []models.AttachmentSummary, error) {
+func (h *Hub) persistDMMessageWithExpiry(convUUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, *time.Time, []models.AttachmentSummary, error) {
 	messageID := uuid.New()
 	ctx, cancel := context.WithTimeout(context.Background(), channelAuthCtxTimeout)
 	defer cancel()

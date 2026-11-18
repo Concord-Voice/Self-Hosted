@@ -81,6 +81,7 @@ func TestServerMove_SelfMove(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, mover.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"moved":true}`, w.Body.String(), "pinned response body")
 	assert.False(t, moveTempOverrideExists(t, ts, to, mover.ID), "self-move must not insert a temp grant")
 }
 
@@ -107,6 +108,7 @@ func TestServerMove_WithPermission_HiddenChannel_GrantsTemp(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"moved":true}`, w.Body.String(), "pinned response body")
 	assert.True(t, moveTempOverrideExists(t, ts, to, target.ID), "temp grant inserted when target lacked access")
 	assert.Equal(t, 0, auditMoveCount(t, ts, serverID, target.ID), "no audit for a downward move")
 }
@@ -139,6 +141,7 @@ func TestServerMove_JoinInheritedViewDenied_GrantsTemp(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"moved":true}`, w.Body.String(), "pinned response body")
 	assert.True(t, moveTempOverrideExists(t, ts, to, target.ID),
 		"temp grant must be inserted when target inherits JoinVoice but is denied ViewVoice")
 	assert.Equal(t, 0, auditMoveCount(t, ts, serverID, target.ID), "no audit for a downward move")
@@ -170,6 +173,7 @@ func TestServerMove_StalePermissionCacheStillGrantsAccess(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"moved":true}`, w.Body.String(), "pinned response body")
 	assert.True(t, moveTempOverrideExists(t, ts, to, target.ID),
 		"a stale cached allow must not suppress the preflight-required temporary grant")
 }
@@ -204,6 +208,7 @@ func TestServerMove_PermanentViewDeny_RejectsBeforeSignal(t *testing.T) {
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusConflict, w.Code,
 		"a permanent ViewVoice deny must reject the move, not signal a false success")
+	assert.JSONEq(t, `{"error":"target cannot access the destination channel due to a permanent permission override"}`, w.Body.String(), "pinned response body")
 	assert.False(t, moveTempOverrideExists(t, ts, to, target.ID),
 		"grant must not insert a temp override on top of a permanent one")
 }
@@ -232,6 +237,7 @@ func TestServerMove_HierarchyBypass_AuditsCrossing(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code, "MOVE_MEMBERS bypasses hierarchy (ADR-0023)")
+	assert.JSONEq(t, `{"moved":true}`, w.Body.String(), "pinned response body")
 	assert.Equal(t, 1, auditMoveCount(t, ts, serverID, target.ID), "hierarchy-crossing move must be audited")
 }
 
@@ -251,6 +257,7 @@ func TestServerMove_NoPermission(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.JSONEq(t, `{"error":"Insufficient permissions"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_CrossServerTarget: target_channel_id in another server → 400.
@@ -270,6 +277,7 @@ func TestServerMove_CrossServerTarget(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": foreignChannel}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.JSONEq(t, `{"error":"target is not a voice channel in this server"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_NonVoiceTarget: target is a text channel → 400.
@@ -286,6 +294,7 @@ func TestServerMove_NonVoiceTarget(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": textChannel}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.JSONEq(t, `{"error":"target is not a voice channel in this server"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_TargetNotInVoice: target is not in any voice channel → 409.
@@ -300,6 +309,7 @@ func TestServerMove_TargetNotInVoice(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.JSONEq(t, `{"error":"Target user is not in a voice channel"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_AlreadyInTarget: from == to → 400.
@@ -315,6 +325,7 @@ func TestServerMove_AlreadyInTarget(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.JSONEq(t, `{"error":"user is already in the target channel"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_MissingBody: no target_channel_id → 400.
@@ -328,6 +339,7 @@ func TestServerMove_MissingBody(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.JSONEq(t, `{"error":"Invalid target_channel_id"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_InvalidServerID: a non-UUID :id path param → 400 before any
@@ -340,6 +352,7 @@ func TestServerMove_InvalidServerID(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath("not-a-uuid", target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": target.ID}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.JSONEq(t, `{"error":"Invalid server ID"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_InvalidUserID: a non-UUID :userId path param → 400 before any
@@ -352,6 +365,7 @@ func TestServerMove_InvalidUserID(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, "not-a-uuid", pathMove),
 		map[string]interface{}{"target_channel_id": serverID}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.JSONEq(t, `{"error":"Invalid user ID"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_Unauthenticated: no token → 401.
@@ -366,6 +380,7 @@ func TestServerMove_Unauthenticated(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.JSONEq(t, `{"error":"Authentication required"}`, w.Body.String(), "pinned response body")
 }
 
 // TestServerMove_SelfMove_NoPermissionNeeded_HiddenStays: self-move into a hidden
@@ -386,5 +401,6 @@ func TestServerMove_SelfMove_NoTempGrantEvenIfHidden(t *testing.T) {
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, mover.ID, pathMove),
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"moved":true}`, w.Body.String(), "pinned response body")
 	assert.False(t, moveTempOverrideExists(t, ts, to, mover.ID), "self-move never grants temp access")
 }

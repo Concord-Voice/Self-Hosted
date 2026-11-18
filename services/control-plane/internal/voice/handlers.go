@@ -1743,44 +1743,14 @@ func (h *Handler) ServerMove(c *gin.Context) {
 		return
 	}
 
-	isVoice, err := isVoiceChannelInServerTx(c.Request.Context(), tx, req.TargetChannelID, serverID)
-	if err != nil {
-		h.log.Error("move: target channel lookup", "error", err, "target_channel_id", req.TargetChannelID, "server_id", serverID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
-		return
-	}
-	if !isVoice {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotVoiceInSrv})
-		return
-	}
-	fromChannelID, err := findVoiceChannelTx(c.Request.Context(), tx, serverID, targetID)
-	if err != nil {
-		h.log.Error("move: find current voice channel", "error", err, "server_id", serverID, "target_id", targetID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
-		return
-	}
-	if fromChannelID == "" {
-		c.JSON(http.StatusConflict, gin.H{"error": errMsgTargetNotInVoice})
-		return
-	}
-	if fromChannelID == req.TargetChannelID {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgAlreadyInTarget})
+	fromChannelID, ok := h.resolveMoveSourceTx(c, tx, serverID, targetID, req.TargetChannelID)
+	if !ok {
 		return
 	}
 
-	canJoin := true
-	if !selfMove {
-		if authorityErr := revalidateVoiceModAuthorityTx(c.Request.Context(), tx, h.resolver, &voiceModContext{serverID: serverID, targetID: targetID}, actorID, rbac.PermMoveMembers, false); authorityErr != nil {
-			h.respondVoiceModAuthorityTxError(c, authorityErr, errMsgMovePrep)
-			return
-		}
-		targetPerms, permErr := h.resolver.ResolveChannelPermissionsTx(c.Request.Context(), tx, serverID, targetID, req.TargetChannelID)
-		if permErr != nil {
-			h.log.Error("move: target join-permission check", "error", permErr, "target_id", sanitizeLogValue(targetID), "target_channel_id", sanitizeLogValue(req.TargetChannelID))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
-			return
-		}
-		canJoin = targetPerms.Has(rbac.PermViewVoiceChannels) && targetPerms.Has(rbac.PermJoinVoice)
+	canJoin, ok := h.decideMoveCanJoinTx(c, tx, serverID, actorID, targetID, req.TargetChannelID, selfMove)
+	if !ok {
+		return
 	}
 
 	if canJoin {
@@ -1789,11 +1759,7 @@ func (h *Handler) ServerMove(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
 			return
 		}
-		h.signalMove(serverID, targetID, fromChannelID, req.TargetChannelID)
-		if !selfMove {
-			h.auditMoveIfCrossesHierarchy(c.Request.Context(), serverID, actorID, targetID, fromChannelID, req.TargetChannelID)
-		}
-		c.JSON(http.StatusOK, gin.H{"moved": true})
+		h.finishDirectMove(c, serverID, actorID, targetID, fromChannelID, req.TargetChannelID, selfMove)
 		return
 	}
 
@@ -1815,6 +1781,69 @@ func (h *Handler) ServerMove(c *gin.Context) {
 	}
 	h.signalMove(serverID, targetID, fromChannelID, req.TargetChannelID)
 	h.auditMoveIfCrossesHierarchy(c.Request.Context(), serverID, actorID, targetID, fromChannelID, req.TargetChannelID)
+	c.JSON(http.StatusOK, gin.H{"moved": true})
+}
+
+// resolveMoveSourceTx validates the destination and finds the target's current
+// voice channel inside the move's decision transaction. It writes the error
+// response and returns false when the move cannot proceed.
+func (h *Handler) resolveMoveSourceTx(c *gin.Context, tx *sql.Tx, serverID, targetID, targetChannelID string) (string, bool) {
+	isVoice, err := isVoiceChannelInServerTx(c.Request.Context(), tx, targetChannelID, serverID)
+	if err != nil {
+		h.log.Error("move: target channel lookup", "error", err, "target_channel_id", targetChannelID, "server_id", serverID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
+		return "", false
+	}
+	if !isVoice {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotVoiceInSrv})
+		return "", false
+	}
+	fromChannelID, err := findVoiceChannelTx(c.Request.Context(), tx, serverID, targetID)
+	if err != nil {
+		h.log.Error("move: find current voice channel", "error", err, "server_id", serverID, "target_id", targetID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
+		return "", false
+	}
+	if fromChannelID == "" {
+		c.JSON(http.StatusConflict, gin.H{"error": errMsgTargetNotInVoice})
+		return "", false
+	}
+	if fromChannelID == targetChannelID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgAlreadyInTarget})
+		return "", false
+	}
+	return fromChannelID, true
+}
+
+// decideMoveCanJoinTx reports whether the target can already join the
+// destination with both required voice bits. A self-move always can; a
+// moderated move first revalidates the actor's MOVE_MEMBERS authority in the
+// same transaction. It writes the error response and returns ok=false on
+// failure.
+func (h *Handler) decideMoveCanJoinTx(c *gin.Context, tx *sql.Tx, serverID, actorID, targetID, targetChannelID string, selfMove bool) (canJoin, ok bool) {
+	if selfMove {
+		return true, true
+	}
+	if authorityErr := revalidateVoiceModAuthorityTx(c.Request.Context(), tx, h.resolver, &voiceModContext{serverID: serverID, targetID: targetID}, actorID, rbac.PermMoveMembers, false); authorityErr != nil {
+		h.respondVoiceModAuthorityTxError(c, authorityErr, errMsgMovePrep)
+		return false, false
+	}
+	targetPerms, permErr := h.resolver.ResolveChannelPermissionsTx(c.Request.Context(), tx, serverID, targetID, targetChannelID)
+	if permErr != nil {
+		h.log.Error("move: target join-permission check", "error", permErr, "target_id", sanitizeLogValue(targetID), "target_channel_id", sanitizeLogValue(targetChannelID))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
+		return false, false
+	}
+	return targetPerms.Has(rbac.PermViewVoiceChannels) && targetPerms.Has(rbac.PermJoinVoice), true
+}
+
+// finishDirectMove signals a committed no-grant move, audits a moderated move
+// that crosses the role hierarchy, and writes the success response.
+func (h *Handler) finishDirectMove(c *gin.Context, serverID, actorID, targetID, fromChannelID, targetChannelID string, selfMove bool) {
+	h.signalMove(serverID, targetID, fromChannelID, targetChannelID)
+	if !selfMove {
+		h.auditMoveIfCrossesHierarchy(c.Request.Context(), serverID, actorID, targetID, fromChannelID, targetChannelID)
+	}
 	c.JSON(http.StatusOK, gin.H{"moved": true})
 }
 

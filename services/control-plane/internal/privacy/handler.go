@@ -83,59 +83,17 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 	// settle. The account is gone; only the fan-out failed.
 	var deliveryFailed bool
 	if err := h.account.DeleteAccount(c.Request.Context(), userID); err != nil {
-		if errors.Is(err, users.ErrUserNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+		if h.writeDeleteAccountFailure(c, userID, err) {
 			return
 		}
-		if errors.Is(err, credepoch.ErrEpochMismatch) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
-			return
-		}
-		if errors.Is(err, users.ErrErasureCandidateSetDrifted) {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": "account state changed; retry the deletion",
-			})
-			return
-		}
-		if errors.Is(err, loginfamily.ErrUnavailable) {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Authentication temporarily unavailable"})
-			return
-		}
-		if !errors.Is(err, presencecapture.ErrPostCommitDelivery) {
-			if h.log != nil {
-				h.log.Error("erase-account: account deletion failed",
-					"user_id", userID,
-					"error", err,
-				)
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "account deletion failed"})
-			return
-		}
-		// Returning here would be two separate failures. First it would answer
-		// 500 for an account that IS erased, and a client retry then gets 404 —
-		// the duplicate-action lie the post-commit classification exists to
-		// prevent. Second, and worse, it would skip revokeAccessTokens below, so
-		// the jti blacklist and the user_disabled:<id> key are never written and
-		// an already-issued access token keeps working against an erased
-		// account. [internal]rules/backend.md requires both to be set BEFORE
-		// returning success (code review, PR #2840).
 		deliveryFailed = true
-		if h.log != nil {
-			h.log.Error("erase-account: presence delivery did not settle",
-				"user_id", userID,
-				"failure_class", "delivery",
-				"error", err,
-			)
-		}
 	}
 
 	if err := h.revokeAccessTokens(c, userID); err != nil {
-		if h.log != nil {
-			h.log.Error("erase-account: access token revocation failed",
-				"user_id", userID,
-				"error", err,
-			)
-		}
+		h.logError("erase-account: access token revocation failed",
+			"user_id", userID,
+			"error", err,
+		)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "access token revocation failed"})
 		return
 	}
@@ -150,6 +108,62 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// writeDeleteAccountFailure classifies a DeleteAccount error. For every
+// failure that leaves the account in place (or is a precondition refusal) it
+// writes the response and returns true. It returns false only for a DURABLE
+// erasure whose post-commit presence delivery did not settle: the caller must
+// still revoke access tokens before answering.
+//
+// The arms are checked in this exact order; an error wrapping several
+// sentinels takes the first matching arm.
+func (h *Handler) writeDeleteAccountFailure(c *gin.Context, userID string, err error) bool {
+	switch {
+	case errors.Is(err, users.ErrUserNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+		return true
+	case errors.Is(err, credepoch.ErrEpochMismatch):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return true
+	case errors.Is(err, users.ErrErasureCandidateSetDrifted):
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "account state changed; retry the deletion",
+		})
+		return true
+	case errors.Is(err, loginfamily.ErrUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Authentication temporarily unavailable"})
+		return true
+	case !errors.Is(err, presencecapture.ErrPostCommitDelivery):
+		h.logError("erase-account: account deletion failed",
+			"user_id", userID,
+			"error", err,
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "account deletion failed"})
+		return true
+	}
+	// Returning here would be two separate failures. First it would answer
+	// 500 for an account that IS erased, and a client retry then gets 404 —
+	// the duplicate-action lie the post-commit classification exists to
+	// prevent. Second, and worse, it would skip revokeAccessTokens, so the
+	// jti blacklist and the user_disabled:<id> key are never written and an
+	// already-issued access token keeps working against an erased account.
+	// [internal]rules/backend.md requires both to be set BEFORE returning
+	// success (code review, PR #2840).
+	h.logError("erase-account: presence delivery did not settle",
+		"user_id", userID,
+		"failure_class", "delivery",
+		"error", err,
+	)
+	return false
+}
+
+// logError logs through h.log when one is wired. A nil logger is tolerated
+// in tests that do not exercise the failure path (see NewHandler).
+func (h *Handler) logError(msg string, args ...any) {
+	if h.log != nil {
+		h.log.Error(msg, args...)
+	}
 }
 
 func (h *Handler) revokeAccessTokens(c *gin.Context, userID string) error {
