@@ -738,13 +738,13 @@ repos:
       # test (there is no root package.json). See PR #2709 for the incident.
       - id: override-range-lint-desktop
         name: override-range lint — packages workspace
-        entry: node scripts/security/override-range-lint.mjs --dir . --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
+        entry: node scripts/security/override-range-lint.mjs --dir . --minimum-version undici=6.29.1 --minimum-version undici=7.30.2 --minimum-version undici=8.12.4
         language: system
         files: '^(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
         pass_filenames: false
       - id: override-range-lint-admin
         name: override-range lint — client/admin
-        entry: node scripts/security/override-range-lint.mjs --dir client/admin --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
+        entry: node scripts/security/override-range-lint.mjs --dir client/admin --minimum-version undici=6.29.1 --minimum-version undici=7.30.2 --minimum-version undici=8.12.4
         language: system
         files: '^client/admin/(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
         pass_filenames: false
