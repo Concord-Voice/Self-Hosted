@@ -1543,6 +1543,30 @@ describe('user-wide revocation sweep (VULN-159)', () => {
     expect(exact.disconnect, 'the sweep re-targeted the exact session socket').not.toHaveBeenCalled();
   });
 
+  it('a throwing stale disconnect neither aborts the sweep nor the command', async () => {
+    const { rm } = makeRoomManager({ socketId: SOCKET_ID });
+    const throwing = fakeSocket(USER_ID);
+    throwing.disconnect.mockImplementation(() => {
+      throw new Error('listener failed');
+    });
+    const stale = fakeSocket(USER_ID);
+    const { io } = makeSweepIO({
+      [SOCKET_ID]: fakeSocket(USER_ID),
+      'socket-throwing': throwing,
+      [STALE_ID]: stale,
+    });
+
+    await expect(
+      handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, REVOKED)
+    ).resolves.toBeUndefined();
+
+    expect(stale.disconnect).toHaveBeenCalledWith(true);
+    expect(logger.error).toHaveBeenCalledWith('Failed to disconnect stale socket on revocation', {
+      channelId: CHANNEL_ID,
+      socketId: 'socket-throwing',
+    });
+  });
+
   it('a successor that commits during the teardown awaits is not swept', async () => {
     const { rm, getParticipant, getProvisionalParticipant } = makeRoomManager({
       socketId: SOCKET_ID,
