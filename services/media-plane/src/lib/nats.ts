@@ -34,6 +34,7 @@ import { logger } from './logger.js';
 import type { RoomEvent, RoomEventHandler } from './roomManager.js';
 import type { EmitSecurityEvent } from './securityEvent.js';
 import { RequiredNatsSubscriptions } from './requiredNatsSubscriptions.js';
+import { voiceEnforcementNodeBootId } from './voiceEnforcementIdentity.js';
 import type { RawRequestReceiver } from './voiceAuthReceiver.js';
 
 // ---------------------------------------------------------------------------
@@ -909,6 +910,14 @@ export class NatsService {
     return identity ? { colour: identity.color, instance_id: identity.instanceId } : {};
   }
 
+  // Every lifecycle frame names the boot that produced it. The control plane
+  // stamps server voice rows with it and refuses to remove a live row another
+  // boot owns, so a predecessor's late room_empty cannot evict users who have
+  // since rejoined elsewhere.
+  private lifecycleOriginFields(): Record<string, string> {
+    return { ...this.mediaLifecycleFields(), nodeBootId: voiceEnforcementNodeBootId };
+  }
+
   publishRoomHeartbeat(payload: {
     channelId: string;
     userIds: string[];
@@ -918,7 +927,7 @@ export class NatsService {
     timestamp: string;
   }): boolean {
     return this.publish('voice.heartbeat', {
-      ...this.mediaLifecycleFields(),
+      ...this.lifecycleOriginFields(),
       ...payload,
       participants_authoritative: payload.userIds.length > 0,
     });
@@ -936,7 +945,7 @@ export class NatsService {
           break;
         case 'user-joined':
           this.publish('voice.joined', {
-            ...this.mediaLifecycleFields(),
+            ...this.lifecycleOriginFields(),
             channelId: event.roomId,
             userId: event.userId,
             username: event.username,
@@ -951,7 +960,7 @@ export class NatsService {
 
         case 'user-left':
           this.publish('voice.left', {
-            ...this.mediaLifecycleFields(),
+            ...this.lifecycleOriginFields(),
             channelId: event.roomId,
             userId: event.userId,
             callId: event.callId,
@@ -961,7 +970,7 @@ export class NatsService {
 
         case 'room-empty':
           this.publish('voice.room_empty', {
-            ...this.mediaLifecycleFields(),
+            ...this.lifecycleOriginFields(),
             channelId: event.roomId,
             callId: event.callId,
             ringId: event.ringId,

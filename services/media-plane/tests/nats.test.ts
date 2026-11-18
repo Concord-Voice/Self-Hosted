@@ -34,6 +34,7 @@ vi.mock('nats', () => ({
 }));
 
 import { NatsService } from '../src/lib/nats.js';
+import { voiceEnforcementNodeBootId } from '../src/lib/voiceEnforcementIdentity.js';
 
 describe('NatsService', () => {
   let service: NatsService;
@@ -157,6 +158,28 @@ describe('NatsService', () => {
   describe('createRoomEventHandler', () => {
     beforeEach(async () => {
       await service.connect();
+    });
+
+    it('lifecycle payloads carry nodeBootId', () => {
+      const handler = service.createRoomEventHandler();
+      const frames: Array<[string, () => void]> = [
+        ['voice.joined', () => handler({
+          type: 'user-joined', roomId: 'room-1', userId: 'u-1', username: 'alice', e2eeEpoch: 1,
+        })],
+        ['voice.left', () => handler({ type: 'user-left', roomId: 'room-1', userId: 'u-1' })],
+        ['voice.room_empty', () => handler({ type: 'room-empty', roomId: 'room-1' })],
+        ['voice.heartbeat', () => service.publishRoomHeartbeat({
+          channelId: 'room-1', userIds: ['u-1'], timestamp: new Date().toISOString(),
+        })],
+      ];
+      for (const [subject, publish] of frames) {
+        publish();
+        expect(mockNc.publish.mock.calls.at(-1)?.[0]).toBe(subject);
+        expect(mockEncode.mock.calls.at(-1)?.[0]).toMatchObject({
+          nodeBootId: voiceEnforcementNodeBootId,
+        });
+      }
+      expect(voiceEnforcementNodeBootId).toMatch(/^[0-9a-f-]{36}$/);
     });
 
     it('maps user-joined to voice.joined with correct payload', () => {
