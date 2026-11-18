@@ -760,7 +760,8 @@ exit "$MOCK_SCAN_EXIT"
                     self.assertFalse(capture.exists(), "nothing may be installed")
             # pip also ends a line at CR, FF, VT and Unicode separators; grep does not.
             for label, line in (("carriage return", "ok==1 \\\r--index-url https://example.invalid/simple"),
-                                ("form feed", "ok==1 \\\f-e ."), ("line separator", "ok==1 \\\u2028-e .")):
+                                ("form feed", "ok==1 \\\f-e ."), ("line separator", "ok==1 \\\u2028-e ."),
+                                ("UTF-7 encoding comment", "# -*- coding: utf-7 -*-\n# x+AAo--r https://example.invalid/r.txt")):
                 with self.subTest(case=label):
                     commit(pr_lock + line + "\n", label)
                     result = run("false", "")

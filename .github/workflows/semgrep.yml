@@ -257,12 +257,14 @@ jobs:
           # index, find-links, editable, include, URL or other option lines. A
           # name starts with a letter or digit and a marker has no "-", so
           # neither can carry an option. pip also splits lines on CR, FF, VT and
-          # Unicode separators, which grep does not, so printable ASCII only.
+          # Unicode separators, which grep does not, so printable ASCII only. pip
+          # also honours a "coding:" comment (UTF-7 can spell a newline in
+          # printable ASCII), so no encoding declaration either.
           # grep exit 2 (unreadable file, bad pattern) stops the job too.
           shown="$reqs"; [ "$EXTERNAL_VERDICT" != 'true' ] || shown="$reqs (the protected base copy)"
-          rc=0; LC_ALL=C grep -n '[^ -~]' "$reqs" || rc=$?
+          rc=0; LC_ALL=C grep -nE '[^ -~]|coding[:=]' "$reqs" || rc=$?
           if [ "$rc" -ne 1 ]; then
-            echo "::error::$shown may hold printable ASCII lines only; the lines above are not, or it could not be read."
+            echo "::error::$shown may hold printable ASCII lines only, with no encoding declaration; the lines above are not, or it could not be read."
             exit 1
           fi
           pin='[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9._+!-]+'
