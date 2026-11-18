@@ -3651,6 +3651,27 @@ func (h *Handler) watchRecoveryCodeAttempt(ctx context.Context, redisKey, code s
 	return record, matched, err
 }
 
+// watchOwnRecoverySlot WATCHes the account's send slot and returns its key when
+// the slot still holds this code's send, or "" when it holds another send or
+// nothing. The WATCH makes the caller's transaction fail if the slot changes.
+func watchOwnRecoverySlot(ctx context.Context, tx *redis.Tx, record recoveryRecord) (string, error) {
+	if record.UserID == "" || record.SendID == "" {
+		return "", nil
+	}
+	slotKey := recoverySlotKey(record.UserID)
+	if err := tx.Watch(ctx, slotKey).Err(); err != nil {
+		return "", err
+	}
+	slot, err := tx.Get(ctx, slotKey).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return "", err
+	}
+	if slot != record.SendID {
+		return "", nil
+	}
+	return slotKey, nil
+}
+
 func commitRecoveryCodeAttempt(ctx context.Context, tx *redis.Tx, redisKey, code string) (recoveryRecord, bool, error) {
 	var record recoveryRecord
 	data, err := tx.Get(ctx, redisKey).Bytes()
@@ -3669,27 +3690,18 @@ func commitRecoveryCodeAttempt(ctx context.Context, tx *redis.Tx, redisKey, code
 	// A spent code also frees the account's send slot when the slot is still
 	// this code's, so a new recovery email can go out at once rather than the
 	// owner waiting out the cooldown with no live code.
-	releaseSlot := false
 	slotKey := ""
-	if spent && record.UserID != "" && record.SendID != "" {
-		slotKey = recoverySlotKey(record.UserID)
-		if err := tx.Watch(ctx, slotKey).Err(); err != nil {
+	if spent {
+		if slotKey, err = watchOwnRecoverySlot(ctx, tx, record); err != nil {
 			return record, false, err
 		}
-		slot, err := tx.Get(ctx, slotKey).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return record, false, err
-		}
-		releaseSlot = slot == record.SendID
 	}
 	_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		// The guess that spends the last attempt deletes the record rather
 		// than keeping a dead one, so a new code can be sent at once.
 		if spent {
-			if releaseSlot {
-				if err := pipe.Del(ctx, slotKey).Err(); err != nil {
-					return err
-				}
+			if slotKey != "" {
+				pipe.Del(ctx, slotKey)
 			}
 			return pipe.Del(ctx, redisKey).Err()
 		}
