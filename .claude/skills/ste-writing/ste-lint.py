@@ -194,7 +194,6 @@ def lint(text):
     v["long_paragraph(>6s)"] = sum(1 for p in paras if len(prose_sentences(p)) > 6)
     em = raw.count("—") + raw.count("–")
     total = sum(v.values())
-    per100 = {k: round(x*100.0/words, 2) for k, x in v.items()}
     return {
         "words": words, "sentences": len(sents),
         "violations": v, "total": total,

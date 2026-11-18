@@ -361,9 +361,10 @@ updates:
 
   # .github/semgrep/requirements.txt is semgrep.yml's hash lock, installed with
   # --no-deps because it overrides some of semgrep's own exact pins (see its
-  # header). One grouped PR keeps the set together; the semgrep workflow runs a
-  # real scan on it. A semgrep bump also needs SEMGREP_VERSION in semgrep.yml,
-  # and the install step fails with that hint until it matches.
+  # header). One grouped PR keeps the set together; the advisory semgrep run
+  # installs and scans with the PR's copy (the protected run uses main's copy
+  # until the PR merges). A semgrep bump also needs SEMGREP_VERSION in
+  # semgrep.yml, and the install step fails with that hint until it matches.
   - package-ecosystem: "pip"
     directory: "/.github/semgrep"
     schedule:
