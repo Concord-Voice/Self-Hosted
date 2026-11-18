@@ -2987,21 +2987,34 @@ func insertWrappedChannelKeysTx(ctx context.Context, tx *sql.Tx, channelID strin
 // the key-request enroll both wait on the channel row this transaction holds
 // FOR UPDATE, so neither can write between this DELETE and the commit.
 //
-// The join to channel_keys at keyVersion keeps the request of a target whose
-// key a reset purged after the target was classified: in this statement's
-// snapshot that target no longer holds the key, so the request it needs stays.
+// A row is deleted only while the target still holds the key at keyVersion,
+// and the check takes FOR SHARE on that channel_keys row, because a key reset
+// (ReplaceMyKeys, RecoveryResetAccount) purges it without the channel lock. The
+// check is a correlated sub-select under LockRows, run per pending row, so a
+// reset meets it in one of three ways. Committed before this statement: the
+// snapshot has no key row, the request stays. Deleting the row while the check
+// arrives: the check waits for the reset, finds the row deleted, and the request
+// stays (READ COMMITTED skips a row whose deleter committed). Arriving after
+// the check: the reset's DELETE waits for this transaction's commit, so the
+// target loses its key only afterwards and its next fetch enrolls it again. An
+// unlocked join let the reset and the target's fetch both commit while this
+// DELETE waited on the pending row, and then deleted the request the target
+// had just been told was pending.
 func deleteFulfilledChannelKeyRequestsTx(ctx context.Context, tx *sql.Tx, channelID string, keyVersion int, userIDs []string) error {
 	if len(userIDs) == 0 {
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM pending_key_requests pending
-		USING channel_keys key
 		WHERE pending.channel_id = $1
 		  AND pending.user_id = ANY($2::uuid[])
-		  AND key.channel_id = pending.channel_id
-		  AND key.user_id = pending.user_id
-		  AND key.key_version = $3
+		  AND EXISTS (
+			SELECT 1 FROM channel_keys key
+			WHERE key.channel_id = pending.channel_id
+			  AND key.user_id = pending.user_id
+			  AND key.key_version = $3
+			FOR SHARE
+		  )
 	`, channelID, pq.Array(userIDs), keyVersion); err != nil {
 		return fmt.Errorf("clear fulfilled key requests: %w", err)
 	}

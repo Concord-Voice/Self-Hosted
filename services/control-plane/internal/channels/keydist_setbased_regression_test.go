@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,13 +158,22 @@ func createEncryptedChannel(t *testing.T, ts *testhelpers.TestServer, owner test
 // identity key version moves and every wrapped channel key is purged.
 func resetIdentityKey(t *testing.T, db *sql.DB, userID string) {
 	t.Helper()
+	require.NoError(t, resetIdentityKeyTx(db, userID))
+}
+
+// resetIdentityKeyTx is resetIdentityKey for a goroutine: it returns the error.
+func resetIdentityKeyTx(db *sql.DB, userID string) error {
 	tx, err := db.Begin()
-	require.NoError(t, err)
-	_, err = tx.Exec(`UPDATE public_keys SET key_version = key_version + 1 WHERE user_id = $1`, userID)
-	require.NoError(t, err)
-	_, err = tx.Exec(`DELETE FROM channel_keys WHERE user_id = $1`, userID)
-	require.NoError(t, err)
-	require.NoError(t, tx.Commit())
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE public_keys SET key_version = key_version + 1 WHERE user_id = $1`, userID); err != nil {
+		return errors.Join(err, tx.Rollback())
+	}
+	if _, err := tx.Exec(`DELETE FROM channel_keys WHERE user_id = $1`, userID); err != nil {
+		return errors.Join(err, tx.Rollback())
+	}
+	return tx.Commit()
 }
 
 type resetRaceResult struct {
@@ -252,9 +262,75 @@ func TestDistribution_CleanupKeepsNeededPendingRequest(t *testing.T) {
 			}
 		})
 	}
+	t.Run("key reset commits during the cleanup DELETE", func(t *testing.T) {
+		resetDuringCleanup(t, ts)
+	})
 	t.Run("rotation commits around the distribution's cleanup", func(t *testing.T) {
 		rotationDuringCleanup(t, ts)
 	})
+}
+
+// resetDuringCleanup: the distribution finds V already holding the key, and its
+// cleanup DELETE is held on V's pending-row lock after it has checked V's key.
+// V's key reset then runs. If that check takes no lock, the reset commits, V's
+// fetch reports pending and finds the row already there, and the cleanup then
+// deletes it: V ends with no key and no request. With FOR SHARE on V's key row
+// the reset waits for the distribution, and V's fetch after it enrolls V.
+func resetDuringCleanup(t *testing.T, ts *testhelpers.TestServer) {
+	owner := ts.CreateTestUser(t, "crdelowner")
+	serverID := ts.CreateTestServer(t, owner.ID, "cr delete server")
+	channelID := createEncryptedChannel(t, ts, owner, serverID, "cr-delete")
+	v := ts.CreateTestUser(t, "crdelv")
+	ts.AddMemberToServer(t, serverID, v.ID, roleMember)
+	seedChannelKey(t, ts, channelID, v.ID, 1)
+	seedPendingChannelRequest(t, ts, channelID, v.ID)
+
+	lockTx, err := ts.DB.Begin()
+	require.NoError(t, err)
+	defer func() { _ = lockTx.Rollback() }()
+	_, err = lockTx.Exec(`SELECT 1 FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2 FOR UPDATE`, channelID, v.ID)
+	require.NoError(t, err)
+
+	var distW *httptest.ResponseRecorder
+	distDone, resetDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(distDone)
+		distW = distributePost(ts, owner.AccessToken, channelID, map[string]string{v.ID: testhelpers.ValidCiphertext()}, nil)
+	}()
+	require.True(t, waitForLockWaiters(t, ts.DB, "%DELETE FROM pending_key_requests%", 1, distDone), "the cleanup never waited on V's row")
+
+	var resetErr error
+	go func() {
+		defer close(resetDone)
+		resetErr = resetIdentityKeyTx(ts.DB, v.ID)
+	}()
+	fetch := func() *httptest.ResponseRecorder {
+		return ts.DoRequest("GET", pathE2EEKeys+channelID, nil, testhelpers.AuthHeaders(v.AccessToken))
+	}
+	var getW *httptest.ResponseRecorder
+	if waitForLockWaiters(t, ts.DB, "%DELETE FROM channel_keys%", 1, resetDone) {
+		// The reset queues on V's key row until the distribution commits.
+		require.NoError(t, lockTx.Rollback())
+		<-distDone
+		<-resetDone
+		getW = fetch()
+	} else {
+		// The reset committed while the cleanup waited; V's client fetches now.
+		<-resetDone
+		getW = fetch()
+		require.NoError(t, lockTx.Rollback())
+		<-distDone
+	}
+
+	require.NoError(t, resetErr)
+	require.Equal(t, http.StatusOK, distW.Code, distW.Body.String())
+	require.Equal(t, http.StatusNotFound, getW.Code, getW.Body.String())
+	require.Contains(t, getW.Body.String(), `"pending":true`)
+	require.Equal(t, 0, rowCount(t, ts,
+		`SELECT COUNT(*) FROM channel_keys WHERE channel_id = $1 AND user_id = $2`, channelID, v.ID),
+		"precondition: the reset purged V's key")
+	assert.Equal(t, 1, pendingChannelRows(t, ts, channelID, v.ID),
+		"V was told pending after its reset, so its request must survive the cleanup")
 }
 
 // rotationDuringCleanup: a distribution at epoch 1 finds V already holding the
