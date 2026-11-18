@@ -33,8 +33,9 @@ belongs in it, and write it if the section has none. Do not edit the
 WebSocket event budgets are ready for self-hosted operators and stay off
 until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
-Android. Backup-code readers now accept the versioned formats needed for a
-later storage migration.
+Android. SSO account linking now requires current account policy and MFA,
+SSO initiation is bound to the Desktop flow that started it, and backup-code
+readers accept the versioned formats needed for a later storage migration.
 
 **22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
 
@@ -116,6 +117,7 @@ later storage migration.
 - **Registration:** New account requests now reject bodies over 64 KiB and oversized decoded key material before password hashing, and check existing email and username conflicts before expensive work ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **WebSocket:** When client attestation is required, JWT fallback upgrades now validate the session's attestation proof before admitting the socket; the single-use ticket path remains unchanged ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
+- **Authentication:** **BREAKING** SSO account linking now completes only after any enrolled MFA factor is verified and current password policy is rechecked. Apple and Google initiation require the Desktop client-binding header, reject provider-wide bursts above 600 per minute, and stop allocating state on Redis errors; the six public cookie-creating auth routes require JSON and reject cross-site requests. SSO registration, linking, session creation, and Apple client-secret requests now reject bodies over 128 KiB with 413 `request_too_large`. Registration caps encoded and decoded E2EE wrapped keys and salts, while provider JWKS refreshes replace withdrawn keys and bound unknown-key fetches. In-flight SSO attempts must restart after upgrade, and older Desktop builds cannot initiate SSO once server enforcement is deployed ([#299](https://github.com/Concord-Voice/Self-Hosted/pull/299)).
 - **Self-hosted setup:** Client IP limits and bans use the address nginx has authenticated: forwarding headers are overwritten, and both services trust only the measured exact proxy address. Cloudflare client addresses are restored only after a deployment-specific Authenticated Origin Pull check; direct media remains separate ([#291](https://github.com/Concord-Voice/Self-Hosted/pull/291)).
 - **Accounts:** **BREAKING** MFA step-up attempts now share one per-account limit of five codes in fifteen minutes across session, security, ownership, DM purge and clear-history actions and turning off purge verification; recovery and registration code guesses keep their limits across new codes, email changes and re-registration. Exhausted budgets return 429 with a retry delay, and unavailable budget checks fail closed. API: `POST /sessions/revoke-all`, `DELETE /sessions/{id}` and `PUT /sessions/revocation-mode` now require `password` and, if MFA is enrolled, `mfa_code`; an exhausted budget is 429 with `step_up_budget_exhausted`, an unavailable one 503 with `step_up_budget_unavailable` ([#285](https://github.com/Concord-Voice/Self-Hosted/pull/285)).
 - **Accounts:** WebAuthn sign-in and inline confirmation now atomically advance authenticator counters and reject clone warnings before granting access, while credential registration enforces the ten-key limit again when the final write commits ([#288](https://github.com/Concord-Voice/Self-Hosted/pull/288)).
