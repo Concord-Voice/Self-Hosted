@@ -1,7 +1,7 @@
 # Email recovery key: design
 
 **Issue:** #344
-**Status:** awaiting approval
+**Status:** approved 2026-11-18
 **Date:** 2026-11-18
 
 ## Intent
