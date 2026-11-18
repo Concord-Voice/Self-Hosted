@@ -7,7 +7,7 @@ describe('Shamir Secret Sharing', () => {
     it('reconstructs secret from all shares', () => {
       const secret = crypto.getRandomValues(new Uint8Array(32));
       const shares = split(secret, 5, 3);
-      expect(shares.length).toBe(5);
+      expect(shares).toHaveLength(5);
 
       const reconstructed = combine(shares);
       expect(reconstructed).toEqual(secret);
@@ -81,7 +81,7 @@ describe('Shamir Secret Sharing', () => {
     it('k=2, n=2 (minimum configuration)', () => {
       const secret = crypto.getRandomValues(new Uint8Array(32));
       const shares = split(secret, 2, 2);
-      expect(shares.length).toBe(2);
+      expect(shares).toHaveLength(2);
 
       const reconstructed = combine(shares);
       expect(reconstructed).toEqual(secret);
@@ -146,7 +146,7 @@ describe('Shamir Secret Sharing', () => {
       const secret = crypto.getRandomValues(new Uint8Array(48));
       const shares = split(secret, 5, 3);
       for (const share of shares) {
-        expect(share.data.length).toBe(secret.length);
+        expect(share.data).toHaveLength(secret.length);
       }
     });
 
