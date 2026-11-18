@@ -47,6 +47,7 @@ import {
 } from './middleware/auth.js';
 import type { AuthenticatedSocketData } from './middleware/auth.js';
 import { commitChannelAdmission, commitDMAdmission } from './lib/roomAdmissionCommit.js';
+import { parseConsumeRequest } from './lib/wireBounds.js';
 import { NatsService } from './lib/nats.js';
 import { EnforcementAvailability } from './lib/enforcementAvailability.js';
 import { VoiceCommandDispatcher } from './lib/voiceCommandDispatcher.js';
@@ -1678,7 +1679,6 @@ async function main() {
     logger.info('Client connected', {
       socketId: socket.id,
       userId: data.userId,
-      username: data.username,
     });
 
     // ── join-room ────────────────────────────────────────────────────
@@ -1872,7 +1872,11 @@ async function main() {
     );
 
     // ── consume ──────────────────────────────────────────────────────
-    withRateLimit(socket, 'consume', async ({ producerId, transportId }, callback) => {
+    withRateLimit(socket, 'consume', async (payload: unknown, callback) => {
+      // Refuse a malformed payload before any log line can carry it.
+      const request = parseConsumeRequest(payload);
+      if (!request) return callback({ error: 'invalid_payload' });
+      const { producerId, transportId } = request;
       try {
         const roomId = data.roomId;
         if (!roomId) {
