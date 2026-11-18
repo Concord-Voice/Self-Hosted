@@ -325,8 +325,11 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	}
 
 	if hostAgentProjectionEnabled(filepath.Dir(agentAuthorizerProjectionPath)) {
-		imported, verifyErr := h.verifyImportedCredential(ctx, challenge.AdminID, req.Assertion, challenge.Session)
-		if verifyErr != nil {
+		// An imported key has a second, root-owned counter. The agent must
+		// reverify this assertion against it and advance it before any session
+		// is minted; a key it has never imported answers 404 and continues to
+		// the database-only finalization below.
+		if verifyErr := h.verifyImportedCredential(ctx, challenge.AdminID, req.Assertion, challenge.Session); verifyErr != nil {
 			h.auditFailure(ctx, challenge.Username, EventLoginFailure)
 			switch {
 			case errors.Is(verifyErr, errImportedCredentialRejected):
@@ -341,28 +344,21 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 			}
 			return
 		}
-		if imported {
-			if scErr := h.repo.UpdateCredentialSignCountMonotonic(ctx, cred.ID, int64(cred.Authenticator.SignCount)); scErr != nil {
-				h.log.Error("admin imported sign-count persist failed", "error", scErr)
-				h.auditFailure(ctx, challenge.Username, EventLoginFailure)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
-				return
-			}
-		} else if scErr := h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount)); scErr != nil {
-			// Non-imported credentials retain the established best-effort persistence
-			// behavior; the Host Agent does not hold an independent counter for them.
-			h.log.Warn("admin sign-count persist failed", "error", scErr)
-		}
-	} else if scErr := h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount)); scErr != nil {
-		// Persist the authenticator's advanced sign counter so clone-detection keeps
-		// working (#1688 / Gitar). A non-imported assertion already validated, so
-		// legacy login behavior keeps this best-effort.
-		h.log.Warn("admin sign-count persist failed", "error", scErr)
 	}
 
-	sid, err := h.sessions.Mint(ctx, challenge.AdminID)
+	// Every credential, imported or not, persists its advanced counter and mints
+	// its generation-bound session in one transaction under the admin row lock.
+	// A counter that did not advance, or an admin that is no longer active,
+	// mints nothing.
+	sid, err := h.repo.FinalizeWebAuthnLogin(ctx, h.sessions, challenge.AdminID, cred.ID, int64(cred.Authenticator.SignCount))
 	if err != nil {
-		h.log.Error("admin session mint failed", "error", err)
+		if errors.Is(err, ErrAdminAuthenticationStateChanged) {
+			h.log.Warn("admin login state changed during ceremony", "event", EventLoginFailure)
+			h.auditFailure(ctx, challenge.Username, EventLoginFailure)
+			c.JSON(http.StatusUnauthorized, genericAuthError)
+			return
+		}
+		h.log.Error("admin login finalization failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
@@ -382,47 +378,48 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 
 // verifyImportedCredential asks the Host Agent to verify the assertion against
 // its independent root-owned counter. A 404 is the sole compatibility result:
-// the key has never been imported and therefore has no second counter.
-func (h *Handler) verifyImportedCredential(ctx context.Context, adminID string, assertion json.RawMessage, session webauthn.SessionData) (bool, error) {
+// the key has never been imported and therefore has no second counter, so
+// the caller continues with database-only finalization.
+func (h *Handler) verifyImportedCredential(ctx context.Context, adminID string, assertion json.RawMessage, session webauthn.SessionData) error {
 	payload, err := json.Marshal(struct {
 		AdminID     string               `json:"admin_id"`
 		Assertion   json.RawMessage      `json:"assertion"`
 		SessionData webauthn.SessionData `json:"session_data"`
 	}{AdminID: adminID, Assertion: assertion, SessionData: session})
 	if err != nil {
-		return false, fmt.Errorf("marshal imported credential assertion: %w", err)
+		return fmt.Errorf("marshal imported credential assertion: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://agent/v1/authorizers/login-assertion", bytes.NewReader(payload))
 	if err != nil {
-		return false, fmt.Errorf("create imported credential request: %w", err)
+		return fmt.Errorf("create imported credential request: %w", err)
 	}
 	req.Header.Set("Content-Type", contentTypeJSON)
 	resp, err := h.server.agent.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", errHostAgentUnavailable, err)
+		return fmt.Errorf("%w: %v", errHostAgentUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<10)+1))
 	if err != nil || len(body) > 1<<10 {
-		return false, errHostAgentProtocol
+		return errHostAgentProtocol
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return true, nil
+		return nil
 	case http.StatusNotFound:
 		var result struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &result) == nil && result.Error == "authorizer_not_imported" {
-			return false, nil
+			return nil
 		}
-		return false, errHostAgentProtocol
+		return errHostAgentProtocol
 	case http.StatusForbidden:
-		return false, errImportedCredentialRejected
+		return errImportedCredentialRejected
 	case http.StatusServiceUnavailable:
-		return false, errHostAgentUnavailable
+		return errHostAgentUnavailable
 	default:
-		return false, errHostAgentProtocol
+		return errHostAgentProtocol
 	}
 }
 
@@ -641,8 +638,9 @@ type enrollBeginResponse struct {
 
 // enrollChallenge is the value stored under the begin handle.
 type enrollChallenge struct {
-	AdminID  string `json:"admin_id"`
-	Username string `json:"username"`
+	AdminID              string `json:"admin_id"`
+	Username             string `json:"username"`
+	CredentialGeneration int64  `json:"credential_generation"`
 	// IPHash is hashIP of the address EnrollBegin ran from; see loginChallenge.
 	IPHash  string               `json:"ip_hash"`
 	Session webauthn.SessionData `json:"session"`
@@ -692,13 +690,13 @@ func (h *Handler) EnrollBegin(c *gin.Context) {
 	// A store fault is a 500, not a failed guess: it records no failure. (The
 	// guess itself was counted before the verify, so the fault still costs one
 	// attempt until the next completed enrollment clears the count.)
-	boundAdminID, err := h.enroll.ConsumeEnrollmentToken(ctx, req.Token)
+	boundAdminID, boundGeneration, err := h.enroll.ConsumeEnrollmentToken(ctx, req.Token)
 	if err != nil && !errors.Is(err, ErrEnrollTokenInvalid) {
 		h.log.Error("admin consume enrollment token failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
-	if err != nil || boundAdminID != adminUser.ID {
+	if err != nil || boundAdminID != adminUser.ID || boundGeneration != adminUser.CredentialGeneration {
 		h.failEnroll(c, req.Username, ip)
 		return
 	}
@@ -711,10 +709,11 @@ func (h *Handler) EnrollBegin(c *gin.Context) {
 	}
 
 	handle, err := h.storeEnrollChallenge(ctx, enrollChallenge{
-		AdminID:  adminUser.ID,
-		Username: adminUser.Username,
-		IPHash:   hashIP(ip),
-		Session:  *session,
+		AdminID:              adminUser.ID,
+		Username:             adminUser.Username,
+		CredentialGeneration: adminUser.CredentialGeneration,
+		IPHash:               hashIP(ip),
+		Session:              *session,
 	})
 	if err != nil {
 		h.log.Error("admin store enroll challenge failed", "error", err)
@@ -756,12 +755,13 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 	// spent enrollment token and strand the admin until an operator resets it.
 	user := adminRegistrationUser()
 	if _, err := FinishAdminRegistration(ctx, h.webauthn, h.repo, AdminRegistrationInput{
-		User:           user,
-		Session:        challenge.Session,
-		Request:        httpRequestWithBody(c, req.Attestation),
-		AdminID:        challenge.AdminID,
-		AllowedAAGUIDs: h.allowedAAGUIDs,
-		CredentialName: req.CredentialName,
+		User:                 user,
+		Session:              challenge.Session,
+		Request:              httpRequestWithBody(c, req.Attestation),
+		AdminID:              challenge.AdminID,
+		CredentialGeneration: challenge.CredentialGeneration,
+		AllowedAAGUIDs:       h.allowedAAGUIDs,
+		CredentialName:       req.CredentialName,
 	}); err != nil {
 		// A credential-save fault is the server's, not a rejected key: a logged
 		// 500 with no failure audit row. Attestation and AAGUID rejections stay a
@@ -774,12 +774,6 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 		h.log.Warn("admin finish registration rejected", "error", err)
 		h.auditFailure(ctx, challenge.Username, EventEnrollComplete)
 		c.JSON(http.StatusUnauthorized, genericAuthError)
-		return
-	}
-
-	if err := h.repo.SetStatus(ctx, challenge.AdminID, StatusActive); err != nil {
-		h.log.Error("admin activate failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
 
@@ -839,7 +833,14 @@ func (h *Handler) storeEnrollChallenge(ctx context.Context, ch enrollChallenge) 
 	if err != nil {
 		return "", fmt.Errorf("marshal enroll challenge: %w", err)
 	}
-	if err := h.redis.Set(ctx, enrollChallengePrefix+handle, payload, enrollChallengeTTL).Err(); err != nil {
+	challengeKey := enrollChallengePrefix + handle
+	indexKey := enrollChallengeIndexKey(ch.AdminID, ch.CredentialGeneration)
+	if _, err := h.redis.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Set(ctx, challengeKey, payload, enrollChallengeTTL)
+		pipe.SAdd(ctx, indexKey, challengeKey)
+		pipe.Expire(ctx, indexKey, enrollChallengeTTL)
+		return nil
+	}); err != nil {
 		return "", fmt.Errorf("store enroll challenge: %w", err)
 	}
 	return handle, nil
@@ -849,7 +850,8 @@ func (h *Handler) consumeEnrollChallenge(ctx context.Context, handle string) (en
 	if handle == "" {
 		return enrollChallenge{}, errInvalidAdminChallenge
 	}
-	raw, err := h.redis.GetDel(ctx, enrollChallengePrefix+handle).Result()
+	challengeKey := enrollChallengePrefix + handle
+	raw, err := h.redis.GetDel(ctx, challengeKey).Result()
 	if errors.Is(err, redis.Nil) {
 		return enrollChallenge{}, errInvalidAdminChallenge
 	}
@@ -859,6 +861,12 @@ func (h *Handler) consumeEnrollChallenge(ctx context.Context, handle string) (en
 	var ch enrollChallenge
 	if err := json.Unmarshal([]byte(raw), &ch); err != nil {
 		return enrollChallenge{}, fmt.Errorf("decode enroll challenge: %w", err)
+	}
+	// The index only lets reset find live ceremonies; the challenge is already
+	// consumed, so a failed index cleanup must not spend it. A leftover member
+	// names a key that no longer exists and expires with the index.
+	if err := h.redis.SRem(ctx, enrollChallengeIndexKey(ch.AdminID, ch.CredentialGeneration), challengeKey).Err(); err != nil {
+		h.log.Warn("admin enroll challenge index cleanup failed", "event", EventEnrollComplete)
 	}
 	return ch, nil
 }
@@ -925,7 +933,7 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		return
 	}
 
-	token, err := h.enroll.MintEnrollmentToken(ctx, created.ID)
+	token, err := h.enroll.MintEnrollmentToken(ctx, created.ID, created.CredentialGeneration)
 	if err != nil {
 		h.log.Error("admin mint enrollment token failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})

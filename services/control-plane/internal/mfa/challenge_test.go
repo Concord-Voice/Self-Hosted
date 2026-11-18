@@ -133,6 +133,18 @@ func TestGenerateRecoveryToken(t *testing.T) {
 	}
 }
 
+func TestRecoveryTokenRejectsRotatedSigningSecret(t *testing.T) {
+	token, _, err := GenerateRecoveryToken("user-456", testJWTSecret)
+	if err != nil {
+		t.Fatalf("GenerateRecoveryToken failed: %v", err)
+	}
+
+	_, err = ValidateChallengeToken(token, "rotated-test-secret", PurposeRecovery)
+	if err == nil {
+		t.Error("expected a recovery token signed before restore to be rejected after signing-key rotation")
+	}
+}
+
 func TestRecoveryTokenRejectsWrongPurpose(t *testing.T) {
 	token, _, err := GenerateRecoveryToken("user-456", testJWTSecret)
 	if err != nil {

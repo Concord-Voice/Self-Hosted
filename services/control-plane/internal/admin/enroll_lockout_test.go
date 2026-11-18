@@ -159,7 +159,7 @@ func TestEnrollBegin_BadTokenWithCorrectPasswordCounts(t *testing.T) { // regres
 func TestEnrollBegin_ActiveAdminCorrectPasswordCounts(t *testing.T) { // regression for #216
 	db, rdb, engine := setupEnrollLockout(t)
 	adminID, username, _ := enrolledAdmin(t, db, rdb)
-	token, err := admin.NewEnrollmentStore(rdb).MintEnrollmentToken(context.Background(), adminID)
+	token, err := admin.NewEnrollmentStore(rdb).MintEnrollmentToken(context.Background(), adminID, 1)
 	require.NoError(t, err)
 
 	// The probe comes from another IP so it does not spend the IP axis the
@@ -277,7 +277,7 @@ func TestEnroll_FinishResetsCounter(t *testing.T) { // regression for #216
 func TestEnrollBegin_ActiveAdminWithValidTokenRefused(t *testing.T) { // regression for #216
 	db, rdb, engine := setupEnrollLockout(t)
 	adminID, username, _ := enrolledAdmin(t, db, rdb)
-	token, err := admin.NewEnrollmentStore(rdb).MintEnrollmentToken(context.Background(), adminID)
+	token, err := admin.NewEnrollmentStore(rdb).MintEnrollmentToken(context.Background(), adminID, 1)
 	require.NoError(t, err)
 
 	code, body := enrollBegin(engine, username, adminTestPassword, token)

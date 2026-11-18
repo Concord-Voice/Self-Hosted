@@ -256,6 +256,51 @@ func TestAuthorizationRealWebAuthnVerifierRejectsWrongTrustClaims(t *testing.T) 
 	}
 }
 
+// TestAuthorizationRealVerifierRejectsRepeatedOrLowerCounters carries the
+// control plane's former step-up counter rule to the agent, which now owns the
+// host-write ceremony: a zero-counter key may repeat zero, but a repeated or
+// lower advanced counter is refused and never rolls the root counter back.
+func TestAuthorizationRealVerifierRejectsRepeatedOrLowerCounters(t *testing.T) {
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	public, err := private.PublicKey.Bytes()
+	require.NoError(t, err)
+	encoder, err := cbor.CanonicalEncOptions().EncMode()
+	require.NoError(t, err)
+	coseKey, err := encoder.Marshal(map[int]any{1: 2, 3: -7, -1: 1, -2: public[1:33], -3: public[33:65]})
+	require.NoError(t, err)
+	root := t.TempDir()
+	doc := testAuthorizerDoc(t)
+	entry := testAuthorizerEntry(t, doc)
+	entry["public_key"] = base64.RawURLEncoding.EncodeToString(coseKey)
+	entry["sign_count"] = 0
+	path := writeAuthorizerDoc(t, root, doc)
+	authorizers := loadTestAuthorizers(t, path, root)
+	adminID := testAuthorizerString(t, entry, "admin_id")
+	verifier, err := mfa.NewWebAuthnService("admin.example.test", "Concord Voice", []string{"https://admin.example.test"})
+	require.NoError(t, err)
+	store := NewAuthorizationStore(authorizers, verifier, time.Now)
+	store.jobs = &jobs{backups: root, boundary: root}
+
+	authorize := func(signCount uint32) error {
+		handle, options, beginErr := store.Begin(adminID, "update", actionRequest{Tag: "v1.2.3"})
+		require.NoError(t, beginErr)
+		assertion := signedAgentAssertion(t, private, []byte("credential-1"), adminWebAuthnUserHandle,
+			options.Response.Challenge.String(), "admin.example.test", "https://admin.example.test", 0x05, signCount)
+		_, consumeErr := store.Consume(handle, "update", assertion)
+		return consumeErr
+	}
+	stored := func() uint32 { return authorizers.Credentials(adminID)[0].Authenticator.SignCount }
+
+	require.NoError(t, authorize(0), "a zero-counter key remains usable")
+	require.NoError(t, authorize(0), "a zero-counter key may repeat zero")
+	require.NoError(t, authorize(1))
+	require.ErrorIs(t, authorize(1), ErrAuthorizationDenied, "a repeated advanced counter cannot authorize an action")
+	require.NoError(t, authorize(2))
+	require.ErrorIs(t, authorize(1), ErrAuthorizationDenied, "a lower advanced counter cannot authorize an action")
+	require.Equal(t, uint32(2), stored(), "rejected assertions must not roll the root counter back")
+}
+
 func signedAgentAssertion(t *testing.T, private *ecdsa.PrivateKey, credentialID []byte, userHandle, challenge, rpID, origin string, flags byte, signCount uint32) []byte {
 	t.Helper()
 	rpHash := sha256.Sum256([]byte(rpID))

@@ -392,7 +392,7 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 		return fmt.Errorf("create pending admin: %w", err)
 	}
 
-	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID)
+	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID, adminUser.CredentialGeneration)
 	if err != nil {
 		return fmt.Errorf("mint enrollment token: %w", err)
 	}
@@ -414,9 +414,9 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 }
 
 // runResetEnrollment is the break-glass recovery verb: it disables an existing
-// admin's hardware keys (so a lost/compromised key cannot authenticate) and
-// mints a fresh enrollment token so the operator can register a new key. It does
-// NOT touch the password. Audits EventCredentialRevoked + EventBootstrap.
+// admin's hardware keys (so a lost/compromised key cannot authenticate),
+// advances the enrollment and session generations, and mints a fresh enrollment
+// token. It does NOT touch the password. Audits EventCredentialRevoked + EventBootstrap.
 func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) error {
 	fs := flag.NewFlagSet(verbResetEnrollment, flag.ContinueOnError)
 	fs.SetOutput(deps.stdout)
@@ -436,32 +436,32 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 		return err
 	}
 
-	// Disable every existing credential so the old key set can no longer be used.
-	creds, err := deps.repo.ListCredentials(ctx, adminUser.ID)
+	// One transaction advances both fences before removing credentials. A stale
+	// enrollment finish fails closed, and sessions minted before the reset fail
+	// their durable generation check after re-enrollment.
+	revoked, previousGeneration, newGeneration, err := deps.repo.ResetEnrollment(ctx, adminUser.ID)
 	if err != nil {
-		return fmt.Errorf("list credentials: %w", err)
+		return fmt.Errorf("reset enrollment authority: %w", err)
 	}
-	if len(creds) > 0 {
-		if delErr := deps.repo.DeleteCredentials(ctx, adminUser.ID); delErr != nil {
-			return fmt.Errorf("revoke credentials: %w", delErr)
-		}
+	if revoked > 0 {
 		if auditErr := deps.audit.Write(ctx, AuditEvent{
 			AdminID:   &adminUser.ID,
 			Actor:     *username,
 			EventType: EventCredentialRevoked,
 			Result:    AuditSuccess,
-			Detail:    map[string]any{"verb": verbResetEnrollment, "revoked": len(creds)},
+			Detail:    map[string]any{"verb": verbResetEnrollment, "revoked": revoked},
 		}); auditErr != nil {
 			return fmt.Errorf("audit credential revoke: %w", auditErr)
 		}
 	}
-
-	// Re-arm enrollment: a reset admin returns to pending until a new key lands.
-	if err := deps.repo.SetStatus(ctx, adminUser.ID, StatusPending); err != nil {
-		return fmt.Errorf("reset status to pending: %w", err)
+	// The revocation is committed and audited before the Redis cleanup, so a
+	// cleanup fault cannot leave it unaudited. PostgreSQL's generation check is
+	// the fence; the cleanup only rejects stale ceremonies sooner.
+	if err := deps.enroll.DeleteEnrollmentChallenges(ctx, adminUser.ID, previousGeneration); err != nil {
+		return fmt.Errorf("invalidate enrollment challenges: %w", err)
 	}
 
-	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID)
+	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID, newGeneration)
 	if err != nil {
 		return fmt.Errorf("mint enrollment token: %w", err)
 	}

@@ -84,6 +84,7 @@ func TestNewRouterActivityHistoryWiringOrderIsSingleAndFinal(t *testing.T) {
 		"presenceHistoryHandler.RegisterRoutes(",
 		"opsRuntime := wireOpsMetricsRuntimeWithSecurityEvents(",
 		"go hub.Run()",
+		"authHandler.CloseRecoveryJobs()",
 		// #2445 added a 7th return value (the shared presence-recheck executor);
 		// #2738 added an 8th, the closer that drains BOTH presence dispatch
 		// workers at shutdown — nothing called either Close before it. #2448

@@ -813,9 +813,10 @@ paths:
       tags:
       - Auth
       summary: Begin account recovery
-      description: 'Send a 6-digit recovery code to the account email. Always returns 200 to prevent email
-        enumeration. A live ten-minute recovery record is retained unchanged: a later begin neither
-        replaces its code nor resets its attempts, and sends no second email.
+      description: 'Queue a 6-digit recovery code for delivery to the account email. Returns before account
+        resolution or delivery and always uses the same 200 response to prevent email enumeration. A live
+        ten-minute recovery record is retained unchanged: a later begin neither replaces its code nor resets
+        its attempts, and sends no second email.
 
         Rate limit: 3 requests per 15 minutes (IP-based).
 
@@ -16076,13 +16077,12 @@ paths:
         permission read on any member reflects it.
 
 
-        After the bump, the server broadcasts `server_permissions_changed`
-        (`{"server_id": "<uuid>"}`) to every subscriber of the server, once per
-        changed request. It is sent whenever the update ran, including when the
-        commit acknowledgement is lost and the route answers 500, and never for a
-        no-op or a refused request. The event names no direction. It does tell a
-        connected member that the setting may have changed, though not what it
-        changed to.
+        After the bump, the server sends `server_permissions_changed`
+        (`{"server_id": "<uuid>"}`) only to the owner and raw-bit Administrators,
+        matching this resource's read boundary, once per changed request. It is
+        sent whenever the update ran, including when the commit acknowledgement is
+        lost and the route answers 500, and never for a no-op or a refused request.
+        The event names no direction, and ordinary members receive no event.
 
 
         Rate limit: 10 requests per minute (fail-open, matching `UpdateServer`).
@@ -19926,10 +19926,10 @@ paths:
 
         | `server_deleted` | `server_id` | Server deleted |
 
-        | `server_permissions_changed` | `server_id` | Sent to every subscriber of the server when
-        `PUT /servers/{id}/mfa-enforcement` changes the setting (or may have: a lost commit acknowledgement
-        also sends it). Names no direction and carries no permission value; the client re-reads its own
-        permissions for that server. |
+        | `server_permissions_changed` | `server_id` | Sent only to the server owner and raw-bit
+        Administrators when `PUT /servers/{id}/mfa-enforcement` changes the setting (or may have: a lost
+        commit acknowledgement also sends it). Names no direction and carries no permission value; an
+        authorized client re-reads its own permissions for that server. |
 
         | `permissions_changed` | none (`data` is `{}`) | Sent to the account''s own connected clients after
         a committed change to its MFA factors. Names no factor and no direction; the client re-reads its

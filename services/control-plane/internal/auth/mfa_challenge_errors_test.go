@@ -302,7 +302,7 @@ func TestSuspiciousMachineMFAFailuresFailClosed(t *testing.T) {
 
 			blocked := h.handleSuspiciousMachineID(c, models.RefreshToken{
 				UserID: "user-fixture", MachineID: "stored-machine", RememberMe: true,
-			}, "new-machine")
+			})
 
 			require.True(t, blocked, "dependency failures must prevent refresh-token rotation")
 			require.Equal(t, http.StatusInternalServerError, response.Code)
@@ -321,7 +321,7 @@ func TestSuspiciousMachineRecoveryOnlyMethodsAllowRefresh(t *testing.T) {
 	h := &Handler{mfaChecker: stub, log: logger.NewWithWriter(io.Discard)}
 	c, rec := newMFAChallengeRecorder()
 
-	blocked := h.handleSuspiciousMachineID(c, models.RefreshToken{UserID: "user-fixture", MachineID: "stored-machine"}, "new-machine")
+	blocked := h.handleSuspiciousMachineID(c, models.RefreshToken{UserID: "user-fixture", MachineID: "stored-machine"})
 
 	require.False(t, blocked, "the refresh caller must proceed when only recovery factors exist")
 	require.Empty(t, rec.Body.String())
@@ -339,7 +339,7 @@ func TestSuspiciousMachineChallengeEmitsSuccessEvent(t *testing.T) {
 	h.SetSecurityEvents(recorder)
 	c, response := newMFAChallengeRecorder()
 
-	require.True(t, h.handleSuspiciousMachineID(c, models.RefreshToken{UserID: "user-fixture", MachineID: "stored-machine"}, "new-machine"))
+	require.True(t, h.handleSuspiciousMachineID(c, models.RefreshToken{UserID: "user-fixture", MachineID: "stored-machine"}))
 	require.Equal(t, http.StatusForbidden, response.Code)
 	require.Equal(t, []securityevent.Event{{
 		EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeSuccess,

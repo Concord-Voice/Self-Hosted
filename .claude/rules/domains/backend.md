@@ -612,7 +612,9 @@ stays authoritative on every request, so a lost event costs a stale display unti
 the next read and nothing else.
 
 - **`server_permissions_changed`**, `{"type":"server_permissions_changed","data":{"server_id":"<uuid>"}}`,
-  goes to every subscriber of the server. `refreshMFAEnforcementViews`
+  goes only to the server owner and raw-bit Administrators, matching the
+  `GET /servers/:id/mfa-enforcement` read boundary. Ordinary members receive no
+  event or timing signal. `refreshMFAEnforcementViews`
   (`internal/servers/mfa_enforcement.go`) replaces `bumpMFAEnforcementGeneration` at
   both of its call sites: after a clean commit that changed the value, and after
   a `Commit()` error whenever the `UPDATE` ran (the lost-ack rule above). So a
@@ -635,8 +637,8 @@ the next read and nothing else.
   could be served, or could recompute and cache, the value the bump is about to
   retire. A failed bump has already retried and fallen back inside the resolver,
   so the re-read is still the best the client can do.
-- **Both use the Context broadcast form** (`BroadcastToServerContext`,
-  `BroadcastToUserContext`) under a 1 s `context.WithTimeout(context.WithoutCancel(ctx))`.
+- **Both use `BroadcastToUserContext`** under a 1 s
+  `context.WithTimeout(context.WithoutCancel(ctx))`.
   Both run on the request goroutine after the commit, so an unbounded send into a
   saturated hub queue would hang a request whose change has already committed.
   `WithoutCancel` keeps a client that hangs up from cancelling the send. One
@@ -655,15 +657,14 @@ the next read and nothing else.
   send. It reaches only the clients connected to the replica that served the
   request, and there is no NATS or Redis relay for it. That is correct while the
   control plane is a singleton. A second replica needs a relay for both events
-  first, or members connected to the other replica keep a stale display until
-  their next read.
-- **F12: the uniform event reveals THAT a flip happened.** Every subscriber of the
-  server receives `server_permissions_changed` for a flip, including members who
-  may not know the setting exists. The frame names no direction and no enrollment
-  and is identical for ON and OFF, but it does tell a connected member that
-  something changed. That was accepted (L7). The untouched `updated_at` (step 7)
-  is therefore not proof that a flip is invisible to members; do not "fix" the
-  difference in either direction.
+  first, or authorized viewers connected to the other replica keep a stale
+  display until their next read.
+- **The event preserves the setting's confidentiality boundary.** Recipient
+  selection uses the same owner-or-raw-Administrator rule as the protected GET,
+  including the server-qualified roles join. The frame remains identical for ON
+  and OFF, but an ordinary member cannot observe its occurrence. The permission
+  generation still bumps for the whole server, so every member's next read is
+  fresh without disclosing when the policy changed.
 
 **`ListServers` and the role-guard pre-check also carry the mask, and the
 pre-check MUST (#2721 F3).** `ListServers` adds the flag to its `SELECT` and,

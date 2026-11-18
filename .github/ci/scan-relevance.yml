@@ -457,14 +457,6 @@ native_ioc:
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'
   - '.github/workflows/pr-ci.yml'
-sonar_profile:
-  - '.github/ci/scan-relevance.yml'
-  - '.github/scripts/ci-scan-relevance.mjs'
-  - '.github/workflows/pr-ci.yml'
-  - '.github/workflows/sonarcloud.yml'
-  - '.github/workflows/build.yml'
-  - 'sonar-project.properties'
-  - 'scripts/sonar/**'
 changelog:
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'

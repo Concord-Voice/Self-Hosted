@@ -10,7 +10,7 @@
 |---|---|
 | `postgres.dump` | `pg_dump --format=custom` of the `concord` database, taken while the stack runs |
 | `minio.tar` | The bundled MinIO volume. Present only in bundled storage mode. With BYO S3, back up your bucket using your provider's own tools. |
-| `env` | The root `.env`, **including every secret** |
+| `env` | The root `.env`, **including every secret**. Restore compares every value except `JWT_SECRET`, which it replaces. |
 | `manifest.json` | Schema, release, storage mode, creation time, and a SHA-256 for each part |
 
 Treat the archive like the `.env` it contains: copy it off the host to encrypted storage, and never commit it. `/backups/` is git-ignored.
@@ -43,29 +43,50 @@ restarts. A second request receives 429 `backup_rate_limited`.
 - A part is missing, a part is not in the manifest, or a checksum does not match.
 - Its release differs from this install. The release is the git commit in a git checkout, or the content of `VERSION` in an install without git.
 - Its storage mode differs from this install.
-- Its `env` differs from the current `.env`.
+- Its `env` differs from the current `.env` outside `JWT_SECRET`, or either copy has anything other than one `JWT_SECRET=` entry.
 
 When every check passes, the command:
 
 1. Stops the stack.
-2. Starts Postgres alone.
-3. Runs `pg_restore --clean --if-exists --single-transaction`.
-4. In bundled mode, unpacks the archived MinIO copy into the volume, then replaces the old objects with it.
-5. Runs `concord-selfhost up`, then `concord-selfhost health`.
+2. Replaces `JWT_SECRET` with a new random value while preserving every other `.env` byte.
+3. Starts Redis and Postgres alone.
+4. Runs `pg_restore --clean --if-exists --single-transaction`.
+5. Revokes every restored active refresh token with a timestamp one hour in the past, so the 30-second grace-recovery path cannot revive it.
+6. Deletes old opaque admin sessions, enrollment and login challenges, step-up grants, WebSocket tickets, recovery-code markers, email verification tokens, and SSO continuation tokens from Redis, plus the cached credential epochs, then verifies none remain. Other Redis state is preserved.
+7. In bundled mode, unpacks the archived MinIO copy into the volume, then replaces the old objects with it.
+8. Runs `concord-selfhost up`, then `concord-selfhost health`.
+
+The new signing secret invalidates every pre-restore signed access, challenge, and recovery token; restored refresh tokens are revoked and old opaque Redis authorization state is cleared too. Sign in again after a successful restore. This prevents a recovery token consumed after the backup was made from becoming valid when the restored system has no Redis replay marker, and prevents an old refresh token or admin session from regaining access. Both application planes start together with the same new secret.
+
+Expect refresh failures after startup as each client presents a token that restore revoked. Unbound clients emit high-severity refresh-replay security events, and key-bound clients log a "no live successor" warning. Both are the replay defence working as intended.
+
+### What a restore rolls back
+
+The database returns to the moment of the backup. Rotating the signing secret and revoking sessions do not undo that. Any of these made after the backup are lost, and the old values work again:
+
+- password changes and password resets;
+- removed passkeys, security keys, and admin WebAuthn credentials;
+- MFA resets and used backup codes;
+- removed trusted recovery devices and replaced recovery keys;
+- revoked server invites and redeemed redemption codes;
+- reversed or completed ownership transfers, whose emailed reversal tokens work again.
+
+After a successful restore, re-apply each such change that you know of, starting with any made in response to a compromise.
 
 ### Restoring onto a new host
 
 1. Install the **same release** with the installer.
 2. Extract `env` from the archive with `tar -xzf ARCHIVE ./env`.
-3. Replace `.env` with it, and set its mode to `0600`.
+3. Replace `.env` with it, and set its mode to `0600`. Restore retains its database and encryption keys but replaces its `JWT_SECRET`.
 4. Run `restore`.
 
-The `.env` check exists because the database and its keys must come from the same install. Copying the archived `env` into place is therefore a deliberate step.
+The `.env` check exists because the database and its keys must come from the same install. Copying the archived `env` into place is therefore a deliberate step. Older archives remain pinned to their original release identity; upgrading the checkout makes restore refuse them. Before a new-host or Redis-loss restore of an older archive, use a reviewed backport of this restore helper on the matching-release checkout, or arrange equivalent signing-key rotation before either application plane starts.
 
 ### When restore fails partway
 
-- **A database step fails:** `--single-transaction` means the database is left unchanged. The stack stays stopped. Run `concord-selfhost up` to resume on the old data.
-- **The MinIO step fails:** the archive is unpacked beside the live objects and swapped in only after it unpacks fully, so a bad stream leaves the old objects in place. The database has already been restored by then. Re-run the same restore.
+- **The stop or the signing-secret install fails:** nothing was restored and `.env` is unchanged. Fix the failure, then either re-run restore or run `concord-selfhost up` to resume the prior state.
+- **Redis or Postgres startup, `pg_restore`, refresh-token revocation, or Redis cleanup fails:** The stack stays stopped. Even if `pg_restore --single-transaction` left the database unchanged, authorization invalidation is incomplete. Fix the failure and re-run restore; do not run `concord-selfhost up` first.
+- **The MinIO step fails:** the archive is unpacked beside the live objects and swapped in only after it unpacks fully, so a bad stream leaves the old objects in place. The database has already been restored by then. Fix the failure and re-run the same restore before starting the stack.
 
 ## Updating to a release tag
 

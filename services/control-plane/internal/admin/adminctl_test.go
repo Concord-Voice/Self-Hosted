@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -57,7 +60,7 @@ func TestAdminCtl_Bootstrap_CreatesPendingAdminAndPrintsToken(t *testing.T) {
 	token := extractToken(t, out)
 	require.NotEmpty(t, token)
 	enroll := admin.NewEnrollmentStore(rdb)
-	gotAdminID, err := enroll.ConsumeEnrollmentToken(ctx, token)
+	gotAdminID, _, err := enroll.ConsumeEnrollmentToken(ctx, token)
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, gotAdminID)
 }
@@ -209,6 +212,11 @@ func TestAdminCtl_ResetEnrollment_RevokesKeysAndMintsToken(t *testing.T) {
 
 	// Make the admin active with a credential, simulating a fully enrolled admin.
 	require.NoError(t, repo.SetStatus(ctx, created.ID, admin.StatusActive))
+	active, err := repo.GetByUsername(ctx, username)
+	require.NoError(t, err)
+	sessions := admin.NewSessionStore(rdb, time.Now)
+	staleSID, err := sessions.Mint(ctx, created.ID, active.SessionGeneration)
+	require.NoError(t, err)
 	_, err = repo.AddCredential(ctx, admin.AdminCredential{ // #nosec G101 -- test fixture WebAuthn credential, not a secret
 		AdminID:      created.ID,
 		CredentialID: []byte(uniqueAdminUsername("reset-cred")),
@@ -230,12 +238,27 @@ func TestAdminCtl_ResetEnrollment_RevokesKeysAndMintsToken(t *testing.T) {
 	got, err := repo.GetByUsername(ctx, username)
 	require.NoError(t, err)
 	assert.Equal(t, admin.StatusPending, got.Status)
+	assert.Equal(t, active.SessionGeneration+1, got.SessionGeneration)
+	assert.Greater(t, got.CredentialGeneration, created.CredentialGeneration)
+
+	// Re-enrollment must not restore authority to a pre-reset session.
+	require.NoError(t, repo.SetStatus(ctx, created.ID, admin.StatusActive))
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.GET("/admin/api/v1/protected", admin.AdminAuthRequired(sessions, repo), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
+	request.AddCookie(&http.Cookie{Name: "__Host-cv_admin_sid", Value: staleSID, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusUnauthorized, response.Code)
 
 	// A fresh enrollment token was minted and is consumable.
 	token := extractToken(t, stdout.String())
 	require.NotEmpty(t, token)
 	enroll := admin.NewEnrollmentStore(rdb)
-	gotAdminID, err := enroll.ConsumeEnrollmentToken(ctx, token)
+	gotAdminID, _, err := enroll.ConsumeEnrollmentToken(ctx, token)
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, gotAdminID)
 }

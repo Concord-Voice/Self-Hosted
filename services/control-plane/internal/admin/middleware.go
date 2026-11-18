@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -10,6 +13,11 @@ import (
 // the resolved admin id for downstream handlers. Handlers read it via
 // c.GetString(adminIDContextKey) — it is the ADMIN identity, never a user_id.
 const adminIDContextKey = "admin_id"
+
+// SessionAuthority resolves the generation that is authorized for an active admin.
+type SessionAuthority interface {
+	ActiveSessionGeneration(ctx context.Context, adminID string) (int64, error)
+}
 
 // AdminAuthRequired gates admin-console routes on a valid opaque admin session.
 // It reads ONLY the `__Host-cv_admin_sid` cookie and resolves it through the
@@ -22,7 +30,7 @@ const adminIDContextKey = "admin_id"
 // the reflective routes_test.
 //
 //nolint:revive // Admin* prefix is the #1688 cross-task naming contract (see types.go header).
-func AdminAuthRequired(sessions *SessionStore) gin.HandlerFunc {
+func AdminAuthRequired(sessions *SessionStore, authority SessionAuthority) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sid, err := c.Cookie(adminCookieName)
 		if err != nil || sid == "" {
@@ -34,6 +42,16 @@ func AdminAuthRequired(sessions *SessionStore) gin.HandlerFunc {
 		sess, err := sessions.Get(c.Request.Context(), sid)
 		if err != nil {
 			// Unknown, expired (idle or absolute), or malformed session id.
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		generation, err := authority.ActiveSessionGeneration(c.Request.Context(), sess.AdminID)
+		if err != nil && !errors.Is(err, ErrAdminNotFound) {
+			// A database fault still fails closed, but it must not look like an
+			// ordinary sign-out.
+			slog.Error("admin session authority check failed", "error", err)
+		}
+		if err != nil || generation != sess.SessionGeneration {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}

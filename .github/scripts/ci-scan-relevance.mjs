@@ -16,7 +16,7 @@ export const ADVISORY_KEYS = [
   'go_toolchain', 'openapi', 'spa_env', 'deployment', 'selfhost', 'feature_wiring',
   'adr_numbers', 'secrets_contract', 'dispatch_trust', 'go_test_contracts',
   'review_contracts', 'tooling_mirrors', 'graphify_contracts', 'native_ioc',
-  'sonar_profile', 'changelog', 'dev_checks', 'workflow_lint',
+  'changelog', 'dev_checks', 'workflow_lint',
 ];
 const ADVISORY_FILTER_KEYS = ADVISORY_KEYS.map(key => key === 'selfhost' ? 'selfhost_guard' : key);
 const STATIC_GUARD_KEYS = ADVISORY_KEYS.filter(key => key !== 'workflow_lint');

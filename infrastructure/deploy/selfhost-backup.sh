@@ -64,7 +64,9 @@ _backup_prepare_dir() {
     (umask 077; mkdir -p -- "$1") || { _backup_fail 'cannot create the backup directory'; return 1; }
     return 0
   fi
-  [[ -d "$1" && ! -L "$1" && "$(stat -c '%u %a' -- "$1")" =~ ^$(id -u)\ [0-7]00$ ]] \
+  local owner_mode
+  owner_mode="$(stat -c '%u %a' -- "$1" 2>/dev/null)" || owner_mode=''
+  [[ -d "$1" && ! -L "$1" && "$owner_mode" =~ ^[0-9]+\ [0-7]00$ && "${owner_mode%% *}" == "$(id -u)" ]] \
     || { _backup_fail 'backup directory must be owned by this user with no group or other access (0700)'; return 1; }
 }
 
@@ -242,8 +244,140 @@ _restore_run() {
   return "$rc"
 }
 
+# _restore_stage_jwt_secret ARCHIVED_ENV CURRENT_ENV STAGED_ENV — the archive may predate
+# a recovery-token use, so preserving its signing secret would revive that token
+# when Redis is empty. Every other .env byte must still match exactly.
+_restore_stage_jwt_secret() {
+  local archived_env="$1" current_env="$2" staged_env="$3" rc=0
+  [[ -f "$archived_env" && -f "$current_env" && ! -L "$current_env" && -f "$staged_env" ]] || {
+    _backup_fail 'restore environment refused'
+    return 1
+  }
+  # Exit 2: the files differ outside JWT_SECRET. Exit 3: an I/O error.
+  python3 - "$archived_env" "$current_env" "$staged_env" <<'PY' || rc=$?
+import os, re, secrets, sys
+archived_path, current_path, staged_path = sys.argv[1:]
+# Any assignment form Compose could read counts, so `export JWT_SECRET=` or an
+# indented copy cannot sit beside the canonical line and keep the old secret.
+ANY_JWT = re.compile(rb"^[ \t]*(export[ \t]+)?JWT_SECRET[ \t]*=")
+def replace(text, value):
+    lines = text.splitlines(keepends=True)
+    indexes = [index for index, line in enumerate(lines) if ANY_JWT.match(line)]
+    if len(indexes) != 1 or not lines[indexes[0]].startswith(b"JWT_SECRET="):
+        raise ValueError()
+    index = indexes[0]
+    ending = b"\r\n" if lines[index].endswith(b"\r\n") else b"\n" if lines[index].endswith(b"\n") else b""
+    lines[index] = b"JWT_SECRET=" + value + ending
+    return b"".join(lines)
+try:
+    archived = open(archived_path, "rb").read()
+    current = open(current_path, "rb").read()
+except OSError:
+    sys.exit(3)
+try:
+    if replace(archived, b"<JWT_SECRET>") != replace(current, b"<JWT_SECRET>"):
+        sys.exit(2)
+except ValueError:
+    sys.exit(2)
+try:
+    with open(staged_path, "wb") as output:
+        output.write(replace(current, secrets.token_hex(32).encode()))
+        output.flush()
+        source = os.stat(current_path)
+        os.fchown(output.fileno(), source.st_uid, source.st_gid)
+        os.fchmod(output.fileno(), 0o600)
+        os.fsync(output.fileno())
+except OSError:
+    sys.exit(3)
+PY
+  case "$rc" in
+    0) return 0 ;;
+    2) _backup_fail 'the backup .env differs from this install outside JWT_SECRET' ;;
+    *) _backup_fail 'cannot write the restored environment with a new signing secret' ;;
+  esac
+  return 1
+}
+
+# _restore_start_redis — start only the legacy Redis service and prove its
+# password-protected command path works before restoring authorization state.
+_restore_start_redis() {
+  local i reply=''
+  echo 'Starting Redis for authorization cleanup...'
+  compose up -d redis || { _restore_auth_incomplete 'cannot start Redis for authorization cleanup'; return 1; }
+  for ((i = 0; i < 30; i++)); do
+    reply="$(compose exec -T redis redis-cli --raw PING 2>/dev/null)" || reply=''
+    [[ "$reply" == PONG ]] && return 0
+    sleep 1
+  done
+  _restore_auth_incomplete 'Redis authentication did not become ready'
+  return 1
+}
+
+# _restore_purge_redis_authority — remove only opaque authorization state that
+# can survive a same-host Redis volume across a database restore, plus the
+# credential-epoch cache, whose newer values would refuse the restored epochs.
+# Each Redis script processes one bounded SCAN page and unlinks at most 500
+# keys per call, below Lua's unpack limit; unrelated keys are never deleted.
+_restore_purge_redis_authority() {
+  local cursor=0 reply scans=0 found=0
+  local prefixes=(
+    'admin_session:'
+    'admin_enroll:'
+    'admin_login_challenge:'
+    'admin_enroll_challenge:'
+    'admin_server_stepup:'
+    'ws_ticket:'
+    'recovery_code:'
+    'email_verify:'
+    'sso_token:'
+    'cred_epoch:'
+  )
+  local purge_script='local r=redis.call("SCAN",ARGV[1],"COUNT",10000); local del={}; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then table.insert(del,k); break end end end; for j=1,#del,500 do redis.call("UNLINK",unpack(del,j,math.min(j+499,#del))) end; return r[1]'
+  local verify_script='local r=redis.call("SCAN",ARGV[1],"COUNT",10000); local found=0; for _,k in ipairs(r[2]) do for i=2,#ARGV do local p=ARGV[i]; if string.sub(k,1,string.len(p))==p then found=found+1; break end end end; return r[1]..":"..found'
+
+  echo 'Purging restored Redis authorization state...'
+  while (( scans < 100000 )); do
+    reply="$(compose exec -T redis redis-cli --raw EVAL "$purge_script" 0 "$cursor" "${prefixes[@]}" 2>/dev/null)" || {
+      _restore_auth_incomplete 'cannot purge Redis authorization state'
+      return 1
+    }
+    [[ "$reply" =~ ^[0-9]+$ ]] || {
+      _restore_auth_incomplete 'Redis purge returned an invalid cursor'
+      return 1
+    }
+    cursor="$reply"
+    ((scans += 1))
+    [[ "$cursor" == 0 ]] && break
+  done
+  [[ "$cursor" == 0 ]] || {
+    _restore_auth_incomplete 'Redis purge did not finish'
+    return 1
+  }
+
+  cursor=0
+  scans=0
+  while (( scans < 100000 )); do
+    reply="$(compose exec -T redis redis-cli --raw EVAL "$verify_script" 0 "$cursor" "${prefixes[@]}" 2>/dev/null)" || {
+      _restore_auth_incomplete 'cannot verify Redis authorization cleanup'
+      return 1
+    }
+    [[ "$reply" =~ ^([0-9]+):([0-9]+)$ ]] || {
+      _restore_auth_incomplete 'Redis verification returned an invalid cursor'
+      return 1
+    }
+    cursor="${BASH_REMATCH[1]}"
+    found=$((found + BASH_REMATCH[2]))
+    ((scans += 1))
+    [[ "$cursor" == 0 ]] && break
+  done
+  [[ "$cursor" == 0 && "$found" == 0 ]] || {
+    _restore_auth_incomplete 'Redis authorization state remains after cleanup'
+    return 1
+  }
+}
+
 _restore_body() {
-  local archive="$1" stage="$2" release="$3" i
+  local archive="$1" stage="$2" release="$3" i staged_env=''
   # One read of the archive: only a top-level directory and the known parts as
   # regular files are accepted, and each is written by name, never by path.
   python3 - "$archive" "$stage" <<'PY' || { _backup_fail 'archive is not a Concord backup'; return 1; }
@@ -266,25 +400,39 @@ except (OSError, tarfile.TarError, EOFError):
     sys.exit(1)
 PY
   _restore_verify "$stage" "$release" "$SELFHOST_STORAGE_MODE_RESOLVED" || return 1
-  # Secrets in .env must match: a restored database under different keys breaks.
-  cmp -s -- "$stage/env" "$PROJECT_ROOT/.env" || {
-    _backup_fail 'the backup .env differs from this install; put the backup env in place as .env (0600) first'
+  staged_env="$(umask 077; mktemp "$PROJECT_ROOT/.env.restore.XXXXXX")" || {
+    _backup_fail 'cannot stage the restored environment'
+    return 1
+  }
+  _restore_stage_jwt_secret "$stage/env" "$PROJECT_ROOT/.env" "$staged_env" || {
+    rm -f -- "$staged_env"
     return 1
   }
 
   echo 'Stopping the stack...'
-  compose stop || { _backup_fail 'stop failed; nothing was restored'; return 1; }
+  compose stop || { rm -f -- "$staged_env"; _backup_fail 'stop failed; nothing was restored'; return 1; }
+  echo 'Rotating the signing secret...'
+  mv -f -- "$staged_env" "$PROJECT_ROOT/.env" \
+    || { rm -f -- "$staged_env"; _restore_stopped 'cannot install the new signing secret'; return 1; }
+  staged_env=''
+  _restore_start_redis || return 1
   echo 'Restoring the database...'
-  compose up -d "$BACKUP_PG_SERVICE" || { _restore_stopped 'cannot start postgres; nothing was restored'; return 1; }
+  compose up -d "$BACKUP_PG_SERVICE" || { _restore_auth_incomplete 'cannot start postgres before authorization cleanup'; return 1; }
   for ((i = 0; ; i++)); do
     compose exec -T "$BACKUP_PG_SERVICE" pg_isready -U concord >/dev/null 2>&1 && break
-    (( i < 30 )) || { _restore_stopped 'postgres did not become ready; nothing was restored'; return 1; }
+    (( i < 30 )) || { _restore_auth_incomplete 'postgres did not become ready before authorization cleanup'; return 1; }
     sleep 2
   done
   # --single-transaction: a failed restore leaves the database as it was.
   compose exec -T "$BACKUP_PG_SERVICE" pg_restore -U concord -d concord --clean --if-exists \
     --no-owner --single-transaction <"$stage/postgres.dump" \
-    || { _restore_stopped 'pg_restore failed; the database is unchanged'; return 1; }
+    || { _restore_auth_incomplete 'pg_restore failed; the database is unchanged but authorization cleanup did not run'; return 1; }
+  # An older backup can revive a refresh token revoked after it was taken.
+  # Use a past timestamp so the 30-second grace-refresh path cannot recover it.
+  compose exec -T "$BACKUP_PG_SERVICE" psql -U concord -d concord -v ON_ERROR_STOP=1 \
+    -c "UPDATE refresh_tokens SET revoked_at = now() - interval '1 hour' WHERE revoked_at IS NULL" >/dev/null \
+    || { _restore_auth_incomplete 'cannot revoke restored sessions'; return 1; }
+  _restore_purge_redis_authority || return 1
   if [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == bundled ]]; then
     echo 'Restoring bundled MinIO data...'
     # Unpack beside the live data and swap only after tar succeeds, so a bad
@@ -299,15 +447,31 @@ PY
         find "$new" -mindepth 1 -maxdepth 1 -exec mv {} /data/ \;
         rmdir "$new"' \
       <"$stage/minio.tar" \
-      || { _restore_stopped 'MinIO restore failed after the database was restored; re-run restore'; return 1; }
+      || { _restore_incomplete 'MinIO restore failed after the database was restored'; return 1; }
   fi
   echo 'Starting the stack...'
   main up || return 1
-  main health
+  main health || return 1
+  echo 'Restore complete. Every user must sign in again. Password, MFA, key, invite and ownership-transfer changes made after this backup were rolled back; re-apply them (see the restore runbook).'
 }
 
-# _restore_stopped MSG — a failure after the stack was stopped says so.
+# _restore_stopped MSG — a pre-restore failure left the prior authorization
+# state intact, so the operator can resume it.
 _restore_stopped() {
   _backup_fail "$1"
-  printf 'selfhost-backup: the stack is stopped; run concord-selfhost up to start it again\n' >&2
+  printf 'selfhost-backup: the stack is stopped; run concord-selfhost up to resume the prior state\n' >&2
+}
+
+# _restore_auth_incomplete MSG — JWT rotation or database restore has started,
+# but its matching opaque authorization cleanup did not complete.
+_restore_auth_incomplete() {
+  _backup_fail "$1"
+  printf 'selfhost-backup: authorization invalidation is incomplete; DO NOT run concord-selfhost up; fix the failure and re-run restore\n' >&2
+}
+
+# _restore_incomplete MSG — persistent state has changed but the restore did
+# not reach its completed state.
+_restore_incomplete() {
+  _backup_fail "$1"
+  printf 'selfhost-backup: the stack is stopped; the restore is incomplete; DO NOT run concord-selfhost up; fix the failure and re-run restore\n' >&2
 }
