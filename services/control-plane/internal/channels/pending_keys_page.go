@@ -88,8 +88,7 @@ func (k pendingCursorCodec) sealText(raw string) (string, error) {
 	if k.aead == nil {
 		return "", errPendingCursorUnavailable
 	}
-	// The AEAD draws a fresh random nonce per seal and requires a nil one here.
-	return base64.RawURLEncoding.EncodeToString(k.aead.Seal(nil, nil, []byte(raw), nil)), nil //nolint:gosec // G407: see above
+	return base64.RawURLEncoding.EncodeToString(k.aead.Seal(nil, nil, []byte(raw), nil)), nil //nolint:gosec // G407: NewGCMWithRandomNonce draws the nonce itself and requires a nil nonce argument
 }
 
 func (k pendingCursorCodec) open(s string) (pendingCursor, error) {
