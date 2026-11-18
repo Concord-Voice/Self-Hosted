@@ -14,8 +14,8 @@ import (
 // c.GetString(adminIDContextKey) — it is the ADMIN identity, never a user_id.
 const adminIDContextKey = "admin_id"
 
-// SessionAuthority resolves the generation that is authorized for an active admin.
-type SessionAuthority interface {
+// SessionGenerationResolver resolves the generation that is authorized for an active admin.
+type SessionGenerationResolver interface {
 	ActiveSessionGeneration(ctx context.Context, adminID string) (int64, error)
 }
 
@@ -30,7 +30,7 @@ type SessionAuthority interface {
 // the reflective routes_test.
 //
 //nolint:revive // Admin* prefix is the #1688 cross-task naming contract (see types.go header).
-func AdminAuthRequired(sessions *SessionStore, authority SessionAuthority) gin.HandlerFunc {
+func AdminAuthRequired(sessions *SessionStore, authority SessionGenerationResolver) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sid, err := c.Cookie(adminCookieName)
 		if err != nil || sid == "" {
