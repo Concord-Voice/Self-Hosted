@@ -308,9 +308,12 @@ expect "--apply --scope npm is rejected" 2 --apply --scope npm
 
 # 10. The first-party module line carries an empty version and must be dropped,
 #     not tabulated. Its presence would inflate every count by one.
+#     --apply must succeed, or an unrelated failure would leave NOTICE.md
+#     untouched and the grep below would pass vacuously.
 write_notice
-"$TMP/scripts/update-notice-md.py" --apply >/dev/null 2>&1 || true
-if grep -q "Concord-Voice/Self-Hosted/services/control-plane |" "$TMP/NOTICE.md"; then
+expect "--apply drops the first-party Go module" 0 --apply
+if grep -q "Concord-Voice/Self-Hosted/services/control-plane |" "$TMP/NOTICE.md" ||
+   ! grep -q "github.com/example/one |" "$TMP/NOTICE.md"; then
   FAILS=$((FAILS + 1)); FAIL_DETAILS+=("first-party Go module was tabulated")
 else
   PASSES=$((PASSES + 1))

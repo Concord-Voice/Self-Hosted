@@ -13,8 +13,7 @@ repository before the repo split. This repository is public. Every Go import, th
 
 1. Rename the module to `github.com/Concord-Voice/Self-Hosted/services/control-plane`.
    Substitute the full old path with the new one in every tracked file (1,412 files: 1,409
-   `.go` files plus a CodeQL query, the compose-manifest coverage script and its test, the
-   NOTICE test and two CI false-positive registers).
+   `.go` files, `go.mod`, the CodeQL log-injection query and the NOTICE test).
 2. Fix the three references that use the bare repository prefix rather than the full
    module path:
    - `.github/workflows/license-check.yml`: both `go-licenses --ignore` values, so the
@@ -26,10 +25,14 @@ repository before the repo split. This repository is public. Every Go import, th
      could never match, so the case was vacuous.
 3. **Out of scope, decided here:** mentions of the private repository that are not the
    module path. These are provenance notes ("Imported from … at the repo split"), links to
-   that repository's issues and PRs in registers and comments, and the
-   `GITHUB_REPOSITORY` / OIDC-subject values in test fixtures. The fixtures model real
-   workflow identities, so changing them changes what the tests assert. They are not a
-   module path and do not affect the build.
+   that repository's issues and PRs in registers and comments, and the repository-identity
+   values: `GITHUB_REPOSITORY` / OIDC-subject values in test fixtures, the
+   self-hosted acceptance release-authority guards
+   (`infrastructure/deploy/tests/selfhost-acceptance.py`, `selfhost-nginx-fixture.sh`) and
+   the production default `ATTESTATION_OIDC_SUBJECT_PREFIX`
+   (`services/control-plane/pkg/config/config.go`). These are not the module path and do not
+   affect the build. Changing them changes which repository a trust decision admits, so they
+   go to the project lead as a separate decision.
 
 ## Merge interaction
 
