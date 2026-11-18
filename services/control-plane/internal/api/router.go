@@ -1451,6 +1451,7 @@ func NewRouter(
 		// Auth routes with rate limiting + IP-based auth failure ban check
 		authRoutes := v1.Group("/auth")
 		authRoutes.Use(middleware.AuthBanCheck(redis))
+		authRoutes.Use(middleware.LoginCSRF(cfg.AllowedOrigins))
 		{
 			// Register: 5 attempts per 15 minutes in production (prevent spam
 			// account creation). Relaxed under CONCORD_ENV=test so the Playwright

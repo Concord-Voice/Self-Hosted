@@ -75,10 +75,9 @@ function boolean(value: unknown): boolean {
   return value;
 }
 
-function enumValue<const T extends string>(
-  value: unknown,
-  allowed: readonly T[],
-): T {
+// Every caller passes an `as const` array, so T still infers the literal union.
+// No `const` type-parameter modifier: the pinned Semgrep parser rejects it.
+function enumValue<T extends string>(value: unknown, allowed: readonly T[]): T {
   const match = allowed.find((candidate) => candidate === value);
   if (match === undefined) failOptions();
   return match;
@@ -122,10 +121,10 @@ function bufferToBase64url(value: ArrayBuffer | ArrayBufferView): string {
   }
   let binary = "";
   for (const byte of bytes) binary += String.fromCodePoint(byte);
-  return btoa(binary)
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll(/=+$/g, "");
+  const encoded = btoa(binary).replaceAll("+", "-").replaceAll("/", "_");
+  let end = encoded.length;
+  while (end > 0 && encoded[end - 1] === "=") end--;
+  return encoded.slice(0, end);
 }
 
 function descriptor(value: unknown): PublicKeyCredentialDescriptor {

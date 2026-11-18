@@ -48,7 +48,7 @@ Architectures: amd64
 Signed-By: /etc/apt/keyrings/docker.asc 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
 EOF
 sudo apt-get update -q
-sudo apt-get install -y -q --no-install-recommends --no-remove --allow-downgrades "${packages[@]}"
+sudo apt-get install -y -q --no-install-recommends --no-remove "${packages[@]}"
 sudo systemctl restart docker
 sudo systemctl is-active --quiet docker
 bash "$root/scripts/ci/require-docker-engine.sh"

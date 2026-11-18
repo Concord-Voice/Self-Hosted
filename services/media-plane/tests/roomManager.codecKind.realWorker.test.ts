@@ -80,7 +80,6 @@ beforeAll(async () => {
     listenInfos: [{ protocol: 'udp', ip: '127.0.0.1', port: 0 }],
   });
   manager = new RoomManager({
-    getWebRtcServer: () => undefined,
     getOrCreateRouter: async () => router,
     getWebRtcServer: () => webRtcServer,
     removeRouter: () => undefined,
