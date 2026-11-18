@@ -8,15 +8,12 @@ import contextlib
 import io
 import importlib.util
 import json
-import os
-import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
-from email.message import Message
 from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 from pathlib import Path

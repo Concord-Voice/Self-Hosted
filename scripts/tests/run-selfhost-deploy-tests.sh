@@ -40,6 +40,12 @@ if [[ $(uname -s) == Darwin ]]; then
   # shellcheck source=infrastructure/deploy/tests/selfhost-cert-test-tools.sh
   source "$ROOT/infrastructure/deploy/tests/selfhost-cert-test-tools.sh"
   cert_image="$(selfhost_cert_prepare_tool_image)"
+  # The suites run as the host uid, which the image does not name, and ssh-keygen
+  # (test-selfhost-update.sh) refuses a uid with no passwd entry.
+  passwd_file="$scratch/passwd"
+  { docker run --rm --network none "$image" cat /etc/passwd
+    printf 'hook:x:%s:%s::%s:/bin/bash\n' "$(id -u)" "$(id -g)" "$scratch"
+  } >"$passwd_file"
   # The nested Docker daemon sees host paths. Keep source and scratch at their
   # identical absolute paths so config-only Compose and cert fixtures can bind them.
   for suite in "${SUITES[@]}"; do
@@ -65,6 +71,7 @@ if [[ $(uname -s) == Darwin ]]; then
       --mount "type=bind,source=$ROOT,target=$ROOT,readonly" \
       --mount "type=bind,source=$git_common,target=$git_common,readonly" \
       --mount "type=bind,source=$scratch,target=$scratch" \
+      --mount "type=bind,source=$passwd_file,target=/etc/passwd,readonly" \
       --mount "type=bind,source=$docker_socket,target=/var/run/docker.sock" \
       --env DOCKER_HOST=unix:///var/run/docker.sock --env TMPDIR="$suite_tmpdir" \
       --env HOME="$scratch" --env SELFHOST_CERT_TEST_IMAGE="$cert_image" \
