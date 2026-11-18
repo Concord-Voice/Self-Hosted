@@ -3520,7 +3520,7 @@ func (h *Handler) deliverRecoveryCode(addr, code string, data []byte) {
 	if h.emailSvc == nil {
 		sendErr = email.ErrDeliveryNotConfigured
 	} else {
-		sendErr = h.emailSvc.SendRecoveryCode(addr, code)
+		sendErr = h.emailSvc.SendRecoveryCode(addr, code, 10)
 	}
 	if sendErr != nil {
 		h.log.Error("Failed to send recovery code email", "failure_class", "recovery_email_delivery")
