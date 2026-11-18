@@ -104,6 +104,22 @@ describe('handleSetTestingStatus (#1163)', () => {
     expect(to).not.toHaveBeenCalled();
   });
 
+  // Regression for VULN-160's sibling: a roomId on the socket is not
+  // admission. setTestingStatus already requires the participant's socket.
+  it('refuses roomId set with no participant', () => {
+    const { roomManager, socket, setParticipantTestingStatus, getParticipant, to } = makeFakes();
+    getParticipant.mockReturnValue(undefined);
+
+    const result = handleSetTestingStatus(roomManager, socket, 'room-1', 'user-1', {
+      isTesting: true,
+    });
+
+    expect(result).toEqual({ error: 'Not in a room' });
+    expect(getParticipant).toHaveBeenCalledWith('room-1', 'user-1');
+    expect(setParticipantTestingStatus).not.toHaveBeenCalled();
+    expect(to).not.toHaveBeenCalled();
+  });
+
   it('rejects stale sockets that no longer own the participant', () => {
     const { roomManager, socket, setParticipantTestingStatus, getParticipant, to } = makeFakes();
     getParticipant.mockReturnValue({ socketId: 'socket-2', isTesting: false });

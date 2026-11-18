@@ -23,13 +23,16 @@ import type { MetricsSample } from './mediaMetrics.js';
 import { ActiveSpeakerSet } from './activeSpeakerSet.js';
 import type { ActiveSpeakerDelta } from './activeSpeakerSet.js';
 import {
+  chargeFlip,
   clampCameraLayerDemand,
   computeCameraLayeringGate,
+  flipBudgetDelayMs,
   parseCameraLayerDemand,
   storedDemand,
   type LayeredCodecKind,
   type LayerValue,
   type StoredCameraLayerDemand,
+  type ViewerCameraLayerDemand,
 } from './cameraLayerGovernor.js';
 import { computeScreenLayeringGate, type StoredScreenLayerDemand } from './screenLayerGovernor.js';
 import type { EmitSecurityEvent, SecurityReasonCode } from './securityEvent.js';
@@ -225,6 +228,20 @@ export interface ProducerEntry {
    * Never cleared — the entry is deleted with its producer at close.
    */
   closing?: boolean;
+  /**
+   * Security#176. Set once, when this camera's arrival first moves the room
+   * camera gate's computed value ON, by its own produce or by a demand on one
+   * of its consumers. That transition is charged to this producer's owner,
+   * never to the viewer whose re-sent demand applied it. Never cleared — the
+   * entry is deleted with its producer, so each new camera is charged once.
+   */
+  cameraArrivalAttributed?: boolean;
+}
+
+/** A camera producer whose arrival has not yet moved the camera gate ON (Security#176). */
+interface CameraArrival {
+  entry: ProducerEntry;
+  ownerUserId: string;
 }
 
 export interface Participant {
@@ -449,6 +466,14 @@ export const FREE_MEDIA_ENTITLEMENT: Readonly<MediaEntitlement> = {
   screenMaxBitrateBps: 5_000_000,
 };
 
+/** Per-member camera gate flip budget on a room (VULN-158). */
+interface CameraGateBudget {
+  flips: Map<string, number[]>;
+  desired: boolean;
+  desiredCause?: string;
+  deferTimer?: ReturnType<typeof setTimeout>;
+}
+
 export interface Room {
   id: string;
   router: Router;
@@ -488,12 +513,21 @@ export interface Room {
   callParticipantHistory: Map<string, Date>;
   /** Channel rooms only (#1542): the server-owner cap tier from join-authorize. Undefined for DMs. */
   ownerTier?: string;
-  /** Raw client camera layer demand, parsed and stored by consumer ID. */
-  cameraLayerDemands: Map<string, StoredCameraLayerDemand>;
+  /** Raw client camera layer demand, parsed and stored by consumer ID. Values
+   *  carry the owning viewer userId so the gate counts DISTINCT viewers, not
+   *  consumer entries (VULN-158). */
+  cameraLayerDemands: Map<string, ViewerCameraLayerDemand>;
   /** Current room-level camera layering gate state. */
   cameraLayeringGateEnabled: boolean;
   /** Pending room-level camera gate-OFF debounce timer. */
   cameraGateOffTimer?: ReturnType<typeof setTimeout>;
+  /** Per-member camera gate flip budget (VULN-158), created on first recompute.
+   *  `flips` holds each member's applied transitions inside the window (keyed by
+   *  userId, so it survives leave and rejoin); `desired` is the last computed
+   *  gate value and `desiredCause` the member whose change last moved it, who is
+   *  charged when it is applied; `deferTimer` re-runs the gate once that member's
+   *  window frees. */
+  cameraGateBudget?: CameraGateBudget;
   /** Receiver-driven screen layer demand, keyed by consumerId (#1924). Values
    *  carry the owning viewer userId (so the gate counts DISTINCT viewers, not
    *  consumer entries — a single client can own multiple screen consumers of one
@@ -1636,7 +1670,7 @@ export class RoomManager {
         room, participant, session.roomId, session.userId);
       // A retired participant is no longer reachable by the ordinary leave path,
       // so a removed camera producer must recompute the room gate here.
-      if (removedCameraProducer) this.recomputeCameraLayeringGate(room);
+      if (removedCameraProducer) this.recomputeCameraLayeringGate(room, session.userId);
       this.closeParticipantTransports(participant);
     }
     await this.removeProvisionalParticipantForEnforcement(session.roomId, session.userId,
@@ -2235,6 +2269,7 @@ export class RoomManager {
           clearTimeout(room.cameraGateOffTimer);
           room.cameraGateOffTimer = undefined;
         }
+        this.clearCameraGateBudget(room);
         this.rooms.delete(roomId);
       } else {
         if (
@@ -2294,6 +2329,7 @@ export class RoomManager {
       clearTimeout(room.cameraGateOffTimer);
       room.cameraGateOffTimer = undefined;
     }
+    this.clearCameraGateBudget(room);
 
     // Close AudioLevelObserver
     if (room.audioLevelObserver && !room.audioLevelObserver.closed) {
@@ -2487,7 +2523,7 @@ export class RoomManager {
     }
     room.participants.set(userId, participant);
     if (removedCameraProducer || room.cameraLayerDemands.size > 0) {
-      this.recomputeCameraLayeringGate(room);
+      this.recomputeCameraLayeringGate(room, userId);
     }
     room.e2eeEpoch++;
     this.emitEvent({
@@ -2584,7 +2620,7 @@ export class RoomManager {
     room.participants.set(userId, pending);
     room.ownerTier = promotion.ownerTier;
     if (removedCameraProducer || room.cameraLayerDemands.size > 0) {
-      this.recomputeCameraLayeringGate(room);
+      this.recomputeCameraLayeringGate(room, userId);
     }
     room.e2eeEpoch++;
 
@@ -2712,7 +2748,7 @@ export class RoomManager {
     room.pendingDMParticipants.delete(userId);
     room.participants.set(userId, participant);
     if (removedCameraProducer || room.cameraLayerDemands.size > 0) {
-      this.recomputeCameraLayeringGate(room);
+      this.recomputeCameraLayeringGate(room, userId);
     }
     if (!room.callParticipantHistory.has(userId)) {
       room.callParticipantHistory.set(userId, admittedAt);
@@ -2930,7 +2966,7 @@ export class RoomManager {
     const removedCameraProducer = this.cleanupParticipantResources(room, roomId, participant);
     room.participants.delete(userId);
     if (room.participants.size > 0 && (removedCameraProducer || room.cameraLayerDemands.size > 0)) {
-      this.recomputeCameraLayeringGate(room);
+      this.recomputeCameraLayeringGate(room, userId);
     }
 
     // E2EE media-epoch (keyId) sync nudge — incremented on leave for the same
@@ -3408,7 +3444,13 @@ export class RoomManager {
       throw new Error('publish permission denied');
     }
 
-    if (source === 'camera') this.recomputeCameraLayeringGate(room);
+    if (source === 'camera') {
+      const arrival = this.unattributedCameraArrival(
+        participant.producers.get(producer.id),
+        userId
+      );
+      this.recomputeCameraLayeringGate(room, userId, arrival);
+    }
 
     // Add mic audio producers to the AudioLevelObserver (skip screen-audio to
     // avoid false active-speaker detection from system audio)
@@ -3655,7 +3697,7 @@ export class RoomManager {
     producer.on('transportclose', () => {
       participant.producers.delete(producer.id);
       this.removeMicProducer(room, producer.id);
-      if (source === 'camera') this.recomputeCameraLayeringGate(room);
+      if (source === 'camera') this.recomputeCameraLayeringGate(room, userId);
     });
 
     const info: ProducerInfo = {
@@ -3963,7 +4005,7 @@ export class RoomManager {
     if (!entry.producer.closed) entry.producer.close();
     participant.producers.delete(producerId);
     this.removeMicProducer(room, producerId);
-    if (entry.source === 'camera') this.recomputeCameraLayeringGate(room);
+    if (entry.source === 'camera') this.recomputeCameraLayeringGate(room, userId);
 
     this.emitEvent({
       type: 'producer-removed',
@@ -4621,7 +4663,9 @@ export class RoomManager {
       consumer.consumers.delete(newConsumer.id);
       consumer.consumersByKey.delete(key);
       room.lastNPausedConsumers.delete(newConsumer.id);
-      this.clearCameraLayerDemand(room, newConsumer.id);
+      // The publisher closed its producer, so its owner caused this removal
+      // (Security#176), not the viewer whose demand it was.
+      this.clearCameraLayerDemand(room, newConsumer.id, producerUserId);
       this.clearScreenLayerDemand(room, newConsumer.id);
     });
 
@@ -4765,12 +4809,12 @@ export class RoomManager {
     const consumerType = (consumer as { type?: unknown }).type;
     const source = (consumer.appData as { source?: unknown } | undefined)?.source;
     if (source === 'camera') {
-      room.cameraLayerDemands.set(stored.consumerId, stored);
+      room.cameraLayerDemands.set(stored.consumerId, { ...stored, userId });
       // After validation and clamping, so this counts demands the SFU ACCEPTED
       // rather than every arriving payload. Before #3094 no client ever sent the
       // flag, so any non-zero total is itself proof the activated path is live.
       if (stored.pressureStepDown) this.counterHooks.onCameraPressureDemand?.();
-      this.recomputeCameraLayeringGate(room);
+      this.recomputeCameraLayeringGate(room, userId, this.cameraArrivalForConsumer(room, consumer));
     } else if (source === 'screen') {
       // The watched screen producer's owner (server-set on consume, appData) is
       // the per-sharer gate key (#1924 fix "B"). Server-authoritative — never a
@@ -5205,7 +5249,7 @@ export class RoomManager {
     const participant = room.participants.get(userId);
     if (participant) {
       participant.rtpCapabilities = rtpCapabilities;
-      if (room.cameraLayerDemands.size > 0) this.recomputeCameraLayeringGate(room);
+      if (room.cameraLayerDemands.size > 0) this.recomputeCameraLayeringGate(room, userId);
     }
   }
 
@@ -6251,48 +6295,161 @@ export class RoomManager {
     }
   }
 
-  private recomputeCameraLayeringGate(room: Room): void {
-    const enabled = (): boolean =>
-      computeCameraLayeringGate({
-        codecKind: this.cameraLayeringCodecKind(room),
-        cameraProducerCount: this.countProducersBySource(room, 'camera'),
-        demands: Array.from(room.cameraLayerDemands.values()),
-        previouslyEnabled: room.cameraLayeringGateEnabled,
-      });
-    const next = enabled();
-
-    if (next) {
-      if (room.cameraGateOffTimer) {
-        clearTimeout(room.cameraGateOffTimer);
-        room.cameraGateOffTimer = undefined;
+  /**
+   * Recompute the room camera gate after `causeUserId` changed its inputs
+   * (VULN-158). The computed value is recorded as `desired`, attributed to the
+   * member whose change moved it; a recompute that does not move it keeps the
+   * attribution, so another member can neither apply nor pay for a pending
+   * transition. Only the two timers pass no cause.
+   *
+   * `arrival` names the camera whose produce, or a demand on whose consumer,
+   * triggered this recompute (Security#176). A camera's arrival is its owner's
+   * change: the first move to ON it triggers is attributed to the owner, once
+   * per producer, and later moves go to `causeUserId`. Without this a
+   * publisher toggling its camera made each viewer's re-sent demand pay for
+   * the ON, and spent viewers' budgets instead of its own.
+   */
+  private recomputeCameraLayeringGate(
+    room: Room,
+    causeUserId?: string,
+    arrival?: CameraArrival
+  ): void {
+    const budget: CameraGateBudget = (room.cameraGateBudget ??= {
+      flips: new Map(),
+      desired: room.cameraLayeringGateEnabled,
+    });
+    const next = this.computeRoomCameraLayeringGate(room);
+    if (next !== budget.desired) {
+      budget.desired = next;
+      budget.desiredCause = causeUserId;
+      if (next && arrival && !arrival.entry.cameraArrivalAttributed) {
+        arrival.entry.cameraArrivalAttributed = true;
+        budget.desiredCause = arrival.ownerUserId;
       }
-      if (room.cameraLayeringGateEnabled) return;
-      room.cameraLayeringGateEnabled = true;
-      this.counterHooks.onCameraLayeringGateFlip?.();
-      this.emitEvent({ type: 'camera-layering-gate', roomId: room.id, enabled: true });
+    }
+    this.settleCameraLayeringGate(room, budget);
+  }
+
+  /** `entry` as a camera whose arrival has not yet moved the gate ON, else undefined. */
+  private unattributedCameraArrival(
+    entry: ProducerEntry | undefined,
+    ownerUserId: string
+  ): CameraArrival | undefined {
+    if (entry?.source !== 'camera' || entry.cameraArrivalAttributed) return undefined;
+    return { entry, ownerUserId };
+  }
+
+  /**
+   * The live camera behind `consumer`, resolved from the appData `consume()`
+   * sets server-side, so a client cannot name another producer. Undefined once
+   * that producer has closed: a demand on a stale consumer is the viewer's.
+   */
+  private cameraArrivalForConsumer(room: Room, consumer: Consumer): CameraArrival | undefined {
+    const appData = consumer.appData as
+      { producerId?: unknown; producerUserId?: unknown } | undefined;
+    const producerId = appData?.producerId;
+    const ownerUserId = appData?.producerUserId;
+    if (typeof producerId !== 'string' || typeof ownerUserId !== 'string') return undefined;
+    const entry = room.participants.get(ownerUserId)?.producers.get(producerId);
+    return this.unattributedCameraArrival(entry, ownerUserId);
+  }
+
+  private settleCameraLayeringGate(room: Room, budget: CameraGateBudget): void {
+    if (budget.desired === room.cameraLayeringGateEnabled) {
+      this.clearCameraGateOffTimer(room);
+      this.clearCameraGateDeferTimer(budget);
       return;
     }
 
-    if (!room.cameraLayeringGateEnabled || room.cameraGateOffTimer) return;
+    const now = Date.now();
+    const wait = budget.desiredCause
+      ? flipBudgetDelayMs(budget.flips.get(budget.desiredCause), now)
+      : 0;
+    this.clearCameraGateDeferTimer(budget);
+    if (wait > 0) {
+      // Over budget: hold the transition until the member's window frees. The
+      // demand is still stored and applied to the consumer; only the gate lags.
+      this.clearCameraGateOffTimer(room);
+      budget.deferTimer = setTimeout(() => {
+        budget.deferTimer = undefined;
+        if (this.rooms.get(room.id) !== room) return;
+        this.recomputeCameraLayeringGate(room);
+      }, wait);
+      return;
+    }
+
+    if (budget.desired) {
+      this.applyCameraLayeringGate(room, budget, true, now);
+      return;
+    }
+
+    if (room.cameraGateOffTimer) return;
     // Consumer demand briefly disappears while a camera producer is replaced.
     // Keep the gate on through that gap, then make the OFF decision from live state.
     room.cameraGateOffTimer = setTimeout(() => {
       room.cameraGateOffTimer = undefined;
       if (this.rooms.get(room.id) !== room) return;
-      if (enabled() || !room.cameraLayeringGateEnabled) return;
-      room.cameraLayeringGateEnabled = false;
-      this.counterHooks.onCameraLayeringGateFlip?.();
-      this.emitEvent({ type: 'camera-layering-gate', roomId: room.id, enabled: false });
+      if (this.computeRoomCameraLayeringGate(room)) {
+        // Live state moved back ON without a recompute; keep `desired` in step.
+        budget.desired = true;
+        budget.desiredCause = undefined;
+        return;
+      }
+      if (!room.cameraLayeringGateEnabled) return;
+      this.applyCameraLayeringGate(room, budget, false, Date.now());
     }, CAMERA_GATE_OFF_DEBOUNCE_MS);
+  }
+
+  private computeRoomCameraLayeringGate(room: Room): boolean {
+    return computeCameraLayeringGate({
+      codecKind: this.cameraLayeringCodecKind(room),
+      cameraProducerCount: this.countProducersBySource(room, 'camera'),
+      demands: Array.from(room.cameraLayerDemands.values()),
+      previouslyEnabled: room.cameraLayeringGateEnabled,
+    });
+  }
+
+  /** Apply a settled transition and charge the member whose change caused it. */
+  private applyCameraLayeringGate(
+    room: Room,
+    budget: CameraGateBudget,
+    enabled: boolean,
+    now: number
+  ): void {
+    room.cameraLayeringGateEnabled = enabled;
+    if (budget.desiredCause) chargeFlip(budget.flips, budget.desiredCause, now);
+    this.counterHooks.onCameraLayeringGateFlip?.();
+    this.emitEvent({ type: 'camera-layering-gate', roomId: room.id, enabled });
+  }
+
+  private clearCameraGateOffTimer(room: Room): void {
+    if (!room.cameraGateOffTimer) return;
+    clearTimeout(room.cameraGateOffTimer);
+    room.cameraGateOffTimer = undefined;
+  }
+
+  private clearCameraGateDeferTimer(budget: CameraGateBudget): void {
+    if (!budget.deferTimer) return;
+    clearTimeout(budget.deferTimer);
+    budget.deferTimer = undefined;
+  }
+
+  /** Room teardown: drop the flip budget and its pending defer timer. */
+  private clearCameraGateBudget(room: Room): void {
+    if (room.cameraGateBudget) this.clearCameraGateDeferTimer(room.cameraGateBudget);
+    room.cameraGateBudget = undefined;
   }
 
   private maxCameraSpatialLayerForParticipant(participant: Participant): LayerValue {
     return cameraSpatialCapForParticipant(participant);
   }
 
-  private clearCameraLayerDemand(room: Room, consumerId: string): void {
+  private clearCameraLayerDemand(room: Room, consumerId: string, causeUserId?: string): void {
+    // Charge the member who caused the removal when it is known (producerclose:
+    // the producer's owner), else the demand's owner.
+    const cause = causeUserId ?? room.cameraLayerDemands.get(consumerId)?.userId;
     if (!room.cameraLayerDemands.delete(consumerId)) return;
-    this.recomputeCameraLayeringGate(room);
+    this.recomputeCameraLayeringGate(room, cause);
   }
 
   private clearParticipantCameraLayerDemands(room: Room, participant: Participant): void {
@@ -6300,7 +6457,7 @@ export class RoomManager {
     for (const consumerId of participant.consumers.keys()) {
       if (room.cameraLayerDemands.delete(consumerId)) changed = true;
     }
-    if (changed) this.recomputeCameraLayeringGate(room);
+    if (changed) this.recomputeCameraLayeringGate(room, participant.userId);
   }
 
   /**

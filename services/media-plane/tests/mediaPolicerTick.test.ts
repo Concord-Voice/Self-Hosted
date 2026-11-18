@@ -166,6 +166,7 @@ function makeHarness(options: HarnessOptions = {}) {
         [SOCKET, { emit: ownerEmit, disconnect: vi.fn() }],
         [SOCKET_2, { emit: ownerEmit2, disconnect: vi.fn() }],
       ]),
+      adapter: { rooms: new Map() },
     },
   } as unknown as MediaPolicerIO;
 

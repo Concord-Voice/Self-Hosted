@@ -117,6 +117,11 @@ export interface ForceDisconnectIO {
         };
       }
     >;
+    /**
+     * Room membership as the adapter holds it: the ground truth for who receives
+     * `io.to(room)` broadcasts. Required, so the user-wide sweep cannot fail open.
+     */
+    adapter: { rooms: Map<string, Set<string>> };
   };
 }
 
@@ -739,6 +744,73 @@ function disconnectCapturedSocket(
   socket.disconnect(true);
 }
 
+type SweepTarget = {
+  socketId: string;
+  socket: NonNullable<ReturnType<ForceDisconnectIO['sockets']['sockets']['get']>>;
+};
+
+/**
+ * VULN-159 backstop for a user-wide command. Invariant: once it returns, no
+ * socket that was in the room's adapter set and authenticated as `userId` when
+ * the command started is still connected, except a successor that took over the
+ * participant or provisional entry, or a new Socket that reused an id. The set is
+ * captured synchronously, before the handler's first await, so a successor that
+ * commits during the teardown awaits is never in it. Exact-socket and
+ * `stats_unavailable` commands never sweep, and a `callId` that no longer
+ * matches the room leaves the new call alone.
+ */
+function captureSweepTargets(
+  roomManager: ForceDisconnectRoomManager,
+  io: ForceDisconnectIO,
+  channelId: string,
+  userId: string,
+  options: ForceDisconnectOptions,
+  exactSocketIds: ReadonlySet<string>
+): SweepTarget[] {
+  if (options.socketId !== undefined || options.reason === 'stats_unavailable') return [];
+  if (options.reason === 'access_revoked' && options.callId !== undefined) {
+    const room = roomManager.getRoom(channelId);
+    if (room && room.callId !== options.callId) return [];
+  }
+  const targets: SweepTarget[] = [];
+  for (const socketId of io.sockets.adapter.rooms.get(channelId) ?? []) {
+    if (exactSocketIds.has(socketId)) continue;
+    const socket = io.sockets.sockets.get(socketId);
+    if (!socket || socket.data?.userId !== userId) continue;
+    targets.push({ socketId, socket });
+  }
+  return targets;
+}
+
+/**
+ * Silently disconnects each captured stale socket, as displacement eviction
+ * does: it is not a participant, so it gets no `force-disconnect` payload. Its
+ * own disconnect handler releases its identities. Ownership is re-read per
+ * socket because each disconnect runs listeners synchronously.
+ */
+function sweepStaleSockets(
+  roomManager: ForceDisconnectRoomManager,
+  io: ForceDisconnectIO,
+  channelId: string,
+  userId: string,
+  targets: readonly SweepTarget[]
+): void {
+  for (const { socketId, socket } of targets) {
+    if (io.sockets.sockets.get(socketId) !== socket) continue;
+    if (
+      roomManager.getParticipant(channelId, userId)?.socketId === socketId ||
+      roomManager.getProvisionalParticipant(channelId, userId)?.socketId === socketId
+    ) {
+      continue;
+    }
+    try {
+      socket.disconnect(true);
+    } catch {
+      logger.error('Failed to disconnect stale socket on revocation', { channelId, socketId });
+    }
+  }
+}
+
 /**
  * Evicts a peer from one room: `voice.enforce.disconnect` from the control
  * plane (#487 P3, reason `access_revoked`) or the media policer's repeat-offender
@@ -757,6 +829,9 @@ function disconnectCapturedSocket(
  *      transports/producers/consumers and emits `user-left`. The NATS room-event
  *      bridge turns that into the normal `voice.left` published back to the control
  *      plane, so `voice_participants` is cleaned and `voice_state_update` broadcasts.
+ *   4. For a user-wide command only, silently disconnects any other socket of the
+ *      user still in the room's adapter set (VULN-159), captured before the first
+ *      await. This runs on the "already left" branch too.
  *
  * Per [internal]rules/media-plane.md it reuses RoomManager's admitted and exact
  * provisional cleanup seams rather than recreating lifecycle logic. Idempotent:
@@ -781,7 +856,21 @@ export async function handleForceDisconnect(
   );
   if (!exact.valid) return;
   const { participant: exactParticipant, provisional: exactProvisional } = exact;
+  // Captured before the first await below; see captureSweepTargets.
+  const sweepTargets = captureSweepTargets(
+    roomManager,
+    io,
+    channelId,
+    userId,
+    options,
+    new Set(
+      [exactParticipant?.socketId, exactProvisional?.socketId].filter(
+        (socketId): socketId is string => socketId !== undefined
+      )
+    )
+  );
   if (!exactParticipant && !exactProvisional) {
+    sweepStaleSockets(roomManager, io, channelId, userId, sweepTargets);
     await roomManager.awaitNativeTermination(channelId, userId, options.socketId);
     return;
   }
@@ -861,6 +950,7 @@ export async function handleForceDisconnect(
       resolved.payload
     );
   }
+  sweepStaleSockets(roomManager, io, channelId, userId, sweepTargets);
 
   if (changed) {
     try {

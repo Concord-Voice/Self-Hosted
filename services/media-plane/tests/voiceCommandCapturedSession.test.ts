@@ -100,6 +100,7 @@ async function setup(
               ],
             ]
       ),
+      adapter: { rooms: new Map() },
     },
   };
   const dispatcher = new VoiceCommandDispatcher({
