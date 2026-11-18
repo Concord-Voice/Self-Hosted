@@ -82,7 +82,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000197)
+## Existing Migrations (000001–000198)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -305,6 +305,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000195 | add_voice_participant_admission_id | Adds nullable `voice_participants.admission_id` and `admission_socket_id`: the admission and socket a Server Voice join consumed. A redelivered `voice.joined` whose reservation is gone is a replay when the row holds that exact pair (#253). The down drops only replay evidence. |
 | 000196 | admin_credential_generation | Adds an administrator credential generation that enrollment ceremonies must match; reset increments it atomically with credential removal. Down refuses once a generation has advanced. |
 | 000197 | add_admin_session_generation | Adds a nonnegative durable generation to `admin_users`; reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; every administrator starts at 1, so pre-migration sessions stop matching and any value above 1 records a revocation; down refuses once any generation passes 1. |
+| 000198 | prefix_legacy_backup_code_hashes | Rewrites each bare lowercase 64-hex SHA-256 element of `user_mfa_totp.backup_codes_hash` to `v1$` plus the same digest, keeping array order and `backup_codes_used`; other elements are untouched. Run only after every serving replica reads bare, v1 and v2 hashes. The down strips `v1$` under a `SHARE ROW EXCLUSIVE` lock and refuses while any element is neither bare nor v1, such as a generated v2 code. |
 
 ### Logical login authority (migration 000194, #2272)
 

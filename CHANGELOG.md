@@ -33,8 +33,8 @@ belongs in it, and write it if the section has none. Do not edit the
 WebSocket event budgets are ready for self-hosted operators and stay off
 until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
-Android. Backup-code readers now accept the versioned formats needed for a
-later storage migration.
+Android. New backup codes are stored as salted Argon2id hashes, and existing
+backup-code hashes move to an explicit versioned format.
 
 **22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
 
@@ -75,6 +75,7 @@ later storage migration.
 - **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
+- **MFA:** New backup codes are stored as salted Argon2id hashes, one random salt per code, so a database read no longer yields unsalted SHA-256 digests of them. Migration 000198 marks each existing hash with an explicit `v1$` prefix. Upgrade only from a release that already reads the versioned formats, or stop every older control-plane process before migrating. Rolling the schema back refuses once any new code has been generated.
 - **MFA:** `POST /mfa/email-sms/setup` and `PUT /mfa/recovery-only` accept only their known methods, at most two and four entries, and refuse a longer list or another method with 400 before the step-up check. A repeated method is sent, coded and stored once.
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
