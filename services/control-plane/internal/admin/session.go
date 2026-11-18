@@ -150,8 +150,11 @@ func (s *SessionStore) Get(ctx context.Context, sid string) (Session, error) {
 
 	// Slide the idle window: refresh last_seen + re-persist with the idle TTL,
 	// clamped so the key never outlives the absolute cap.
+	// The slide only rewrites a key that still exists (SET XX): a logout that
+	// deleted it between the read above and this write wins, and this request
+	// does not authenticate on the session it just lost.
 	sess.LastSeen = now
-	if err := s.persist(ctx, sid, sess, now); err != nil {
+	if err := s.persistExisting(ctx, sid, sess, now); err != nil {
 		return Session{}, err
 	}
 	return sess, nil
@@ -192,10 +195,41 @@ func (s *SessionStore) Revoke(ctx context.Context, sid string) error {
 	return nil
 }
 
+// persistExisting re-writes a session only while its key still exists, so a
+// concurrent Revoke cannot be undone by a slide. A missing key is
+// ErrSessionInvalid.
+func (s *SessionStore) persistExisting(ctx context.Context, sid string, sess Session, now time.Time) error {
+	payload, ttl, err := sessionPayload(sess, now)
+	if err != nil {
+		return err
+	}
+	ok, err := s.redis.SetXX(ctx, sessionKeyPrefix+sid, payload, ttl).Result()
+	if err != nil {
+		return fmt.Errorf("persist session: %w", err)
+	}
+	if !ok {
+		return ErrSessionInvalid
+	}
+	return nil
+}
+
 // persist serializes a session and writes it with a key TTL equal to the idle
 // window, clamped so the key never outlives the absolute expiry. Clamping keeps
 // Redis from holding a key past the hard cap even if the idle window would.
 func (s *SessionStore) persist(ctx context.Context, sid string, sess Session, now time.Time) error {
+	payload, ttl, err := sessionPayload(sess, now)
+	if err != nil {
+		return err
+	}
+	if err := s.redis.Set(ctx, sessionKeyPrefix+sid, payload, ttl).Err(); err != nil {
+		return fmt.Errorf("persist session: %w", err)
+	}
+	return nil
+}
+
+// sessionPayload encodes a session and its key TTL, clamped so the key never
+// outlives the absolute cap.
+func sessionPayload(sess Session, now time.Time) ([]byte, time.Duration, error) {
 	ttl := sessionIdleTTL
 	if remaining := sess.AbsoluteExpiry.Sub(now); remaining < ttl {
 		ttl = remaining
@@ -203,16 +237,13 @@ func (s *SessionStore) persist(ctx context.Context, sid string, sess Session, no
 	if ttl <= 0 {
 		// Already past the absolute cap — do not write a non-positive TTL (which
 		// Redis treats as "persist forever").
-		return ErrSessionInvalid
+		return nil, 0, ErrSessionInvalid
 	}
 	payload, err := json.Marshal(sess)
 	if err != nil {
-		return fmt.Errorf("marshal session: %w", err)
+		return nil, 0, fmt.Errorf("marshal session: %w", err)
 	}
-	if err := s.redis.Set(ctx, sessionKeyPrefix+sid, payload, ttl).Err(); err != nil {
-		return fmt.Errorf("persist session: %w", err)
-	}
-	return nil
+	return payload, ttl, nil
 }
 
 // SetAdminSessionCookie writes the `__Host-cv_admin_sid` cookie. The `__Host-`
