@@ -17,7 +17,7 @@ cleanup() {
   rm -rf "$TEST_TEMP"
 }
 trap cleanup EXIT
-PIN_DIGEST="823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5" # pragma: allowlist secret -- public official NATS image manifest digest
+PIN_DIGEST="afae2fdbe2e326c65e1246cb83b9d05d319188734f3bd577ac8072daae78a10f" # pragma: allowlist secret -- public official NATS image manifest digest
 PIN_IMAGE="nats:2.15.2-alpine@sha256:${PIN_DIGEST}"
 REAL_ENV="$(command -v env)"
 CASE_DIR=""

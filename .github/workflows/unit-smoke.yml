@@ -4,7 +4,7 @@
 # ORCHESTRATED, NOT STANDALONE (deviation from the issue's original
 # "standalone on: pull_request" wording, governed by ADR-0018's IOC-first
 # invariant): concord-dev-smoke-native runs `concord-dev.sh up`, which
-# performs a media-plane npm install and control-plane Go module downloads
+# performs a media-plane npm ci and control-plane Go module downloads
 # — repo dependency installs that MUST NOT race the supply-chain IOC
 # verdict. pr-ci.yml invokes this workflow with `needs: ioc`. The unit
 # tests and compose smoke execute repo scripts (same invariant, lower
@@ -214,7 +214,7 @@ jobs:
   # ─── concord-dev.sh smoke (full native startup) ────────────────────────
   # End-to-end real-Docker + native cycle that exercises what `concord-dev.sh
   # up --skip-client` actually does on a developer's first run: 5 infra
-  # containers, control-plane `go build` + run, media-plane `npm install` +
+  # containers, control-plane `go build` + run, media-plane `npm ci` +
   # `npx tsx watch`, then /health on both natives. This is the surface that
   # was scoped down during #1113 development because the original ubuntu-
   # latest's pre-installed Node (22.x) hit the mediasoup-postinstall +
@@ -223,7 +223,7 @@ jobs:
   #
   # Two fixes combine to make this reliable:
   #   1. setup-node@v6 pins Node 24 (matching the project's documented runtime)
-  #   2. concord-dev.sh _up_media_plane uses two-pass `npm install
+  #   2. concord-dev.sh _up_media_plane uses two-pass `npm ci
   #      --ignore-scripts` + `npm rebuild` to defeat the parallelism race
   #
   # Parallel to (not replacement for) the compose-only smoke above so a
@@ -258,7 +258,7 @@ jobs:
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml pull --quiet --ignore-buildable postgres redis nats coturn minio
       - name: concord-dev.sh up --skip-client (full native cycle)
         # Brings up: 5 infra containers + control-plane (go build + run)
-        # + media-plane (npm install + tsx watch). --skip-client avoids
+        # + media-plane (npm ci + tsx watch). --skip-client avoids
         # Electron in headless CI. Internal /health waits gate the step.
         run: ./scripts/concord-dev.sh up --skip-client
         timeout-minutes: 10
