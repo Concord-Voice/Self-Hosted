@@ -24,7 +24,7 @@ import tarfile
 import subprocess
 import tempfile
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 
 _STARTUP_PHASES = frozenset({
@@ -314,7 +314,7 @@ _RUN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$")
 
 
-def _fail(code: str, returncode: int | None = None) -> None:
+def _fail(code: str, returncode: int | None = None) -> NoReturn:
     raise AcceptanceError(code, returncode)
 
 

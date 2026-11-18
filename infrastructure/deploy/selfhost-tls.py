@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import time
+from typing import NoReturn
 
 
 IMAGE = "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e"
@@ -46,7 +47,7 @@ class TLSRefusalError(Exception):
     """Fixed, sanitized refusal class for expected admission and observation failures."""
 
 
-def _refuse(reason: str) -> None:
+def _refuse(reason: str) -> NoReturn:
     raise TLSRefusalError(reason)
 
 

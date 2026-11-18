@@ -393,7 +393,7 @@ class LoopbackTLS(unittest.TestCase):
                     tls_conn.close()
                 except (OSError, ssl.SSLError):
                     try: conn.close()
-                    except OSError: pass  # handshake already failed; a close error changes nothing
+                    except OSError: pass  # TLS setup, handshake or close failed; a close error here changes nothing
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start(); ready.wait(1)

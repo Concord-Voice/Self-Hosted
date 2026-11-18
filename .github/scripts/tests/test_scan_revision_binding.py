@@ -13,9 +13,7 @@ class ScanRevisionBindingTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.repo = Path(temporary.name)
-        # twin_merges returns base, head, then exactly two merges.
-        self.base, self.head, *merges = twin_merges(self.repo)
-        self.event_merge, self.admitted_merge = merges
+        self.base, self.head, self.event_merge, self.admitted_merge = twin_merges(self.repo)
         self.selection = selection(dict(semgrep_custom=True, semgrep_community=True, eslint=True, govulncheck=True))
         merge_base = run_git(self.repo, 'show', '-s', '--format=%P', self.admitted_merge).split()[0]
         self.selection.update(base_sha=self.base, head_sha=self.head, merge_sha=self.admitted_merge,

@@ -129,7 +129,8 @@ def twin_merges(root):
         result = subprocess.run(['git', '-C', str(root), 'commit-tree', tree, '-p', base, '-p', head,
                                  '-m', 'synthetic merge'], env=env, capture_output=True, text=True, check=True)
         merges.append(result.stdout.strip())
-    return base, head, *merges
+    first, second = merges
+    return base, head, first, second
 
 
 def main_ancestry_reply(repo, merge_base):

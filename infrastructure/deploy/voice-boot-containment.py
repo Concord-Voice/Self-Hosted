@@ -198,13 +198,13 @@ class AssociationStore:
     def __init__(self, lock_path):
         self.fds = []
         try:
-            self.pin(lock_path)
+            self._pin(lock_path)
         except BaseException:
             # A refused or failed setup must not leak the descriptors it opened.
             self.close()
             raise
 
-    def pin(self, lock_path):
+    def _pin(self, lock_path):
         lock = Path(lock_path)
         if not lock.is_absolute() or str(lock) != lock_path or ".." in lock.parts:
             raise Refusal("invalid deployment lock")
