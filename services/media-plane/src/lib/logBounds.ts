@@ -159,8 +159,13 @@ function boundInfo(info: Logform.TransformableInfo): Logform.TransformableInfo {
     entries += 1;
     setEntry(out, cutLogString(key, LOG_MAX_KEY_CHARS), boundLogValue(info[key], budget));
   }
+  // LEVEL is logform's own level string. Every other symbol is bounded like
+  // meta: SPLAT holds the raw interpolation arguments, which `format.splat()`
+  // writes into the message, so a raw copy would let a later splat() bypass
+  // these bounds.
   for (const symbol of Object.getOwnPropertySymbols(info)) {
-    setEntry(out, symbol, (info as Record<symbol, unknown>)[symbol]);
+    const value: unknown = (info as Record<symbol, unknown>)[symbol];
+    setEntry(out, symbol, symbol === LEVEL ? value : boundLogValue(value, budget));
   }
   return out;
 }

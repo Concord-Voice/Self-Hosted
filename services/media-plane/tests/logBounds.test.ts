@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { LEVEL, MESSAGE, SPLAT } from 'triple-beam';
+import winston from 'winston';
 import type { Logform } from 'winston';
 
 // logger.ts reads the environment from config at import; the format factory
@@ -16,6 +17,7 @@ import {
   LOG_STACK_MAX_CHARS,
   boundLogValue,
   boundedFields,
+  cutLogString,
 } from '../src/lib/logBounds.js';
 import { createLogFormat } from '../src/lib/logger.js';
 
@@ -247,6 +249,7 @@ describe('boundedFields format (VULN-157)', () => {
 
   it('does not mutate the caller object and copies symbol keys', () => {
     const splat = [{ raw: 'payload' }];
+    const splatBefore = structuredClone(splat);
     const meta = { nested: { s: 'x'.repeat(400) } };
     const info: Info = {
       level: 'warn',
@@ -262,7 +265,34 @@ describe('boundedFields format (VULN-157)', () => {
     expect(meta.nested.s).toBe(before.nested);
     expect(info.meta).toBe(meta);
     expect(out[LEVEL]).toBe('warn');
-    expect(out[SPLAT]).toBe(splat);
+    // SPLAT is copied as a bounded copy, never the caller's array.
+    expect(out[SPLAT]).not.toBe(splat);
+    expect(out[SPLAT]).toEqual(splat);
+    expect(splat).toEqual(splatBefore);
+  });
+
+  // regression for Security#176 red-team finding
+  it('bounds SPLAT like other meta, so a later format.splat() cannot bypass the bounds', () => {
+    const splat = [
+      'a'.repeat(5000),
+      { nested: 'b'.repeat(5000) },
+      ...Array.from({ length: 40 }, (_, i) => i),
+    ];
+    const out = runFormat(format, { level: 'info', message: 'm', [LEVEL]: 'info', [SPLAT]: splat });
+    const bounded = out[SPLAT] as unknown[];
+    expect(bounded).toHaveLength(LOG_MAX_ENTRIES);
+    expect(bounded[0]).toBe(cutLogString('a'.repeat(5000), LOG_FIELD_MAX_CHARS));
+    expect(bounded[1]).toEqual({ nested: cutLogString('b'.repeat(5000), LOG_FIELD_MAX_CHARS) });
+
+    // The bypass itself: splat() placed after the bounds interpolates SPLAT into the message.
+    const misordered = winston.format.combine(boundedFields(), winston.format.splat());
+    const line = runFormat(misordered, {
+      level: 'info',
+      message: 'value %s',
+      [LEVEL]: 'info',
+      [SPLAT]: ['c'.repeat(5000)],
+    });
+    expect(line.message).toBe(`value ${cutLogString('c'.repeat(5000), LOG_FIELD_MAX_CHARS)}`);
   });
 
   it('returns level, bounded message and logBoundFailure on a throwing getter', () => {
