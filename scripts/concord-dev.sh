@@ -1575,7 +1575,8 @@ _up_control_plane() {
 # package-lock.json pins and never rewrites it, but it always wipes
 # node_modules/ first. A stamp in node_modules/ records the hash of
 # package.json + package-lock.json at the last successful `npm ci`, so a warm
-# tree whose manifests have not moved skips the install at zero cost. Hashing
+# tree whose manifests and installed tree have not moved skips the install at
+# zero cost (see _npm_tree_sha256). Hashing
 # package.json too means a manifest edit without a lockfile change still runs
 # `npm ci`, which then fails loudly on the mismatch instead of starting with a
 # missing module. The stamp is written only after every pass has succeeded; a
@@ -1590,6 +1591,17 @@ _lock_sha256() {
   fi
 }
 
+# The manifests, plus npm's own record of the installed tree when it exists.
+# npm rewrites node_modules/.package-lock.json on every install or uninstall,
+# so an out-of-band `npm install --no-save` or `npm uninstall` also breaks the
+# match. Deleting files inside node_modules/ by hand does not; `rebuild` is the
+# repair verb for that.
+_npm_tree_sha256() {
+  local files=(package.json package-lock.json)
+  [[ -f node_modules/.package-lock.json ]] && files+=(node_modules/.package-lock.json)
+  _lock_sha256 "${files[@]}"
+}
+
 _npm_ci_if_lock_changed() {
   local label="$1"
   shift
@@ -1602,7 +1614,7 @@ _npm_ci_if_lock_changed() {
 
   local stamp="node_modules/.concord-lock.sha256"
   local lock_sha
-  lock_sha="$(_lock_sha256 package.json package-lock.json)" || return 1
+  lock_sha="$(_npm_tree_sha256)" || return 1
   if [[ "${CONCORD_FORCE_NPM_CI:-0}" -eq 0 && -d node_modules && -f "$stamp" && "$(<"$stamp")" == "$lock_sha" ]]; then
     return 0
   fi
@@ -1614,6 +1626,8 @@ _npm_ci_if_lock_changed() {
     "$@" >/dev/null || return 1
   fi
   mkdir -p node_modules || return 1
+  # Re-hash: npm ci has just rewritten node_modules/.package-lock.json.
+  lock_sha="$(_npm_tree_sha256)" || return 1
   printf '%s\n' "$lock_sha" >"$stamp"
 }
 

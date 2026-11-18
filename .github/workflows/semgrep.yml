@@ -210,6 +210,13 @@ jobs:
           # --no-deps: the lock overrides some of semgrep's own exact pins to fixed
           # versions (see the file header), which pip's resolver would reject.
           python3 -m pip install --user --quiet --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: -r .github/semgrep/requirements.txt
+          # Fail fast on a broken set. `pip check` cannot be used: it always
+          # reports the deliberate overrides. Importing the CLI is what breaks
+          # when a bumped or missing package is incompatible.
+          "$HOME/.local/bin/semgrep" --version >/dev/null || {
+            echo "::error file=.github/semgrep/requirements.txt::semgrep does not start with this lock. Regenerate it with the command in its header."
+            exit 1
+          }
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run Semgrep (custom rules)

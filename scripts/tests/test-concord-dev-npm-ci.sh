@@ -18,7 +18,7 @@ cat >"$TMP/bin/npm" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >>"$NPM_LOG"
 [[ -e "$NPM_FAIL" ]] && exit 1
-if [[ "$1" == ci ]]; then rm -rf node_modules; mkdir node_modules; fi
+if [[ "$1" == ci ]]; then rm -rf node_modules; mkdir node_modules; echo "{}" >node_modules/.package-lock.json; fi
 exit 0
 STUB
 chmod +x "$TMP/bin/npm"
@@ -58,5 +58,17 @@ CONCORD_FORCE_NPM_CI=1 _npm_ci_if_lock_changed t || fail "forced run returned no
 [[ "$(calls)" -eq 6 ]] || fail "CONCORD_FORCE_NPM_CI=1 did not force npm ci"
 echo "PASS: CONCORD_FORCE_NPM_CI=1 (rebuild) ignores a matching stamp"
 
-grep -q 'local CONCORD_FORCE_NPM_CI=1' "$PROJECT_ROOT/scripts/concord-dev.sh" || fail "verb_rebuild no longer forces npm ci"
-echo "PASS: rebuild forces npm ci"
+# The real verb_rebuild, with verb_down/verb_up stubbed so only its own
+# forcing reaches the helper (dynamic scope through verb_up).
+verb_down() { :; }
+verb_up() { _npm_ci_if_lock_changed t; }
+verb_rebuild || fail "verb_rebuild returned non-zero"
+[[ "$(calls)" -eq 7 ]] || fail "verb_rebuild did not force npm ci through verb_up"
+_npm_ci_if_lock_changed t || fail "post-rebuild up returned non-zero"
+[[ "$(calls)" -eq 7 ]] || fail "plain up after rebuild did not skip"
+echo "PASS: rebuild forces npm ci; the next plain up skips"
+
+echo '{"lockfileVersion":3,"packages":{"node_modules/extra":{}}}' >node_modules/.package-lock.json
+_npm_ci_if_lock_changed t || fail "hidden-lockfile change run returned non-zero"
+[[ "$(calls)" -eq 8 ]] || fail "an out-of-band change to node_modules/.package-lock.json did not re-run npm ci"
+echo "PASS: an out-of-band install (hidden lockfile changed) re-runs npm ci"
