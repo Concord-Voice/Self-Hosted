@@ -1,5 +1,7 @@
 # Weekly hygiene: npm dependency risks — design (ad-hoc, issueless)
 
+> **Update after #330 merged (2026-11-18):** #330 landed first with the same undici, qs and minimatch fixes. Its root minimatch override is scoped (`eslint@^10` and `@typescript-eslint/typescript-estree`) rather than global, and this PR keeps that design. After merging main, this PR adds the `@microsoft/eslint-formatter-sarif` `$eslint` override, which removes eslint 8.57.1, every minimatch 3.1.5 copy and `glob@7` (68 root lockfile entries). It also adds the corrected admin undici rationale and the runbook and CHANGELOG updates.
+
 Scope: the npm findings from the 2026-11-18 SonarCloud SCA scan of `Concord-Voice_Self-Hosted`, and Dependabot alerts 8 and 9. Go modules, source, Python and workflows are out of scope. Other batches of the same sweep own them.
 
 ## Findings and decisions

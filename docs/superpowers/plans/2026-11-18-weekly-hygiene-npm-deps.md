@@ -1,5 +1,7 @@
 # Weekly hygiene: npm dependency risks — plan
 
+> **Update after #330 merged (2026-11-18):** #330 landed first with the same undici, qs and minimatch fixes. Its root minimatch override is scoped (`eslint@^10` and `@typescript-eslint/typescript-estree`) rather than global, and this PR keeps that design. After merging main, this PR adds the `@microsoft/eslint-formatter-sarif` `$eslint` override, which removes eslint 8.57.1, every minimatch 3.1.5 copy and `glob@7` (68 root lockfile entries). It also adds the corrected admin undici rationale and the runbook and CHANGELOG updates.
+
 Spec: `docs/superpowers/specs/2026-11-18-weekly-hygiene-npm-deps-design.md`.
 
 1. Inventory each package with `npm ls` in the root, `client/admin`, `services/media-plane` and `.github/tools/license-checker` lockfiles. Read the advisory ranges from GHSA, OSV and NVD.
