@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 if [[ $# != 0 || ${GITHUB_ACTIONS:-} != true ||
-      ${GITHUB_REPOSITORY:-} != Concord-Voice/Concord-Voice-Alpha ||
+      ${GITHUB_REPOSITORY:-} != Concord-Voice/Self-Hosted ||
       ${RUNNER_ENVIRONMENT:-} != self-hosted ||
       ${SELFHOST_ACCEPTANCE_RUNNER_PROFILE:-} != blacksmith-4vcpu-ubuntu-2404 ]]; then
   echo 'Invalid disposable acceptance CI context' >&2

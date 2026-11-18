@@ -1390,7 +1390,7 @@ func validAttestationConfig() *Config {
 		RequireClientAttestation: true,
 		OIDCIssuer:               "https://token.actions.githubusercontent.com",
 		OIDCAudience:             "https://api.concordvoice.chat",
-		OIDCSubjectPrefix:        "repo:Concord-Voice/Concord-Voice-Alpha:",
+		OIDCSubjectPrefix:        "repo:Concord-Voice/Self-Hosted:",
 		OIDCSPAWorkflow:          "main-cd.yml",
 		OIDCSPARef:               "refs/heads/main",
 		OIDCBinaryWorkflow:       "build-desktop.yml",
@@ -1469,7 +1469,7 @@ func TestValidateAttestation_MissingSubjectPrefix(t *testing.T) {
 // guard — a prefix that cannot match any GitHub OIDC sub claim.
 func TestValidateAttestation_MalformedSubjectPrefix(t *testing.T) {
 	cfg := validAttestationConfig()
-	cfg.OIDCSubjectPrefix = "Concord-Voice/Concord-Voice-Alpha"
+	cfg.OIDCSubjectPrefix = "Concord-Voice/Self-Hosted"
 	err := cfg.validateAttestation()
 	require.ErrorContains(t, err, `must start with "repo:"`)
 }
@@ -1490,7 +1490,7 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 		{"bare scheme", "repo:", "matches every repository on GitHub"},
 		{"owner only", "repo:Concord-Voice", "matches a lookalike org anyone can register"},
 		{"owner with slash", "repo:Concord-Voice/", "matches any repo under the org"},
-		{"missing trailing colon", "repo:Concord-Voice/Concord-Voice-Alpha", "also matches ...-Alpha-Evil:"},
+		{"missing trailing colon", "repo:Concord-Voice/Self-Hosted", "also matches ...-Self-Hosted-Evil:"},
 		// The immutable owner@id/repo@id form must stay fully qualified.
 		{"id form bare org", "repo:Concord-Voice@264583090:", "matches every repo under the org"},
 		{"id form owner with slash", "repo:Concord-Voice@264583090/", "matches any repo under the org"},
@@ -1522,7 +1522,7 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 func TestValidateAttestation_AcceptsFullyQualifiedSubjectPrefix(t *testing.T) {
 	for _, prefix := range []string{
 		"repo:Concord-Voice@264583090/Hosted@1158152129:",
-		"repo:Concord-Voice/Concord-Voice-Alpha:",
+		"repo:Concord-Voice/Self-Hosted:",
 		"repo:some-operator/their.fork_name:",
 	} {
 		cfg := validAttestationConfig()

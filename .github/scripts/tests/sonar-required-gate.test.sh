@@ -712,7 +712,7 @@ with tempfile.TemporaryDirectory() as tmp:
                           env=git_env, capture_output=True).returncode != 0
     assert subprocess.run(["git", "-C", str(protected), "cat-file", "-e", pr_head],
                           env=git_env, capture_output=True).returncode != 0
-    fetch_env = {**git_env, "WORKFLOW_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha",
+    fetch_env = {**git_env, "WORKFLOW_REPOSITORY": "Concord-Voice/Self-Hosted",
                  "WORKFLOW_SHA": reviewed, "BASE_SHA": reviewed, "HEAD_SHA": pr_head, "PR_NUMBER": "123"}
     fetched = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", fetch["run"]], cwd=tmp,
                              env=fetch_env, capture_output=True, text=True)

@@ -509,7 +509,7 @@ class ProtectedMainWorkflowTrustTests(unittest.TestCase):
                           "main_rc": 0, "head": self.MAIN, "head_rc": 0,
                           "origin": self.MAIN, "origin_rc": 0, "ancestor_rc": 0}
         self.env = {"PATH": str(self.bin), "LANG": "C", "LC_ALL": "C",
-                    "GITHUB_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha",
+                    "GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted",
                     "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": self.MAIN, "ALPHA_SHA": self.ALPHA,
                     "PUBLIC_SHA": "c" * 40, "BUNDLE_SHA256": "d" * 64,
                     "STAGE_GIT_BUNDLE_SHA256": "e" * 64, "STAGE_RUN_ID": "701",
@@ -521,7 +521,7 @@ tool = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with pathlib.Path(os.environ["OWNED_GATE_TRACE"]).open("a") as out:
     out.write(json.dumps([tool, *args]) + "\\n")
-if tool == "gh" and args[:3] == ["api", "repos/Concord-Voice/Concord-Voice-Alpha/branches/main", "--jq"] and len(args) == 4:
+if tool == "gh" and args[:3] == ["api", "repos/Concord-Voice/Self-Hosted/branches/main", "--jq"] and len(args) == 4:
     key = {".protected": "protected", ".commit.sha": "main"}.get(args[3])
     if key is not None:
         print(config[key])
@@ -565,7 +565,7 @@ raise SystemExit(97)
         return result, calls
 
     def expected_calls(self):
-        branch = "repos/Concord-Voice/Concord-Voice-Alpha/branches/main"
+        branch = "repos/Concord-Voice/Self-Hosted/branches/main"
         return [["gh", "api", branch, "--jq", ".protected"],
                 ["gh", "api", branch, "--jq", ".commit.sha"],
                 ["git", "rev-parse", "HEAD"],
@@ -835,7 +835,7 @@ if name == "selfhost-acceptance.py" and os.environ.get("OWNED_ACCEPTANCE_FAIL") 
         (bin_dir / "python3").symlink_to(sys.executable)
         (bin_dir / "gh").write_text("#!" + sys.executable + '''
 import os, sys
-assert sys.argv[1:4] == ["api", "repos/Concord-Voice/Concord-Voice-Alpha/branches/main", "--jq"]
+assert sys.argv[1:4] == ["api", "repos/Concord-Voice/Self-Hosted/branches/main", "--jq"]
 assert len(sys.argv) == 5
 print({".protected": "true", ".commit.sha": os.environ["GITHUB_SHA"]}[sys.argv[4]])
 ''')
@@ -843,7 +843,7 @@ print({".protected": "true", ".commit.sha": os.environ["GITHUB_SHA"]}[sys.argv[4
         trace = sandbox / "trace.jsonl"
         env = {"PATH": str(bin_dir) + os.pathsep + os.defpath, "LANG": "C", "LC_ALL": "C",
                "GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(runner_temp),
-               "GITHUB_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha", "GITHUB_REF": "refs/heads/main",
+               "GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted", "GITHUB_REF": "refs/heads/main",
                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": self.main,
                "ALPHA_SHA": self.alpha, "PUBLIC_SHA": "c" * 40, "BUNDLE_SHA256": "d" * 64,
                "STAGE_GIT_BUNDLE_SHA256": "e" * 64, "STAGE_RUN_ID": "701",
