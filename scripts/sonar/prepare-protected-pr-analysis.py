@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -24,6 +23,12 @@ REPO = "Concord-Voice/Self-Hosted"
 API = f"https://api.github.com/repos/{REPO}"
 ROOT = Path(__file__).resolve().parents[2]
 GIT_REMOTE = f"https://github.com/{REPO}.git"
+# Accepted control-plane module path prefixes. The second is the pre-rename
+# module path; drop it once services/control-plane/go.mod on main no longer
+# declares it (the module rename PR, #340, does that).
+GO_MODULE_PREFIXES = (f"github.com/{REPO}/", "github.com/Concord-Voice/Concord-Voice-Alpha/")
+GO_COVERAGE_HEADER = re.compile(r"mode: (set|count|atomic)")
+GO_COVERAGE_RECORD = re.compile(r"([^:\s]+)(:\d+\.\d+,\d+\.\d+ \d+ \d+)")
 GIT_ENV = {k: v for k, v in os.environ.items()
            if not k.startswith("GIT_") and k not in ("GITHUB_TOKEN", "GH_TOKEN", "SONAR_TOKEN")}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -473,26 +478,49 @@ def trusted_support(repo):
         destination.chmod(0o644)
 
 
-def validate_report(content, component):
+def validate_report(content, component, repo=None):
     try:
-        lines = content.decode("utf-8").splitlines(keepends=True)
+        text = content.decode("utf-8")
     except UnicodeDecodeError:
         raise Reject("coverage encoding invalid") from None
+    lines = text.splitlines(keepends=True)
     prefix = COMPONENTS[component][3]
     if component == "control_plane":
-        if not lines or not lines[0].startswith("mode: "):
+        # Split on "\n" only, as Sonar's line reader does; splitlines() also
+        # splits on characters Sonar keeps inside a line.
+        rows = [row[:-1] if row.endswith("\r") else row for row in text.split("\n")]
+        # Java's line reader also breaks on a lone "\r", so refuse one anywhere.
+        if any("\r" in row for row in rows):
+            raise Reject("Go coverage record malformed")
+        if not rows or not GO_COVERAGE_HEADER.fullmatch(rows[0]):
             raise Reject("Go coverage header missing")
-        records = [line.split(":", 1)[0] for line in lines[1:] if line.strip()]
-        if not records:
-            raise Reject("Go coverage empty")
-        for path in records:
+        output = [rows[0]]
+        for row in rows[1:]:
+            if not row.strip():
+                continue
+            # Sonar's coverage regex takes the file name up to the LAST colon tail,
+            # so validate exactly that name, and refuse any record it would read
+            # differently.
+            match = GO_COVERAGE_RECORD.fullmatch(row)
+            if not match:
+                raise Reject("Go coverage record malformed")
+            path, tail = match.groups()
             safe_path(path)
-            # Self-Hosted's control plane kept Alpha's Go module path through the
-            # split, so `go test` coverage names files under it. Retire this
-            # alternative together with any module rename.
-            if not (path.startswith(prefix + "/") or path.startswith("github.com/Concord-Voice/Concord-Voice-Alpha/" + prefix + "/")):
+            # `go test` coverage names files by Go import path. Rewrite a
+            # module-path prefix to the repo-relative path, so Sonar resolves the
+            # file directly and never falls back to matching by subpath.
+            for module in GO_MODULE_PREFIXES:
+                if path.startswith(module + prefix + "/"):
+                    path = path[len(module):]
+                    break
+            if not path.startswith(prefix + "/") or not path.endswith(".go"):
                 raise Reject("Go coverage source outside component")
-        return content
+            if repo is not None and not (repo / path).is_file():
+                raise Reject("Go coverage source not in PR tree")
+            output.append(path + tail)
+        if len(output) == 1:
+            raise Reject("Go coverage empty")
+        return ("\n".join(output) + "\n").encode()
     found = 0
     output = []
     for line in lines:
@@ -605,7 +633,7 @@ def prepare(candidate, directory, api):
             if not payload["coverage"][component]:
                 continue
             archive = api.artifact(inventory, artifact_name, run_id, started, MAX_COVERAGE_ZIP)
-            report = validate_report(one_zip(archive, report_name, MAX_COVERAGE), component)
+            report = validate_report(one_zip(archive, report_name, MAX_COVERAGE), component, repo)
             destination = repo / report_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(report)
