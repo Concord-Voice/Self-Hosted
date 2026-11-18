@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -2268,28 +2269,6 @@ func (h *Handler) channelKeyAccess(ctx context.Context, channelID, userID string
 	return true, perms.Has(target.viewPerm), nil
 }
 
-// channelKeyAccessTx is channelKeyAccess on the caller's transaction
-// (VULN-079). A check called while a key-distribution transaction holds the
-// channel row lock must not take a second pool connection: each distribution
-// would then hold one connection while waiting for another, and enough of them
-// exhaust the shared pool. Both the membership read and the permission resolve
-// run on tx; ResolveChannelPermissionsTx reads and publishes no cache entry and
-// opens no transaction of its own. The result is the same as channelKeyAccess.
-func (h *Handler) channelKeyAccessTx(ctx context.Context, tx *sql.Tx, channelID, userID string) (isMember, canView bool, err error) {
-	target, isMember, err := readChannelKeyTarget(ctx, tx, channelID, userID)
-	if err != nil || !isMember {
-		return false, false, err
-	}
-	if h.resolver == nil {
-		return true, true, nil
-	}
-	perms, permErr := h.resolver.ResolveChannelPermissionsTx(ctx, tx, target.serverID, target.userID, target.channelID)
-	if permErr != nil {
-		return true, false, permErr
-	}
-	return true, perms.Has(target.viewPerm), nil
-}
-
 // channelKeyTarget is one (channel, user) pair after canonicalization, with the
 // channel's server and the view permission its type requires.
 type channelKeyTarget struct {
@@ -2401,6 +2380,10 @@ type DistributeChannelKeysRequest struct {
 // DistributeChannelKeys stores wrapped channel keys for new members (key distribution).
 // Uses first-response-wins: if a key already exists for a (channel, user), returns 409.
 func (h *Handler) DistributeChannelKeys(c *gin.Context) {
+	// VULN-079: one deadline for the whole request, below the server's write
+	// deadline, so a distribution that overruns still answers 503.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), keyDistributionDeadline)
+	defer cancel()
 	userID := c.GetString("user_id")
 	channelID := c.Param("id")
 	channelID, err := requestid.Canonical(channelID)
@@ -2421,13 +2404,13 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTooManyWrappedKeys})
 		return
 	}
-	if err := h.verifyChannelEncrypted(c.Request.Context(), channelID, userID); err != nil {
+	if err := h.verifyChannelKeyDistributor(ctx, channelID, userID); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// A pre-check that ran out of time is not a denial.
+			h.respondKeyDistributionError(c, ctxErr, channelID)
+			return
+		}
 		h.respondKeyDistError(c, err)
-		return
-	}
-
-	if !h.callerHasChannelKey(channelID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "You must have the channel key to distribute keys"})
 		return
 	}
 
@@ -2436,7 +2419,7 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
-	distribution, distErr := h.distributeChannelKeysToMembers(c.Request.Context(), channelKeyDistributionRequest{
+	distribution, distErr := h.distributeChannelKeysToMembers(ctx, channelKeyDistributionRequest{
 		actorID:                userID,
 		tokenEpoch:             middleware.TokenCredentialEpoch(c),
 		channelID:              channelID,
@@ -2446,43 +2429,49 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 		rotationKeyFingerprint: rotationKeyFingerprint,
 	})
 	if distErr != nil {
-		h.respondKeyDistributionError(c, distErr, channelID)
+		h.respondKeyDistributionError(c, withDistributionContextErr(ctx, distErr), channelID)
 		return
 	}
 
 	h.log.Info("Channel keys distributed",
 		"channel_id", channelID, "by_user", userID,
-		"distributed", distribution.distributed, "duplicates", distribution.duplicates, "skipped", distribution.skippedErrors,
+		"distributed", distribution.distributed, "duplicates", distribution.duplicates,
 		"skipped_stale", distribution.skippedStale)
 
-	// CV-CAN-005: distribution fails CLOSED — a channelKeyAccess resolver error
-	// skips the target rather than leaking a key. Skipped targets are enrolled
-	// into pending_key_requests for peer retry, but returning 200 here would let
-	// the caller (e.g. rotateChannelKey, which only checks res.ok and then
-	// invalidates its cache) treat a degraded rotation as fully successful and
-	// leave skipped members on a stale epoch with no synchronous signal. Return
-	// 503 so res.ok is false and the caller can retry the rotation; the counts
-	// stay in the body for observability.
-	if distribution.skippedErrors > 0 {
-		h.log.Warn("key distribution: targets skipped due to view-check errors (degraded rotation)",
-			"channel_id", sanitizeID(channelID), "by_user", sanitizeID(userID),
-			"skipped_errors", distribution.skippedErrors, "distributed", distribution.distributed)
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error":         "Some targets could not be verified and were skipped; retry",
-			"distributed":   distribution.distributed,
-			"duplicates":    distribution.duplicates,
-			"skipped":       distribution.skippedErrors,
-			"skipped_stale": distribution.skippedStale,
-		})
-		return
-	}
-
+	// CV-CAN-005: distribution fails CLOSED. The view check is one statement
+	// for the whole batch, and its failure fails the request (503 or 500) with
+	// nothing written, so no target is ever skipped on error: "skipped" stays in
+	// the body for clients that read it, and is always 0.
 	c.JSON(http.StatusOK, gin.H{
 		"distributed":   distribution.distributed,
 		"duplicates":    distribution.duplicates,
-		"skipped":       distribution.skippedErrors,
+		"skipped":       0,
 		"skipped_stale": distribution.skippedStale,
 	})
+}
+
+// withDistributionContextErr adds the request deadline's error to a failure
+// that happened after it expired. The driver reports an expiry in several
+// shapes (a cancelled statement, a transaction database/sql already rolled
+// back, a closed connection); joining ctx.Err() lets the 503 mapping see the
+// cause whatever the shape.
+func withDistributionContextErr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return errors.Join(err, ctxErr)
+	}
+	return err
+}
+
+// verifyChannelKeyDistributor runs the pre-transaction distributor checks:
+// current channel VIEW, then holding the channel key.
+func (h *Handler) verifyChannelKeyDistributor(ctx context.Context, channelID, userID string) error {
+	if err := h.verifyChannelEncrypted(ctx, channelID, userID); err != nil {
+		return err
+	}
+	if !h.callerHasChannelKey(ctx, channelID, userID) {
+		return &keyDistError{http.StatusForbidden, "You must have the channel key to distribute keys"}
+	}
+	return nil
 }
 
 type keyDistError struct {
@@ -2529,9 +2518,9 @@ func (h *Handler) respondKeyDistError(c *gin.Context, err error) {
 // nothing are different properties: a legitimate distributor refused by a
 // database fault sees the same bare 403 as an unauthorized one, and without
 // this line nothing anywhere records which it was.
-func (h *Handler) callerHasChannelKey(channelID, userID string) bool {
+func (h *Handler) callerHasChannelKey(ctx context.Context, channelID, userID string) bool {
 	var hasKey bool
-	if err := h.db.QueryRow(
+	if err := h.db.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM channel_keys WHERE channel_id = $1 AND user_id = $2)`,
 		channelID, userID,
 	).Scan(&hasKey); err != nil {
@@ -2687,62 +2676,69 @@ func claimChannelKeyRotationTx(ctx context.Context, tx *sql.Tx, channelID, actor
 	return nil
 }
 
-// distributionTargetAdmitted applies the CV-CAN-005 gate for one distribution
-// target: do not distribute a channel key to a target lacking channel VIEW (or
-// that is not a member). Fail CLOSED — skip on a definite deny AND on a
-// resolver error. A persistent resolver failure must not silently degrade this
-// security gate back to membership-only. Distribution is retryable and
-// eventually consistent: a target skipped on a transient error is enrolled
-// into the peer-fulfillment queue (idempotent) so a viewer re-delivers the key
-// once the resolver recovers; fulfillment re-checks VIEW, so this cannot
-// re-open CV-CAN-005 for a genuinely no-view user.
+// admitChannelKeyTargetsTx applies the CV-CAN-005 gate to a whole distribution
+// batch: it returns the candidates that are members of serverID and can view
+// channelID. A target lacking channel VIEW, or not a member, gets no key.
 //
-// The check runs on tx (VULN-079), inside a savepoint: a statement error in it,
-// including a lock or statement timeout, would otherwise abort the whole
-// transaction (25P02) and fail every later target. Rolling back to the
-// savepoint keeps skip-and-continue for the rest of the batch.
+// It is one statement on tx (VULN-079). On tx, so it takes no second pool
+// connection while the distribution holds the channel row lock. One statement,
+// because concurrent distributions queue on that lock: a check per target held
+// it long enough that the queue behind a 500-target batch ran past
+// lock_timeout and honest distributions got 503. FilterVisibleUserIDsForChannelTx
+// decides what channelKeyAccess decides for one user (membership, the owner and
+// Administrator bypasses, role and user overrides, the type's view bit; the MFA
+// mask never removes a view bit), and TestChannelKeyAdmissionTx_MatchesPoolVariant
+// holds the two to one answer. With no resolver, membership alone admits, as it
+// does in channelKeyAccess.
 //
-// A target that already holds the key at keyVersion is not enrolled
-// (VULN-080): the request it would leave behind is redundant.
-func (h *Handler) distributionTargetAdmitted(ctx context.Context, tx *sql.Tx, channelID, memberUserID string, keyVersion int) (admitted, skippedOnError bool) {
-	canView, vErr := h.channelKeyViewCheckTx(ctx, tx, channelID, memberUserID)
-	if vErr != nil {
-		held, heldErr := channelKeyHeldTx(ctx, tx, channelID, memberUserID, keyVersion)
-		if heldErr != nil {
-			h.log.Error("key distribution: held-key check failed; enrolling skipped target",
-				"error", heldErr, "channel_id", sanitizeID(channelID), "user_id", sanitizeID(memberUserID))
-		}
-		if held {
-			h.log.Error("key distribution: view check failed; skipping target that already holds the key", "error", vErr, "user_id", sanitizeID(memberUserID))
-			return false, true
-		}
-		if enrollErr := enqueueChannelKeyRequest(ctx, tx, channelID, memberUserID); enrollErr != nil {
-			h.log.Error("key distribution: failed to enroll skipped target for retry",
-				"error", enrollErr, "channel_id", sanitizeID(channelID), "user_id", sanitizeID(memberUserID))
-		}
-		h.log.Error("key distribution: view check failed; skipping target (fail closed, enrolled for retry)", "error", vErr, "user_id", sanitizeID(memberUserID))
-		return false, true
+// An error fails the batch closed. The failed statement aborted the
+// transaction, so nothing is written, and the caller answers 503 for a lock or
+// statement timeout and 500 otherwise; the client retries the distribution.
+func (h *Handler) admitChannelKeyTargetsTx(ctx context.Context, tx *sql.Tx, serverID, channelID string, candidates []string) ([]string, error) {
+	if len(candidates) == 0 {
+		return []string{}, nil
 	}
-	return canView, false
+	if h.resolver == nil {
+		return channelKeyMembersTx(ctx, tx, serverID, candidates)
+	}
+	viewers, err := h.resolver.FilterVisibleUserIDsForChannelTx(ctx, tx, serverID, channelID, candidates)
+	if err != nil {
+		return nil, fmt.Errorf("filter key distribution targets: %w", err)
+	}
+	return viewers, nil
 }
 
-// channelKeyViewCheckTx runs channelKeyAccessTx inside SAVEPOINT
-// keydist_target. On error it rolls back to the savepoint and releases it, so
-// the transaction stays usable and savepoints do not nest across a batch.
-func (h *Handler) channelKeyViewCheckTx(ctx context.Context, tx *sql.Tx, channelID, memberUserID string) (bool, error) {
-	if _, err := tx.ExecContext(ctx, `SAVEPOINT keydist_target`); err != nil {
-		return false, fmt.Errorf("open target check savepoint: %w", err)
+// channelKeyMembersTx returns the candidates that are members of serverID.
+func channelKeyMembersTx(ctx context.Context, tx *sql.Tx, serverID string, candidates []string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT user_id FROM server_members
+		 WHERE server_id = $1 AND user_id = ANY($2::uuid[])
+		 ORDER BY user_id`, serverID, pq.Array(candidates))
+	if err != nil {
+		return nil, fmt.Errorf("list key distribution members: %w", err)
 	}
-	_, canView, vErr := h.channelKeyAccessTx(ctx, tx, channelID, memberUserID)
-	if vErr != nil {
-		if _, rbErr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT keydist_target`); rbErr != nil {
-			return false, errors.Join(vErr, fmt.Errorf("roll back target check savepoint: %w", rbErr))
+	return scanKeyDistributionUserIDs(rows, "key distribution members")
+}
+
+// scanKeyDistributionUserIDs reads a one-column user_id result and closes rows.
+func scanKeyDistributionUserIDs(rows *sql.Rows, what string) (ids []string, err error) {
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			ids, err = nil, fmt.Errorf("close %s: %w", what, closeErr)
 		}
+	}()
+	ids = []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan %s: %w", what, err)
+		}
+		ids = append(ids, id)
 	}
-	if _, relErr := tx.ExecContext(ctx, `RELEASE SAVEPOINT keydist_target`); relErr != nil {
-		return false, errors.Join(vErr, fmt.Errorf("release target check savepoint: %w", relErr))
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s: %w", what, err)
 	}
-	return canView, vErr
+	return ids, nil
 }
 
 // distributionOutcome classifies one target of a channel-key distribution.
@@ -2750,7 +2746,6 @@ type distributionOutcome int
 
 const (
 	distributionSkipped distributionOutcome = iota
-	distributionSkippedOnError
 	distributionDuplicate
 	distributionDelivered
 	// distributionSkippedStale: the recipient's public key rotated after the
@@ -2782,22 +2777,91 @@ func recipientKeyFresh(ctx context.Context, tx *sql.Tx, userID string, wrappedVe
 	return current == wrappedVersion, nil
 }
 
-// channelKeyHeldTx reports whether userID already holds channelID's key at
+// currentPublicKeyVersionsTx is recipientKeyFresh for a set: it returns each
+// user's current public-key version and takes FOR SHARE on those public_keys
+// rows, in user_id order. The lock is load-bearing for the same reason: it
+// conflicts with a concurrent key reset's FOR NO KEY UPDATE on the rows, so the
+// compare-then-insert cannot straddle the reset (#2420). A user with no row is
+// absent from the result, which the caller treats as not fresh.
+func currentPublicKeyVersionsTx(ctx context.Context, tx *sql.Tx, userIDs []string) (map[string]int, error) {
+	current := make(map[string]int, len(userIDs))
+	if len(userIDs) == 0 {
+		return current, nil
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT user_id, key_version FROM public_keys
+		 WHERE user_id = ANY($1::uuid[])
+		 ORDER BY user_id, key_version DESC
+		 FOR SHARE`, pq.Array(userIDs))
+	if err != nil {
+		return nil, fmt.Errorf("recipient key freshness read: %w", err)
+	}
+	return current, scanCurrentPublicKeyVersions(rows, current)
+}
+
+func scanCurrentPublicKeyVersions(rows *sql.Rows, current map[string]int) (err error) {
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close recipient key freshness rows: %w", closeErr)
+		}
+	}()
+	for rows.Next() {
+		var userID string
+		var version int
+		if err := rows.Scan(&userID, &version); err != nil {
+			return fmt.Errorf("scan recipient key freshness row: %w", err)
+		}
+		if _, seen := current[userID]; !seen {
+			current[userID] = version // rows are newest first per user
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate recipient key freshness rows: %w", err)
+	}
+	return nil
+}
+
+// channelKeyHoldersTx returns which of userIDs already hold channelID's key at
 // keyVersion. keyVersion must be the batch's version after the server's epoch
 // guard accepted it, never a caller-supplied wrapped_key_versions value: the
 // caller chooses those, and checking against one would let a stale submission
 // write a pending request for a target that already holds the current key
 // (VULN-080).
-func channelKeyHeldTx(ctx context.Context, tx *sql.Tx, channelID, userID string, keyVersion int) (bool, error) {
-	var held bool
-	if err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM channel_keys
-			WHERE channel_id = $1 AND user_id = $2 AND key_version = $3
-		)`, channelID, userID, keyVersion).Scan(&held); err != nil {
-		return false, fmt.Errorf("read held channel key: %w", err)
+func channelKeyHoldersTx(ctx context.Context, tx *sql.Tx, channelID string, keyVersion int, userIDs []string) (map[string]struct{}, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT user_id FROM channel_keys
+		 WHERE channel_id = $1 AND key_version = $2 AND user_id = ANY($3::uuid[])`,
+		channelID, keyVersion, pq.Array(userIDs))
+	if err != nil {
+		return nil, fmt.Errorf("read held channel keys: %w", err)
 	}
-	return held, nil
+	ids, err := scanKeyDistributionUserIDs(rows, "held channel keys")
+	if err != nil {
+		return nil, err
+	}
+	return userIDSet(ids), nil
+}
+
+func userIDSet(ids []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set
+}
+
+// enqueueChannelKeyRequestsTx is enqueueChannelKeyRequest for a set: one
+// self-heal re-request per user (#2420), idempotent against the retry loop.
+func enqueueChannelKeyRequestsTx(ctx context.Context, tx *sql.Tx, channelID string, userIDs []string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO pending_key_requests (channel_id, user_id)
+		 SELECT $1, target.user_id FROM unnest($2::uuid[]) AS target(user_id)
+		 ON CONFLICT (channel_id, user_id) DO NOTHING`,
+		channelID, pq.Array(userIDs))
+	return err
 }
 
 // enqueueChannelKeyRequest re-requests distribution for a recipient skipped as
@@ -2812,77 +2876,136 @@ func enqueueChannelKeyRequest(ctx context.Context, tx *sql.Tx, channelID, userID
 	return err
 }
 
-// distributeOneChannelKey processes one distribution target inside the caller's
-// epoch-guarded transaction: the CV-CAN-005 admission gate, the #2420
-// recipient-freshness guard, and the idempotent insert (the caller validates the
-// member UUID). The freshness guard runs only when the distributor supplied the
-// wrapped-against public-key version (fail-open for old clients) and serializes
-// against a concurrent ReplaceMyKeys/RecoveryResetAccount so a stale wrapped key
-// cannot re-create a row the reset just purged. A statement error poisons the
-// whole PG transaction (25P02), so insert failures fail the batch via the error.
-func (h *Handler) distributeOneChannelKey(ctx context.Context, tx *sql.Tx, channelID, memberUserID, wrappedKey string, wrappedKeyVersions map[string]int, keyVersion int) (distributionOutcome, error) {
-	admitted, skippedOnError := h.distributionTargetAdmitted(ctx, tx, channelID, memberUserID, keyVersion)
-	if skippedOnError {
-		return distributionSkippedOnError, nil
-	}
-	if !admitted {
-		return distributionSkipped, nil
-	}
-
-	if wrappedVersion, ok := wrappedKeyVersions[memberUserID]; ok {
-		fresh, fErr := recipientKeyFresh(ctx, tx, memberUserID, wrappedVersion)
-		if fErr != nil {
-			return distributionSkipped, fErr
-		}
-		if !fresh {
-			// A stale wrap for a target that already holds the current key is
-			// redundant, not a reason to re-request it (VULN-080).
-			held, hErr := channelKeyHeldTx(ctx, tx, channelID, memberUserID, keyVersion)
-			if hErr != nil {
-				return distributionSkipped, hErr
-			}
-			if held {
-				return distributionDuplicate, nil
-			}
-			if eErr := enqueueChannelKeyRequest(ctx, tx, channelID, memberUserID); eErr != nil {
-				return distributionSkipped, fmt.Errorf("enqueue self-heal: %w", eErr)
-			}
-			return distributionSkippedStale, nil
+// wellFormedChannelKeyTargets returns the wrapped-key recipients that parse as
+// UUIDs, sorted, so every statement of the batch visits them in one order. A
+// recipient that does not parse is ignored, as before.
+func wellFormedChannelKeyTargets(wrappedKeys map[string]string) []string {
+	targets := make([]string, 0, len(wrappedKeys))
+	for memberUserID := range wrappedKeys {
+		if _, err := uuid.Parse(memberUserID); err == nil {
+			targets = append(targets, memberUserID)
 		}
 	}
-
-	inserted, insErr := insertWrappedChannelKeyTx(ctx, tx, channelID, memberUserID, wrappedKey, keyVersion)
-	if insErr != nil {
-		h.log.Error("Failed to store key for member", "error", insErr, "user_id", memberUserID)
-		return distributionSkipped, fmt.Errorf("store key: %w", insErr)
-	}
-	if !inserted {
-		return distributionDuplicate, nil
-	}
-	return distributionDelivered, nil
+	slices.Sort(targets)
+	return targets
 }
 
-// insertWrappedChannelKeyTx inserts one wrapped key inside the caller's
-// epoch-guarded transaction. inserted=false with a nil error means the
-// (channel, user, version) row already existed.
-func insertWrappedChannelKeyTx(ctx context.Context, tx *sql.Tx, channelID, memberUserID, wrappedKey string, keyVersion int) (inserted bool, err error) {
-	result, err := tx.ExecContext(ctx,
-		`INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (channel_id, user_id, key_version) DO NOTHING`,
-		channelID, memberUserID, wrappedKey, keyVersion,
-	)
+// splitStaleChannelKeyTargetsTx separates the admitted targets the #2420
+// freshness guard refuses, because the distributor wrapped against a public-key
+// version that is no longer current, from the targets to insert. The guard
+// applies only to a target with a wrapped_key_versions entry; one without keeps
+// the legacy bare insert (fail-open for old clients).
+func splitStaleChannelKeyTargetsTx(ctx context.Context, tx *sql.Tx, admitted []string, wrappedKeyVersions map[string]int) (insert, stale []string, err error) {
+	versioned := make([]string, 0, len(admitted))
+	for _, memberUserID := range admitted {
+		if _, ok := wrappedKeyVersions[memberUserID]; ok {
+			versioned = append(versioned, memberUserID)
+		}
+	}
+	current, err := currentPublicKeyVersionsTx(ctx, tx, versioned)
 	if err != nil {
-		return false, err
+		return nil, nil, err
 	}
-	rowsAffected, raErr := result.RowsAffected()
-	if raErr != nil {
-		// #2201 review: a RowsAffected error means we can't tell whether the
-		// wrapped-key row landed. Fail the batch (caller → 500) rather than
-		// silently classify it not-delivered and skip the delivered notification.
-		return false, fmt.Errorf("rows affected: %w", raErr)
+	insert = make([]string, 0, len(admitted))
+	for _, memberUserID := range admitted {
+		wrappedVersion, guarded := wrappedKeyVersions[memberUserID]
+		currentVersion, hasKey := current[memberUserID]
+		if guarded && (!hasKey || currentVersion != wrappedVersion) {
+			stale = append(stale, memberUserID)
+			continue
+		}
+		insert = append(insert, memberUserID)
 	}
-	return rowsAffected > 0, nil
+	return insert, stale, nil
+}
+
+// recordStaleChannelKeyTargetsTx classifies the stale targets. One that already
+// holds the key at keyVersion is a duplicate: its stale wrap is redundant, not a
+// reason to re-request the key (VULN-080). The rest get the self-heal request
+// and count as skipped_stale.
+func recordStaleChannelKeyTargetsTx(ctx context.Context, tx *sql.Tx, channelID string, keyVersion int, stale []string, tally *channelDistributionTally) error {
+	if len(stale) == 0 {
+		return nil
+	}
+	held, err := channelKeyHoldersTx(ctx, tx, channelID, keyVersion, stale)
+	if err != nil {
+		return err
+	}
+	missing := make([]string, 0, len(stale))
+	for _, memberUserID := range stale {
+		if _, ok := held[memberUserID]; ok {
+			tally.record(distributionDuplicate, memberUserID)
+			continue
+		}
+		missing = append(missing, memberUserID)
+	}
+	if err := enqueueChannelKeyRequestsTx(ctx, tx, channelID, missing); err != nil {
+		return fmt.Errorf("enqueue self-heal: %w", err)
+	}
+	for _, memberUserID := range missing {
+		tally.record(distributionSkippedStale, memberUserID)
+	}
+	return nil
+}
+
+// insertWrappedChannelKeysTx inserts the wrapped keys for userIDs in one
+// statement inside the caller's epoch-guarded transaction and returns the users
+// whose row it wrote. A user it did not write already had the (channel, user,
+// version) row. A statement error, the revoked-epoch trigger included, fails the
+// batch.
+func insertWrappedChannelKeysTx(ctx context.Context, tx *sql.Tx, channelID string, keyVersion int, userIDs []string, wrappedKeys map[string]string) (map[string]struct{}, error) {
+	if len(userIDs) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	keys := make([]string, len(userIDs))
+	for i, memberUserID := range userIDs {
+		keys[i] = wrappedKeys[memberUserID]
+	}
+	rows, err := tx.QueryContext(ctx, `
+		INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
+		SELECT $1, target.user_id, target.wrapped_key, $4
+		FROM unnest($2::uuid[], $3::text[]) AS target(user_id, wrapped_key)
+		ON CONFLICT (channel_id, user_id, key_version) DO NOTHING
+		RETURNING user_id`, channelID, pq.Array(userIDs), pq.Array(keys), keyVersion)
+	if err != nil {
+		return nil, fmt.Errorf("store keys: %w", err)
+	}
+	inserted, err := scanKeyDistributionUserIDs(rows, "stored keys")
+	if err != nil {
+		return nil, fmt.Errorf("store keys: %w", err)
+	}
+	return userIDSet(inserted), nil
+}
+
+// deleteFulfilledChannelKeyRequestsTx deletes the pending requests of the
+// delivered and duplicate targets in one statement, inside the distribution
+// transaction and before its commit (VULN-080).
+//
+// Inside, because pending rows are per (channel, user), not per epoch. A
+// cleanup after commit raced a rotation that committed in between and enqueued
+// the same user for the successor epoch, and deleted that request. Rotation and
+// the key-request enroll both wait on the channel row this transaction holds
+// FOR UPDATE, so neither can write between this DELETE and the commit.
+//
+// The join to channel_keys at keyVersion keeps the request of a target whose
+// key a reset purged after the target was classified: in this statement's
+// snapshot that target no longer holds the key, so the request it needs stays.
+func deleteFulfilledChannelKeyRequestsTx(ctx context.Context, tx *sql.Tx, channelID string, keyVersion int, userIDs []string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM pending_key_requests pending
+		USING channel_keys key
+		WHERE pending.channel_id = $1
+		  AND pending.user_id = ANY($2::uuid[])
+		  AND key.channel_id = pending.channel_id
+		  AND key.user_id = pending.user_id
+		  AND key.key_version = $3
+	`, channelID, pq.Array(userIDs), keyVersion); err != nil {
+		return fmt.Errorf("clear fulfilled key requests: %w", err)
+	}
+	return nil
 }
 
 // respondKeyDistributionError maps a distribution failure onto the wire (#2201):
@@ -2903,10 +3026,18 @@ func (h *Handler) respondKeyDistributionError(c *gin.Context, distErr error, con
 // distributionTimeoutsSQL bounds a key-distribution transaction (VULN-079):
 // lock_timeout a wait on the channel or conversation lock, statement_timeout
 // any one statement, idle_in_transaction_session_timeout a transaction left
-// open between statements. All three are SET LOCAL because the same pool runs
-// migrations, which a pool-wide statement_timeout would cut short. It is a
+// open between statements. statement_timeout sits below keyDistributionDeadline,
+// so one slow statement fails with room left to roll back and answer 503 before
+// the server's 15 s WriteTimeout. All three are SET LOCAL because the same pool
+// runs migrations, which a pool-wide statement_timeout would cut short. It is a
 // const statement, never built from input.
-const distributionTimeoutsSQL = `SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '15s'; SET LOCAL idle_in_transaction_session_timeout = '15s'`
+const distributionTimeoutsSQL = `SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '10s'; SET LOCAL idle_in_transaction_session_timeout = '15s'`
+
+// keyDistributionDeadline bounds a whole channel-key distribution request, its
+// pre-checks included (VULN-079). It sits below the server's 15 s WriteTimeout
+// (cmd/server/main.go), so a distribution that overruns still has its 503
+// written instead of the connection dropped.
+const keyDistributionDeadline = 12 * time.Second
 
 // msgDMDistributionRollbackFailed is logged when a DM distribution rollback fails.
 const msgDMDistributionRollbackFailed = "Failed to rollback dm distribution tx"
@@ -2926,9 +3057,13 @@ const (
 )
 
 // keyDistributionTimeoutClass reports whether a distribution gave up on one of
-// its bounds — lock_timeout (55P03) or statement_timeout (57014, which a
-// cancelled request also raises) — and the failure class to log for it.
+// its bounds — the request deadline, lock_timeout (55P03) or statement_timeout
+// (57014, which the driver's cancel on an expired context also raises) — and the
+// failure class to log for it.
 func keyDistributionTimeoutClass(err error) (string, bool) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "distribution_deadline", true
+	}
 	var pqErr *pq.Error
 	if !errors.As(err, &pqErr) {
 		return "", false
@@ -2947,6 +3082,11 @@ func keyDistributionTimeoutClass(err error) (string, bool) {
 // written and the client may retry. It reports whether it responded.
 func (h *Handler) respondKeyDistributionTimeout(c *gin.Context, distErr error, contextID, body string) bool {
 	class, timedOut := keyDistributionTimeoutClass(distErr)
+	if c.Request != nil && errors.Is(c.Request.Context().Err(), context.Canceled) {
+		// The client went away. The statement may report that as a cancelled
+		// query or a closed transaction; either way it is not a server bound.
+		class, timedOut = "distribution_client_canceled", true
+	}
 	if !timedOut {
 		return false
 	}
@@ -3072,17 +3212,41 @@ func (h *Handler) resolveChannelKeyDistributionVersion(ctx context.Context, tx *
 	return state, nil
 }
 
-func (h *Handler) distributeChannelKeyBatch(ctx context.Context, tx *sql.Tx, req channelKeyDistributionRequest, keyVersion int) (channelDistributionTally, error) {
+// distributeChannelKeyBatch classifies and writes a whole batch in a fixed
+// number of statements on tx: admission, the #2420 freshness read for targets
+// with a wrapped-against version, the held check for stale ones, the self-heal
+// enqueue, the key insert, and the pending cleanup. Each target's outcome is the
+// one the per-target loop gave for the same state: not admitted is skipped;
+// stale and already holding the key is a duplicate; stale otherwise is
+// skipped_stale with a self-heal request; inserted is delivered; an insert
+// conflict is a duplicate.
+func (h *Handler) distributeChannelKeyBatch(ctx context.Context, tx *sql.Tx, req channelKeyDistributionRequest, serverID string, keyVersion int) (channelDistributionTally, error) {
 	var tally channelDistributionTally
-	for memberUserID, wrappedKey := range req.wrappedKeys {
-		if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
-			continue
+	admitted, err := h.admitChannelKeyTargetsTx(ctx, tx, serverID, req.channelID, wellFormedChannelKeyTargets(req.wrappedKeys))
+	if err != nil {
+		return tally, err
+	}
+	insert, stale, err := splitStaleChannelKeyTargetsTx(ctx, tx, admitted, req.wrappedKeyVersions)
+	if err != nil {
+		return tally, err
+	}
+	if err := recordStaleChannelKeyTargetsTx(ctx, tx, req.channelID, keyVersion, stale, &tally); err != nil {
+		return tally, err
+	}
+	inserted, err := insertWrappedChannelKeysTx(ctx, tx, req.channelID, keyVersion, insert, req.wrappedKeys)
+	if err != nil {
+		return tally, err
+	}
+	for _, memberUserID := range insert {
+		if _, ok := inserted[memberUserID]; ok {
+			tally.record(distributionDelivered, memberUserID)
+		} else {
+			tally.record(distributionDuplicate, memberUserID)
 		}
-		outcome, err := h.distributeOneChannelKey(ctx, tx, req.channelID, memberUserID, wrappedKey, req.wrappedKeyVersions, keyVersion)
-		if err != nil {
-			return tally, err
-		}
-		tally.record(outcome, memberUserID)
+	}
+	fulfilled := append(slices.Clone(tally.delivered), tally.duplicate...)
+	if err := deleteFulfilledChannelKeyRequestsTx(ctx, tx, req.channelID, keyVersion, fulfilled); err != nil {
+		return tally, err
 	}
 	return tally, nil
 }
@@ -3091,7 +3255,7 @@ func (h *Handler) completeChannelKeyDistribution(ctx context.Context, tx *sql.Tx
 	if state.keyVersion > 1 && tally.distributed == 0 && tally.duplicates == 0 {
 		return state, errNoChannelKeyRecipients
 	}
-	if state.initialKeyVersion > 0 && tally.skippedErrors == 0 {
+	if state.initialKeyVersion > 0 {
 		incomplete, err := h.finishInitialKeyDistribution(ctx, tx, req.channelID, state.keyVersion)
 		if err != nil {
 			return state, err
@@ -3112,15 +3276,11 @@ func (h *Handler) completeChannelKeyDistribution(ctx context.Context, tx *sql.Tx
 }
 
 func (h *Handler) notifyChannelKeyDistribution(req channelKeyDistributionRequest, state channelKeyDistributionState, tally channelDistributionTally) {
+	// Pending requests were cleared inside the transaction
+	// (deleteFulfilledChannelKeyRequestsTx). A duplicate gets no key_delivered:
+	// nothing new was written for it.
 	for _, memberUserID := range tally.delivered {
-		h.deletePendingChannelKeyRequest(req.channelID, memberUserID)
 		h.notifyKeyDelivered(req.channelID, memberUserID)
-	}
-	// A duplicate target already holds the key at the epoch-validated version,
-	// which can only have been written after its latest key reset, so its
-	// pending request is redundant (VULN-080). No key_delivered: nothing new.
-	for _, memberUserID := range tally.duplicate {
-		h.deletePendingChannelKeyRequest(req.channelID, memberUserID)
 	}
 	if state.initialDistributionIncomplete {
 		// A marker remains creator-only even after it advances. Wake that
@@ -3133,27 +3293,14 @@ func (h *Handler) notifyChannelKeyDistribution(req channelKeyDistributionRequest
 	}
 }
 
-// deletePendingChannelKeyRequest is best-effort POST-commit housekeeping: the
-// key row is already durable, and a failed DELETE inside the tx would poison
-// the whole batch (25P02) for what is only retry-safe cleanup.
-func (h *Handler) deletePendingChannelKeyRequest(channelID, memberUserID string) {
-	if _, err := h.db.Exec(
-		`DELETE FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
-		channelID, memberUserID,
-	); err != nil {
-		h.log.Warn("key distribution: pending cleanup failed",
-			"channel_id", sanitizeID(channelID), "user_id", sanitizeID(memberUserID), "error", err)
-	}
-}
-
 // distributeChannelKeysToMembers writes wrapped keys inside ONE transaction
 // guarded by the distributing actor's credential epoch (#2201): a distributor
 // admitted before a destructive key reset cannot recreate wrapped-key rows
 // after it (GuardTx FOR SHARE serializes against the reset's user-row lock).
 // key_delivered notifications fire only after commit so a notified client
 // never fetches an uncommitted row. A guard/transaction failure returns an
-// error (the caller maps epoch errors to 401); per-member insert errors keep
-// their existing skip semantics.
+// error (the caller maps epoch errors to 401), and so does any statement error
+// in the batch: nothing is written and the client retries.
 func (h *Handler) distributeChannelKeysToMembers(ctx context.Context, req channelKeyDistributionRequest) (channelDistributionTally, error) {
 	var tally channelDistributionTally
 	normalizedWrappedKeys, normalizedVersions, err := canonicalizeWrappedKeyMaps(req.wrappedKeys, req.wrappedKeyVersions)
@@ -3181,7 +3328,7 @@ func (h *Handler) distributeChannelKeysToMembers(ctx context.Context, req channe
 	if err != nil {
 		return tally, err
 	}
-	tally, err = h.distributeChannelKeyBatch(ctx, tx, req, state.keyVersion)
+	tally, err = h.distributeChannelKeyBatch(ctx, tx, req, state.serverID, state.keyVersion)
 	if err != nil {
 		return tally, err
 	}
@@ -3322,10 +3469,10 @@ func (h *Handler) finishInitialKeyDistribution(ctx context.Context, tx *sql.Tx, 
 // distribution. Split out (with record) to keep distributeChannelKeysToMembers
 // under the cognitive-complexity ceiling.
 type channelDistributionTally struct {
-	distributed, duplicates, skippedErrors, skippedStale int
-	delivered, holders                                   []string
+	distributed, duplicates, skippedStale int
+	delivered, holders                    []string
 	// duplicate lists the targets that already held the key; their pending
-	// requests are deleted after commit.
+	// requests are deleted with the delivered targets' before commit.
 	duplicate []string
 }
 
@@ -3339,14 +3486,11 @@ func (t *channelDistributionTally) record(outcome distributionOutcome, memberUse
 		t.holders = append(t.holders, memberUserID)
 		t.duplicate = append(t.duplicate, memberUserID)
 		t.duplicates++
-	case distributionSkippedOnError:
-		t.skippedErrors++
 	case distributionSkippedStale:
-		// Guarded out (#2420): recipient rotated after wrap. Counted apart from
-		// skippedErrors — this is a deterministic skip (retrying the SAME stale
-		// wrap won't help; the in-tx self-heal enqueue re-requests a fresh wrap),
-		// so it must NOT trip the transient-retry 503 the caller raises for
-		// skippedErrors. No key_delivered notification fires.
+		// Guarded out (#2420): recipient rotated after wrap. A deterministic skip
+		// (retrying the SAME stale wrap won't help; the in-tx self-heal enqueue
+		// re-requests a fresh wrap), reported apart from the retryable failures.
+		// No key_delivered notification fires.
 		t.skippedStale++
 	case distributionSkipped:
 	}
@@ -4326,8 +4470,8 @@ func resolveTargetKeyVersionDM(
 // distributeDMKeys mirrors distributeChannelKeysToMembers' guarded-transaction
 // shape (#2201): one tx, actor epoch checked under user locks before domain
 // locks, post-commit notifications.
-// insertWrappedDMKeyTx mirrors insertWrappedChannelKeyTx for the unified-DM
-// branch: inserted=false means an idempotent duplicate; any error (statement OR
+// insertWrappedDMKeyTx is the per-target DM counterpart of
+// insertWrappedChannelKeysTx for the unified-DM branch: inserted=false means an idempotent duplicate; any error (statement OR
 // RowsAffected — the latter leaves delivery unknowable, Codex #2397 review)
 // fails the batch.
 func insertWrappedDMKeyTx(ctx context.Context, tx *sql.Tx, conversationID, memberUserID, wrappedKey string, keyVersion int) (inserted bool, err error) {
@@ -4692,7 +4836,7 @@ func admitDMCurrentEpochWriteTx(ctx context.Context, tx *sql.Tx, conversationID,
 
 // dmActorHoldsEpochTx reports whether actorID has a wrapped key at version.
 // It serves both the epoch-claim fence and the distribution already-held
-// check (the DM analogue of channelKeyHeldTx).
+// check (the DM analogue of channelKeyHoldersTx).
 func dmActorHoldsEpochTx(ctx context.Context, tx *sql.Tx, conversationID, actorID string, version int) (bool, error) {
 	var holder bool
 	if err := tx.QueryRowContext(ctx, `
@@ -4877,8 +5021,7 @@ func (h *Handler) notifyDMKeyDistribution(conversationID string, delivered, clea
 	}
 }
 
-// deletePendingDMKeyRequest is best-effort POST-commit cleanup — see
-// deletePendingChannelKeyRequest, which logs this same failure. A failure must
+// deletePendingDMKeyRequest is best-effort POST-commit cleanup. A failure must
 // be logged, not discarded: it is self-amplifying, because a pending row that
 // outlives its own fulfilment keeps the recipient in pendingKeyRequestsPage,
 // so every holder re-POSTs for them each sweep, against the per-conversation

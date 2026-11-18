@@ -1,8 +1,10 @@
 package channels
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -103,7 +105,7 @@ func newKeyAccessHandler(db *sql.DB) *Handler {
 // expectation AND equality with the pool variant, so a regression in either
 // cannot hide behind the other. Where the caller is a member it also compares
 // the full permission masks of the two resolver entry points.
-func TestChannelKeyAccessTx_MatchesPoolVariant(t *testing.T) {
+func TestChannelKeyAdmissionTx_MatchesPoolVariant(t *testing.T) {
 	db, cleanup := dbtest.SetupTestDB(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -177,29 +179,41 @@ func TestChannelKeyAccessTx_MatchesPoolVariant(t *testing.T) {
 		}, false, false},
 	}
 
+	nilResolver := NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			channelID, userID := tc.setup(keyAccessFixture{t: t, db: db})
+			var serverID string
+			require.NoError(t, db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID))
 
-			poolMember, poolView, poolErr := h.channelKeyAccess(ctx, channelID, userID)
-			require.NoError(t, poolErr)
-
-			tx, err := db.BeginTx(ctx, nil)
-			require.NoError(t, err)
-			defer func() { _ = tx.Rollback() }()
-			txMember, txView, txErr := h.channelKeyAccessTx(ctx, tx, channelID, userID)
-			require.NoError(t, txErr)
-
-			assert.Equal(t, tc.wantMember, txMember, "tx variant membership")
-			assert.Equal(t, tc.wantView, txView, "tx variant view")
-			assert.Equal(t, poolMember, txMember, "membership must match the pool variant")
-			assert.Equal(t, poolView, txView, "view must match the pool variant")
+			// The batch admission must give the per-user pool check's answer,
+			// with the resolver and without one (membership alone admits).
+			variants := []struct {
+				name      string
+				h         *Handler
+				wantAdmit bool
+			}{
+				{"resolver", h, tc.wantMember && tc.wantView},
+				{"nil resolver", nilResolver, tc.wantMember},
+			}
+			for _, v := range variants {
+				poolMember, poolView, poolErr := v.h.channelKeyAccess(ctx, channelID, userID)
+				require.NoError(t, poolErr)
+				tx, err := db.BeginTx(ctx, nil)
+				require.NoError(t, err)
+				admitted, txErr := v.h.admitChannelKeyTargetsTx(ctx, tx, serverID, channelID, []string{userID})
+				require.NoError(t, tx.Rollback())
+				require.NoError(t, txErr)
+				assert.Equal(t, v.wantAdmit, len(admitted) == 1, "%s: batch admission", v.name)
+				assert.Equal(t, poolMember && poolView, len(admitted) == 1, "%s: batch admission must match the pool check", v.name)
+			}
 
 			if !tc.wantMember {
 				return
 			}
-			var serverID string
-			require.NoError(t, db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID))
+			tx, err := db.BeginTx(ctx, nil)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
 			poolMask, err := h.resolver.ResolveEffectivePermissionsUncached(ctx, serverID, userID, channelID)
 			require.NoError(t, err)
 			txMask, err := h.resolver.ResolveChannelPermissionsTx(ctx, tx, serverID, userID, channelID)
@@ -207,6 +221,30 @@ func TestChannelKeyAccessTx_MatchesPoolVariant(t *testing.T) {
 			assert.Equal(t, poolMask, txMask, "permission masks must match")
 		})
 	}
+}
+
+// TestChannelKeyAdmissionTx_MixedBatch: one statement answers for every target
+// in the batch, so a viewer, a member without view, and a stranger sent
+// together get the same answers they get alone.
+func TestChannelKeyAdmissionTx_MixedBatch(t *testing.T) {
+	db, cleanup := dbtest.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	f := keyAccessFixture{t: t, db: db}
+	srv := f.server(f.user())
+	ch := f.channel(srv, "text")
+	viewer, hidden, stranger := f.user(), f.user(), f.user()
+	f.member(srv, viewer)
+	f.grantRole(srv, viewer, rbac.PermViewTextChannels)
+	f.member(srv, hidden)
+	h := newKeyAccessHandler(db)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	admitted, err := h.admitChannelKeyTargetsTx(ctx, tx, srv, ch, []string{stranger, hidden, viewer})
+	require.NoError(t, err)
+	assert.Equal(t, []string{viewer}, admitted)
 }
 
 // TestDistribution_NoPoolConnWhileTxOpen is the VULN-079 shape at its
@@ -233,20 +271,18 @@ func TestDistribution_NoPoolConnWhileTxOpen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	start := time.Now()
-	admitted, skippedOnError := h.distributionTargetAdmitted(ctx, tx, ch, target, 1)
+	admitted, err := h.admitChannelKeyTargetsTx(ctx, tx, srv, ch, []string{target})
 	elapsed := time.Since(start)
 
 	assert.Less(t, elapsed, deadline, "the check must not wait for a second pool connection")
-	assert.False(t, skippedOnError, "the check must not fail")
-	assert.True(t, admitted, "a viewing member is admitted")
+	require.NoError(t, err, "the check must not fail")
+	assert.Equal(t, []string{target}, admitted, "a viewing member is admitted")
 }
 
-// TestDistribution_TargetCheckErrorDoesNotPoisonBatch: a statement error in
-// one target's check aborts the transaction unless it is contained. Target 1's
-// role read hits a lock timeout; target 2 (the owner, whose check never reads
-// roles) and a following insert must still succeed on the same transaction,
-// and target 1 must be enrolled for retry.
-func TestDistribution_TargetCheckErrorDoesNotPoisonBatch(t *testing.T) {
+// TestDistribution_AdmissionTimeoutFailsBatch: a lock timeout in the batch's
+// view check fails the whole batch with an error the route maps to 503. It is
+// never skip-and-continue: no target is admitted on a failed check.
+func TestDistribution_AdmissionTimeoutFailsBatch(t *testing.T) {
 	db, cleanup := dbtest.SetupTestDB(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -271,27 +307,12 @@ func TestDistribution_TargetCheckErrorDoesNotPoisonBatch(t *testing.T) {
 	_, err = tx.ExecContext(ctx, `SET LOCAL lock_timeout = '200ms'`)
 	require.NoError(t, err)
 
-	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	admitted1, skipped1 := h.distributionTargetAdmitted(checkCtx, tx, ch, member, 1)
-	require.False(t, admitted1, "precondition: target 1's check fails")
-	require.True(t, skipped1, "precondition: target 1 is skipped on error")
-
-	admitted2, skipped2 := h.distributionTargetAdmitted(checkCtx, tx, ch, owner, 1)
-	assert.False(t, skipped2, "target 2's check must run on a live transaction")
-	assert.True(t, admitted2, "target 2 is admitted")
-
-	inserted, err := insertWrappedChannelKeyTx(ctx, tx, ch, owner, "a2V5", 1)
-	require.NoError(t, err, "the transaction must still accept writes")
-	assert.True(t, inserted)
-
-	require.NoError(t, locker.Rollback())
-	require.NoError(t, tx.Commit())
-
-	var enrolled int
-	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
-		ch, member).Scan(&enrolled))
-	assert.Equal(t, 1, enrolled, "target 1 is enrolled for retry")
+	admitted, err := h.admitChannelKeyTargetsTx(ctx, tx, srv, ch, []string{member, owner})
+	require.Error(t, err)
+	assert.Nil(t, admitted, "a failed check admits nobody")
+	class, timedOut := keyDistributionTimeoutClass(err)
+	assert.True(t, timedOut, "the lock timeout must reach the 503 mapping: %v", err)
+	assert.Equal(t, "distribution_lock_timeout", class)
 }
 
 // TestSetDistributionTimeouts_AppliesInTxOnly: the bounds hold inside the
@@ -312,7 +333,7 @@ func TestSetDistributionTimeouts_AppliesInTxOnly(t *testing.T) {
 	}
 	bounds := map[string]string{
 		"lock_timeout":                        "5s",
-		"statement_timeout":                   "15s",
+		"statement_timeout":                   "10s",
 		"idle_in_transaction_session_timeout": "15s",
 	}
 
@@ -358,51 +379,35 @@ func TestRespondKeyDistributionTimeout(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 		assert.Contains(t, w.Body.String(), errMsgFailedRotateKey)
 	})
+	t.Run("an expired request deadline is a retryable 503", func(t *testing.T) {
+		c, w := newInternalTestContext()
+		h.respondKeyDistributionError(c, errors.Join(sql.ErrTxDone, context.DeadlineExceeded), "ctx-5")
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Contains(t, w.Body.String(), errMsgFailedDistributeKeys)
+	})
+	t.Run("a client cancel is logged with its own class", func(t *testing.T) {
+		var logs bytes.Buffer
+		logged := &Handler{log: logger.NewWithWriter(&logs)}
+		c, w := newInternalTestContext()
+		reqCtx, cancelReq := context.WithCancel(context.Background())
+		cancelReq()
+		c.Request = c.Request.WithContext(reqCtx)
+		logged.respondKeyDistributionError(c, stmtTimeout, "ctx-6")
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Contains(t, logs.String(), "distribution_client_canceled")
+		assert.NotContains(t, logs.String(), "distribution_statement_timeout")
+	})
+	t.Run("a statement timeout without a cancel keeps its class", func(t *testing.T) {
+		var logs bytes.Buffer
+		logged := &Handler{log: logger.NewWithWriter(&logs)}
+		c, _ := newInternalTestContext()
+		logged.respondKeyDistributionError(c, stmtTimeout, "ctx-7")
+		assert.Contains(t, logs.String(), "distribution_statement_timeout")
+		assert.NotContains(t, logs.String(), "distribution_client_canceled")
+	})
 	t.Run("another database error stays a 500", func(t *testing.T) {
 		c, w := newInternalTestContext()
 		h.respondKeyDistributionError(c, fmt.Errorf("store key: %w", &pq.Error{Code: "23505"}), "ctx-4")
 		assert.Equal(t, http.StatusInternalServerError, w.Code)
 	})
-}
-
-// TestDistribution_CheckErrorForHolderDoesNotEnroll: the skip-and-enrol path
-// must not write a pending request for a target that already holds the key at
-// the batch version (VULN-080). TestDistribution_TargetCheckErrorDoesNotPoisonBatch
-// is the positive control: a target without the key is enrolled.
-func TestDistribution_CheckErrorForHolderDoesNotEnroll(t *testing.T) {
-	db, cleanup := dbtest.SetupTestDB(t)
-	t.Cleanup(cleanup)
-	ctx := context.Background()
-	f := keyAccessFixture{t: t, db: db}
-	srv := f.server(f.user())
-	ch := f.channel(srv, "text")
-	member := f.user()
-	f.member(srv, member)
-	f.grantRole(srv, member, rbac.PermViewTextChannels)
-	_, err := db.Exec(`INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version) VALUES ($1, $2, 'a2V5', 1)`, ch, member)
-	require.NoError(t, err)
-	h := newKeyAccessHandler(db)
-
-	locker, err := db.BeginTx(ctx, nil)
-	require.NoError(t, err)
-	defer func() { _ = locker.Rollback() }()
-	_, err = locker.ExecContext(ctx, `LOCK TABLE roles IN ACCESS EXCLUSIVE MODE`)
-	require.NoError(t, err)
-
-	tx, err := db.BeginTx(ctx, nil)
-	require.NoError(t, err)
-	defer func() { _ = tx.Rollback() }()
-	_, err = tx.ExecContext(ctx, `SET LOCAL lock_timeout = '200ms'`)
-	require.NoError(t, err)
-
-	admitted, skipped := h.distributionTargetAdmitted(ctx, tx, ch, member, 1)
-	require.False(t, admitted, "precondition: the check fails")
-	require.True(t, skipped, "precondition: the target is skipped on error")
-
-	require.NoError(t, locker.Rollback())
-	require.NoError(t, tx.Commit())
-	var enrolled int
-	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
-		ch, member).Scan(&enrolled))
-	assert.Equal(t, 0, enrolled, "a holder is not enrolled for retry")
 }
