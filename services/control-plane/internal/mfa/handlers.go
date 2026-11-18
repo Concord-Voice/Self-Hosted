@@ -3848,12 +3848,7 @@ func isValidEmail(email string) bool {
 // GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
 // Implements auth.MFAChecker interface.
 func (h *Handler) GenerateRecoveryToken(userID, verifiedFactor string) (string, string, error) {
-	if verifiedFactor != "email" && verifiedFactor != "totp" && verifiedFactor != "webauthn" {
-		return "", "", errors.New("invalid recovery proof")
-	}
-	return generateChallengeTokenWithTTL(ChallengeClaims{
-		UserID: userID, Purpose: PurposeRecovery, RecoveryFactor: verifiedFactor,
-	}, JWTSecret(h.jwtSecret), recoveryTTL)
+	return GenerateRecoveryToken(userID, verifiedFactor, JWTSecret(h.jwtSecret), "")
 }
 
 // ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.

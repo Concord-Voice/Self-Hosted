@@ -61,6 +61,13 @@ type RecoveryClaims struct {
 	UserID         string
 	JTI            string
 	ExpiresAt      time.Time // Verified JWT expiry; only the device ceremony uses this lifetime.
+	// CredentialEpoch is the users.credential_epoch the token was issued
+	// against; empty means the account had never rotated.
+	CredentialEpoch string
+	// EpochBound is set only by ValidateRecoveryToken after it verified a
+	// recovery_v3 token. ValidateRecoveryClaimsTx refuses claims without it, so
+	// a hand-built or zero-value RecoveryClaims authorizes nothing.
+	EpochBound bool
 }
 
 // ErrRecoveryPolicyUnavailable means current recovery policy could not be evaluated.
@@ -3238,10 +3245,15 @@ func (h *Handler) revokeLogoutSession(c *gin.Context, claims *Claims, refreshTok
 const (
 	recoveryCodeTTL       = 10 * time.Minute // Recovery code expires after 10 minutes
 	recoveryMaxAttempts   = 5                // Max wrong-code attempts before invalidating
-	recoveryTokenUsedTTL  = 25 * time.Hour   // Must match or exceed mfa.recoveryTTL
 	recoveryFailureLimit  = 10
 	recoveryFailureWindow = 24 * time.Hour
 )
+
+// RecoveryTokenTTL is the lifetime of final recovery authority and of its
+// spent marker (ADR-0046 decision 7). The device ceremony and the reset share
+// it. Social recovery needed 24 hours and is paused; un-pausing it needs a
+// request-scoped credential, not a longer token.
+const RecoveryTokenTTL = 15 * time.Minute
 
 const recoveryFailureKeyPrefix = "recovery_fail:"
 
@@ -3907,7 +3919,7 @@ func (h *Handler) validateAndConsumeRecoveryToken(c *gin.Context, tokenStr strin
 
 	ctx := c.Request.Context()
 	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
-	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: recoveryTokenUsedTTL, Mode: "NX"}).Result()
+	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: RecoveryTokenTTL, Mode: "NX"}).Result()
 	if errors.Is(err, redis.Nil) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
 		return nil, ""

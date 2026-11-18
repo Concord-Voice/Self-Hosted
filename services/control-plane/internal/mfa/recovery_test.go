@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/gin-gonic/gin"
@@ -141,7 +142,7 @@ func TestRecoveryPolicyRejectsPriorEmailAuthorityAfterTightening(t *testing.T) {
 		match:  recoveryPolicyQuery,
 		values: []driver.Value{[]byte("{totp}"), true, []byte("{totp}"), true, false},
 	})
-	token, _, err := GenerateRecoveryToken(enrollUser, JWTSecret("test"))
+	token, _, err := GenerateRecoveryToken(enrollUser, "email", JWTSecret("test"), "")
 	require.NoError(t, err)
 	_, err = h.ValidateRecoveryToken(context.Background(), token)
 	require.Error(t, err, "email-only authority must not bypass the current reserved authenticator")
@@ -184,7 +185,7 @@ func TestFinalRecoveryAuthorityFailsClosedWithoutProofOrPolicy(t *testing.T) {
 	_, err = h.ValidateRecoveryToken(context.Background(), token)
 	require.ErrorIs(t, err, errReadFailed)
 	require.ErrorIs(t, err, auth.ErrRecoveryPolicyUnavailable)
-	token, _, err = GenerateChallengeToken(enrollUser, PurposeRecovery, JWTSecret("test"), "")
+	token, _, err = generateChallengeTokenWithTTL(ChallengeClaims{UserID: enrollUser, Purpose: PurposeRecovery}, JWTSecret("test"), time.Minute)
 	require.NoError(t, err)
 	_, err = h.ValidateRecoveryToken(context.Background(), token)
 	require.ErrorContains(t, err, "recovery proof missing")

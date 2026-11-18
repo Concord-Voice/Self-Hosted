@@ -4,8 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/stretchr/testify/require"
 )
 
 const testJWTSecret = "test-secret-for-mfa-challenges" // #nosec G101
@@ -103,7 +105,7 @@ func TestValidateChallengeTokenWrongSecret(t *testing.T) {
 }
 
 func TestGenerateRecoveryToken(t *testing.T) {
-	token, jti, err := GenerateRecoveryToken("user-456", testJWTSecret)
+	token, jti, err := GenerateRecoveryToken("user-456", "email", testJWTSecret, "")
 	if err != nil {
 		t.Fatalf("GenerateRecoveryToken failed: %v", err)
 	}
@@ -126,15 +128,15 @@ func TestGenerateRecoveryToken(t *testing.T) {
 		t.Errorf("Purpose = %q, want %q", claims.Purpose, PurposeRecovery)
 	}
 
-	// Verify ~25 hour TTL (should expire between 24h59m and 25h10s from now)
+	// Verify ~15 minute TTL (ADR-0046 decision 7).
 	expiresIn := time.Until(claims.ExpiresAt.Time)
-	if expiresIn < 24*time.Hour+59*time.Minute || expiresIn > 25*time.Hour+10*time.Second {
-		t.Errorf("recovery token TTL = %v, want ~25 hours", expiresIn)
+	if expiresIn < 14*time.Minute+50*time.Second || expiresIn > 15*time.Minute+10*time.Second {
+		t.Errorf("recovery token TTL = %v, want ~15 minutes", expiresIn)
 	}
 }
 
 func TestRecoveryTokenRejectsRotatedSigningSecret(t *testing.T) {
-	token, _, err := GenerateRecoveryToken("user-456", testJWTSecret)
+	token, _, err := GenerateRecoveryToken("user-456", "email", testJWTSecret, "")
 	if err != nil {
 		t.Fatalf("GenerateRecoveryToken failed: %v", err)
 	}
@@ -146,7 +148,7 @@ func TestRecoveryTokenRejectsRotatedSigningSecret(t *testing.T) {
 }
 
 func TestRecoveryTokenRejectsWrongPurpose(t *testing.T) {
-	token, _, err := GenerateRecoveryToken("user-456", testJWTSecret)
+	token, _, err := GenerateRecoveryToken("user-456", "email", testJWTSecret, "")
 	if err != nil {
 		t.Fatalf("GenerateRecoveryToken failed: %v", err)
 	}
@@ -221,19 +223,51 @@ func TestGenerateChallengeTokenEmptyEpochOmitsClaim(t *testing.T) {
 	}
 }
 
-func TestGenerateRecoveryTokenCarriesNoEpoch(t *testing.T) {
-	// Recovery tokens never reach CompleteLogin — completeVerifyPurpose routes only
-	// PurposeLogin to a session mint — so they are deliberately unstamped (#2418).
-	token, _, err := GenerateRecoveryToken("user-456", testJWTSecret)
-	if err != nil {
-		t.Fatalf("GenerateRecoveryToken failed: %v", err)
-	}
-
+func TestGenerateRecoveryTokenStampsEpochPurposeAndTTL(t *testing.T) {
+	token, jti, err := GenerateRecoveryToken("user-456", "email", testJWTSecret, CredEpoch("e1"))
+	require.NoError(t, err)
 	claims, err := ValidateChallengeToken(token, testJWTSecret, PurposeRecovery)
-	if err != nil {
-		t.Fatalf("ValidateChallengeToken failed: %v", err)
+	require.NoError(t, err)
+	require.Equal(t, ChallengePurpose("recovery_v3"), claims.Purpose)
+	require.Equal(t, "e1", claims.CredentialEpoch)
+	require.Equal(t, "email", claims.RecoveryFactor)
+	require.Equal(t, jti, claims.ID)
+	require.Equal(t, auth.RecoveryTokenTTL, claims.ExpiresAt.Sub(claims.IssuedAt.Time))
+	require.Equal(t, 15*time.Minute, auth.RecoveryTokenTTL)
+
+	// A never-rotated account mints with an empty epoch; the purpose version,
+	// not the claim, marks the token as epoch-bound.
+	token, _, err = GenerateRecoveryToken("user-456", "totp", testJWTSecret, "")
+	require.NoError(t, err)
+	claims, err = ValidateChallengeToken(token, testJWTSecret, PurposeRecovery)
+	require.NoError(t, err)
+	require.Empty(t, claims.CredentialEpoch)
+	require.Equal(t, "totp", claims.RecoveryFactor)
+}
+
+func TestGenerateRecoveryTokenRejectsUnknownFactor(t *testing.T) {
+	for _, factor := range []string{"unverified", "", "sms", "backup_code"} {
+		token, jti, err := GenerateRecoveryToken("user-456", factor, testJWTSecret, "e1")
+		require.Error(t, err, factor)
+		require.Empty(t, token)
+		require.Empty(t, jti)
 	}
-	if claims.CredentialEpoch != "" {
-		t.Errorf("CredentialEpoch = %q, want empty for a recovery token", claims.CredentialEpoch)
-	}
+}
+
+func TestGenerateChallengeTokenRefusesRecoveryPurpose(t *testing.T) {
+	token, jti, err := GenerateChallengeToken("user-456", PurposeRecovery, testJWTSecret, "")
+	require.Error(t, err)
+	require.Empty(t, token)
+	require.Empty(t, jti)
+}
+
+// TestLegacyRecoveryPurposeIsRejected proves a token minted before the epoch
+// binding (purpose recovery_v2, no epoch) fails purpose validation everywhere.
+func TestLegacyRecoveryPurposeIsRejected(t *testing.T) {
+	legacy, _, err := generateChallengeTokenWithTTL(ChallengeClaims{
+		UserID: "user-456", Purpose: "recovery_v2", RecoveryFactor: "email",
+	}, testJWTSecret, time.Hour)
+	require.NoError(t, err)
+	_, err = ValidateChallengeToken(legacy, testJWTSecret, PurposeRecovery)
+	require.ErrorContains(t, err, "purpose mismatch")
 }
