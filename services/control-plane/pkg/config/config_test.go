@@ -336,6 +336,25 @@ func TestLoad_AllowedOriginsDefault_OmitsHostedSpaOrigin(t *testing.T) {
 	assert.Contains(t, cfg.AllowedOrigins, "http://localhost:3001")
 }
 
+// The default attestation prefix must match the immutable subject claims this
+// repository's OIDC tokens carry (use_immutable_subject is on), and only those.
+func TestLoad_AttestationOIDCSubjectPrefixDefault_IsImmutableSelfHosted(t *testing.T) {
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("ATTESTATION_OIDC_SUBJECT_PREFIX", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	prefix := cfg.OIDCSubjectPrefix
+	assert.Equal(t, "repo:Concord-Voice@264583090/Self-Hosted@1359565266:", prefix)
+	assert.True(t, strings.HasPrefix("repo:Concord-Voice@264583090/Self-Hosted@1359565266:ref:refs/heads/main", prefix))
+	for _, sub := range []string{
+		"repo:Concord-Voice/Self-Hosted:ref:refs/heads/main",                       // name form is not issued
+		"repo:Concord-Voice@264583090/Self-Hosted@1158152129:ref:refs/heads/main",  // another repository id
+		"repo:Concord-Voice@264583090/Self-Hosted@13595652660:ref:refs/heads/main", // id with a trailing digit
+	} {
+		assert.False(t, strings.HasPrefix(sub, prefix), sub)
+	}
+}
+
 func TestLoadTrustedProxyCIDRs(t *testing.T) {
 	// Pin ENVIRONMENT=development in every sub-test so Load() doesn't hit the
 	// production guards (and fatally exit on unrelated missing prod config)
@@ -1390,7 +1409,7 @@ func validAttestationConfig() *Config {
 		RequireClientAttestation: true,
 		OIDCIssuer:               "https://token.actions.githubusercontent.com",
 		OIDCAudience:             "https://api.concordvoice.chat",
-		OIDCSubjectPrefix:        "repo:Concord-Voice/Self-Hosted:",
+		OIDCSubjectPrefix:        "repo:Concord-Voice@264583090/Self-Hosted@1359565266:",
 		OIDCSPAWorkflow:          "main-cd.yml",
 		OIDCSPARef:               "refs/heads/main",
 		OIDCBinaryWorkflow:       "build-desktop.yml",
@@ -1521,7 +1540,7 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 // own slug must both still pass.
 func TestValidateAttestation_AcceptsFullyQualifiedSubjectPrefix(t *testing.T) {
 	for _, prefix := range []string{
-		"repo:Concord-Voice@264583090/Hosted@1158152129:",
+		"repo:example-org@100/example-repo@200:",
 		"repo:Concord-Voice/Self-Hosted:",
 		"repo:some-operator/their.fork_name:",
 	} {

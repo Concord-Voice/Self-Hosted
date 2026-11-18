@@ -63,7 +63,7 @@ func newTestVerifier() *OIDCVerifier {
 		cfg: OIDCConfig{
 			Issuer:         "https://token.actions.githubusercontent.com",
 			Audience:       "https://api.concordvoice.chat",
-			SubjectPrefix:  "repo:Concord-Voice/Self-Hosted:",
+			SubjectPrefix:  "repo:Concord-Voice@264583090/Self-Hosted@1359565266:",
 			SPAWorkflow:    "main-cd.yml",
 			SPARef:         "refs/heads/main",
 			BinaryWorkflow: "build-desktop.yml",
@@ -90,7 +90,7 @@ const (
 	// canonicalBinaryWorkflowRef likewise for build-desktop.yml.
 	canonicalBinaryWorkflowRef = "Concord-Voice/Self-Hosted/.github/workflows/build-desktop.yml@refs/heads/main"
 	// canonicalSubject mirrors the real GitHub OIDC `sub` claim shape.
-	canonicalSubject = "repo:Concord-Voice/Self-Hosted:ref:refs/heads/main"
+	canonicalSubject = "repo:Concord-Voice@264583090/Self-Hosted@1359565266:ref:refs/heads/main"
 )
 
 // ── SPA axis ───────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ func TestVerifySPA_RejectsWrongWorkflow(t *testing.T) {
 
 func TestVerifySPA_RejectsWrongRef(t *testing.T) {
 	err := newTestVerifier().applySPAPolicy(ghOIDCClaims{
-		Sub:      "repo:Concord-Voice/Self-Hosted:ref:refs/heads/feature/xyz",
+		Sub:      "repo:Concord-Voice@264583090/Self-Hosted@1359565266:ref:refs/heads/feature/xyz",
 		Workflow: "Concord-Voice/Self-Hosted/.github/workflows/main-cd.yml@refs/heads/feature/xyz",
 		Ref:      "refs/heads/feature/xyz",
 	})
@@ -155,7 +155,7 @@ func TestVerifyBinary_RejectsWrongWorkflow(t *testing.T) {
 
 func TestVerifyBinary_RejectsWrongRef(t *testing.T) {
 	err := newTestVerifier().applyBinaryPolicy(ghOIDCClaims{
-		Sub:      "repo:Concord-Voice/Self-Hosted:ref:refs/heads/feature/xyz",
+		Sub:      "repo:Concord-Voice@264583090/Self-Hosted@1359565266:ref:refs/heads/feature/xyz",
 		Workflow: "Concord-Voice/Self-Hosted/.github/workflows/build-desktop.yml@refs/heads/feature/xyz",
 		Ref:      "refs/heads/feature/xyz",
 	})
@@ -296,7 +296,7 @@ func TestNewOIDCVerifier_BadIssuer(t *testing.T) {
 	cfg := OIDCConfig{
 		Issuer:         "https://0.0.0.0:1/unreachable",
 		Audience:       "https://api.concordvoice.chat",
-		SubjectPrefix:  "repo:Concord-Voice/Self-Hosted:",
+		SubjectPrefix:  "repo:Concord-Voice@264583090/Self-Hosted@1359565266:",
 		SPAWorkflow:    "main-cd.yml",
 		SPARef:         "refs/heads/main",
 		BinaryWorkflow: "build-desktop.yml",
@@ -324,7 +324,7 @@ func TestNewOIDCVerifier_EmptyFields(t *testing.T) {
 	base := OIDCConfig{
 		Issuer:         "https://token.actions.githubusercontent.com",
 		Audience:       "https://api.concordvoice.chat",
-		SubjectPrefix:  "repo:Concord-Voice/Self-Hosted:",
+		SubjectPrefix:  "repo:Concord-Voice@264583090/Self-Hosted@1359565266:",
 		SPAWorkflow:    "main-cd.yml",
 		SPARef:         "refs/heads/main",
 		BinaryWorkflow: "build-desktop.yml",
@@ -531,7 +531,7 @@ func oidcAlgPinConfig(issuer string) OIDCConfig {
 	return OIDCConfig{
 		Issuer:         issuer,
 		Audience:       "https://api.concordvoice.chat",
-		SubjectPrefix:  "repo:Concord-Voice/Self-Hosted:",
+		SubjectPrefix:  "repo:Concord-Voice@264583090/Self-Hosted@1359565266:",
 		SPAWorkflow:    "main-cd.yml",
 		SPARef:         "refs/heads/main",
 		BinaryWorkflow: "build-desktop.yml",
