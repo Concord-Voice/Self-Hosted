@@ -311,6 +311,16 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		return
 	}
 
+	// Read before this sign-in is recorded, so "since your last sign-in" is the
+	// previous one. No session is minted when the notice cannot be read: a
+	// sign-in must not silently drop the news that an admin was added.
+	adminsAdded, err := h.audit.AdminsAddedSinceLastSignIn(ctx, challenge.AdminID)
+	if err != nil {
+		h.log.Error("admin sign-in notice read failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+		return
+	}
+
 	sid, err := h.repo.FinalizeWebAuthnLogin(ctx, h.sessions, challenge.AdminID, cred.ID, int64(cred.Authenticator.SignCount))
 	if err != nil {
 		if errors.Is(err, ErrAdminAuthenticationStateChanged) {
@@ -334,7 +344,9 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 
 	adminID := challenge.AdminID
 	h.auditOK(ctx, &adminID, challenge.Username, EventLoginSuccess)
-	c.JSON(http.StatusOK, gin.H{"status": "authenticated"})
+	// admins_added tells this admin how many admins were created in the
+	// console since their previous sign-in; the portal shows it.
+	c.JSON(http.StatusOK, gin.H{"status": "authenticated", "admins_added": adminsAdded})
 }
 
 // Logout revokes the current admin session and clears the cookie. It is mounted

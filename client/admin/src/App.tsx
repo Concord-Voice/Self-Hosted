@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { ApiError, api } from "./api";
+import { ApiError, MAX_ADMINS_ADDED_NOTICE, api } from "./api";
 import concordSymbol from "./assets/logos/symbol-transparent-vector.svg";
 import { AuthScreen } from "./AuthScreen";
 import type { AdminHealthResponse } from "./contracts";
@@ -46,7 +46,7 @@ type View =
 interface EntryContentProps {
   isEnrollment: boolean;
   navigate: (path: string) => void;
-  onAuthenticated: () => void;
+  onAuthenticated: (adminsAdded: number) => void;
   onRetry: () => void;
   view: View;
 }
@@ -93,6 +93,10 @@ export function App({
   const isEnrollment = globalThis.location.pathname === "/admin/enroll";
   const [view, setView] = useState<View>({ kind: "loading" });
   const [probeGeneration, setProbeGeneration] = useState(0);
+  // Admins added since the previous sign-in, kept until this admin dismisses
+  // the notice or the session ends. A second sign-in before the portal opens
+  // adds to it rather than replacing it, so the notice is never lost.
+  const [adminsAdded, setAdminsAdded] = useState(0);
 
   useEffect(() => {
     if (isEnrollment) return;
@@ -127,21 +131,35 @@ export function App({
     setProbeGeneration((generation) => generation + 1);
   };
 
+  const handleAuthenticated = (count: number) => {
+    setAdminsAdded((previous) =>
+      Math.min(previous + count, MAX_ADMINS_ADDED_NOTICE),
+    );
+    retrySessionProbe();
+  };
+
+  const handleSessionEnded = () => {
+    setAdminsAdded(0);
+    setView({ kind: "login" });
+  };
+
   return (
     <div className="app-shell">
       <Brand />
       {!isEnrollment && view.kind === "portal" ? (
         <Portal
+          adminsAdded={adminsAdded}
           initialHealth={view.health}
+          onAdminsAddedDismiss={() => setAdminsAdded(0)}
           onForbidden={reload}
-          onSessionEnded={() => setView({ kind: "login" })}
+          onSessionEnded={handleSessionEnded}
         />
       ) : (
         <main className="app-main">
           <EntryContent
             isEnrollment={isEnrollment}
             navigate={navigate}
-            onAuthenticated={retrySessionProbe}
+            onAuthenticated={handleAuthenticated}
             onRetry={retrySessionProbe}
             view={view}
           />

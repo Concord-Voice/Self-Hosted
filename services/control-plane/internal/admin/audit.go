@@ -163,6 +163,39 @@ func (a *AuditLog) emitAuditWriteFailure(ctx context.Context) {
 	})
 }
 
+// MaxAdminsAddedNotice caps the sign-in notice count; the portal shows the
+// cap as "N or more".
+const MaxAdminsAddedNotice = 100
+
+// AdminsAddedSinceLastSignIn counts console-created admins (admin_created
+// successes, by any admin) recorded since this admin's previous successful
+// sign-in, capped at MaxAdminsAddedNotice. It is 0 on a first sign-in.
+//
+// The window opens ten seconds before the previous sign-in's row, so a
+// creation that committed while that sign-in was being recorded is counted
+// at the next one. Such a creation can be reported twice; none is missed. A
+// lost login_success row widens the window, which also only over-reports.
+func (a *AuditLog) AdminsAddedSinceLastSignIn(ctx context.Context, adminID string) (int, error) {
+	const q = `
+		SELECT LEAST(COUNT(*), $4)::int
+		FROM admin_audit_log
+		WHERE event_type = $2 AND result = $5
+		  AND ts > (
+		    SELECT ts FROM admin_audit_log
+		    WHERE admin_id = $1 AND event_type = $3 AND result = $5
+		    ORDER BY ts DESC
+		    LIMIT 1
+		  ) - interval '10 seconds'
+	`
+	var n int
+	if err := a.db.QueryRowContext(ctx, q,
+		adminID, EventAdminCreated, EventLoginSuccess, MaxAdminsAddedNotice, AuditSuccess,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count admins added since sign-in: %w", err)
+	}
+	return n, nil
+}
+
 // adminIDValue dereferences a nullable admin id pointer to a string ("" => NULL).
 func adminIDValue(p *string) string {
 	if p == nil {

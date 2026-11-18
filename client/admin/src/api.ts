@@ -154,6 +154,30 @@ function credentialOptionsResponse(value: unknown): CredentialOptionsResponse {
   };
 }
 
+// The sign-in response caps admins_added at this value; the portal shows the
+// cap as "N or more".
+export const MAX_ADMINS_ADDED_NOTICE = 100;
+
+// The sign-in success carries one scalar beside its status: how many admins
+// were created in the console since this admin's previous sign-in. It is
+// required, so a server that stops sending it is refused rather than read as
+// zero.
+function signInResponse(value: unknown): number {
+  const data = record(value);
+  exactKeys(data, ["status", "admins_added"]);
+  if (data.status !== "authenticated") throw new ContractError();
+  const count = data.admins_added;
+  if (
+    typeof count !== "number" ||
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    count > MAX_ADMINS_ADDED_NOTICE
+  ) {
+    throw new ContractError();
+  }
+  return count;
+}
+
 function statusResponse(expected: string): (value: unknown) => void {
   return (value) => {
     const data = record(value);
@@ -207,15 +231,11 @@ export const api = {
     handle: string,
     assertion: unknown,
     options?: RequestOptions,
-  ): Promise<void> {
-    return request(
-      "/admin/api/v1/auth/webauthn",
-      statusResponse("authenticated"),
-      {
-        ...options,
-        body: { handle, assertion },
-      },
-    );
+  ): Promise<number> {
+    return request("/admin/api/v1/auth/webauthn", signInResponse, {
+      ...options,
+      body: { handle, assertion },
+    });
   },
   enrollBegin(
     username: string,

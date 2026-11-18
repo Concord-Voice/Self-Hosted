@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AdminsAddedNotice } from "./AdminsAddedNotice";
 import { api } from "./api";
 import type {
   AdminCountersResponse,
@@ -142,8 +143,10 @@ function reloadDocument(): void {
 }
 
 interface PortalProps {
+  adminsAdded?: number;
   initialHealth: AdminHealthResponse | null;
   initialState?: PollingState;
+  onAdminsAddedDismiss?: () => void;
   onForbidden?: () => void;
   onSessionEnded: () => void;
 }
@@ -331,8 +334,10 @@ function WorkspaceContent({
 }
 
 export function Portal({
+  adminsAdded = 0,
   initialHealth,
   initialState = initialHealth === null ? "stale" : "ready",
+  onAdminsAddedDismiss = () => undefined,
   onForbidden = reloadDocument,
   onSessionEnded,
 }: Readonly<PortalProps>) {
@@ -806,6 +811,12 @@ export function Portal({
         </header>
 
         <main aria-labelledby="workspace-title" className="workspace-main">
+          {adminsAdded > 0 ? (
+            <AdminsAddedNotice
+              count={adminsAdded}
+              onDismiss={onAdminsAddedDismiss}
+            />
+          ) : null}
           {healthData === null ? (
             <output className="shell-notice">
               Live telemetry is temporarily unavailable

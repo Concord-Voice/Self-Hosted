@@ -136,7 +136,7 @@ describe("api", () => {
       }),
       http.post(`${base}/admin/api/v1/auth/webauthn`, async ({ request }) => {
         bodies.push(await request.json());
-        return json({ status: "authenticated" });
+        return json({ status: "authenticated", admins_added: 0 });
       }),
       http.post(`${base}/admin/api/v1/enroll/begin`, async ({ request }) => {
         bodies.push(await request.json());
@@ -216,7 +216,7 @@ describe("api", () => {
         }),
       ),
       http.post(`${base}/admin/api/v1/auth/webauthn`, () =>
-        json({ status: "authenticated", unexpected: true }),
+        json({ status: "authenticated", admins_added: 0, unexpected: true }),
       ),
       http.post(`${base}/admin/api/v1/enroll/begin`, () =>
         json({
@@ -250,6 +250,39 @@ describe("api", () => {
       api.enrollFinish("enroll-handle", { id: "credential" }, "primary"),
     ).rejects.toBeInstanceOf(ApiContractError);
     await expect(api.logout()).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+  it.each([0, 1, 100])(
+    "returns the sign-in count of admins added (%i)",
+    async (count) => {
+      server.use(
+        http.post(`${base}/admin/api/v1/auth/webauthn`, () =>
+          json({ status: "authenticated", admins_added: count }),
+        ),
+      );
+
+      await expect(
+        api.webauthnLogin("login-handle", { id: "credential" }),
+      ).resolves.toBe(count);
+    },
+  );
+
+  it.each([
+    ["missing", { status: "authenticated" }],
+    ["null", { status: "authenticated", admins_added: null }],
+    ["negative", { status: "authenticated", admins_added: -1 }],
+    ["fractional", { status: "authenticated", admins_added: 1.5 }],
+    ["over the cap", { status: "authenticated", admins_added: 101 }],
+    ["a string", { status: "authenticated", admins_added: "3" }],
+    ["under another status", { status: "enrolled", admins_added: 0 }],
+  ])("rejects a sign-in count that is %s", async (_label, body) => {
+    server.use(
+      http.post(`${base}/admin/api/v1/auth/webauthn`, () => json(body)),
+    );
+
+    await rejectWithContractError(
+      api.webauthnLogin("login-handle", { id: "credential" }),
+    );
   });
 
   it.each([

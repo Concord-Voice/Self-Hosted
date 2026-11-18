@@ -4,7 +4,9 @@ import { ApiContractError, ApiError, api } from "./api";
 import { decodeRequestOptions, encodeAssertion } from "./webauthn";
 
 interface AuthScreenProps {
-  onAuthenticated: () => void;
+  // adminsAdded is the sign-in response's count of admins created in the
+  // console since this admin's previous sign-in.
+  onAuthenticated: (adminsAdded: number) => void;
 }
 
 interface Ceremony {
@@ -49,14 +51,14 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
         setError("Security key did not return a credential.");
         return;
       }
-      await api.webauthnLogin(
+      const adminsAdded = await api.webauthnLogin(
         next.handle,
         encodeAssertion(credential as PublicKeyCredential),
       );
       setPassword("");
       setStatus("");
       setCeremony(null);
-      onAuthenticated();
+      onAuthenticated(adminsAdded);
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "NotAllowedError") {
         setError("Security key verification was canceled.");
