@@ -75,7 +75,7 @@ fi
 [ -z "$FILE_PATHS" ] && exit 0
 
 canonicalize_path() {
-    local raw_path=$1 candidate parent base canonical_parent
+    local raw_path=$1 candidate parent base canonical_parent next_parent
 
     candidate=$raw_path
     if [[ "$candidate" != /* ]]; then
@@ -89,6 +89,18 @@ canonicalize_path() {
 
     parent=$(dirname "$candidate")
     base=$(basename "$candidate")
+    # Walk to an existing ancestor when Write will create several directories.
+    # Refuse ambiguous traversal and broken symlinks in the missing suffix;
+    # otherwise a later mkdir could make a seemingly new path reach an existing
+    # migration through `..` or a symlink.
+    while [[ ! -d "$parent" ]]; do
+        [[ -e "$parent" || -L "$parent" ]] && return 1
+        next_parent=$(dirname "$parent")
+        [[ "$next_parent" != "$parent" ]] || return 1
+        case "$(basename "$parent")" in .|..) return 1 ;; *) : ;; esac
+        base="$(basename "$parent")/$base"
+        parent=$next_parent
+    done
     # GNU realpath permits a missing final component by default and preserves
     # caller-supplied casing on a case-insensitive filesystem. Entering the
     # parent requires it to exist; external /bin/pwd -P then reports its

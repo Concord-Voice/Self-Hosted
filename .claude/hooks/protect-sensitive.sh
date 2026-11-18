@@ -960,7 +960,14 @@ if [ -z "$FILE_PATH" ] && [ -n "$COMMAND" ]; then
   VARS=""
   VARS_ALT=""
   ALIASES=""
-  CWD=""
+  # Relative Bash operands begin at the hook's actual working directory, which
+  # may be a subdirectory of the project rather than its root.
+  START_CWD=$(pwd -P) || { echo "BLOCKED: cannot resolve the working directory." >&2; exit 2; }
+  case "$START_CWD" in
+    "$REPO_REAL") CWD="" ;;
+    "$REPO_REAL"/*) CWD="${START_CWD#"$REPO_REAL"/}" ;;
+    *) CWD="$START_CWD" ;;
+  esac
   # Directories a CONDITIONAL `cd` may have entered. `cd a; true || cd ../b; echo x
   # > f` writes a/f, but the walk applied the second cd unconditionally and resolved
   # from b. The `&&`/`||` marker the assignment tracker already reads applies to
@@ -1841,16 +1848,16 @@ if [ -z "$FILE_PATH" ] && [ -n "$COMMAND" ]; then
   # for an interpreter body elsewhere on the line. The cost is that a git commit
   # message quoting all three indicators now blocks — the repo's standing answer to
   # that class is `-F`/`--body-file`. Do not "tidy" this to $SCAN.
-  if printf '%s' "$COMMAND" | grep -qE '\b(python3?|node|ruby|perl)\b' \
-     && printf '%s' "$COMMAND" | grep -qE 'open\([^)]*,[[:space:]]*(mode[[:space:]]*=[[:space:]]*)?['"'"'"]([wax]|r[bt]*\+)|open\([^)]*,[[:space:]]*['"'"'"]>>?['"'"'"]|writeFile|appendFile|createWriteStream|write_text|write_bytes|File\.write|shutil\.(copy|move)|os\.(replace|rename)|os\.(unlink|remove|rmdir)|unlinkSync|rmSync|rmdirSync|Path\([^)]*\)\.unlink|\.unlink\(\)|File\.(delete|unlink)|FileUtils\.rm'; then
+  if printf '%s' "$COMMAND" | grep -E '\b(python3?|node|ruby|perl)\b'  >/dev/null \
+     && printf '%s' "$COMMAND" | grep -E 'open\([^)]*,[[:space:]]*(mode[[:space:]]*=[[:space:]]*)?['"'"'"]([wax]|r[bt]*\+)|open\([^)]*,[[:space:]]*['"'"'"]>>?['"'"'"]|writeFile|appendFile|createWriteStream|write_text|write_bytes|File\.write|shutil\.(copy|move)|os\.(replace|rename)|os\.(unlink|remove|rmdir)|unlinkSync|rmSync|rmdirSync|Path\([^)]*\)\.unlink|\.unlink\(\)|File\.(delete|unlink)|FileUtils\.rm' >/dev/null; then
     # `shutil.copy(src, dst)` READS its source; only `move`/`replace`/`rename` and
     # the open-for-write forms consume one. When copy is the ONLY indicator present,
     # consider just its destination — sweeping every token blocked
     # `shutil.copy("<protected>", "/tmp/x")`, contradicting this file's own rule that
     # copying a protected file outward stays free.
     narrowed=0
-    if printf '%s' "$COMMAND" | grep -qE 'shutil\.copy' \
-       && ! printf '%s' "$COMMAND" | grep -qE "${WRITE_API_STRICT}"; then
+    if printf '%s' "$COMMAND" | grep -E 'shutil\.copy'  >/dev/null \
+       && ! printf '%s' "$COMMAND" | grep -E "${WRITE_API_STRICT}" >/dev/null; then
       # The SECOND argument specifically. Stripping to the last comma isolated the
       # destination only for the two-argument shape: `copytree(src, dst, keyword=…)`
       # left the keyword and lost the destination entirely — fail-open.

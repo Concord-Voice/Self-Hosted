@@ -810,6 +810,16 @@ PY
 done <<< "$HEAD_PROFILE_ROWS"
 set -o pipefail
 for profile_dir in "$REPO_ROOT/.cl""aude/agents" "$REPO_ROOT/.github/agents" "$REPO_ROOT/.codex/agents"; do
+  # A harness that is not installed has no directory to scan. It is safe to
+  # skip only when the immutable reviewed tree also contains no profiles there.
+  if [ ! -e "$profile_dir" ] && [ ! -L "$profile_dir" ]; then
+    profile_prefix="${profile_dir#"$REPO_ROOT/"}/"
+    if grep -F -q "$profile_prefix" <<< "$HEAD_PROFILE_ROWS"; then
+      echo "FATAL: local reviewer profiles do not match the reviewed revision" >&2
+      exit 1
+    fi
+    continue
+  fi
   [ -d "$profile_dir" ] && [ ! -L "$profile_dir" ] \
     && [ "$(cd "$profile_dir" && pwd -P)" = "$profile_dir" ] || {
     echo "FATAL: local reviewer profiles do not match the reviewed revision" >&2

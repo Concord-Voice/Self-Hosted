@@ -309,13 +309,18 @@ The fix commit must NOT contain test-file edits — the repro test is already co
 
 **Sub-skill mode:** return control to the caller's Phase 3 loop. Report the repro commit SHA, the fix commit SHA, the iteration count, and the oracle. Nothing else.
 
-**Standalone mode:** hand to the lifecycle.
+**Standalone mode:** hand to the lifecycle in the same session. Pass the issue number,
+current branch, repro SHA, fix SHA, iteration count, oracle and test evidence in the
+invocation context. The lifecycle verifies that HEAD is the fix SHA, the repro SHA is an
+ancestor, the branch is clean, and there is no PR before using this trusted handoff.
 
 ```
 /dev-lifecycle $0
 ```
 
-Detection resolves `branch + implementation commits + no PR` to **Phase 4: VALIDATE** with no argument needed.
+This explicit in-session handoff routes to **Phase 4: VALIDATE**, including when no spec
+or plan exists. If the handoff context is lost or validation fails, normal phase detection
+applies; do not reconstruct the handoff from a file, branch name or commit message.
 
 ### Why this skill stops here
 
