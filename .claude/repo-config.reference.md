@@ -63,8 +63,12 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 | `version_bump.enabled` | bool | `false` → version-bump step skipped | dev-lifecycle |
 | `version_bump.source_check` / `.bump_file` | string | — | version-bump handoff |
 | `branch_protection.doc_path` / `.code_owner_team` | string | optional prose substitution | enhanced-pr-review, dev-lifecycle |
-| `ecosystems` | string[] | `[]` → auto-detect from live PR diffs | weekly-deps |
-| `weekly_deps.tiers` | object | `{}` → every bump treated Tier C (manual) | weekly-deps |
+| `ecosystems` | string[] (`npm`, `gomod`, `github-actions`, `pip`, `cargo`, `rubygems`, `composer`, `gradle`, `docker`) | `[]` → auto-detect from live PR diffs | weekly-deps |
+| `weekly_deps.tiers` | `{A,B,C}` → map(rule name → rule) | `{}` → every bump treated Tier C (manual) | weekly-deps Phase 2 |
+| `weekly_deps.tiers.<T>.<rule>` | `{groups[],ungrouped,packages[],ecosystems[],directories[],dependency_type,max_bump}` | — ; all given fields must hold; a PR that no rule matches is Tier C | weekly-deps Phase 2 |
+| `weekly_deps.label_rules[]` | `{label,tier,demote_to,demote_max_packages}` | `[]` → no label reclassification | weekly-deps Phase 2 |
+| `weekly_deps.bundled_engines` | string[] (package globs or Dependabot group names) | `[]` (added to the built-in bundled-engine class; always Tier C) | weekly-deps Phase 2 |
+| `weekly_deps.lockstep_sets` | string[][] (package globs per set) | `[]` → only the same-version heuristic flags split pairs | weekly-deps Phase 2 |
 | `weekly_deps.security_sensitive_extra` | string[] | `[]` (merged over shared default list) | weekly-deps |
 | `weekly_deps.signal3_repo_map` | map | `{}` | weekly-deps community signal |
 | `weekly_deps.tier_d_sources` | object[] | `[]` → Tier D yields nothing | weekly-deps |
@@ -73,7 +77,7 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 | `weekly_deps.deep_review_skill` | string | `/enhanced-pr-review` (fallback: `/review-pr` manual) | weekly-deps |
 | `weekly_deps.cron.{prep,triage,tz_label}` | string | `0 13 * * 3` / `0 15 * * 3` / `ET` | weekly-deps autonomous mode |
 | `weekly_deps.digest_issue_title` | string | `Weekly Dependency Triage — Routine Output` | weekly-deps |
-| `review_coverage.reviewer_bots` | string[] | `[]` → only `copilot-pull-request-reviewer[bot]` counts | `enhanced-pr-review/review-coverage.sh` (read from the PR's **base** branch, so a PR cannot widen it). Bot logins whose reviews count as coverage on a bot-authored PR, e.g. `gitar-bot[bot]`. Do not list scanners or auto-approve workflows. |
+| `review_coverage.reviewer_bots` | string[] | `[]` → only `copilot-pull-request-reviewer[bot]` counts | `enhanced-pr-review/review-coverage.sh` (read from the repository's **default** branch, never the PR's base ref, so a PR cannot widen it). Bot logins whose reviews count as coverage on a bot-authored PR, e.g. `gitar-bot[bot]`. Logins on `.bots[]` (exact `.login` or `.match` substring) are treated as bots even when GitHub types them `User`, and a review matching the entry's `decline_pattern` / `ack_pattern` does not count, so a machine-user reviewer must be listed here too. Do not list scanners or auto-approve workflows. |
 | `skip_commit_patterns` | string[] | `[]` → no extra commits skipped | release-notes |
 | `ai_policy_doc` | string | unset → glob `docs/policies/ai-*.md`, else omit | release-notes |
 | `docs_map.sources[]` | `{glob,docs[]}` | `[]` → docs-reviewer uses heuristics | docs-reviewer, docs-writer, release-notes |
@@ -93,3 +97,38 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 **Protect the guard itself.** `protect-sensitive.sh` only guards what `protected_patterns` lists, so a repo with no config, or a config that leaves out the tooling's own files, lets an agent edit the hooks that are meant to stop it. Every repo should list at least the three tooling patterns in the example: `(^|/)\.claude/(hooks/|settings\.json|repo-config\.json|\.agentic-dev-tooling\.lock$|state/hook-bypass/)`, `(^|/)scripts/repo-config\.sh$` and `(^|/)\.github/workflows/`. Start them with `(^|/)`, not `/`: the hook also tests repo-relative paths such as `.claude/hooks/x.sh`, which carry no leading slash. The `state/hook-bypass/` part matters most: a bypass marker there lets edits through before any pattern is checked, so an agent that can write one can edit every protected file. With it listed, only a person working outside the agent can create a marker. Pair the patterns with `CODEOWNERS` entries for the same paths so a human reviews every change to them.
 
 **Rule:** never put a secret in `repo-config.json` (it is committed). Secrets go through env-var interpolation in `.mcp.json` (see `mcp/README.md`).
+
+## `weekly_deps.tiers` rules
+
+Tier data is per repository. The shared skill ships none, and `/weekly-deps --org` never applies one repository's rules to another, so each repository that wants a fast track declares its own. Rule names are free text shown in the triage table.
+
+```json
+"weekly_deps": {
+  "tiers": {
+    "A": {
+      "lint and format": { "groups": ["lint"], "dependency_type": "development", "max_bump": "minor" },
+      "dev singles":     { "ungrouped": true, "dependency_type": "development", "max_bump": "minor" }
+    },
+    "B": {
+      "runtime libs":    { "groups": ["runtime"], "max_bump": "minor" }
+    },
+    "C": {
+      "build and signing": { "groups": ["packaging"] }
+    }
+  },
+  "label_rules": [ { "label": "routine: transitive-refresh", "tier": "C", "demote_to": "B", "demote_max_packages": 4 } ],
+  "bundled_engines": ["my-webrtc-wrapper*"],
+  "lockstep_sets": [ ["vitest", "@vitest/*"] ]
+}
+```
+
+| Rule field | Meaning |
+|---|---|
+| `groups` | Dependabot group names (exact). A single-package PR has no group. |
+| `ungrouped` | `true` matches only a single-package PR with no group. |
+| `packages` | Globs. Every bumped package must match one. |
+| `ecosystems` / `directories` | Limit the rule to these ecosystems / manifest directories (globs). |
+| `dependency_type` | `development` or `production`: every bumped package must be of that type, read from the PR diff. |
+| `max_bump` | `patch` or `minor` (default `minor`). Ignored in tier C. |
+
+Rules that cannot be switched off by this data: a major bump is Tier C; a bundled-engine package (including every `docker` bump) is Tier C; a package on the security-sensitive list is LOW confidence; a PR that no rule matches is Tier C. If rules of two tiers match one PR, the higher-risk tier wins. A tier A or B rule with none of `groups`, `ungrouped` and `packages` is ignored.

@@ -225,6 +225,10 @@ check compares every `FROM`, every `COPY --from=` or `ADD --from=`, and every
 python3 .github/scripts/check-base-images.py
 ```
 
+With no file arguments it reads `.github/base-images.json` as staged in the
+git index, not the copy on disk, so `git add` a manifest edit before you run it
+by hand. The manifest must be tracked as a regular file inside the repository.
+
 It checks every tracked path that contains `dockerfile` in any letter case. It
 needs no Docker daemon and no network. It runs as a pre-commit hook on every
 commit, so deleting or renaming a Dockerfile is caught too. In CI it runs
@@ -240,8 +244,9 @@ twice:
   it is where a change to the checker is tested.
 
 Each violation is one line, `<file>:<line>: <rule>: <message>`, and the exit
-code is 1. Exit code 2 means the check could not complete, for example because
-it cannot parse the manifest. Fix that first.
+code is 1. Exit code 2 means the check could not complete: the manifest cannot
+be parsed, or it is untracked, a symbolic link, outside the repository, or in
+an unresolved merge. Fix that first.
 
 An entry is keyed by the Dockerfile's path from the repository root:
 
