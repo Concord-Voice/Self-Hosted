@@ -836,10 +836,19 @@ paths:
       tags:
       - Auth
       summary: Begin account recovery
-      description: 'Queue a 6-digit recovery code for delivery to the account email. Returns before account
-        resolution or delivery and always uses the same 200 response to prevent email enumeration. A live
-        ten-minute recovery record is retained unchanged: a later begin neither replaces its code nor resets
-        its attempts, and sends no second email.
+      description: 'Queue a recovery email for the account address. With format "token" the email
+        carries a single-use recovery key (43 base64url characters, 256 random bits); without it, or with
+        format "code", it carries the deprecated 6-digit code. Returns before account resolution or delivery
+        and always uses the same 200 response for an address, to prevent email enumeration. The response
+        format field names what the server will email; it depends only on the request and the server''s
+        RECOVERY_LEGACY_CODE setting. A client that sent format "token" and gets no format back is talking
+        to an older server and must offer 6-digit entry.
+
+        One recovery email per account is live at a time, in either format. While it is live a later begin
+        sends nothing, except that a begin with format "token" replaces a live 6-digit code once and makes
+        that code invalid. Its secret expires when the resend wait ends: 15 minutes for the first three emails
+        in 24 hours, then 60 minutes. Redeeming the secret, or spending a code''s five attempts, ends the
+        wait at once.
 
         Rate limit: 3 requests per 15 minutes (IP-based).
 
@@ -858,13 +867,26 @@ paths:
                 email:
                   type: string
                   format: email
+                format:
+                  type: string
+                  enum: [token, code]
+                  description: What the recovery email should carry. Omitted means code (deprecated).
       responses:
         '200':
           description: Generic acknowledgement (sent whether or not the account exists)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SuccessMessage'
+                type: object
+                required: [message, format]
+                properties:
+                  message:
+                    type: string
+                  format:
+                    type: string
+                    enum: [token, code]
+                    description: What the server emails for this request when an account exists and no
+                      recovery email is already live. It depends only on the request and RECOVERY_LEGACY_CODE.
         '400':
           $ref: '#/components/responses/BadRequest'
         '429':
@@ -1257,10 +1279,14 @@ paths:
     post:
       tags:
       - Auth
-      summary: Verify a recovery code
-      description: 'Validate the emailed recovery code (single-use, max 5 attempts). Wrong submissions
-        also consume a separate per-normalized-email budget of 10 attempts per 24 hours; it is not
-        reset by beginning recovery again and a correctly consumed code clears it. When a reserved
+      summary: Verify a recovery key or code
+      description: 'Send exactly one of token (a recovery key from the email) or email plus code
+        (deprecated 6-digit code). A key is single use and has no attempt limit, because it cannot
+        be guessed; a wrong, expired or used key gets the same 401, and wrong keys never count
+        against the account. A code is single use with 5 attempts per code, and wrong codes also
+        consume a separate per-normalized-email budget of 10 attempts per 24 hours; that budget is
+        not reset by beginning recovery again and a completed recovery clears it. When the server
+        sets RECOVERY_LEGACY_CODE=false, a code submission gets 400. When a reserved
         authenticator app or security key is enabled, return a five-minute recovery_challenge MFA
         token and offered methods, without recovery authority or key material. Complete that challenge
         through /auth/mfa/verify. Backup codes satisfy a reserved authenticator app. Email ownership
@@ -1285,15 +1311,22 @@ paths:
           application/json:
             schema:
               type: object
-              required:
-              - email
-              - code
+              oneOf:
+              - required: [token]
+              - required: [email, code]
               properties:
+                token:
+                  type: string
+                  minLength: 43
+                  maxLength: 43
+                  description: Recovery key from the email (base64url). Surrounding whitespace is ignored.
                 email:
                   type: string
                   format: email
+                  description: Required with code; ignored with token.
                 code:
                   type: string
+                  deprecated: true
                   description: 6-digit recovery code
       responses:
         '200':
@@ -1368,7 +1401,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
-          description: Invalid or expired recovery code
+          description: Invalid or expired recovery key or code
           content:
             application/json:
               schema:
@@ -1378,11 +1411,13 @@ paths:
                     type: string
                   attempts_remaining:
                     type: integer
+                    description: Code submissions only; always 0.
         '429':
           $ref: '#/components/responses/RecoveryAttemptsExhausted'
         '503':
           description: Recovery policy unavailable, unsupported, or no reserved factor can be challenged;
-            the recovery attempt budget also fails closed when Redis is unavailable, before the code is checked.
+            for code submissions the recovery attempt budget also fails closed when Redis is unavailable,
+            before the code is checked.
           content:
             application/json:
               schema:

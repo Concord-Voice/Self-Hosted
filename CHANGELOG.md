@@ -73,6 +73,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Security
 
+- **Recovery:** Email account recovery can now send a single-use recovery key that cannot be guessed, so wrong attempts by others can no longer block the account owner's email recovery. A client asks for one with `format: "token"` on `/auth/recovery/begin` and submits it as `token` on `/auth/recovery/verify-code`. Each account has one live recovery email at a time, valid until the resend wait ends (15 minutes for the first three emails in a day, then 60 minutes); a key request replaces a live 6-digit code ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
 - **Encryption keys:** Channel and DM key distribution no longer takes a second database connection while it holds a lock, so many concurrent distributions can no longer stall every other request. Distribution and DM key rotation now give up after a 5-second lock wait or a 15-second statement and return 503 instead of hanging, and the pool closes connections left idle inside a transaction for 60 seconds (VULN-079).
 - **Encryption keys:** A key request for someone who already holds the current key is no longer stored, and such requests are cleared after a distribution. `GET /api/v1/e2ee/pending-keys` is now paged (`limit`, `cursor`, `next_cursor`; 100 per page by default, up to 200) and reads at most 1,000 rows per request. The cursor is opaque and sealed, so it reveals nothing about requests the caller cannot see. Older clients still get the first page (VULN-080, VULN-207).
 - **Media plane:** Updated `qs` to 6.17.1, which encodes keys when `stringify` runs with `allowEmptyArrays` (CVE-2026-110910) ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)).
@@ -92,6 +93,10 @@ readers accept the versioned formats needed for a later storage migration.
 - **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
 - **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
 - **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
+
+### Deprecated
+
+- **Recovery:** The 6-digit email recovery code is deprecated. It still works for clients that do not ask for a recovery key, and operators can turn it off with `RECOVERY_LEGACY_CODE=false` once every client accepts recovery keys ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
 
 ### Fixed
 

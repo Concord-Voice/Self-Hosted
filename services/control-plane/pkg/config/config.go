@@ -243,6 +243,13 @@ type Config struct {
 	TURNSecretFile string // Managed runtime key snapshot; mutually exclusive with TURNSecret
 	TURNRealm      string // TURN realm (e.g. "concordvoice.chat")
 
+	// RecoveryLegacyCodeDisabled stops issuing and accepting the 6-digit email
+	// recovery code (RECOVERY_LEGACY_CODE=false; any other value keeps it).
+	// The zero value keeps it, so a hand-built Config never strands old
+	// clients. Disabling it locks out the owner of every account whose client
+	// cannot accept a recovery key.
+	RecoveryLegacyCodeDisabled bool
+
 	// Client config (#155 Tier 2 + Tier 3)
 	ClientMinVersion string // Minimum desktop client version allowed (e.g. "0.1.3"); empty = no enforcement
 	// Minimum mobile versions, selected by the X-Concord-Client-Platform header
@@ -450,6 +457,21 @@ type Config struct {
 	RedemptionAdminToken string // #nosec G117 -- config field name, secret loaded from env
 }
 
+// recoveryLegacyCodeDisabled reads RECOVERY_LEGACY_CODE. Only "false" turns the
+// 6-digit code off; any other value keeps it on, and a value that is not "true"
+// is logged so the operator knows the switch did nothing.
+func recoveryLegacyCodeDisabled(raw string) bool {
+	switch v := strings.TrimSpace(raw); v {
+	case "false":
+		return true
+	case "true", "":
+		return false
+	default:
+		log.Printf("WARN: RECOVERY_LEGACY_CODE=%q is not \"true\" or \"false\"; the 6-digit recovery code stays on", v)
+		return false
+	}
+}
+
 // Load reads configuration from environment variables
 func Load() (*Config, error) {
 	// Load .env file if it exists (development)
@@ -622,6 +644,7 @@ func Load() (*Config, error) {
 		OIDCBinaryWorkflow: getEnv("ATTESTATION_OIDC_BINARY_WORKFLOW", "build-desktop.yml"),
 		OIDCBinaryRef:      getEnv("ATTESTATION_OIDC_BINARY_REF", "refs/heads/main"),
 	}
+	cfg.RecoveryLegacyCodeDisabled = recoveryLegacyCodeDisabled(getEnv("RECOVERY_LEGACY_CODE", "true"))
 
 	if err := loadActivityHistoryConfig(cfg); err != nil {
 		return nil, err

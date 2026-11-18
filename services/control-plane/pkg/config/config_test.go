@@ -1960,3 +1960,34 @@ func TestOIDCSubjectPrefixShapeMatchesVerifier(t *testing.T) {
 	require.NotNil(t, m, "subjectPrefixShape declaration not found in oidc.go")
 	assert.Equal(t, oidcSubjectPrefixShape.String(), string(m[1]))
 }
+
+func TestRecoveryLegacyCodeDefaultsOn(t *testing.T) {
+	assert.False(t, Config{}.RecoveryLegacyCodeDisabled, "zero value keeps the legacy code")
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("RECOVERY_LEGACY_CODE", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.RecoveryLegacyCodeDisabled)
+
+	t.Setenv("RECOVERY_LEGACY_CODE", "false")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.RecoveryLegacyCodeDisabled)
+}
+
+// Only "false" turns the code off; any other value except "true" keeps it on
+// and warns, so an operator who writes FALSE or 0 is told the switch did nothing.
+func TestRecoveryLegacyCodeUnrecognizedValueWarns(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	for _, v := range []string{"true", "false", ""} {
+		_ = recoveryLegacyCodeDisabled(v)
+	}
+	assert.Empty(t, logs.String())
+	for _, v := range []string{"FALSE", "0", "no"} {
+		logs.Reset()
+		assert.False(t, recoveryLegacyCodeDisabled(v), v)
+		assert.Contains(t, logs.String(), "RECOVERY_LEGACY_CODE", v)
+	}
+}

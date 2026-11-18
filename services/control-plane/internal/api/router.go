@@ -1091,6 +1091,7 @@ func NewRouter(
 	authHandler.SetSecurityEvents(securityEvents)
 	authHandler.SetPresenceHistory(presenceHistoryService)
 	authHandler.SetEmailService(emailSvc)
+	authHandler.SetRecoveryLegacyCode(!cfg.RecoveryLegacyCodeDisabled)
 	authHandler.SetCredentialFence(credFence)
 	authHandler.SetKeyRevocationBroadcaster(websocket.KeyRevocationBroadcaster(hub))
 	authHandler.SetInitialDistributorChecker(rbacResolver.CanDistributeChannelKeyTx)
