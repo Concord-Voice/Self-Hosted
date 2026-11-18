@@ -20,10 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const (
-	viewJoinPerms = rbac.PermViewVoiceChannels | rbac.PermJoinVoice
-)
-
 type authorityFixture struct {
 	ts       *testhelpers.TestServer
 	resolver *rbac.Resolver
@@ -85,14 +81,14 @@ func TestFindVoiceChannelsTx_SortedAllRows(t *testing.T) {
 func TestAuthorizeMoveDestinationTx(t *testing.T) {
 	f := newAuthorityFixture(t, "amd")
 	ctx := context.Background()
-	call := func(dest, actor string, self bool) error {
+	call := func(t *testing.T, dest, actor string, self bool) error {
 		_, err := voice.AuthorizeMoveDestinationTxForTest(ctx, f.tx(t), f.resolver, f.serverID, actor, dest, self)
 		return err
 	}
 
 	// Positive control: plain visible destination for a Move holder.
 	okDest := f.ts.CreateVoiceChannel(t, f.serverID, "amd-ok")
-	require.NoError(t, call(okDest, f.mover.ID, false))
+	require.NoError(t, call(t, okDest, f.mover.ID, false))
 
 	otherServer := f.ts.CreateTestServer(t, f.owner.ID, "Authority amd other")
 	noView := f.ts.CreateVoiceChannel(t, f.serverID, "amd-noview")
@@ -112,7 +108,7 @@ func TestAuthorizeMoveDestinationTx(t *testing.T) {
 	}
 	for name, dest := range cases {
 		t.Run(name, func(t *testing.T) {
-			err := call(dest, f.mover.ID, false)
+			err := call(t, dest, f.mover.ID, false)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, voice.ErrVoiceModPermissionForTest)
 		})
@@ -120,13 +116,13 @@ func TestAuthorizeMoveDestinationTx(t *testing.T) {
 
 	t.Run("owner is not narrowed by a channel DENY Move", func(t *testing.T) {
 		f.deny(t, noMove, f.owner.ID, rbac.PermMoveMembers)
-		require.NoError(t, call(noMove, f.owner.ID, false))
+		require.NoError(t, call(t, noMove, f.owner.ID, false))
 	})
 	t.Run("self move needs only VIEW and JOIN", func(t *testing.T) {
-		require.NoError(t, call(okDest, f.plain.ID, true))
+		require.NoError(t, call(t, okDest, f.plain.ID, true))
 	})
 	t.Run("non-self without Move is refused", func(t *testing.T) {
-		err := call(okDest, f.plain.ID, false)
+		err := call(t, okDest, f.plain.ID, false)
 		assert.ErrorIs(t, err, voice.ErrVoiceModPermissionForTest)
 	})
 }
@@ -154,6 +150,8 @@ func TestAuthorizeMoveSourcesTx(t *testing.T) {
 func TestFilterAuthorizedSessionSpecsTx(t *testing.T) {
 	f := newAuthorityFixture(t, "fas")
 	ctx := context.Background()
+	muteRole := f.ts.CreateTestRole(t, f.serverID, "Muter", 6, int64(rbac.PermMuteMembers))
+	f.ts.AssignRoleToUser(t, f.serverID, f.mover.ID, muteRole)
 	hidden := f.ts.CreateVoiceChannel(t, f.serverID, "fas-hidden")
 	f.deny(t, hidden, f.mover.ID, rbac.PermViewVoiceChannels)
 	allowed := f.ts.CreateVoiceChannel(t, f.serverID, "fas-allowed")

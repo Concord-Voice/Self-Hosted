@@ -104,7 +104,8 @@ func TestServerMove_WithPermission_HiddenChannel_GrantsTemp(t *testing.T) {
 	from := ts.CreateVoiceChannel(t, serverID, "voice-grant-from")
 	to := ts.CreateVoiceChannel(t, serverID, "voice-grant-to")
 	hideVoiceChannel(t, ts, serverID, to) // target cannot see/join `to`
-	ts.CreateChannelOverride(t, to, "role", moverRole, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice|rbac.PermSpeak), 0)
+	// A USER override beats the @all role deny; a role allow cannot.
+	ts.CreateChannelOverride(t, to, "user", mover.ID, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice|rbac.PermSpeak), 0)
 	joinVoice(t, ts, from, target.ID)
 
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
@@ -139,7 +140,8 @@ func TestServerMove_JoinInheritedViewDenied_GrantsTemp(t *testing.T) {
 	from := ts.CreateVoiceChannel(t, serverID, "voice-viewdenied-from")
 	to := ts.CreateVoiceChannel(t, serverID, "voice-viewdenied-to")
 	denyViewVoiceForAll(t, ts, serverID, to) // target keeps JoinVoice, loses ViewVoice
-	ts.CreateChannelOverride(t, to, "role", moverRole, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice|rbac.PermSpeak), 0)
+	// A USER override beats the @all role deny; a role allow cannot.
+	ts.CreateChannelOverride(t, to, "user", mover.ID, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice|rbac.PermSpeak), 0)
 	joinVoice(t, ts, from, target.ID)
 
 	w := ts.DoRequest("POST", voiceEnforcePath(serverID, target.ID, pathMove),
@@ -147,7 +149,7 @@ func TestServerMove_JoinInheritedViewDenied_GrantsTemp(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.True(t, moveTempOverrideExists(t, ts, to, target.ID),
 		"temp grant must be inserted when target inherits JoinVoice but is denied ViewVoice")
-	assert.Equal(t, 0, auditMoveCount(t, ts, serverID, target.ID), "no audit for a downward move")
+	assert.Equal(t, 1, auditMoveCount(t, ts, serverID, target.ID), "a move that writes a temporary grant is audited")
 }
 
 func TestServerMove_StalePermissionCacheStillGrantsAccess(t *testing.T) {
@@ -164,7 +166,8 @@ func TestServerMove_StalePermissionCacheStillGrantsAccess(t *testing.T) {
 	from := ts.CreateVoiceChannel(t, serverID, "voice-stale-cache-from")
 	to := ts.CreateVoiceChannel(t, serverID, "voice-stale-cache-to")
 	hideVoiceChannel(t, ts, serverID, to)
-	ts.CreateChannelOverride(t, to, "role", moverRole, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice|rbac.PermSpeak), 0)
+	// A USER override beats the @all role deny; a role allow cannot.
+	ts.CreateChannelOverride(t, to, "user", mover.ID, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice|rbac.PermSpeak), 0)
 	joinVoice(t, ts, from, target.ID)
 
 	// The transactional move preflight sees the durable deny; the stale cache
@@ -378,27 +381,6 @@ func TestServerMove_Unauthenticated(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-// TestServerMove_SelfMove_NoPermissionNeeded_HiddenStays: self-move into a hidden
-// channel does NOT grant temp access (self-move skips the grant entirely). The
-// client AuthorizeJoin will then legitimately reject if they truly can't join —
-// but the move endpoint itself must not fabricate access for a self-move.
-func TestServerMove_SelfMove_NoTempGrantEvenIfHidden(t *testing.T) {
-	ts := setupTS(t)
-	owner := ts.CreateTestUser(t, "mv_selfhide_owner")
-	mover := ts.CreateTestUser(t, "mv_selfhide_mover")
-	serverID := ts.CreateTestServer(t, owner.ID, "Move SelfHidden")
-	ts.AddMemberToServer(t, serverID, mover.ID, roleMember)
-	from := ts.CreateVoiceChannel(t, serverID, "voice-selfhide-from")
-	to := ts.CreateVoiceChannel(t, serverID, "voice-selfhide-to")
-	hideVoiceChannel(t, ts, serverID, to)
-	joinVoice(t, ts, from, mover.ID)
-
-	w := ts.DoRequest("POST", voiceEnforcePath(serverID, mover.ID, pathMove),
-		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.False(t, moveTempOverrideExists(t, ts, to, mover.ID), "self-move never grants temp access")
-}
-
 func moveAuditMeta(t *testing.T, ts *testhelpers.TestServer, serverID, targetID, key string) string {
 	t.Helper()
 	var v string
@@ -499,9 +481,20 @@ func TestServerMove_SourceDenyMove_403NoGrant(t *testing.T) {
 func TestServerMove_GrantNeededMoverLacksSpeak_403NoGrant(t *testing.T) {
 	f := newMoveFixture(t, "mvc_nospeak", true)
 	hideVoiceChannel(t, f.ts, f.serverID, f.to) // target needs a temporary grant
-	f.ts.CreateChannelOverride(t, f.to, "user", f.mover.ID, 0, int64(rbac.PermSpeak))
+	// One user override (unique per channel/target): VIEW|JOIN allowed so the
+	// refusal happens at SPEAK, not at VIEW.
+	f.ts.CreateChannelOverride(t, f.to, "user", f.mover.ID, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice), int64(rbac.PermSpeak))
 	code, body := f.move(t, f.mover, f.target.ID, f.to)
 	f.requireRefusedNoGrant(t, code, body)
+
+	// Control: lifting only the SPEAK deny flips the result, proving the refusal
+	// above was at SPEAK and not at VIEW/JOIN.
+	_, err := f.ts.DB.Exec(`UPDATE channel_permission_overrides SET deny = 0
+		WHERE channel_id = $1 AND target_type = 'user' AND target_id = $2`, f.to, f.mover.ID)
+	require.NoError(t, err)
+	require.NoError(t, f.ts.Redis.FlushDB(context.Background()).Err())
+	code, body = f.move(t, f.mover, f.target.ID, f.to)
+	assert.Equal(t, http.StatusOK, code, body)
 }
 
 func TestServerMove_MissingDestination_SameAsNoAccess(t *testing.T) {

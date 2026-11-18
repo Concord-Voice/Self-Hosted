@@ -200,7 +200,7 @@ func TestServerDisconnect_DeniedPlusAllowed_403NoOutbox(t *testing.T) {
 
 // Review Focus 4: a server Administrator is not narrowed by a channel deny.
 func TestServerDisconnect_AdminWithChannelDeny_Queued(t *testing.T) {
-	f := newSessionScopeFixture(t, "dc_admin", rbac.AdminPermissions)
+	f := newSessionScopeFixture(t, "dc_admin", rbac.PermMoveMembers|rbac.PermAdministrator)
 	f.ts.CreateChannelOverride(t, f.channelID, "user", f.actor.ID, 0, int64(rbac.PermMoveMembers))
 	code, body := f.post(t, f.target.ID, pathDisconnect)
 	assert.Equal(t, http.StatusAccepted, code, body)
