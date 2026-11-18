@@ -898,7 +898,7 @@ def _ci_runner_profile_valid(env) -> bool:
         return profile is None
     return (environment == "self-hosted"
             and profile == _BLACKSMITH_RUNNER_PROFILE
-            and env.get("GITHUB_REPOSITORY") == "Concord-Voice/Concord-Voice-Alpha")
+            and env.get("GITHUB_REPOSITORY") == "Concord-Voice/Self-Hosted")
 
 
 _SELECTED_FILES = (*_BASE_FILES, "docker-compose.selfhost.yml")
