@@ -303,7 +303,6 @@ func TestAdminCreateRouteRateLimitFailsClosed(t *testing.T) {
 	}
 }
 
-
 // postRaw issues an in-process POST with a raw JSON body.
 func postRaw(engine *gin.Engine, path string, body io.Reader) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
