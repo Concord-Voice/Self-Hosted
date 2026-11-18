@@ -186,3 +186,35 @@ func seedCanonicalMediaCall(t *testing.T, ts *testhelpers.TestServer, callerID, 
 	require.NoError(t, dm.RememberDMVoiceJoinAdmission(ctx, ts.Redis, convUUID, callerUUID, callUUID, dm.DMVoiceCallReservationTTL))
 	return callUUID.String()
 }
+
+func TestAddMember_AlternateSpellingUserID_CanonicalPayload(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "canonadduidadmin")
+	member := ts.CreateTestUser(t, "canonadduidmember")
+	newUser := ts.CreateTestUser(t, "canonadduidnew")
+	convID := createTestGroup(t, ts, admin, member)
+	ts.CreateFriendship(t, admin.ID, newUser.ID, statusAccepted)
+	ts.SeedDMKey(t, convID, admin.ID, 1)
+	conn := dialDMObserver(t, ts, member.ID, convID)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathMembers,
+		map[string]interface{}{"user_id": upperSpelling(t, newUser.ID)}, testhelpers.AuthHeaders(admin.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	added := readUntilDMEvent(t, conn, "dm_participant_added")
+	assert.Equal(t, newUser.ID, added["user_id"], "the added member id must be canonical so hub delivery and clients match it")
+}
+
+func TestDeleteGroup_AlternateSpelling_CanonicalWSPayload(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "canondeladmin")
+	member := ts.CreateTestUser(t, "canondelmember")
+	convID := createTestGroup(t, ts, admin, member)
+	conn := dialDMObserver(t, ts, member.ID, convID)
+
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+upperSpelling(t, convID), nil, testhelpers.AuthHeaders(admin.AccessToken))
+	require.Less(t, w.Code, 300, w.Body.String())
+
+	deleted := readUntilDMEvent(t, conn, "dm_group_deleted")
+	assert.Equal(t, convID, deleted["conversation_id"])
+}
