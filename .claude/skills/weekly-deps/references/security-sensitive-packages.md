@@ -4,7 +4,7 @@ Read this file when Phase 3.5 (confidence assessment) needs to decide whether a 
 
 **This list is the shared, universal default — package families that sit on a security boundary in essentially any codebase that uses them** (authentication, cryptography, parsers/validators, deserialization, HTTP clients, XSS sanitizers, logging). It is intentionally framework- and stack-agnostic: it does NOT name any single repo's framework, UI library, or infrastructure-specific actions.
 
-**The effective list = this universal default ∪ the repo's `.weekly_deps.security_sensitive_extra`.** Repos add their own boundary packages (a UI framework, a desktop runtime, a server framework, code-signing actions, etc.) via `.weekly_deps.security_sensitive_extra` in `.claude/repo-config.json` — see `config/repo-config.reference.md`. Do not edit this shared file to add a repo-specific package; put it in that repo's config instead.
+**The effective list = this universal default ∪ the repo's `.weekly_deps.security_sensitive_extra`.** Repos add their own boundary packages (a UI framework, a desktop runtime, a server framework, code-signing actions, etc.) via `.weekly_deps.security_sensitive_extra` in `.claude/repo-config.json` — see `.claude/repo-config.reference.md`. Do not edit this shared file to add a repo-specific package; put it in that repo's config instead.
 
 ## NPM / JavaScript
 
@@ -102,7 +102,7 @@ Any action that touches secrets, fetches code, or executes arbitrary scripts:
 In Phase 3.5 of `weekly-deps` (confidence assessment), after parsing the bumped package name(s) from the PR title:
 
 1. Compute the **effective list** = this universal default ∪ the repo's `.weekly_deps.security_sensitive_extra` (read via `rc_get '.weekly_deps.security_sensitive_extra | join(" ")' ''`).
-2. For grouped PRs (`chore: bump the X group ...`), fetch the dependabot summary body via `gh pr view $PR --json body --jq '.body'` and extract individual package names from the bullet list.
+2. For grouped PRs (`chore: bump the X group ...`), fetch the dependabot summary body via `gh pr view $PR -R "$OWNER_REPO" --json body --jq '.body'` and extract individual package names from the bullet list.
 3. For each bumped package, glob-match against the effective list (e.g., `ajv*` matches `ajv`, `ajv-formats`, `ajv-keywords`).
 4. If ANY bumped package matches → set confidence to LOW regardless of other signals.
 

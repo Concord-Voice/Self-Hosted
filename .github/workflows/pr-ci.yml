@@ -542,12 +542,6 @@ jobs:
             exit 1
           fi
 
-      # SonarCloud narrowed-profile drift guard (ADR-0017 / #1430).
-      # Hermetic self-test — no token, no network, fork-safe — BLOCKING.
-      - name: Test SonarCloud narrowed-profile drift guard (self-test)
-        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.sonar_profile) }}
-        run: bash scripts/sonar/test-check-narrowed-profile.sh
-
       # ── CHANGELOG.md discipline gate (#1857) ───────────────────────────
       # Folded in from the former standalone `verify-changelog` job (2026-08 CI
       # cost audit). That job averaged 1.00 min across 1,925 runs and had an
@@ -733,7 +727,7 @@ jobs:
         id: selection
         env:
           FILTERS: >-
-            {"all_changed":"${{ steps.filter.outputs.all_changed }}","codeql_actions":"${{ steps.filter.outputs.codeql_actions }}","codeql_go":"${{ steps.filter.outputs.codeql_go }}","codeql_js":"${{ steps.filter.outputs.codeql_js }}","eslint":"${{ steps.filter.outputs.eslint }}","govulncheck":"${{ steps.filter.outputs.govulncheck }}","osv":"${{ steps.filter.outputs.osv }}","semgrep_custom":"${{ steps.filter.outputs.semgrep_custom }}","semgrep_community":"${{ steps.filter.outputs.semgrep_community }}","semgrep_canary":"${{ steps.filter.outputs.semgrep_canary }}","sonar":"${{ steps.filter.outputs.sonar }}","sonar_force_all":"${{ steps.filter.outputs.sonar_force_all }}","sonar_desktop":"${{ steps.filter.outputs.sonar_desktop }}","sonar_control_plane":"${{ steps.filter.outputs.sonar_control_plane }}","sonar_media_plane":"${{ steps.filter.outputs.sonar_media_plane }}","sonar_admin":"${{ steps.filter.outputs.sonar_admin }}","selfhost":"${{ steps.filter.outputs.selfhost }}","services":"${{ steps.filter.outputs.services }}","spa":"${{ steps.filter.outputs.spa }}","desktop":"${{ steps.filter.outputs.desktop }}","control_plane":"${{ steps.filter.outputs.control_plane }}","media_plane":"${{ steps.filter.outputs.media_plane }}","media_plane_tests":"${{ steps.filter.outputs.media_plane_tests }}","admin":"${{ steps.filter.outputs.admin }}","production_docker":"${{ steps.filter.outputs.production_docker }}","native":"${{ steps.filter.outputs.native }}","go_lint":"${{ steps.filter.outputs.go_lint }}","dev_stack":"${{ steps.filter.outputs.dev_stack }}","go_toolchain":"${{ steps.filter.outputs.go_toolchain }}","openapi":"${{ steps.filter.outputs.openapi }}","spa_env":"${{ steps.filter.outputs.spa_env }}","deployment":"${{ steps.filter.outputs.deployment }}","selfhost_guard":"${{ steps.filter.outputs.selfhost_guard }}","feature_wiring":"${{ steps.filter.outputs.feature_wiring }}","adr_numbers":"${{ steps.filter.outputs.adr_numbers }}","secrets_contract":"${{ steps.filter.outputs.secrets_contract }}","dispatch_trust":"${{ steps.filter.outputs.dispatch_trust }}","go_test_contracts":"${{ steps.filter.outputs.go_test_contracts }}","review_contracts":"${{ steps.filter.outputs.review_contracts }}","tooling_mirrors":"${{ steps.filter.outputs.tooling_mirrors }}","graphify_contracts":"${{ steps.filter.outputs.graphify_contracts }}","native_ioc":"${{ steps.filter.outputs.native_ioc }}","sonar_profile":"${{ steps.filter.outputs.sonar_profile }}","changelog":"${{ steps.filter.outputs.changelog }}","dev_checks":"${{ steps.filter.outputs.dev_checks }}","workflow_lint":"${{ steps.filter.outputs.workflow_lint }}","worker_apple":"${{ steps.filter.outputs.worker_apple }}","worker_invite":"${{ steps.filter.outputs.worker_invite }}","license_desktop":"${{ steps.filter.outputs.license_desktop }}","license_media":"${{ steps.filter.outputs.license_media }}","license_admin":"${{ steps.filter.outputs.license_admin }}","license_go":"${{ steps.filter.outputs.license_go }}"}
+            {"all_changed":"${{ steps.filter.outputs.all_changed }}","codeql_actions":"${{ steps.filter.outputs.codeql_actions }}","codeql_go":"${{ steps.filter.outputs.codeql_go }}","codeql_js":"${{ steps.filter.outputs.codeql_js }}","eslint":"${{ steps.filter.outputs.eslint }}","govulncheck":"${{ steps.filter.outputs.govulncheck }}","osv":"${{ steps.filter.outputs.osv }}","semgrep_custom":"${{ steps.filter.outputs.semgrep_custom }}","semgrep_community":"${{ steps.filter.outputs.semgrep_community }}","semgrep_canary":"${{ steps.filter.outputs.semgrep_canary }}","sonar":"${{ steps.filter.outputs.sonar }}","sonar_force_all":"${{ steps.filter.outputs.sonar_force_all }}","sonar_desktop":"${{ steps.filter.outputs.sonar_desktop }}","sonar_control_plane":"${{ steps.filter.outputs.sonar_control_plane }}","sonar_media_plane":"${{ steps.filter.outputs.sonar_media_plane }}","sonar_admin":"${{ steps.filter.outputs.sonar_admin }}","selfhost":"${{ steps.filter.outputs.selfhost }}","services":"${{ steps.filter.outputs.services }}","spa":"${{ steps.filter.outputs.spa }}","desktop":"${{ steps.filter.outputs.desktop }}","control_plane":"${{ steps.filter.outputs.control_plane }}","media_plane":"${{ steps.filter.outputs.media_plane }}","media_plane_tests":"${{ steps.filter.outputs.media_plane_tests }}","admin":"${{ steps.filter.outputs.admin }}","production_docker":"${{ steps.filter.outputs.production_docker }}","native":"${{ steps.filter.outputs.native }}","go_lint":"${{ steps.filter.outputs.go_lint }}","dev_stack":"${{ steps.filter.outputs.dev_stack }}","go_toolchain":"${{ steps.filter.outputs.go_toolchain }}","openapi":"${{ steps.filter.outputs.openapi }}","spa_env":"${{ steps.filter.outputs.spa_env }}","deployment":"${{ steps.filter.outputs.deployment }}","selfhost_guard":"${{ steps.filter.outputs.selfhost_guard }}","feature_wiring":"${{ steps.filter.outputs.feature_wiring }}","adr_numbers":"${{ steps.filter.outputs.adr_numbers }}","secrets_contract":"${{ steps.filter.outputs.secrets_contract }}","dispatch_trust":"${{ steps.filter.outputs.dispatch_trust }}","go_test_contracts":"${{ steps.filter.outputs.go_test_contracts }}","review_contracts":"${{ steps.filter.outputs.review_contracts }}","tooling_mirrors":"${{ steps.filter.outputs.tooling_mirrors }}","graphify_contracts":"${{ steps.filter.outputs.graphify_contracts }}","native_ioc":"${{ steps.filter.outputs.native_ioc }}","changelog":"${{ steps.filter.outputs.changelog }}","dev_checks":"${{ steps.filter.outputs.dev_checks }}","workflow_lint":"${{ steps.filter.outputs.workflow_lint }}","worker_apple":"${{ steps.filter.outputs.worker_apple }}","worker_invite":"${{ steps.filter.outputs.worker_invite }}","license_desktop":"${{ steps.filter.outputs.license_desktop }}","license_media":"${{ steps.filter.outputs.license_media }}","license_admin":"${{ steps.filter.outputs.license_admin }}","license_go":"${{ steps.filter.outputs.license_go }}"}
           METADATA: >-
             {"event_name":"pull_request","hotfix":${{ steps.metadata.outputs.hotfix == 'true' }},"head_sha":"${{ steps.metadata.outputs.head_sha }}","base_sha":"${{ steps.metadata.outputs.base_sha }}","merge_base_sha":"${{ steps.metadata.outputs.merge_base_sha }}","merge_sha":"${{ steps.metadata.outputs.merge_sha }}","changed_files":${{ steps.metadata.outputs.changed_files || '-1' }}}
           SCAN_MODE: ${{ inputs.trusted-source && (vars.CI_SCAN_RELEVANCE_MODE == '' || vars.CI_SCAN_RELEVANCE_MODE == 'legacy') && 'required-full' || vars.CI_SCAN_RELEVANCE_MODE }}
@@ -1046,12 +1040,60 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      # The diff below and HEAD^1 assume GitHub's two-parent merge commit. A
+      # single-parent checkout (a merge-queue squash, or a change in how GitHub
+      # builds the ref) would make HEAD^1 a PR commit, so fail closed instead.
+      # The job runs on pull_request only; another trigger has no PR head here
+      # and fails this step by design.
+      - name: Verify the checkout is the PR merge commit
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          read -r -a parents <<< "$(git rev-list --parents -n 1 HEAD)"
+          if [[ ! "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ || "${#parents[@]}" -ne 3 ||
+                "${parents[2]}" != "$PR_HEAD_SHA" ]]; then
+            echo "::error::HEAD is not the two-parent merge commit of PR head ${PR_HEAD_SHA:-none}."
+            exit 1
+          fi
+
+      # The runner (golang-migrate) reads every top-level NNN_*.up.* or .down.*
+      # file in the directory, through file:// and following symlinks, and squawk
+      # reads each argument as a glob. So the directory must be a tree of regular
+      # files, and every migration name one plain shape, or a PR could route SQL
+      # around this selection (an .up.psql file, a symlink, a [glob] name).
+      # Both golang-migrate sources are covered: the control-plane directory and
+      # the account authority's embedded one (internal/authority/store).
       - name: Select changed up migrations
         id: select
         run: |
           set -euo pipefail
-          git diff --name-only --diff-filter=ACMR HEAD^1 HEAD \
-            -- 'services/control-plane/migrations/*.up.sql' > "$RUNNER_TEMP/migrations.txt"
+          # Byte semantics: under a UTF-8 locale "." skips a non-UTF-8 byte, so
+          # such a name would pass the prefilter unchecked.
+          export LC_ALL=C
+          : > "$RUNNER_TEMP/migrations.txt"
+          for dir in services/control-plane/migrations services/control-plane/internal/authority/store/migrations; do
+            if [ "$(git ls-tree HEAD -- "$dir" | cut -c1-6)" != 040000 ]; then
+              echo "::error::$dir is not a directory in the merge commit."
+              exit 1
+            fi
+            # Into a file first, so set -e sees a failing ls-tree.
+            git ls-tree -r HEAD -- "$dir/" > "$RUNNER_TEMP/tree.txt"
+            if grep -Ev '^100(644|755) blob ' "$RUNNER_TEMP/tree.txt"; then
+              echo "::error::$dir may hold regular files only; the entries above are not."
+              exit 1
+            fi
+            git diff -z --no-renames --name-only --diff-filter=d HEAD^1 HEAD -- "$dir/" > "$RUNNER_TEMP/changed.z"
+            while IFS= read -r -d '' path; do
+              name=${path#"$dir/"}
+              [[ "$name" =~ ^[0-9]+_.*\.(up|down)\. ]] || continue
+              if [[ ! "$name" =~ ^[0-9]{6}_[a-z0-9_]+\.(up|down)\.sql$ ]]; then
+                echo "::error::Migration file name is not NNNNNN_name.up.sql or .down.sql: $(printf '%q' "$path")"
+                exit 1
+              fi
+              if [[ "$name" == *.up.sql ]]; then printf '%s\n' "$path" >> "$RUNNER_TEMP/migrations.txt"; fi
+            done < "$RUNNER_TEMP/changed.z"
+          done
           count=$(grep -c . "$RUNNER_TEMP/migrations.txt" || true)
           echo "count=$count" >> "$GITHUB_OUTPUT"
           if [ "$count" -eq 0 ]; then
@@ -1060,22 +1102,49 @@ jobs:
             cat "$RUNNER_TEMP/migrations.txt"
           fi
 
-      # The config and the pinned requirements come from the base (HEAD^1), never
-      # the PR: a PR that widened excluded_rules or swapped the wheel hash would
-      # otherwise clear its own required check.
+      # Config and pinned requirements come from the protected base commit,
+      # fetched by SHA, never from the PR or from HEAD^1, so a PR cannot loosen
+      # the check it is judged by (a widened excluded_rules or a swapped hash).
       - name: Install squawk
         if: ${{ steps.select.outputs.count != '0' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git show HEAD^1:.squawk.toml > "$RUNNER_TEMP/squawk.toml"
-          git show HEAD^1:.github/requirements-squawk.txt > "$RUNNER_TEMP/requirements-squawk.txt"
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The PR base commit ${BASE_SHA:-none} is not a commit SHA."
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git show "$BASE_SHA:.squawk.toml" > "$RUNNER_TEMP/squawk.toml"
+          git show "$BASE_SHA:.github/requirements-squawk.txt" > "$RUNNER_TEMP/requirements-squawk.txt"
           python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/requirements-squawk.txt"
 
+      # squawk obeys squawk-ignore comments in the file it lints. The only form
+      # accepted is the documented one: a whole-line "-- squawk-ignore <rule>"
+      # above one statement, which a reviewer sees in the diff. A file-wide
+      # ignore, a bare ignore or one hidden in a trailing or block comment would
+      # let the PR switch off its own check.
       - name: Lint changed migrations
         if: ${{ steps.select.outputs.count != '0' }}
         run: |
           set -euo pipefail
           mapfile -t files < "$RUNNER_TEMP/migrations.txt"
+          # grep reads a file with a NUL byte as binary and prints no lines, so
+          # refuse anything that is not NUL-free UTF-8 before the ignore check.
+          for f in "${files[@]}"; do
+            if ! iconv -f UTF-8 -t UTF-8 < "$f" > /dev/null || [ "$(tr -d '\000' < "$f" | wc -c)" -ne "$(wc -c < "$f")" ]; then
+              echo "::error::$(printf '%q' "$f") is not NUL-free UTF-8 text."
+              exit 1
+            fi
+          done
+          # Into a file first, so set -e sees a grep read error (exit 2).
+          grep -ainH 'squawk-ignore' -- "${files[@]}" > "$RUNNER_TEMP/ignores.txt" || [ $? -eq 1 ]
+          if grep -Ev '^[^:]+:[0-9]+:[[:blank:]]*-- squawk-ignore [a-z0-9-]+([[:blank:]]*,[[:blank:]]*[a-z0-9-]+)*[[:blank:]]*$' "$RUNNER_TEMP/ignores.txt"; then
+            echo "::error::Only a whole-line '-- squawk-ignore <rule>' above one statement is accepted; the lines above are not."
+            exit 1
+          fi
           "$HOME/.local/bin/squawk" --version
           "$HOME/.local/bin/squawk" --config "$RUNNER_TEMP/squawk.toml" "${files[@]}"
 

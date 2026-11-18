@@ -20,7 +20,7 @@ The title is matched exactly so the routine can find the issue by title-search w
 TITLE="$(rc_get '.weekly_deps.digest_issue_title' 'Weekly Dependency Triage — Routine Output')"
 
 # Create the issue
-gh issue create \
+gh issue create -R "$OWNER_REPO" \
   --title "$TITLE" \
   --label "routine,dependencies" \
   --body "Pinned tracking issue for the \`/weekly-deps\` routine.
@@ -41,7 +41,7 @@ Then pin the issue manually via the GitHub UI (Issues → ⋯ → Pin issue). `g
 
 ```bash
 TITLE="$(rc_get '.weekly_deps.digest_issue_title' 'Weekly Dependency Triage — Routine Output')"
-ISSUE_NUM=$(gh issue list --state open \
+ISSUE_NUM=$(gh issue list -R "$OWNER_REPO" --state open \
   --search "in:title \"$TITLE\"" \
   --json number --jq '.[0].number')
 if [ -z "$ISSUE_NUM" ]; then

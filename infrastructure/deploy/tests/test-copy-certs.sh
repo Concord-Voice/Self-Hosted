@@ -13,8 +13,8 @@ FIXTURE_IMAGE="${SELFHOST_CERT_TEST_IMAGE:-}"
 COTURN_TEST_IMAGE="${SELFHOST_CERT_TEST_COTURN_IMAGE:-$IMAGE}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-if [[ "$IMAGE" != "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e" ]]; then
-  fail "the Compose coturn image must remain pinned to the reviewed 4.18.0 artifact (got ${IMAGE:-none})"
+if [[ "$IMAGE" != "coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e" ]]; then
+  fail "the Compose coturn image must remain pinned to the reviewed 4.19.0 artifact (got ${IMAGE:-none})"
 fi
 [[ -r "$TOOL_HELPER" ]] || fail "shared public tooling image helper unavailable"
 # shellcheck source=infrastructure/deploy/tests/selfhost-cert-test-tools.sh
@@ -111,7 +111,7 @@ case "${1:-}" in
   inspect)
     [[ $# -eq 4 && "$2" == --format && "$3" == "$COPY_TEST_INSPECT_TEMPLATE" &&
       "$4" == "$COPY_TEST_CONSUMER_ID" ]] || exit 97
-    printf '{"Name":"/%s","Image":"coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e","Project":"%s","Service":"coturn","Status":"running","Running":true,"Paused":false,"Restarting":false}\n' \
+    printf '{"Name":"/%s","Image":"coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e","Project":"%s","Service":"coturn","Status":"running","Running":true,"Paused":false,"Restarting":false}\n' \
       "$container_name" "$COPY_TEST_PROJECT"
     ;;
   restart)

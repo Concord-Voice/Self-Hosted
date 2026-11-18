@@ -24,7 +24,7 @@ const storeBusyTimeoutMS = 250
 // file through its read-only mount; nobody else can.
 const dbFileMode os.FileMode = 0o640
 
-// coturnSchema is the exact list of statements coturn 4.18.0 runs in
+// coturnSchema is the exact list of statements coturn 4.19.0 (unchanged since 4.18.0) runs in
 // init_sqlite_database (src/apps/relay/dbdrivers/dbd_sqlite.c), in order. The
 // text is stored verbatim in sqlite_master, so it is kept byte-for-byte,
 // including the two literal tabs in turn_realm_option.
@@ -176,7 +176,7 @@ func closeRows(rows *sql.Rows, err *error) {
 // and any write or execute for other users. Other-read is tightened instead.
 const dbRefusedBits os.FileMode = 0o033
 
-// InitSchema creates coturn 4.18.0's eight tables exactly as coturn would, if
+// InitSchema creates coturn 4.19.0's eight tables exactly as coturn would, if
 // absent. It never changes rows. Unlike coturn it does not ignore failures: a
 // table whose stored DDL differs, or any object coturn would not create, is
 // refused so that drift or tampering cannot hide behind a successful exit.

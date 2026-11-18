@@ -86,6 +86,9 @@ type MFAChecker interface {
 	// for any user who has rotated. primaryAuthMethod is the server-authenticated
 	// password, SSO, or session path whose provenance must survive MFA completion.
 	GenerateLoginChallenge(ctx context.Context, userID string, rememberMe bool, credEpoch string, primaryAuthMethod securityevent.AuthMethod) (token string, jti string, err error)
+	// GenerateSSOLinkChallenge signs a login-purpose MFA challenge whose only
+	// completion authority is the pending SSO identity bound to its JTI.
+	GenerateSSOLinkChallenge(ctx context.Context, userID, credEpoch string) (token string, jti string, err error)
 	// GenerateUpgradeChallenge creates a challenge token for pre-MFA sessions that
 	// need to verify MFA before continuing. The signed challenge is bound to the
 	// refresh session that requested it.
@@ -429,8 +432,8 @@ type RegisterRequest struct {
 const (
 	maxRegisterRequestBytes    = 64 * 1024
 	maxRegisterPublicKeyBytes  = 1024
-	maxRegisterWrappedKeyBytes = 32 * 1024
-	maxRegisterSaltBytes       = 64
+	maxRegisterWrappedKeyBytes = MaxWrappedPrivateKeyDecoded
+	maxRegisterSaltBytes       = MaxKeyDerivationSaltDecoded
 )
 
 var errRegisterBodyTooLarge = errors.New("registration body too large")
@@ -473,19 +476,18 @@ func (h *Handler) validateRegistration(req *RegisterRequest) error {
 }
 
 func decodeE2EEKeys(publicKeyB64, wrappedKeyB64, saltB64 string) (publicKey, wrappedKey, salt []byte, err error) {
+	wrappedKey, salt, err = DecodeRegistrationPrivateMaterial(wrappedKeyB64, saltB64)
+	if errors.Is(err, ErrWrappedPrivateKeyInvalid) {
+		return nil, nil, nil, fmt.Errorf("Invalid wrapped private key format") //nolint:staticcheck // ST1005: user-facing message rendered directly in UI
+	}
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("Invalid salt format") //nolint:staticcheck // ST1005: user-facing message rendered directly in UI
+	}
 	publicKey, err = decodeBoundedBase64(publicKeyB64, "public key", maxRegisterPublicKeyBytes)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	if err := ValidateE2EEPublicKey(publicKey); err != nil {
-		return nil, nil, nil, err
-	}
-	wrappedKey, err = decodeBoundedBase64(wrappedKeyB64, "wrapped private key", maxRegisterWrappedKeyBytes)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	salt, err = decodeBoundedBase64(saltB64, "salt", maxRegisterSaltBytes)
-	if err != nil {
 		return nil, nil, nil, err
 	}
 	return publicKey, wrappedKey, salt, nil
@@ -600,7 +602,7 @@ func (h *Handler) Register(c *gin.Context) {
 
 	publicKey, wrappedKey, salt, err := decodeE2EEKeys(req.PublicKey, req.WrappedPrivateKey, req.KeyDerivationSalt)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "error_code": "invalid_key_material"})
 		return
 	}
 

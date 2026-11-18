@@ -1,0 +1,146 @@
+name: Sonar Container Scan
+
+# SonarQube Cloud container scanning (Advanced Security, beta). Scans the
+# first-party service images, built from main as container-image-scan.yml
+# builds them, and every digest-pinned image a deployment pulls (compose
+# `image:`) or builds FROM. Results go to the organization's Container images
+# view. SonarQube Cloud re-checks scanned images for new CVEs by itself; this
+# run refreshes them after main changes.
+#
+# --fail-on none: this run reports to SonarQube Cloud and does not gate.
+# Trivy in container-image-scan.yml is the gate on fixable HIGH/CRITICAL
+# findings in the service images. A build, pull or scanner error still fails
+# the run.
+#
+# MAIN ONLY. The scan job holds SONAR_TOKEN in the main-restricted
+# protected-sonar environment, so this workflow has no pull_request trigger,
+# and a dispatch from any other ref fails before the environment is entered.
+# IOC-first (ADR-0018 §2): the media-plane build runs `npm ci`, so the scan
+# job needs the ioc verdict. A cron has no event.before, so the IOC
+# install-script diff covers only the last merge; the nightly covers the full
+# window.
+#
+# The image publishers (publish-buildtools-base.yml, publish-minio-image.yml)
+# keep their own review and approval gates. This workflow only pulls what they
+# published, by the digests that main pins.
+on:
+  schedule:
+    # 09:00 UTC daily, two hours after nightly-ci, so they do not compete for runners.
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sonar-container-scan
+  cancel-in-progress: false
+
+env:
+  SCANNER_VERSION: 0.4.0.10193
+  # linux-x64 build. install-docker-engine.sh admits only amd64 runners.
+  SCANNER_SHA256: 487348ce07fa8bc9238070532b9f7c8f11dcffd0c6a7349284fd59244dccc38e # pragma: allowlist secret -- sha256 of Sonar's published scanner binary, not a credential
+
+jobs:
+  reject-non-main:
+    name: Reject non-main dispatch
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Reject non-main dispatch
+        run: |
+          echo "::error::Sonar container scan runs only from refs/heads/main."
+          exit 1
+
+  ioc:
+    name: ioc
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/ioc-scanning.yml
+
+  scan:
+    name: Sonar container scan
+    needs: [ioc]
+    if: github.ref == 'refs/heads/main'
+    environment: protected-sonar
+    # GitHub's standard runner: credential-path jobs stay on GitHub-hosted
+    # runners (ADR-0016), and the work is serial build, pull and upload, so
+    # more vCPUs buy little.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install and admit locked Docker Engine
+        run: bash scripts/ci/install-docker-engine.sh
+
+      - name: Install container scanner
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/sonar-container-scanner"
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 --retry 3 \
+            -o "$bin" "https://binaries.sonarsource.com/CommercialDistribution/sonar-container-scanner/sonar-container-scanner-${SCANNER_VERSION}-linux-x64.bin"
+          echo "${SCANNER_SHA256}  $bin" | sha256sum --check --strict
+          chmod +x "$bin"
+
+      # Same images and build inputs as container-image-scan.yml's matrix; keep
+      # the two lists in step.
+      - name: Build first-party images
+        run: |
+          set -euo pipefail
+          build() { docker buildx build --load "${@:4}" -f "$3" -t "self-hosted/$1:main" "$2"; }
+          build control-plane services/control-plane services/control-plane/Dockerfile \
+            --build-context admin_ui=client/admin
+          build media-plane services/media-plane services/media-plane/Dockerfile
+          build ops-agent services/control-plane services/control-plane/Dockerfile.ops-agent
+          build account-authority services/control-plane services/control-plane/Dockerfile.account-authority
+
+      # Read from the files, not a copied list, so a Dependabot digest bump is
+      # scanned the next day. Test-only Dockerfiles stay out.
+      - name: Pull digest-pinned images
+        run: |
+          set -euo pipefail
+          mapfile -t refs < <(
+            { git ls-files -z -- 'docker-compose*.yml' | xargs -0 grep -hE '^[[:space:]]*image:'
+              git ls-files -z -- '*Dockerfile*' ':!*/tests/*' | xargs -0 grep -hiE '^[[:space:]]*FROM[[:space:]]'
+            } | grep -oE '[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}' | sort -u)
+          (( ${#refs[@]} > 0 )) || { echo "::error::No digest-pinned images found."; exit 1; }
+          for ref in "${refs[@]}"; do
+            named=${ref%@*}
+            # The scanner reads the identity from the tag; refuse a pin without one.
+            [[ $named =~ :[A-Za-z0-9._-]+$ ]] || { echo "::error::Pin has no tag: $ref"; exit 1; }
+            docker pull --quiet "$ref"
+            # A digest pull stores no tag. Put it back for the scanner.
+            docker tag "${named%:*}@${ref#*@}" "$named"
+            echo "$named" >> "$RUNNER_TEMP/pinned-images.txt"
+          done
+
+      - name: Scan images
+        env:
+          SONAR_CONTAINER_SCANNER_ORG: concord-voice
+          SONAR_CONTAINER_SCANNER_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SONAR_CONTAINER_SCANNER_TOKEN" ]] || { echo "::error::Sonar credential unavailable."; exit 1; }
+          scanner="$RUNNER_TEMP/sonar-container-scanner"
+          mapfile -t pinned < "$RUNNER_TEMP/pinned-images.txt"
+          failed=()
+          # Built images exist in no registry, so name them explicitly.
+          for image in control-plane media-plane ops-agent account-authority; do
+            "$scanner" "self-hosted/$image:main" --registry localhost --repository "self-hosted/$image" \
+              --tag main --fail-on none --format table || failed+=("self-hosted/$image")
+          done
+          for image in "${pinned[@]}"; do
+            "$scanner" "$image" --fail-on none --format table || failed+=("$image")
+          done
+          if (( ${#failed[@]} )); then
+            echo "::error::Container scan failed for: ${failed[*]}"
+            exit 1
+          fi
