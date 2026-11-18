@@ -92,7 +92,7 @@ class RunnerEngine(unittest.TestCase):
         result, calls = self.execute("good")
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         install = next(args for kind, args in calls if kind == "sudo" and any(x.startswith("docker-ce=") for x in args))
-        self.assertEqual(install, ["apt-get", "install", "-y", "-q", "--no-install-recommends", "--no-remove", *PACKAGES])
+        self.assertEqual(install, ["apt-get", "install", "-y", "-q", "--no-install-recommends", "--no-remove", "--allow-downgrades", *PACKAGES])
         source = next(args for kind, args in calls if kind == "source")
         self.assertIn("Signed-By: /etc/apt/keyrings/docker.asc " + KEY, source)
         download = next(args for kind, args in calls if kind == "curl")
