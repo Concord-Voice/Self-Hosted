@@ -75,7 +75,7 @@ fi
 [ -z "$FILE_PATHS" ] && exit 0
 
 canonicalize_path() {
-    local raw_path=$1 candidate parent base canonical_parent next_parent
+    local raw_path=$1 candidate parent base canonical_parent next_parent segment
 
     candidate=$raw_path
     if [[ "$candidate" != /* ]]; then
@@ -97,8 +97,10 @@ canonicalize_path() {
         [[ -e "$parent" || -L "$parent" ]] && return 1
         next_parent=$(dirname "$parent")
         [[ "$next_parent" != "$parent" ]] || return 1
-        case "$(basename "$parent")" in .|..) return 1 ;; *) : ;; esac
-        base="$(basename "$parent")/$base"
+        # An [[ ]] test, not a case pattern: Semgrep 1.121's bash parser rejects `.|..)`.
+        segment=$(basename "$parent")
+        [[ "$segment" != "." && "$segment" != ".." ]] || return 1
+        base="$segment/$base"
         parent=$next_parent
     done
     # GNU realpath permits a missing final component by default and preserves

@@ -29,7 +29,7 @@
   ".claude/hooks/destructive-commands.sh": "294753303 15",
   ".claude/hooks/detect-secrets.sh": "2037546878 16",
   ".claude/hooks/issue-creation-nudge.sh": "4280316669 16",
-  ".claude/hooks/protect-applied-migrations.sh": "2363584213 16",
+  ".claude/hooks/protect-applied-migrations.sh": "990394385 16",
   ".claude/hooks/protect-env-files.sh": "81604108 16",
   ".claude/hooks/protect-sensitive.sh": "2456911452 18",
   ".claude/hooks/test-detect-secrets.sh": "727376372 16",
