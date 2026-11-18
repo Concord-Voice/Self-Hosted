@@ -1,6 +1,6 @@
 # WebSocket event budget implementation plan
 
-Plan for `Hosted issue 2270`, governed
+Implementation plan governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
 **UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1–C4 supply
 socket lifetimes, enabled event gates and complete dispatch/renewal integration.

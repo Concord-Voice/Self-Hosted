@@ -1,6 +1,6 @@
 # Authenticated step-up budget implementation plan
 
-Plan for Hosted issue 2271 within Hosted epic 696, governed by the
+Implementation plan governed by the
 [design contract](authenticated-step-up-budget.md).
 
 The opaque actor adapter, private SQL accounting core and process proof-work tracker
@@ -184,5 +184,5 @@ Canonical Self-Hosted delivery to Hosted and actual supported-consumer compatibi
 must be demonstrated before activation. Deployment remains separately governed.
 Accounting-only Redis degradation after authenticated authority is distinct from
 an unavailable `AuthRequired` veto. The latter's bounded 503 is not availability:
-**A7b remains unfulfilled and blocks full issue closure.** This unit references
-Hosted issue 2271; it does not close it or authorize rollout.
+**A7b remains unfulfilled and blocks full issue closure.** This unit does not
+complete the step-up budget work or authorize rollout.
