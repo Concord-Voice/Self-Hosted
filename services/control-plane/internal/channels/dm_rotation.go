@@ -192,7 +192,7 @@ func (h *Handler) RotateDMKey(c *gin.Context) {
 		// the epoch already established (one GET).
 		h.broadcastDMKeyRevocation(convID, outcome.previousVersion, outcome.keyVersion, "manual_rotation")
 	}
-	h.notifyDMKeyDistribution(convID, outcome.delivered)
+	h.notifyDMKeyDistribution(convID, outcome.delivered, outcome.alreadyHeld)
 	c.JSON(http.StatusOK, gin.H{"message": "Key rotated", "new_key_version": outcome.keyVersion})
 }
 

@@ -2695,9 +2695,21 @@ func claimChannelKeyRotationTx(ctx context.Context, tx *sql.Tx, channelID, actor
 // including a lock or statement timeout, would otherwise abort the whole
 // transaction (25P02) and fail every later target. Rolling back to the
 // savepoint keeps skip-and-continue for the rest of the batch.
-func (h *Handler) distributionTargetAdmitted(ctx context.Context, tx *sql.Tx, channelID, memberUserID string) (admitted, skippedOnError bool) {
+//
+// A target that already holds the key at keyVersion is not enrolled
+// (VULN-080): the request it would leave behind is redundant.
+func (h *Handler) distributionTargetAdmitted(ctx context.Context, tx *sql.Tx, channelID, memberUserID string, keyVersion int) (admitted, skippedOnError bool) {
 	canView, vErr := h.channelKeyViewCheckTx(ctx, tx, channelID, memberUserID)
 	if vErr != nil {
+		held, heldErr := channelKeyHeldTx(ctx, tx, channelID, memberUserID, keyVersion)
+		if heldErr != nil {
+			h.log.Error("key distribution: held-key check failed; enrolling skipped target",
+				"error", heldErr, "channel_id", sanitizeID(channelID), "user_id", sanitizeID(memberUserID))
+		}
+		if held {
+			h.log.Error("key distribution: view check failed; skipping target that already holds the key", "error", vErr, "user_id", sanitizeID(memberUserID))
+			return false, true
+		}
 		if enrollErr := enqueueChannelKeyRequest(ctx, tx, channelID, memberUserID); enrollErr != nil {
 			h.log.Error("key distribution: failed to enroll skipped target for retry",
 				"error", enrollErr, "channel_id", sanitizeID(channelID), "user_id", sanitizeID(memberUserID))
@@ -2764,6 +2776,24 @@ func recipientKeyFresh(ctx context.Context, tx *sql.Tx, userID string, wrappedVe
 	return current == wrappedVersion, nil
 }
 
+// channelKeyHeldTx reports whether userID already holds channelID's key at
+// keyVersion. keyVersion must be the batch's version after the server's epoch
+// guard accepted it, never a caller-supplied wrapped_key_versions value: the
+// caller chooses those, and checking against one would let a stale submission
+// write a pending request for a target that already holds the current key
+// (VULN-080).
+func channelKeyHeldTx(ctx context.Context, tx *sql.Tx, channelID, userID string, keyVersion int) (bool, error) {
+	var held bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM channel_keys
+			WHERE channel_id = $1 AND user_id = $2 AND key_version = $3
+		)`, channelID, userID, keyVersion).Scan(&held); err != nil {
+		return false, fmt.Errorf("read held channel key: %w", err)
+	}
+	return held, nil
+}
+
 // enqueueChannelKeyRequest re-requests distribution for a recipient skipped as
 // stale (#2420 self-heal). Idempotent against the existing retry loop; ON
 // CONFLICT DO NOTHING never raises a statement error, so it cannot poison the
@@ -2785,7 +2815,7 @@ func enqueueChannelKeyRequest(ctx context.Context, tx *sql.Tx, channelID, userID
 // cannot re-create a row the reset just purged. A statement error poisons the
 // whole PG transaction (25P02), so insert failures fail the batch via the error.
 func (h *Handler) distributeOneChannelKey(ctx context.Context, tx *sql.Tx, channelID, memberUserID, wrappedKey string, wrappedKeyVersions map[string]int, keyVersion int) (distributionOutcome, error) {
-	admitted, skippedOnError := h.distributionTargetAdmitted(ctx, tx, channelID, memberUserID)
+	admitted, skippedOnError := h.distributionTargetAdmitted(ctx, tx, channelID, memberUserID, keyVersion)
 	if skippedOnError {
 		return distributionSkippedOnError, nil
 	}
@@ -2799,6 +2829,15 @@ func (h *Handler) distributeOneChannelKey(ctx context.Context, tx *sql.Tx, chann
 			return distributionSkipped, fErr
 		}
 		if !fresh {
+			// A stale wrap for a target that already holds the current key is
+			// redundant, not a reason to re-request it (VULN-080).
+			held, hErr := channelKeyHeldTx(ctx, tx, channelID, memberUserID, keyVersion)
+			if hErr != nil {
+				return distributionSkipped, hErr
+			}
+			if held {
+				return distributionDuplicate, nil
+			}
 			if eErr := enqueueChannelKeyRequest(ctx, tx, channelID, memberUserID); eErr != nil {
 				return distributionSkipped, fmt.Errorf("enqueue self-heal: %w", eErr)
 			}
@@ -3067,17 +3106,14 @@ func (h *Handler) completeChannelKeyDistribution(ctx context.Context, tx *sql.Tx
 
 func (h *Handler) notifyChannelKeyDistribution(req channelKeyDistributionRequest, state channelKeyDistributionState, tally channelDistributionTally) {
 	for _, memberUserID := range tally.delivered {
-		// Newly delivered rows are best-effort POST-commit: the key row is already
-		// durable, and a failed DELETE inside the tx would poison the whole batch
-		// (25P02) for what is only retry-safe housekeeping.
-		if _, err := h.db.Exec(
-			`DELETE FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
-			req.channelID, memberUserID,
-		); err != nil {
-			h.log.Warn("key distribution: delivered pending cleanup failed",
-				"channel_id", sanitizeID(req.channelID), "user_id", sanitizeID(memberUserID), "error", err)
-		}
+		h.deletePendingChannelKeyRequest(req.channelID, memberUserID)
 		h.notifyKeyDelivered(req.channelID, memberUserID)
+	}
+	// A duplicate target already holds the key at the epoch-validated version,
+	// which can only have been written after its latest key reset, so its
+	// pending request is redundant (VULN-080). No key_delivered: nothing new.
+	for _, memberUserID := range tally.duplicate {
+		h.deletePendingChannelKeyRequest(req.channelID, memberUserID)
 	}
 	if state.initialDistributionIncomplete {
 		// A marker remains creator-only even after it advances. Wake that
@@ -3087,6 +3123,19 @@ func (h *Handler) notifyChannelKeyDistribution(req channelKeyDistributionRequest
 		// The holder received or already had the successor key, so it can drain
 		// the durable queue if the original batching renderer has gone away.
 		h.notifyKeyNeeded(tally.holders[0], state.serverID, req.channelID)
+	}
+}
+
+// deletePendingChannelKeyRequest is best-effort POST-commit housekeeping: the
+// key row is already durable, and a failed DELETE inside the tx would poison
+// the whole batch (25P02) for what is only retry-safe cleanup.
+func (h *Handler) deletePendingChannelKeyRequest(channelID, memberUserID string) {
+	if _, err := h.db.Exec(
+		`DELETE FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
+		channelID, memberUserID,
+	); err != nil {
+		h.log.Warn("key distribution: pending cleanup failed",
+			"channel_id", sanitizeID(channelID), "user_id", sanitizeID(memberUserID), "error", err)
 	}
 }
 
@@ -3268,6 +3317,9 @@ func (h *Handler) finishInitialKeyDistribution(ctx context.Context, tx *sql.Tx, 
 type channelDistributionTally struct {
 	distributed, duplicates, skippedErrors, skippedStale int
 	delivered, holders                                   []string
+	// duplicate lists the targets that already held the key; their pending
+	// requests are deleted after commit.
+	duplicate []string
 }
 
 func (t *channelDistributionTally) record(outcome distributionOutcome, memberUserID string) {
@@ -3278,6 +3330,7 @@ func (t *channelDistributionTally) record(outcome distributionOutcome, memberUse
 		t.distributed++
 	case distributionDuplicate:
 		t.holders = append(t.holders, memberUserID)
+		t.duplicate = append(t.duplicate, memberUserID)
 		t.duplicates++
 	case distributionSkippedOnError:
 		t.skippedErrors++
@@ -4424,6 +4477,20 @@ func insertWrappedDMKeyTx(ctx context.Context, tx *sql.Tx, conversationID, membe
 	return rowsAffected > 0, nil
 }
 
+// dmKeyHeldTx is the DM analogue of channelKeyHeldTx: keyVersion is the
+// batch's epoch-validated version, never a caller-supplied one (VULN-207).
+func dmKeyHeldTx(ctx context.Context, tx *sql.Tx, conversationID, userID string, keyVersion int) (bool, error) {
+	var held bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM dm_channel_keys
+			WHERE conversation_id = $1 AND user_id = $2 AND key_version = $3
+		)`, conversationID, userID, keyVersion).Scan(&held); err != nil {
+		return false, fmt.Errorf("read held dm key: %w", err)
+	}
+	return held, nil
+}
+
 // enqueueDMKeyRequest is the DM analogue of enqueueChannelKeyRequest (#2420
 // self-heal): idempotent re-request for a recipient skipped as stale.
 func enqueueDMKeyRequest(ctx context.Context, tx *sql.Tx, conversationID, userID string) error {
@@ -4459,6 +4526,13 @@ func distributeOneDMKey(ctx context.Context, tx *sql.Tx, conversationID, memberU
 			return dmRecipientSkippedStaleKey, fErr
 		}
 		if !fresh {
+			held, hErr := dmKeyHeldTx(ctx, tx, conversationID, memberUserID, keyVersion)
+			if hErr != nil {
+				return dmRecipientSkippedStaleKey, hErr
+			}
+			if held {
+				return dmRecipientAlreadyHeld, nil
+			}
 			if eErr := enqueueDMKeyRequest(ctx, tx, conversationID, memberUserID); eErr != nil {
 				return dmRecipientSkippedStaleKey, fmt.Errorf("enqueue dm self-heal: %w", eErr)
 			}
@@ -4542,7 +4616,7 @@ func (h *Handler) distributeDMKeys(ctx context.Context, actorID, tokenEpoch, con
 			}
 			return 0, fmt.Errorf("commit dm distribution tx: %w", err)
 		}
-		h.notifyDMKeyDistribution(conversationID, outcome.delivered)
+		h.notifyDMKeyDistribution(conversationID, outcome.delivered, outcome.alreadyHeld)
 		return len(outcome.delivered), nil
 	}
 	return 0, fmt.Errorf("retry dm distribution topology: %w", dmblock.ErrMembershipChanged)
@@ -4555,6 +4629,9 @@ type dmDistributionOutcome struct {
 	keyVersion      int
 	previousVersion int
 	delivered       []string
+	// alreadyHeld lists recipients that already held keyVersion; their
+	// pending requests are deleted after commit.
+	alreadyHeld []string
 }
 
 // dmDistributionBatch is one caller's distribution request: who is posting
@@ -4659,11 +4736,12 @@ func distributeDMKeysTx(ctx context.Context, tx *sql.Tx, batch dmDistributionBat
 	}
 
 	outcome := dmDistributionOutcome{keyVersion: keyVersion, previousVersion: previousVersion}
-	delivered, stale, err := applyDMKeyBatchTx(ctx, tx, batch, keyVersion)
+	delivered, alreadyHeld, stale, err := applyDMKeyBatchTx(ctx, tx, batch, keyVersion)
 	if err != nil {
 		return dmDistributionOutcome{}, err
 	}
 	outcome.delivered = delivered
+	outcome.alreadyHeld = alreadyHeld
 	if err := recordDMSuccessorRevocationTx(ctx, tx, batch, previousVersion, keyVersion, stale); err != nil {
 		return dmDistributionOutcome{}, err
 	}
@@ -4671,26 +4749,29 @@ func distributeDMKeysTx(ctx context.Context, tx *sql.Tx, batch dmDistributionBat
 }
 
 // applyDMKeyBatchTx writes each wrap in the batch and reports which recipients
-// received a new row and how many were skipped for holding a since-rotated
-// identity key (#2420). It performs no fencing; the caller has already admitted
-// the batch against the conversation's current epoch.
-func applyDMKeyBatchTx(ctx context.Context, tx *sql.Tx, batch dmDistributionBatch, keyVersion int) (delivered []string, stale int, err error) {
+// received a new row, which already held keyVersion, and how many were skipped
+// for holding a since-rotated identity key (#2420). It performs no fencing; the
+// caller has already admitted the batch against the conversation's current epoch.
+func applyDMKeyBatchTx(ctx context.Context, tx *sql.Tx, batch dmDistributionBatch, keyVersion int) (delivered, alreadyHeld []string, stale int, err error) {
 	for memberUserID, wrappedKey := range batch.wrappedKeys {
 		if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
 			continue
 		}
 		result, insErr := distributeOneDMKey(ctx, tx, batch.conversationID, memberUserID, wrappedKey, batch.wrappedKeyVersions, keyVersion)
 		if insErr != nil {
-			return nil, 0, insErr
+			return nil, nil, 0, insErr
 		}
 		switch result {
 		case dmRecipientInserted:
 			delivered = append(delivered, memberUserID)
+		case dmRecipientAlreadyHeld:
+			alreadyHeld = append(alreadyHeld, memberUserID)
 		case dmRecipientSkippedStaleKey:
 			stale++
+		case dmRecipientSkippedNotParticipant:
 		}
 	}
-	return delivered, stale, nil
+	return delivered, alreadyHeld, stale, nil
 }
 
 // recordDMSuccessorRevocationTx writes the dm_key_revocations row for a
@@ -4924,25 +5005,33 @@ func canonicalizeWrappedKeyMaps(wrappedKeys map[string]string, wrappedKeyVersion
 // sibling is. Keeping it inline left distributeDMKeys at exactly the S3776
 // cognitive-complexity threshold, so adding the error branch below — the one
 // thing this loop was missing — pushed it over.
-func (h *Handler) notifyDMKeyDistribution(conversationID string, delivered []string) {
+//
+// cleanup lists recipients that already held the epoch: their pending requests
+// are redundant and deleted too (VULN-207), but they get no key_delivered.
+func (h *Handler) notifyDMKeyDistribution(conversationID string, delivered, cleanup []string) {
+	for _, memberUserID := range cleanup {
+		h.deletePendingDMKeyRequest(conversationID, memberUserID)
+	}
 	for _, memberUserID := range delivered {
-		// Best-effort POST-commit cleanup — see distributeChannelKeysToMembers,
-		// which logs this same failure. This copy discarded it while citing
-		// that sibling, and the legacy DM route that DID log it is deleted by
-		// this PR, so the discard would have left the failure unreported
-		// everywhere. It is also self-amplifying: a pending row that outlives
-		// its own fulfilment keeps the recipient in appendDMPendingRequests, so
-		// every holder re-POSTs for them each sweep — against the per-conversation
-		// budget this PR adds.
-		if _, err := h.db.Exec(
-			`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`,
-			conversationID, memberUserID,
-		); err != nil {
-			h.log.Warn("dm key distribution: delivered pending cleanup failed",
-				"conversation_id", sanitizeID(conversationID),
-				"user_id", sanitizeID(memberUserID), "error", err)
-		}
+		h.deletePendingDMKeyRequest(conversationID, memberUserID)
 		h.notifyKeyDelivered(conversationID, memberUserID)
+	}
+}
+
+// deletePendingDMKeyRequest is best-effort POST-commit cleanup — see
+// deletePendingChannelKeyRequest, which logs this same failure. A failure must
+// be logged, not discarded: it is self-amplifying, because a pending row that
+// outlives its own fulfilment keeps the recipient in appendDMPendingRequests,
+// so every holder re-POSTs for them each sweep, against the per-conversation
+// budget.
+func (h *Handler) deletePendingDMKeyRequest(conversationID, memberUserID string) {
+	if _, err := h.db.Exec(
+		`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`,
+		conversationID, memberUserID,
+	); err != nil {
+		h.log.Warn("dm key distribution: pending cleanup failed",
+			"conversation_id", sanitizeID(conversationID),
+			"user_id", sanitizeID(memberUserID), "error", err)
 	}
 }
 

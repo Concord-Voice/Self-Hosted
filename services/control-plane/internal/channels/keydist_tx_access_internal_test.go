@@ -233,7 +233,7 @@ func TestDistribution_NoPoolConnWhileTxOpen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	start := time.Now()
-	admitted, skippedOnError := h.distributionTargetAdmitted(ctx, tx, ch, target)
+	admitted, skippedOnError := h.distributionTargetAdmitted(ctx, tx, ch, target, 1)
 	elapsed := time.Since(start)
 
 	assert.Less(t, elapsed, deadline, "the check must not wait for a second pool connection")
@@ -273,11 +273,11 @@ func TestDistribution_TargetCheckErrorDoesNotPoisonBatch(t *testing.T) {
 
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	admitted1, skipped1 := h.distributionTargetAdmitted(checkCtx, tx, ch, member)
+	admitted1, skipped1 := h.distributionTargetAdmitted(checkCtx, tx, ch, member, 1)
 	require.False(t, admitted1, "precondition: target 1's check fails")
 	require.True(t, skipped1, "precondition: target 1 is skipped on error")
 
-	admitted2, skipped2 := h.distributionTargetAdmitted(checkCtx, tx, ch, owner)
+	admitted2, skipped2 := h.distributionTargetAdmitted(checkCtx, tx, ch, owner, 1)
 	assert.False(t, skipped2, "target 2's check must run on a live transaction")
 	assert.True(t, admitted2, "target 2 is admitted")
 
@@ -363,4 +363,46 @@ func TestRespondKeyDistributionTimeout(t *testing.T) {
 		h.respondKeyDistributionError(c, fmt.Errorf("store key: %w", &pq.Error{Code: "23505"}), "ctx-4")
 		assert.Equal(t, http.StatusInternalServerError, w.Code)
 	})
+}
+
+// TestDistribution_CheckErrorForHolderDoesNotEnroll: the skip-and-enrol path
+// must not write a pending request for a target that already holds the key at
+// the batch version (VULN-080). TestDistribution_TargetCheckErrorDoesNotPoisonBatch
+// is the positive control: a target without the key is enrolled.
+func TestDistribution_CheckErrorForHolderDoesNotEnroll(t *testing.T) {
+	db, cleanup := dbtest.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	f := keyAccessFixture{t: t, db: db}
+	srv := f.server(f.user())
+	ch := f.channel(srv, "text")
+	member := f.user()
+	f.member(srv, member)
+	f.grantRole(srv, member, rbac.PermViewTextChannels)
+	_, err := db.Exec(`INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version) VALUES ($1, $2, 'a2V5', 1)`, ch, member)
+	require.NoError(t, err)
+	h := newKeyAccessHandler(db)
+
+	locker, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = locker.Rollback() }()
+	_, err = locker.ExecContext(ctx, `LOCK TABLE roles IN ACCESS EXCLUSIVE MODE`)
+	require.NoError(t, err)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `SET LOCAL lock_timeout = '200ms'`)
+	require.NoError(t, err)
+
+	admitted, skipped := h.distributionTargetAdmitted(ctx, tx, ch, member, 1)
+	require.False(t, admitted, "precondition: the check fails")
+	require.True(t, skipped, "precondition: the target is skipped on error")
+
+	require.NoError(t, locker.Rollback())
+	require.NoError(t, tx.Commit())
+	var enrolled int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
+		ch, member).Scan(&enrolled))
+	assert.Equal(t, 0, enrolled, "a holder is not enrolled for retry")
 }
