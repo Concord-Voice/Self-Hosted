@@ -3,14 +3,29 @@
 package backuphash
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
+
+	"golang.org/x/crypto/argon2"
 )
 
 // V2Prefix identifies the bounded Argon2id backup-code format.
 const V2Prefix = "v2$argon2id$v=19$m=19456,t=2,p=1$"
+
+// The v2 tuple. V2Prefix spells the same values, and Parse accepts no other,
+// so the writer and the verifier cannot drift apart.
+const (
+	v2Time      = 2
+	v2MemoryKiB = 19456
+	v2Threads   = 1
+	v2SaltLen   = 16
+	v2DigestLen = 32
+)
 
 var errInvalidStoredHash = errors.New("invalid stored backup hash")
 
@@ -32,14 +47,33 @@ func Parse(stored string) (salt, digest []byte, err error) {
 		return nil, nil, errInvalidStoredHash
 	}
 	salt, err = base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil || len(salt) != 16 || base64.RawURLEncoding.EncodeToString(salt) != parts[0] {
+	if err != nil || len(salt) != v2SaltLen || base64.RawURLEncoding.EncodeToString(salt) != parts[0] {
 		return nil, nil, errInvalidStoredHash
 	}
 	digest, err = base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil || len(digest) != 32 || base64.RawURLEncoding.EncodeToString(digest) != parts[1] {
+	if err != nil || len(digest) != v2DigestLen || base64.RawURLEncoding.EncodeToString(digest) != parts[1] {
 		return nil, nil, errInvalidStoredHash
 	}
 	return salt, digest, nil
+}
+
+// NewV2 hashes one normalized backup code with a fresh random 16-byte salt.
+func NewV2(code string) (string, error) {
+	return newV2(code, rand.Reader)
+}
+
+func newV2(code string, random io.Reader) (string, error) {
+	salt := make([]byte, v2SaltLen)
+	if _, err := io.ReadFull(random, salt); err != nil {
+		return "", fmt.Errorf("read backup-code salt: %w", err)
+	}
+	return V2Prefix + base64.RawURLEncoding.EncodeToString(salt) + "$" +
+		base64.RawURLEncoding.EncodeToString(DeriveV2(code, salt)), nil
+}
+
+// DeriveV2 computes the v2 digest of a normalized code under a parsed salt.
+func DeriveV2(code string, salt []byte) []byte {
+	return argon2.IDKey([]byte(code), salt, v2Time, v2MemoryKiB, v2Threads, v2DigestLen)
 }
 
 func parseSHA256(encoded string) ([]byte, []byte, error) {

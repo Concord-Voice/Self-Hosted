@@ -17,7 +17,6 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
-	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -150,8 +149,10 @@ func ParseEncryptionKey(hexKey string) ([]byte, error) {
 }
 
 // GenerateBackupCodes creates 8 random backup codes.
-// Returns the plaintext codes (to show the user once) and legacy SHA-256 hashes.
-// The writer changes only after every serving replica can read both formats.
+// Returns the plaintext codes (to show the user once) and their v2 hashes: each
+// code gets its own random salt and the bounded Argon2id tuple the reader
+// accepts. Only a release whose every serving replica reads v2 may run this
+// writer; see docs/architecture.md, "Backup-code storage".
 func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 	codes = make([]string, backupCount)
 	hashes = make([]string, backupCount)
@@ -167,8 +168,9 @@ func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 			sb.WriteByte(backupAlphabet[idx.Int64()])
 		}
 		codes[i] = sb.String()
-		hash := sha256.Sum256([]byte(codes[i]))
-		hashes[i] = hex.EncodeToString(hash[:])
+		if hashes[i], err = backuphash.NewV2(codes[i]); err != nil {
+			return nil, nil, fmt.Errorf("hash backup code: %w", err)
+		}
 	}
 
 	return codes, hashes, nil
@@ -203,7 +205,7 @@ func VerifyBackupCode(code string, hashes []string, used []bool) (index int, mat
 		stored := parsed[i]
 		candidate := codeHash[:]
 		if stored.salt != nil {
-			candidate = argon2.IDKey([]byte(normalized), stored.salt, 2, 19456, 1, 32)
+			candidate = backuphash.DeriveV2(normalized, stored.salt)
 		}
 		if subtle.ConstantTimeCompare(candidate, stored.digest) == 1 {
 			return i, true, nil

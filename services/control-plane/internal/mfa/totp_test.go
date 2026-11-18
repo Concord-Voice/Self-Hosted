@@ -7,9 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -278,10 +280,27 @@ func TestGenerateBackupCodes(t *testing.T) {
 			t.Errorf("code[%d] length = %d, want %d", i, len(code), backupLen)
 		}
 
-		h := sha256.Sum256([]byte(code))
-		if hashes[i] != hex.EncodeToString(h[:]) {
-			t.Errorf("hash[%d] changed before the reader rollout", i)
+		// B2 writes only v2: a fresh salt per code, in the exact tuple the B1
+		// reader accepts.
+		salt, _, parseErr := backuphash.Parse(hashes[i])
+		if parseErr != nil || salt == nil {
+			t.Errorf("hash[%d] is not a v2 hash the reader accepts: %v", i, parseErr)
 		}
+		if !strings.HasPrefix(hashes[i], "v2$argon2id$v=19$m=19456,t=2,p=1$") {
+			t.Errorf("hash[%d] is not in the B1 reader's v2 tuple", i)
+		}
+		h := sha256.Sum256([]byte(code))
+		if strings.Contains(hashes[i], hex.EncodeToString(h[:])) {
+			t.Errorf("hash[%d] still carries the unsalted SHA-256 digest", i)
+		}
+	}
+	salts := make(map[string]bool, len(hashes))
+	for i, stored := range hashes {
+		salt, _, _ := backuphash.Parse(stored)
+		if salts[string(salt)] {
+			t.Errorf("hash[%d] reuses another code's salt", i)
+		}
+		salts[string(salt)] = true
 	}
 
 	// Codes should be unique
