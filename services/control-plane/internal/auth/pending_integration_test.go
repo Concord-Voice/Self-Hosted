@@ -346,7 +346,7 @@ func TestPromoteRejectsCodeForDifferentEmail(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = repo.Promote(ctx, id, "recipient-b@test.concord.chat", nil)
+	_, err = repo.Promote(ctx, id, "recipient-b@test.concord.chat", func() error { return nil })
 	require.ErrorIs(t, err, auth.ErrVerificationEmailChanged)
 
 	var userCount int

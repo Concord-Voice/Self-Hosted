@@ -32,6 +32,10 @@ var (
 	ErrUsernameTaken            = errors.New("username taken")
 	ErrVerificationEmailChanged = errors.New("verification recipient no longer matches pending registration")
 	ErrVerificationCodeReplaced = errors.New("verification code was replaced")
+
+	// errPromoteNeedsCodeCheck refuses a Promote call made without the
+	// current-code check.
+	errPromoteNeedsCodeCheck = errors.New("promote requires a current-code check")
 )
 
 // PendingRegistration holds an in-progress registration awaiting email verification.
@@ -513,7 +517,21 @@ func pendingResendCount(ctx context.Context, tx *sql.Tx, id string) (int, error)
 // Promote atomically converts a pending registration into a full user account,
 // inserting rows into users, user_keys, and public_keys, then deleting the
 // pending row. Returns the new user ID.
+//
+// The accepted code is evidence for one recipient, so with the row locked
+// Promote refuses unless the row still names expectedEmail and
+// verifyCodeCurrent confirms the accepted code is still the current one.
+// Every code record faces both checks, whichever binary wrote it: there is no
+// exempt record shape. Both arguments are required, so a caller cannot skip
+// either check by passing an empty email or a nil func.
 func (r *PendingRepo) Promote(ctx context.Context, id, expectedEmail string, verifyCodeCurrent func() error) (userID string, err error) {
+	if verifyCodeCurrent == nil {
+		return "", errPromoteNeedsCodeCheck
+	}
+	expectedEmail = strings.TrimSpace(expectedEmail)
+	if expectedEmail == "" {
+		return "", ErrVerificationEmailChanged
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -546,13 +564,11 @@ func (r *PendingRepo) Promote(ctx context.Context, id, expectedEmail string, ver
 	if time.Now().After(p.ExpiresAt) {
 		return "", ErrPendingExpired
 	}
-	if !strings.EqualFold(strings.TrimSpace(p.Email), strings.TrimSpace(expectedEmail)) {
+	if !strings.EqualFold(strings.TrimSpace(p.Email), expectedEmail) {
 		return "", ErrVerificationEmailChanged
 	}
-	if verifyCodeCurrent != nil {
-		if err = verifyCodeCurrent(); err != nil {
-			return "", err
-		}
+	if err = verifyCodeCurrent(); err != nil {
+		return "", err
 	}
 
 	// Step 2: insert into users
