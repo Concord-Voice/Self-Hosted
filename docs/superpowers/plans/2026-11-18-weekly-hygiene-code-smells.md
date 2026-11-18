@@ -10,4 +10,4 @@ orchestrator owns the registers and the Sonar status flips. Fix agents do not ed
 3. **media-plane src + scripts**: CodeQL #1, #2 (missing-await), #3 (`voiceAuthReceiver` null compare), #9 (`gen.mjs`). Verify: media-plane typecheck, lint and tests. Check that `gen.mjs` output does not change.
 4. **Go**: `admin/middleware.go` (S8196), `websocket/handler.go` (S3776), and `dm/handlers.go` (CodeQL #88). Verify: gofmt, `go vet`, and `go test` on the touched packages.
 5. **Adversarial verify**: one agent checks every diff hunk for behaviour drift and incomplete fixes.
-6. **Orchestrator**: flips Sonar S8431 ×4 and S1313 ×1 to false positive and appends rows #79–#83. It records any rejection that the fix groups return.
+6. **Orchestrator**: flips Sonar S8431 ×4 and S1313 ×1 to false positive and appends rows #92–#96 (renumbered after a merge from main), plus #97–#99 for S7764. It records any rejection that the fix groups return.
