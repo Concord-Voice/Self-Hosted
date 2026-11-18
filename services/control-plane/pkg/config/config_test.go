@@ -1941,3 +1941,17 @@ func TestOIDCSubjectPrefixShapeMatchesVerifier(t *testing.T) {
 	require.NotNil(t, m, "subjectPrefixShape declaration not found in oidc.go")
 	assert.Equal(t, oidcSubjectPrefixShape.String(), string(m[1]))
 }
+
+func TestRecoveryLegacyCodeDefaultsOn(t *testing.T) {
+	assert.False(t, Config{}.RecoveryLegacyCodeDisabled, "zero value keeps the legacy code")
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("RECOVERY_LEGACY_CODE", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.RecoveryLegacyCodeDisabled)
+
+	t.Setenv("RECOVERY_LEGACY_CODE", "false")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.RecoveryLegacyCodeDisabled)
+}

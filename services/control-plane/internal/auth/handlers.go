@@ -179,6 +179,7 @@ type Handler struct {
 	mfaChecker                MFAChecker
 	defaultMethodReader       DefaultMethodReader
 	emailSvc                  *email.Service
+	recoveryLegacyCode        bool // false: every recovery email carries a key (RECOVERY_LEGACY_CODE)
 	pending                   *PendingRepo
 	entCache                  *entitlements.Cache
 	credFence                 *credepoch.Fence
@@ -350,16 +351,17 @@ func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSe
 // deployment mode used for native login policy and JWT tier claims.
 func NewHandlerForInstance(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSecret string, hub SessionDisconnector, instanceType string) *Handler {
 	h := &Handler{
-		db:             db,
-		redis:          redisClient,
-		log:            log,
-		jwtSecret:      jwtSecret,
-		instanceType:   config.NormalizeInstanceType(instanceType),
-		hub:            hub,
-		pending:        NewPendingRepo(db),
-		entCache:       entitlements.NewCacheForInstance(redisClient, db, instanceType),
-		securityEvents: securityevent.Discard,
-		recoveryQueue:  make(chan string, recoveryQueueCapacity),
+		db:                 db,
+		redis:              redisClient,
+		log:                log,
+		jwtSecret:          jwtSecret,
+		instanceType:       config.NormalizeInstanceType(instanceType),
+		hub:                hub,
+		pending:            NewPendingRepo(db),
+		entCache:           entitlements.NewCacheForInstance(redisClient, db, instanceType),
+		securityEvents:     securityevent.Discard,
+		recoveryQueue:      make(chan string, recoveryQueueCapacity),
+		recoveryLegacyCode: true,
 	}
 	h.recoveryProcess = h.processRecoveryBegin
 	h.recoveryAbort = make(chan struct{})
@@ -372,6 +374,12 @@ func NewHandlerForInstance(db *sql.DB, redisClient *redis.Client, log *logger.Lo
 // acknowledged delivery, reconciliation, and reconnect snapshots.
 func (h *Handler) SetPresenceHistory(service *presencehistory.Service) {
 	h.presenceHistory = service
+}
+
+// SetRecoveryLegacyCode sets whether clients may still request and submit a
+// 6-digit recovery code.
+func (h *Handler) SetRecoveryLegacyCode(enabled bool) {
+	h.recoveryLegacyCode = enabled
 }
 
 // SetEmailService sets the email service (called after initialization to avoid circular deps).
