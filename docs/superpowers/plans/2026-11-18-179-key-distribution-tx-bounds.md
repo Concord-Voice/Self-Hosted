@@ -15,7 +15,7 @@
 - No migration.
 - No pool-wide `statement_timeout`. The pool runs migrations.
 - In-tx timeouts: `lock_timeout = '5s'`, `statement_timeout = '15s'`, `idle_in_transaction_session_timeout = '15s'` via `SET LOCAL`. Pool DSN parameter: `idle_in_transaction_session_timeout=60000` (ms). nginx `/api/`: `proxy_read_timeout 60s`.
-- Paging: default limit 100, max 200, scan cap 1,000 rows per request. Cursor = base64url(`created_at RFC3339Nano|source|id`), `source` ∈ {`channel`,`dm`}. A malformed cursor or limit returns 400.
+- Paging: default limit 100, max 200, scan cap 1,000 rows per request. Cursor = opaque: `created_at RFC3339Nano|source|id` (`source` ∈ {`channel`,`dm`}) sealed with AES-256-GCM under a per-process key, base64url-encoded. A full page always carries a cursor. A malformed, altered or pre-restart cursor, or a bad limit, returns 400.
 - Authorization results must not change. The pool-backed `channelKeyAccess` stays for non-tx callers.
 - PR text and comments cite VULN IDs and behavior only. This is a public repo.
 - Test run: `cd services/control-plane && go test -race -p 1 ./internal/channels/... ./internal/database/...` (needs `DATABASE_URL` / `REDIS_URL` from the dev env; never private Go caches).
