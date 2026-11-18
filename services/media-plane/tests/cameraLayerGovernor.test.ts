@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CAMERA_GATE_MEMBER_FLIP_LIMIT,
+  CAMERA_GATE_MEMBER_FLIP_WINDOW_MS,
+  chargeFlip,
   clampCameraLayerDemand,
   computeCameraLayeringGate,
+  flipBudgetDelayMs,
   parseCameraLayerDemand,
   storedDemand,
 } from '../src/lib/cameraLayerGovernor.js';
@@ -480,5 +484,47 @@ describe('computeCameraLayeringGate', () => {
         })
       ).toBe(true);
     });
+  });
+});
+
+// VULN-158: each member may move the camera gate a bounded number of times per
+// window; the room keeps the per-member history.
+describe('camera gate flip budget (VULN-158)', () => {
+  const t = 1_000_000;
+
+  it('allows two flips per member per 30 seconds', () => {
+    expect(CAMERA_GATE_MEMBER_FLIP_LIMIT).toBe(2);
+    expect(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS).toBe(30_000);
+  });
+
+  it('flipBudgetDelayMs is 0 for a member with no history', () => {
+    expect(flipBudgetDelayMs(undefined, t)).toBe(0);
+  });
+
+  it('flipBudgetDelayMs is 0 below the limit inside the window', () => {
+    expect(flipBudgetDelayMs([t], t + 1)).toBe(0);
+  });
+
+  it('flipBudgetDelayMs waits until the oldest flip leaves the window', () => {
+    expect(flipBudgetDelayMs([t, t + 1], t + 2)).toBe(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS - 2);
+  });
+
+  it('flipBudgetDelayMs ignores flips outside the window', () => {
+    expect(flipBudgetDelayMs([t, t + 1], t + 1 + CAMERA_GATE_MEMBER_FLIP_WINDOW_MS)).toBe(0);
+  });
+
+  it('chargeFlip prunes an expired key and removes it from the map', () => {
+    const now = t + CAMERA_GATE_MEMBER_FLIP_WINDOW_MS;
+    const flips = new Map<string, number[]>([
+      ['expired', [t]],
+      ['kept', [now - 1]],
+    ]);
+
+    chargeFlip(flips, 'charged', now);
+
+    expect([...flips.entries()]).toEqual([
+      ['kept', [now - 1]],
+      ['charged', [now]],
+    ]);
   });
 });

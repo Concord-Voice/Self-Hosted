@@ -70,6 +70,7 @@ import {
   MAX_SERVER_VOICE_PARTICIPANTS,
 } from '../src/lib/roomManager.js';
 import type { Room, Participant, RoomEvent, MediaSource } from '../src/lib/roomManager.js';
+import { CAMERA_GATE_MEMBER_FLIP_WINDOW_MS } from '../src/lib/cameraLayerGovernor.js';
 import {
   handleForceDisconnect,
   type ForceDisconnectIO,
@@ -6426,6 +6427,264 @@ describe('RoomManager', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    // VULN-158: a member may move the room camera gate at most twice per 30 s.
+    // The charge goes to the member whose change moved the computed value
+    // (spec ruling 9), never to whichever recompute happens to apply it.
+    describe('camera gate flip budget (VULN-158)', () => {
+      let handler: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        vi.useFakeTimers();
+        handler = vi.fn();
+        manager.onEvent(handler);
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      const room = () => manager.getRoom('room-1')!;
+      const enabled = () => gateEvents(handler).map((event) => event.enabled);
+      const flipKeys = () => [...(room().cameraGateBudget?.flips.keys() ?? [])];
+      const flipsOf = (userId: string) => room().cameraGateBudget?.flips.get(userId);
+      const on = (userId: string, consumerId: string) =>
+        manager.setPreferredLayers('room-1', userId, validLayerDemand(consumerId));
+      const hide = (userId: string, consumerId: string) =>
+        manager.setPreferredLayers(
+          'room-1',
+          userId,
+          validLayerDemand(consumerId, { visible: false })
+        );
+      const showTop = (userId: string, consumerId: string) =>
+        manager.setPreferredLayers(
+          'room-1',
+          userId,
+          validLayerDemand(consumerId, { cssWidth: 1920, cssHeight: 1080 })
+        );
+      // From u-a's third request until its first flip leaves the window.
+      const deferredWait = CAMERA_GATE_MEMBER_FLIP_WINDOW_MS - CAMERA_GATE_OFF_DEBOUNCE_MS;
+
+      // u-b is a visible top-layer viewer above the free spatial cap: it counts
+      // toward the viewer threshold but brings no layer benefit, so u-a's demand
+      // alone moves the gate.
+      async function setupRoom() {
+        await addCameraProducer('u-1', 'p1', ['video/VP9']);
+        await addCameraProducer('u-2', 'p2', ['video/VP9']);
+        await addCameraConsumer('u-a', 'c-a');
+        const { participant: viewerB } = await addCameraConsumer('u-b', 'c-b');
+        viewerB.maxManualBitrateBps = Number.MAX_SAFE_INTEGER;
+        await addCameraConsumer('u-c', 'c-c');
+        await showTop('u-b', 'c-b');
+      }
+
+      // u-a spends both flips (ON, then OFF after the debounce) and asks for ON again.
+      async function deferThirdFlip() {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        expect(enabled()).toEqual([true, false]);
+        await on('u-a', 'c-a');
+      }
+
+      it("defers one viewer's third flip inside 30 s and applies it when the window frees", async () => {
+        await deferThirdFlip();
+        expect(room().cameraLayeringGateEnabled).toBe(false);
+        expect(enabled()).toEqual([true, false]);
+
+        await vi.advanceTimersByTimeAsync(deferredWait - 1);
+        expect(enabled()).toEqual([true, false]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(enabled()).toEqual([true, false, true]);
+        expect(room().cameraLayeringGateEnabled).toBe(true);
+        // The defer timer applied it, and the deferred member paid for it.
+        expect(flipKeys()).toEqual(['u-a']);
+        expect(flipsOf('u-a')).toHaveLength(2);
+      });
+
+      it("another member's recompute that does not move the value neither applies nor is charged", async () => {
+        await deferThirdFlip();
+        await hide('u-c', 'c-c');
+        expect(room().cameraLayeringGateEnabled).toBe(false);
+        expect(enabled()).toEqual([true, false]);
+        expect(flipKeys()).toEqual(['u-a']);
+
+        await vi.advanceTimersByTimeAsync(deferredWait);
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipKeys()).toEqual(['u-a']);
+      });
+
+      it("another member's change that moves the value back cancels the pending flip with no charge", async () => {
+        await deferThirdFlip();
+        await hide('u-b', 'c-b');
+        expect(room().cameraGateBudget?.deferTimer).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        expect(enabled()).toEqual([true, false]);
+        expect(room().cameraLayeringGateEnabled).toBe(false);
+        expect(flipKeys()).toEqual(['u-a']);
+        expect(flipsOf('u-a')).toHaveLength(2);
+      });
+
+      it("another member's flip is immediate when nothing is pending", async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        expect(enabled()).toEqual([true, false]);
+
+        await on('u-c', 'c-c');
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipsOf('u-c')).toHaveLength(1);
+      });
+
+      it('the budget survives leave and rejoin', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        await manager.leaveRoom('room-1', 'u-a');
+        await addCameraConsumer('u-a', 'c-a2');
+
+        await on('u-a', 'c-a2');
+        expect(enabled()).toEqual([true, false]);
+        expect(flipsOf('u-a')).toHaveLength(2);
+        expect(room().cameraGateBudget?.deferTimer).toBeDefined();
+      });
+
+      it('charges a demand removal to its owner', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        expect(manager.closeConsumer('room-1', 'u-a', 'c-a')).toBe(true);
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+
+        expect(enabled()).toEqual([true, false]);
+        expect(flipKeys()).toEqual(['u-a']);
+        expect(flipsOf('u-a')).toHaveLength(2);
+      });
+
+      // A live camera producer's codec overrides receive claims, and with no
+      // camera producer the gate is OFF, so no capability update moves the value
+      // today. The pin is the attribution the recompute receives.
+      it('charges a codec-kind change via updateRtpCapabilities to its caller', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        const recompute = vi.spyOn(
+          manager as unknown as {
+            recomputeCameraLayeringGate: (room: Room, causeUserId?: string) => void;
+          },
+          'recomputeCameraLayeringGate'
+        );
+
+        manager.updateRtpCapabilities('room-1', 'u-c', createRtpCapabilities(['video/VP8']) as any);
+
+        expect(recompute).toHaveBeenCalledWith(room(), 'u-c');
+      });
+
+      it('does not charge a change absorbed by the OFF debounce, nor the timers', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS - 1);
+        await on('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+
+        expect(enabled()).toEqual([true]);
+        expect(flipKeys()).toEqual(['u-a']);
+        expect(flipsOf('u-a')).toHaveLength(1);
+      });
+
+      it('room close clears the defer timer and the budget when a stale room is replaced', async () => {
+        await deferThirdFlip();
+        const stale = room();
+        expect(stale.cameraGateBudget?.deferTimer).toBeDefined();
+
+        mockRouter.closed = true;
+        mockMediasoup.getOrCreateRouter.mockResolvedValueOnce(createMockRouter());
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-z', 'sock-z', { username: 'z' });
+
+        expect(room()).not.toBe(stale);
+        expect(stale.cameraGateBudget).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        expect(enabled()).toEqual([true, false]);
+      });
+
+      it('room close clears the defer timer and the budget when the last member leaves', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        await hide('u-b', 'c-b');
+        await on('u-a', 'c-a');
+        await showTop('u-b', 'c-b');
+        expect(enabled()).toEqual([true, false, true]);
+        // u-a, over budget, is the member whose change turns the gate OFF.
+        await hide('u-a', 'c-a');
+        const stale = room();
+        expect(stale.cameraGateBudget?.deferTimer).toBeDefined();
+
+        for (const userId of ['u-c', 'u-1', 'u-2', 'u-b', 'u-a']) {
+          await manager.leaveRoom('room-1', userId);
+        }
+
+        expect(manager.getRoom('room-1')).toBeUndefined();
+        expect(stale.cameraGateBudget).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        expect(enabled()).toEqual([true, false, true]);
+      });
+
+      it('a stale defer timer does not touch a recreated room with the same id', async () => {
+        await deferThirdFlip();
+        const stale = room();
+        // Drop the room without its teardown, so only the timer's own room check stands.
+        (manager as unknown as { rooms: Map<string, Room> }).rooms.delete('room-1');
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-z', 'sock-z', { username: 'z' });
+        const fresh = room();
+        expect(fresh).not.toBe(stale);
+
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        expect(enabled()).toEqual([true, false]);
+        expect(fresh.cameraLayeringGateEnabled).toBe(false);
+        expect(stale.cameraLayeringGateEnabled).toBe(false);
+      });
+
+      it('keeps the setPreferredLayers ack and applies consumer layers while deferred', async () => {
+        await setupRoom();
+        const consumer = manager
+          .getParticipant('room-1', 'u-a')!
+          .consumers.get('c-a') as unknown as {
+          setPreferredLayers: ReturnType<typeof vi.fn>;
+        };
+        const firstAck = await on('u-a', 'c-a');
+        const firstLayers = consumer.setPreferredLayers.mock.calls.at(-1);
+        expect(firstLayers).toBeDefined();
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        const callsBefore = consumer.setPreferredLayers.mock.calls.length;
+
+        const deferredAck = await on('u-a', 'c-a');
+
+        expect(room().cameraGateBudget?.deferTimer).toBeDefined();
+        expect(deferredAck).toEqual(firstAck);
+        expect(consumer.setPreferredLayers).toHaveBeenCalledTimes(callsBefore + 1);
+        expect(consumer.setPreferredLayers.mock.calls.at(-1)).toEqual(firstLayers);
+      });
+
+      it('a user with no flip inside the window has no map key after the next charge', async () => {
+        await setupRoom();
+        await on('u-c', 'c-c');
+        await hide('u-c', 'c-c');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        expect(flipKeys()).toEqual(['u-c']);
+
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        await on('u-a', 'c-a');
+
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipKeys()).toEqual(['u-a']);
+      });
     });
 
     it('keeps fallback simulcast gate disabled with only two camera producers', async () => {

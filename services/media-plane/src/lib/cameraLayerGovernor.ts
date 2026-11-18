@@ -168,3 +168,44 @@ export function computeCameraLayeringGate(input: {
   if (input.codecKind === 'svc') return true;
   return input.cameraProducerCount >= (input.previouslyEnabled ? 2 : 3);
 }
+
+/**
+ * Per-member camera gate flip budget (VULN-158). `set-preferred-layers` allows
+ * a burst of 200 events, so the event budget does not bound how often one
+ * member can move the room gate, and every applied flip makes every camera
+ * publisher re-encode. A member may cause at most
+ * `CAMERA_GATE_MEMBER_FLIP_LIMIT` applied transitions per
+ * `CAMERA_GATE_MEMBER_FLIP_WINDOW_MS`; a further one is deferred, not refused.
+ */
+export const CAMERA_GATE_MEMBER_FLIP_LIMIT = 2;
+export const CAMERA_GATE_MEMBER_FLIP_WINDOW_MS = 30_000;
+
+function insideFlipWindow(time: number, now: number): boolean {
+  return now - time < CAMERA_GATE_MEMBER_FLIP_WINDOW_MS;
+}
+
+/**
+ * Milliseconds until the member may cause another applied transition: 0 while
+ * fewer than `CAMERA_GATE_MEMBER_FLIP_LIMIT` of its flips are inside the window,
+ * otherwise the time until enough of the oldest leave it.
+ */
+export function flipBudgetDelayMs(times: readonly number[] | undefined, now: number): number {
+  const recent = (times ?? []).filter((time) => insideFlipWindow(time, now));
+  if (recent.length < CAMERA_GATE_MEMBER_FLIP_LIMIT) return 0;
+  const blocking = recent[recent.length - CAMERA_GATE_MEMBER_FLIP_LIMIT];
+  return blocking + CAMERA_GATE_MEMBER_FLIP_WINDOW_MS - now;
+}
+
+/**
+ * Record an applied transition against `userId`, then prune every member's
+ * history to the window and drop empty entries, so the map is bounded by the
+ * members who flipped recently rather than by the room's lifetime.
+ */
+export function chargeFlip(flips: Map<string, number[]>, userId: string, now: number): void {
+  flips.set(userId, [...(flips.get(userId) ?? []), now]);
+  for (const [member, times] of flips) {
+    const recent = times.filter((time) => insideFlipWindow(time, now));
+    if (recent.length === 0) flips.delete(member);
+    else flips.set(member, recent);
+  }
+}
