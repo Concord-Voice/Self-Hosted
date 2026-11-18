@@ -461,6 +461,18 @@ class PrepareTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.Reject, "not in PR tree"):
             self.prepare()
 
+    def test_go_coverage_rejects_lone_carriage_return(self):
+        self.zips[3] = zipped("coverage.out",
+                              b"mode: atomic\rpackages/x.ts:1.1,2.1 1 1\nservices/control-plane/internal/x.go:1.1,2.1 1 1\n")
+        with self.assertRaisesRegex(MODULE.Reject, "^Go coverage record malformed$"):
+            self.prepare()
+
+    def test_go_coverage_rejects_unknown_header(self):
+        self.zips[3] = zipped("coverage.out",
+                              b"mode: atomic extra\nservices/control-plane/internal/x.go:1.1,2.1 1 1\n")
+        with self.assertRaisesRegex(MODULE.Reject, "^Go coverage header missing$"):
+            self.prepare()
+
     def test_go_coverage_rejects_other_module_prefix(self):
         self.zips[3] = zipped("coverage.out",
                               b"mode: atomic\ngithub.com/example/other/services/control-plane/internal/x.go:1.1,2.1 1 1\n")

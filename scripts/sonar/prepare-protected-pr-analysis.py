@@ -28,6 +28,7 @@ GIT_REMOTE = f"https://github.com/{REPO}.git"
 # module path; drop it once services/control-plane/go.mod on main no longer
 # declares it (the module rename PR, #340, does that).
 GO_MODULE_PREFIXES = (f"github.com/{REPO}/", "github.com/Concord-Voice/Concord-Voice-Alpha/")
+GO_COVERAGE_HEADER = re.compile(r"mode: (set|count|atomic)")
 GO_COVERAGE_RECORD = re.compile(r"([^:\s]+)(:\d+\.\d+,\d+\.\d+ \d+ \d+)")
 GIT_ENV = {k: v for k, v in os.environ.items()
            if not k.startswith("GIT_") and k not in ("GITHUB_TOKEN", "GH_TOKEN", "SONAR_TOKEN")}
@@ -489,7 +490,10 @@ def validate_report(content, component, repo=None):
         # Split on "\n" only, as Sonar's line reader does; splitlines() also
         # splits on characters Sonar keeps inside a line.
         rows = [row[:-1] if row.endswith("\r") else row for row in text.split("\n")]
-        if not rows or not rows[0].startswith("mode: "):
+        # Java's line reader also breaks on a lone "\r", so refuse one anywhere.
+        if any("\r" in row for row in rows):
+            raise Reject("Go coverage record malformed")
+        if not rows or not GO_COVERAGE_HEADER.fullmatch(rows[0]):
             raise Reject("Go coverage header missing")
         output = [rows[0]]
         for row in rows[1:]:
