@@ -773,9 +773,13 @@ broadcast channel); every other writer goes through `Hub.PublishDMRespawn`.
 The admin console is a **separate identity domain** — it never shares state with end-user auth (no JWT, no `users` table, no refresh tokens).
 
 **Identity:** `admin_users` table (separate from `users`). The `control-plane admin bootstrap` CLI
-subcommand creates the first admin, inside the running container. An authenticated `POST /admin/api/v1/admins` creates each
-subsequent pending admin and returns its enrollment token once. The current
-Admin Portal does not expose that operation in its UI.
+subcommand creates the first admin, inside the running container. A signed-in admin creates each subsequent pending admin in
+two calls, and a session alone is not enough:
+
+1. `POST /admin/api/v1/admins/stepup` (body `{}`) begins a WebAuthn assertion for the acting admin, bound to the `create_admin` action, with user verification required. It returns `{handle, publicKey}`; the handle lives 2 minutes under its own Redis prefix, so a Server-action step-up handle cannot be used here, nor this one for a Server action.
+2. `POST /admin/api/v1/admins` with `{username, password, stepup: {handle, assertion}}`. The handle is redeemed once (`GETDEL`) and must belong to the same admin; the assertion must verify, advance the credential counter and raise no clone warning. A missing step-up is a 403 `stepup_required` and a failed one a 403 `stepup_failed`. Malformed input is a 400 before the handle is spent, and a duplicate username a 409 only after the step-up verifies. The `admin_created` audit row (mapped to a `privileged_action` security event) is written before the enrollment token is minted; if it cannot be written the answer is a 503 `audit_unavailable` and no token exists. Success is a 201 with `{username, status, enrollment_token}`, the token shown once.
+
+Each step-up refusal (`denied`), taken username (`failure`) and creation (`success`) writes an `admin_created` row; malformed input and rate-limited requests write none. Both routes sit behind their own fail-closed per-IP limit of 5 per hour (429; a limiter store fault is a 500). The current Admin Portal does not expose admin creation in its UI.
 
 **Admin CLI:** `control-plane admin <verb>` runs inside the running container, on host shell access only. It is never a deploy-pipeline step. The verbs are:
 
@@ -790,7 +794,7 @@ After upgrading to the release that adds enrollment and session generations, eve
 **Auth flow (2FA mandatory):**
 
 1. `POST /admin/api/v1/auth/password` — constant-time password verify. Returns a short-lived challenge handle + WebAuthn `BeginLogin` assertion. **Password alone never yields a session.**
-2. `POST /admin/api/v1/auth/webauthn` — `FinishLogin` with `userVerification: required`. The active admin and exact credential are rechecked under a database lock; the credential counter is persisted and an opaque Redis session is minted before that transaction commits. A failed finalization returns no session.
+2. `POST /admin/api/v1/auth/webauthn` — `FinishLogin` with `userVerification: required`. The active admin and exact credential are rechecked under a database lock; the credential counter is persisted and an opaque Redis session is minted before that transaction commits. A failed finalization returns no session. Success returns `{"status": "authenticated", "admins_added": N}`: the number of `admin_created` successes, by any admin, since this admin's previous successful sign-in (0 on a first sign-in), capped at 100. The window opens 10 seconds before that sign-in's audit row, so a creation that raced it can be counted twice but is never missed. The count is read before the session is minted, and a failed read returns a 500 with no session. The portal requires the field, rejects a missing or out-of-range value as an unrecognized response, and shows an "Admins added" notice until it is dismissed or the session ends.
 
 **Sessions:** 256-bit CSPRNG session id stored in Redis under `admin_session:{sid}` with the admin's durable `session_generation`. Cookie `__Host-cv_admin_sid`: `Secure; HttpOnly; SameSite=Strict; Path=/`. Idle TTL 30 min (sliding). Absolute cap 8 h. Logout `DEL`s the key (instant revocation). `AdminAuthRequired` validates the cookie → Redis → expiry → active admin with the same session generation for protected administration, metrics and Server routes. Reset increments that generation and a separate `credential_generation` in the same transaction that removes credentials; old sessions stay rejected after re-enrollment, and old enrollment tokens and ceremonies cannot activate the admin. The SPA shell, assets, authentication, logout, and enrollment routes remain outside the local-session gate.
 

@@ -79,5 +79,6 @@ npm are not present at runtime.
 The portal supports enrollment, password-plus-WebAuthn login, logout, and the
 read-only health and metrics workspaces, plus the self-hosted Server workspace
 (container status, health checks and recent logs), which needs the Concord Host
-Agent (see `docs/runbooks/selfhost-host-agent.md`). It has no UI yet for creating later admins or
+Agent (see `docs/runbooks/selfhost-host-agent.md`). After sign-in it shows how many admins were
+added in the console since your previous sign-in. It has no UI yet for creating later admins or
 adding backup credentials.

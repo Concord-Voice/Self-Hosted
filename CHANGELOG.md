@@ -71,6 +71,7 @@ later storage migration.
 
 ### Security
 
+- **Admin Console:** Creating an admin through `POST /admin/api/v1/admins` now needs a fresh security-key check from the acting admin, begun with `POST /admin/api/v1/admins/stepup` and sent as `stepup`, and both routes allow 5 attempts per hour per IP. Every attempt is audited, and each sign-in tells the admin how many admins were added since their previous one.
 - **Admin Console:** Enrollment reset now invalidates earlier enrollment tokens, ceremonies, and console sessions. WebAuthn sign-in persists the credential counter before issuing a session and rejects a stale nonzero counter; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
 - **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
