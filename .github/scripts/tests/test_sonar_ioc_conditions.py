@@ -682,6 +682,82 @@ exit "$MOCK_SCAN_EXIT"
             self.assertNotEqual(protected.returncode, 0,
                                 "protected verdict cannot accept community engine failure or absent report")
 
+    def test_protected_semgrep_install_reads_the_lock_from_the_protected_base(self):
+        """#353: a protected run installs the base commit's lock, never the PR's; option lines are refused."""
+        root = CHECKER.parents[3]
+        workflow = yaml.load((root / ".github/workflows/semgrep.yml").read_text(), Loader=yaml.BaseLoader)
+        step = next(step for step in workflow["jobs"]["semgrep"]["steps"] if step.get("name") == "Install Semgrep")
+        pin ="semgrep==1.0.0 \\\n    --hash=sha256:" + "a" * 64 + "\n"
+        base_lock = "# base\n" + pin + "cffi==2.1.1 ; platform_python_implementation != 'PyPy' \\\n    --hash=sha256:" + "b" * 64 + "\n"
+        pr_lock = "# pr\n" + pin + "evil==6.6.6 \\\n    --hash=sha256:" + "c" * 64 + "\n"
+        with tempfile.TemporaryDirectory(prefix="semgrep-install-contract-") as tmp:
+            work = Path(tmp)
+            repo = work / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid")):
+                git_revision(repo, "config", key, value)
+            (repo / ".github/semgrep").mkdir(parents=True)
+            target = repo / ".github/semgrep/requirements.txt"
+
+            def commit(text, message):
+                target.write_text(text)
+                git_revision(repo, "add", "-A")
+                git_revision(repo, "commit", "-qm", message)
+                return git_revision(repo, "rev-parse", "HEAD")
+
+            base = commit(base_lock, "base")
+            target.unlink()
+            target.symlink_to("../../other.txt")
+            (repo / "other.txt").write_text(base_lock)
+            git_revision(repo, "add", "-A")
+            git_revision(repo, "commit", "-qm", "link")
+            linked = git_revision(repo, "rev-parse", "HEAD")
+            target.unlink()
+            commit(pr_lock, "pr")  # the checkout: the PR's own lock
+            bindir = work / "bin"
+            bindir.mkdir()
+            capture = work / "installed.txt"
+            fake = bindir / "python3"  # stands in for pip: records the -r file and plants a semgrep
+            fake.write_text('#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -r ] && cp "$2" "$CAPTURE"; shift; done\n'
+                            'mkdir -p "$HOME/.local/bin"\nprintf "#!/bin/sh\\nexit 0\\n" > "$HOME/.local/bin/semgrep"\n'
+                            'chmod +x "$HOME/.local/bin/semgrep"\n')
+            fake.chmod(0o755)
+
+            def run(protected, merge_base):
+                capture.unlink(missing_ok=True)
+                temp = work / "runner"
+                temp.mkdir(exist_ok=True)
+                env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(work / "home"),
+                       "RUNNER_TEMP": str(temp), "GITHUB_PATH": str(work / "github-path"), "CAPTURE": str(capture),
+                       "SEMGREP_VERSION": "1.0.0", "EXTERNAL_VERDICT": protected, "MERGE_BASE_SHA": merge_base}
+                return subprocess.run(["bash", "-e", "-c", step["run"]], cwd=repo, env=env, text=True,
+                                      capture_output=True)
+
+            result = run("true", base)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(base_lock, capture.read_text(), "the protected run must install the base lock")
+            result = run("false", "")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(pr_lock, capture.read_text(), "the advisory run tests the PR's lock")
+            for label, merge_base in (("empty", ""), ("not a SHA", "main"), ("unknown", "f" * 40),
+                                      ("symlinked lock", linked)):
+                with self.subTest(case=label):
+                    result = run("true", merge_base)
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("has no regular .github/semgrep/requirements.txt", result.stdout)
+                    self.assertFalse(capture.exists(), "nothing may be installed")
+            for label, line in (("index URL", "--index-url https://example.invalid/simple"),
+                                ("find links", "-f https://example.invalid/wheels"), ("editable", "-e ."),
+                                ("URL requirement", "evil @ https://example.invalid/evil.whl \\"),
+                                ("option in a marker", "evil==1 ; os_name == 'x' --global-option=y \\")):
+                with self.subTest(case=label):
+                    commit(pr_lock + line + "\n", label)
+                    result = run("false", "")
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("Only comments, name==version pins and --hash lines", result.stdout)
+                    self.assertFalse(capture.exists(), "nothing may be installed")
+        self.assertEqual("${{ inputs.selected-merge-base-sha }}", step.get("env", {}).get("MERGE_BASE_SHA"))
+
 
 class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
     """Exercise the actual Actions definitions that own the protected verdict."""

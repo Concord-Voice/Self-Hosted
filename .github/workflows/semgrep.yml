@@ -200,16 +200,43 @@ jobs:
           path: ~/.cache/pip
           key: pip-semgrep-${{ runner.os }}-py${{ steps.py.outputs.version }}-${{ env.SEMGREP_VERSION }}-${{ hashFiles('.github/semgrep/requirements.txt') }}
 
+      # The protected run installs from the protected main parent that "Validate
+      # protected scan revision" proved, never from the PR: with --no-deps any
+      # hash-pinned wheel a PR adds would run as code in this job, which uploads
+      # the SARIF the protected verdict trusts. The advisory run installs the
+      # PR's copy, so a change to the lock is tested before it merges.
       - name: Install Semgrep
         if: inputs.run-custom || inputs.run-community || inputs.run-canary
+        env:
+          MERGE_BASE_SHA: ${{ inputs.selected-merge-base-sha }}
         run: |
-          if ! grep -qxF "semgrep==${SEMGREP_VERSION} \\" .github/semgrep/requirements.txt; then
+          set -euo pipefail
+          reqs=.github/semgrep/requirements.txt
+          if [ "$EXTERNAL_VERDICT" = 'true' ]; then
+            if [[ ! "$MERGE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${MERGE_BASE_SHA}^{commit}" ||
+                [ "$(git ls-tree "$MERGE_BASE_SHA" -- "$reqs" | cut -c1-6)" != 100644 ]; then
+              echo "::error::The protected base commit ${MERGE_BASE_SHA:-none} has no regular $reqs."
+              exit 1
+            fi
+            git show "$MERGE_BASE_SHA:$reqs" > "$RUNNER_TEMP/semgrep-requirements.txt"
+            reqs="$RUNNER_TEMP/semgrep-requirements.txt"
+          fi
+          # Comments, "name==version [; marker] \" pins and --hash lines only: no
+          # index, find-links, editable, URL or other option lines. A marker has
+          # no "-", so it cannot carry a per-requirement option either.
+          pin='[A-Za-z0-9._-]+==[A-Za-z0-9._+!-]+'
+          marker="( ; [A-Za-z0-9_.'\"! =<>()]+)?"
+          if grep -nEv "^(#.*|${pin}${marker} \\\\|    --hash=sha256:[0-9a-f]{64}( \\\\)?)?\$" "$reqs"; then
+            echo "::error file=.github/semgrep/requirements.txt::Only comments, name==version pins and --hash lines are allowed; the lines above are not."
+            exit 1
+          fi
+          if ! grep -qxF "semgrep==${SEMGREP_VERSION} \\" "$reqs"; then
             echo "::error file=.github/semgrep/requirements.txt::.github/semgrep/requirements.txt does not pin semgrep==${SEMGREP_VERSION}. Set SEMGREP_VERSION in semgrep.yml and the file's semgrep pin to the same version (regenerate the file with the command in its header)."
             exit 1
           fi
           # --no-deps: the lock overrides some of semgrep's own exact pins to fixed
           # versions (see the file header), which pip's resolver would reject.
-          python3 -m pip install --user --quiet --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: -r .github/semgrep/requirements.txt
+          python3 -m pip install --user --quiet --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: -r "$reqs"
           # Fail fast on a broken set. `pip check` cannot be used: it always
           # reports the deliberate overrides. Importing the CLI is what breaks
           # when a bumped or missing package is incompatible.
