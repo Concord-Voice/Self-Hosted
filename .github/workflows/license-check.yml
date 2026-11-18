@@ -251,12 +251,12 @@ jobs:
           go mod download
           go-licenses check ./cmd/server \
             --disallowed_types=restricted,forbidden \
-            --ignore=github.com/Concord-Voice/Self-Hosted
+            --ignore=github.com/Concord-Voice/Self-Hosted/services/control-plane
       - name: Check migrate-media + mfa-rekey + account-authority (secondary binaries)
         working-directory: services/control-plane
         run: |
           go-licenses check ./cmd/migrate-media ./cmd/mfa-rekey ./cmd/account-authority \
             --disallowed_types=restricted,forbidden \
-            --ignore=github.com/Concord-Voice/Self-Hosted
+            --ignore=github.com/Concord-Voice/Self-Hosted/services/control-plane
       - name: NOTICE.md drift guard (Go control-plane)
         run: scripts/update-notice-md.py --check --scope go
