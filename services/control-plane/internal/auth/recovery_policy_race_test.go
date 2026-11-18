@@ -335,6 +335,7 @@ func approvedDeviceRecoveryRequest(t *testing.T, ts *testhelpers.TestServer, use
 	}
 	testhelpers.ParseJSON(t, create, &pending)
 	digest, payload := deviceOfferV2(t, ts, user.ID, pending.RequestID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	approved := ts.DoRequest(http.MethodPost, "/api/v1/mfa/recovery-requests/"+pending.RequestID+"/respond", map[string]any{"action": "approve", "protocol_version": 2, "transcript_hash": digest, "encrypted_payload": payload}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusOK, approved.Code, approved.Body.String())
 	return pending.RequestID, digest

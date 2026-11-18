@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/devicerecovery"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/google/uuid"
@@ -46,7 +47,11 @@ func deviceOfferV2(t *testing.T, ts *testhelpers.TestServer, userID, requestID s
 	_, h, err := devicerecovery.Transcript(c, o)
 	require.NoError(t, err)
 	hash := devicerecovery.Encode(h)
-	_, err = devicerecovery.Respond(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, userID), ts.DB, userID, "", requestID, devicerecovery.RespondBody{Action: "offer", ProtocolVersion: 2, ResponderPublicKey: o.ResponderPublicKey, ResponderNonce: o.ResponderNonce, TranscriptHash: hash})
+	actor := testhelpers.ActorContextForDB(context.Background(), t, ts.DB, userID)
+	identity, ok := loginfamily.AccessIdentityFromContext(actor)
+	require.True(t, ok)
+	testhelpers.TrustSID(t, ts.DB, userID, identity.SID)
+	_, err = devicerecovery.Respond(actor, ts.DB, userID, "", requestID, devicerecovery.RespondBody{Action: "offer", ProtocolVersion: 2, ResponderPublicKey: o.ResponderPublicKey, ResponderNonce: o.ResponderNonce, TranscriptHash: hash})
 	require.NoError(t, err)
 	return hash, p
 }
