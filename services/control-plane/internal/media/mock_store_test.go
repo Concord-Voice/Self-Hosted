@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/storage"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/storage"
 )
 
 // mockStore is an in-memory ObjectStore implementation for testing.

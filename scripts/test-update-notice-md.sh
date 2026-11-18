@@ -70,7 +70,7 @@ SHIM
 # the script must drop rather than tabulate.
 cat > "$TMP/bin/go" <<'SHIM'
 #!/bin/bash
-echo "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane "
+echo "github.com/Concord-Voice/Self-Hosted/services/control-plane "
 echo "github.com/example/one v1.1.0"
 echo "github.com/example/two v2.2.0"
 SHIM
@@ -310,7 +310,7 @@ expect "--apply --scope npm is rejected" 2 --apply --scope npm
 #     not tabulated. Its presence would inflate every count by one.
 write_notice
 "$TMP/scripts/update-notice-md.py" --apply >/dev/null 2>&1 || true
-if grep -q "Concord-Voice-Alpha/services/control-plane |" "$TMP/NOTICE.md"; then
+if grep -q "Concord-Voice/Self-Hosted/services/control-plane |" "$TMP/NOTICE.md"; then
   FAILS=$((FAILS + 1)); FAIL_DETAILS+=("first-party Go module was tabulated")
 else
   PASSES=$((PASSES + 1))

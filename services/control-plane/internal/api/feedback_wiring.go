@@ -6,9 +6,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/feedback"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/feedback"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"golang.org/x/crypto/hkdf"
 )
 

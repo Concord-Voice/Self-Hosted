@@ -13,7 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedturn"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedturn"
 )
 
 // testRealm is a fictional realm; the writer must use it exactly as given.

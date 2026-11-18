@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/stmthook"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

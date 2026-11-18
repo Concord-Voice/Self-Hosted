@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 )
 
 // EnrollInlineTOTP gives userID a TOTP row that policy P1 counts as an inline

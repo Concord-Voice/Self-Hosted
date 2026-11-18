@@ -18,9 +18,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/api"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/api"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 	"github.com/google/uuid"
 )
 

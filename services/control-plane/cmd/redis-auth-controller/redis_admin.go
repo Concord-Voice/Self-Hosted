@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedredis"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedredis"
 	"github.com/redis/go-redis/v9"
 )
 

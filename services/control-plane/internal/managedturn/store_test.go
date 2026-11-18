@@ -16,7 +16,7 @@ import (
 
 	_ "modernc.org/sqlite" // test-only: inspect the on-disk database as coturn would see it
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedturn"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedturn"
 )
 
 // coturnDDL is the exact list of statements coturn 4.18.0 runs in

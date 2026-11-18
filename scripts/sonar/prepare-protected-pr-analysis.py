@@ -487,10 +487,9 @@ def validate_report(content, component):
             raise Reject("Go coverage empty")
         for path in records:
             safe_path(path)
-            # Self-Hosted's control plane kept Alpha's Go module path through the
-            # split, so `go test` coverage names files under it. Retire this
-            # alternative together with any module rename.
-            if not (path.startswith(prefix + "/") or path.startswith("github.com/Concord-Voice/Concord-Voice-Alpha/" + prefix + "/")):
+            # `go test` coverage names files by Go import path, so a coverage path
+            # may carry the control plane's module path prefix.
+            if not (path.startswith(prefix + "/") or path.startswith("github.com/Concord-Voice/Self-Hosted/" + prefix + "/")):
                 raise Reject("Go coverage source outside component")
         return content
     found = 0

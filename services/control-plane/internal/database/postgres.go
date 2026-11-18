@@ -10,7 +10,7 @@ import (
 
 	_ "github.com/lib/pq" // Register PostgreSQL driver
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/migrationrunner"
 )
 
 // migrationsSourceURL is the control plane's migrations directory, relative to
