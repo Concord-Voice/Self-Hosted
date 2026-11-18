@@ -106,15 +106,15 @@ It prints the union of supported operations from both surfaces and the
 `verify-openapi-coverage` CI job checks it against the router in both drift
 directions, so it cannot fall behind the way this table can.
 
-Counts measured on 2026-10-13: 287 operations use 27 tags in `openapi.yaml`
+Counts measured on 2026-11-18: 305 operations use 27 tags in `openapi.yaml`
 (24 tags are declared in its top-level list), plus 4 `Admin Metrics` operations
-in `admin-metrics.openapi.yaml`: 291 supported operations across both surfaces.
+in `admin-metrics.openapi.yaml`: 309 supported operations across both surfaces.
 
 | Tag | Ops | Representative paths | Auth |
 | --- | ---: | --- | --- |
 | Auth | 26 | `/auth/{register,login,refresh,logout,ws-ticket}`, `/auth/register/*`, `/auth/recovery/*`, `/auth/sso/{provider}/*`, `/auth/mfa/{verify,email/send}` | Mixed — public (rate-limited), refresh cookie or `X-Refresh-Token`, MFA challenge token, Bearer for `ws-ticket` |
 | MFA | 35 | `/mfa/{status,totp/*,webauthn/*,backup-codes/*,trusted-devices/*,recovery-*,backup-email,email-sms/*}` | Bearer |
-| Users | 20 | `/users/me`, `/users/me/{keys,password,preferences,security,saved-gifs,sso-identities,friend-organization}`, `/users/search`, `/users/{user_id}/{profile,public-key,friend-request-eligibility}` | Bearer |
+| Users | 21 | `/users/me`, `/users/me/{keys,password,preferences,security,saved-gifs,sso-identities,friend-organization}`, `/users/search`, `/users/{user_id}/{profile,public-key,friend-request-eligibility}` | Bearer |
 | Sessions | 4 | `/sessions`, `/sessions/{id}`, `/sessions/{revoke-all,revocation-mode}` | Bearer |
 | Servers | 22 | `/servers`, `/servers/{id}`, `/servers/unread-status`, `/servers/{id}/{roles,roles/{role_id},roles/reorder,permissions,audit-log,entitlements,mute-states,transfer-ownership}`, `/ownership/reverse/{token}` | Bearer |
 | Members | 12 | `/servers/{id}/members`, `/servers/{id}/members/{userId}`, `/servers/{id}/bans`, `/servers/{id}/member-public-keys` | Bearer |
@@ -125,7 +125,7 @@ in `admin-metrics.openapi.yaml`: 291 supported operations across both surfaces.
 | DM | 31 | `/dm/conversations`, `/dm/conversations/{personal,group}`, `/dm/conversations/{id}/{hide,clear}`, `/dm/conversations/{id}/{messages,members,keys,read}` | Bearer |
 | Direct Messages | 2 | `/dm/conversations/{id}/members/{userId}` | Bearer — a stray tag spelling of `DM` in the spec, listed so the row count reconciles |
 | E2EE | 9 | `/e2ee/pending-keys`, `/channels/{id}/keys`, `/channels/{id}/rotate-key`, `/dm/conversations/{id}/rotate-key` | Bearer |
-| Voice | 27 | `/channels/{id}/voice/{join,participants,authorize-action}`, `/servers/{id}/voice/{userId}/{mute,deafen,move,disconnect,temp-access}`, `/dm/conversations/{id}/voice/{join,ring,decline,cancel,participants}` | Bearer |
+| Voice | 30 | `/channels/{id}/voice/{join,participants}`, `/servers/{id}/voice/{userId}/{mute,deafen,move,disconnect,temp-access}`, `/dm/conversations/{id}/voice/{join,ring,decline,cancel,participants}` | Bearer |
 | Media | 19 | `/media/{file_id}`, `/media/{attachments,avatars,banners,server-icons,server-banners,dm-icons}/…`, `/media/upload/{avatar,banner,attachment,server-icon,server-banner,dm-icon}`, `/media/upload/attachment/session/*` (chunked upload, #2157) | Mixed — DM-icon reads Bearer + current membership; public image reads remain public, uploads Bearer |
 | Friends | 6 | `/friends`, `/friends/request`, `/friends/request/{id}` | Bearer |
 | FriendCodes | 7 | `/friends/codes`, `/friends/codes/{code}`, `/friends/codes/{code}/{avatar,preview,claim}` | Mixed — preview/avatar public, the rest Bearer |
@@ -134,10 +134,10 @@ in `admin-metrics.openapi.yaml`: 291 supported operations across both surfaces.
 | Notifications | 2 | `/notifications/{mute,preferences}` | Bearer |
 | GIFs | 11 | `/klipy/gifs/{items,categories,trending}`, `/klipy/customer-id` | Bearer |
 | Age Verification | 2 | `/age/claim`, `/age/status` | Bearer + verified email |
-| Attestation | 3 | `/attestation/verify`, `/internal/attestation/publish/{binary,spa}` | Bearer |
+| Attestation | 4 | `/attestation/verify`, `/internal/attestation/publish/{binary,spa}` | Bearer |
 | Redemption | 2 | `/redeem`, `/admin/redemption/codes` | Bearer; the admin path additionally requires an admin token |
 | Feedback | 1 | `/feedback` | Bearer |
-| Platform | 5 | `/client/config`, `/server/capabilities`, `/entitlements`, `/subscriptions/me`, `/updates/{filename}` | Mixed — `client/config` and `server/capabilities` public (rate-limited), the rest Bearer |
+| Platform | 18 | `/client/config`, `/server/capabilities`, `/entitlements`, `/subscriptions/me`, `/updates/{filename}` | Mixed — `client/config` and `server/capabilities` public (rate-limited), the rest Bearer |
 | WebSocket | 1 | `/ws` | Ticket or Bearer |
 | Admin Metrics | 4 | `/admin/api/v1/*` — see [admin-metrics.openapi.yaml](./admin-metrics.openapi.yaml) | Admin token |
 

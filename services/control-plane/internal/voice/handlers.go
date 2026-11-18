@@ -888,123 +888,6 @@ func (h *Handler) claimVoiceJoinPlacement(c *gin.Context, channelID, userID stri
 	return mediaURL, true
 }
 
-// AuthorizeVoiceAction checks whether a user has permission to perform a voice
-// moderation action (mute, deafen, move) on a target user. The media plane
-// should call this endpoint before executing moderation commands.
-// POST /channels/:id/voice/authorize-action
-func (h *Handler) AuthorizeVoiceAction(c *gin.Context) {
-	userID := c.GetString("user_id")
-	channelID, err := requestid.Param(c, "id")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
-		return
-	}
-
-	var req struct {
-		Action       string `json:"action" binding:"required,oneof=mute deafen move"`
-		TargetUserID string `json:"target_user_id" binding:"required,uuid"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
-		return
-	}
-	req.TargetUserID, err = requestid.Canonical(req.TargetUserID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidVoiceRequestBody})
-		return
-	}
-
-	// Keep the users-row epoch fence through every DB-backed authorization read
-	// and the emitted authority response. A reset that acquires the users row
-	// first fails this request; otherwise it necessarily commits after it.
-	tx, err := h.db.BeginTx(c.Request.Context(), nil)
-	if err != nil {
-		h.log.Error("voice action: begin credential transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthAction})
-		return
-	}
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-			h.log.Error("voice action: credential transaction rollback", "error", rbErr)
-		}
-	}()
-	if err := credepoch.GuardFamilyTx(c.Request.Context(), tx, userID, middleware.TokenCredentialEpoch(c)); err != nil {
-		h.respondVoiceGuardTxError(c, err, errMsgFailedAuthAction)
-		return
-	}
-
-	// Get server ID from channel
-	var serverID string
-	err = tx.QueryRowContext(c.Request.Context(), `
-		SELECT c.server_id FROM channels c
-		INNER JOIN server_members sm ON sm.server_id = c.server_id AND sm.user_id = $2
-		WHERE c.id = $1
-	`, channelID, userID).Scan(&serverID)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMember})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to check channel access", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthAction})
-		return
-	}
-
-	// Map action to required permission
-	var perm rbac.Permission
-	switch req.Action {
-	case "mute":
-		perm = rbac.PermMuteMembers
-	case "deafen":
-		perm = rbac.PermDeafenMembers
-	case "move":
-		perm = rbac.PermMoveMembers
-	}
-
-	// Check permission
-	effectivePerms, permErr := h.resolver.ResolveChannelPermissionsTx(c.Request.Context(), tx, serverID, userID, channelID)
-	if permErr != nil {
-		h.log.Error("Failed to check voice moderation permission", "error", permErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthAction})
-		return
-	}
-	if !effectivePerms.Has(perm) {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
-		return
-	}
-
-	// Verify target user is a member of this server
-	var targetIsMember bool
-	if err := tx.QueryRowContext(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
-		serverID, req.TargetUserID).Scan(&targetIsMember); err != nil {
-		h.log.Error("Failed to check target membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthAction})
-		return
-	}
-	if !targetIsMember {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotMember})
-		return
-	}
-
-	// Hierarchy check: cannot moderate members with equal or higher role
-	if h.resolver.CheckHierarchyTx(c.Request.Context(), tx, serverID, userID, req.TargetUserID) != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgHierarchyViolation})
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		h.log.Error("voice action: commit credential transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthAction})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"allowed":    true,
-		"action":     req.Action,
-		"target_id":  req.TargetUserID,
-		"channel_id": channelID,
-	})
-}
-
 // --- Server-enforced voice moderation ---
 
 const (
@@ -1015,7 +898,6 @@ const (
 	errMsgFetchParticipants      = "Failed to fetch participants"
 	errMsgFailedAuthorize        = "Failed to authorize"
 	errMsgFailedRevokeTempAccess = "Failed to revoke temporary access"
-	errMsgFailedAuthAction       = "Failed to authorize action"
 	errMsgInsufficientPerms      = "Insufficient permissions"
 	errMsgFailedCheckPerms       = "Failed to check permissions"
 	errMsgFailedCheckMember      = "Failed to check membership"
