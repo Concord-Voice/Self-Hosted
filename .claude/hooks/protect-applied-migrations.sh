@@ -102,15 +102,27 @@ fi
 
 [ -z "$ENTRIES" ] && exit 0
 
+# True (exit 0) when the path starts or ends with a character an editing tool may
+# trim: the union of JavaScript trim() and Rust trim() (Unicode White_Space plus
+# U+FEFF), and U+200B. Checked by code point in jq, because bash's [[:space:]]
+# depends on the locale and misses U+00A0 and the like. Exit 4 = no such edge.
+edge_blank() {
+    printf '%s' "$1" | jq -Rse 'explode | (.[0], .[-1])
+        | select((. >= 9 and . <= 13) or . == 32 or . == 133 or . == 160 or . == 5760
+                 or (. >= 8192 and . <= 8203) or . == 8232 or . == 8233 or . == 8239
+                 or . == 8287 or . == 12288 or . == 65279)' >/dev/null 2>&1
+}
+
 canonicalize_path() {
-    local raw_path=$1 mode=$2 candidate parent base canonical_parent next_parent segment
+    local raw_path=$1 mode=$2 candidate parent base canonical_parent next_parent segment rc
 
     # Refuse spellings the editing tool resolves differently from this hook:
     # it trims surrounding whitespace and expands a leading ~ to $HOME, and a
     # control character has no place in a real path.
     [[ -n "$raw_path" ]] || return 1
     [[ "$raw_path" != *[[:cntrl:]]* ]] || return 1
-    [[ "$raw_path" != [[:space:]]* && "$raw_path" != *[[:space:]] ]] || return 1
+    edge_blank "$raw_path"; rc=$?
+    [[ "$rc" -eq 4 ]] || return 1   # 0 = blank edge, anything else = jq failed: fail closed
     [[ "$raw_path" != "~"* ]] || return 1
 
     candidate=$raw_path

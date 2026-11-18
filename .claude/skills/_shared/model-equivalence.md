@@ -80,7 +80,8 @@ speculative per-vendor prose.
 ## GitHub Copilot (including Copilot Fusion)
 
 There is no Copilot column yet: Agentic-Dev-Tooling does not generate Copilot custom agents (see
-its `CAPABILITIES.md`; consumer repositories receive this file without it). Two facts constrain the column when it is added:
+its `CAPABILITIES.md`; consumer repositories receive this file without it). Two facts constrain
+the column when it is added:
 
 - **Fusion has no fixed model.** It picks a model per prompt, and the running conversation
   cannot read which one. Nothing may depend on the orchestrator's model.
