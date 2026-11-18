@@ -1430,10 +1430,12 @@ func (h *Handler) AddMember(c *gin.Context) {
 		return
 	}
 
-	if _, err := uuid.Parse(req.UserID); err != nil {
+	canonicalUserID, err := requestid.Canonical(req.UserID)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
 		return
 	}
+	req.UserID = canonicalUserID
 
 	// Verify caller is participant, group status, and admin role
 	isGroup, role, err := h.getParticipantGroupRole(convID, userID)
