@@ -1496,9 +1496,14 @@ func (h *Handler) RevokeTempAccess(c *gin.Context) {
 	// preflight-to-delete race that could otherwise claim a revoke occurred.
 	// The body channel_id is scoped to the path server inside that transaction
 	// (cross-server IDOR guard): requireActorVoiceChannelPermTx refuses a channel
-	// of another server like any channel the actor cannot moderate, so there is
-	// no pool-side check whose answer could confirm a hidden channel ID.
+	// of another server like any channel the actor cannot moderate. The
+	// refuse-only preflight below gives that same 403 before the phase-1
+	// presence capture, so a refusal does no work that tracks the occupancy of
+	// a channel the actor cannot see; it never grants.
 	actorID := c.GetString("user_id")
+	if !h.preflightRevokeChannelScope(c, ctx.serverID, actorID, req.ChannelID) {
+		return
+	}
 	removed, err := h.tempGrant.revokeTemporaryChannelAccessWithCredential(
 		reqCtx, ctx.serverID, req.ChannelID, ctx.targetID,
 		temporaryGrantAuthorization{
@@ -1877,4 +1882,38 @@ func (h *Handler) auditVoiceMove(ctx context.Context, serverID, actorID, targetI
 	}); err != nil {
 		h.log.Error("move: audit log", "error", err, "server_id", serverID, "target_id", targetID)
 	}
+}
+
+// preflightRevokeChannelScope is a refuse-only, non-authoritative pool check
+// that runs before the revoke's phase-1 presence capture and audience fence.
+// A channel that is not a voice channel of this server, or on which the actor
+// lacks VIEW or Move Members, gets the same 403 the in-transaction
+// requireActorVoiceChannelPermTx gives, so a refusal costs the same whatever
+// the channel's occupancy. A lookup error falls through to that transaction,
+// which stays the decision; this check can only save work, never grant it.
+func (h *Handler) preflightRevokeChannelScope(c *gin.Context, serverID, actorID, channelID string) bool {
+	reqCtx := c.Request.Context()
+	var isVoice bool
+	if err := h.db.QueryRowContext(reqCtx,
+		`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1 AND server_id = $2 AND type = 'voice')`,
+		channelID, serverID).Scan(&isVoice); err != nil {
+		return true
+	}
+	if !isVoice {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
+		return false
+	}
+	perms, err := h.resolver.GetEffectivePermissions(reqCtx, serverID, actorID, channelID)
+	if err != nil {
+		if errors.Is(err, rbac.ErrChannelNotInServer) {
+			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
+			return false
+		}
+		return true
+	}
+	if !hasAllPerms(perms, rbac.PermViewVoiceChannels|rbac.PermMoveMembers) {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
+		return false
+	}
+	return true
 }

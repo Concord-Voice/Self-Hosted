@@ -627,14 +627,17 @@ func (m *tempGrantManager) deleteTemporaryGrantWithCapture(
 	if err := rbac.LockServerVisibilityCapture(ctx, tx, serverID); err != nil {
 		return nil, nil, false, fmt.Errorf("temp revoke lock: %w", err)
 	}
+	// Same order as guardTemporaryGrantAuthorization: the credential guard when
+	// guardCredential is set, then the authority closure whenever one is
+	// supplied. Only cleanup revokes pass no closure.
 	if authorization.guardCredential {
 		if err := credepoch.GuardFamilyTx(ctx, tx, authorization.actorID, authorization.credentialEpoch); err != nil {
 			return nil, nil, false, fmt.Errorf("temp revoke credential guard: %w", err)
 		}
-		if authorization.authority != nil {
-			if err := authorization.authority(ctx, tx); err != nil {
-				return nil, nil, false, fmt.Errorf("temp revoke authority guard: %w", err)
-			}
+	}
+	if authorization.authority != nil {
+		if err := authorization.authority(ctx, tx); err != nil {
+			return nil, nil, false, fmt.Errorf("temp revoke authority guard: %w", err)
 		}
 	}
 	if err := LockServerVoiceLifecycleTx(ctx, tx, parsedUserID); err != nil {
