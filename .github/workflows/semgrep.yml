@@ -87,9 +87,9 @@ jobs:
       # Robust against shallow clones (paired with fetch-depth: 0 below)
       # and fork PRs.
       BASELINE_COMMIT: ${{ inputs.external-verdict && inputs.selected-merge-base-sha || github.event.pull_request.base.sha }}
-      # Single source of truth for the Semgrep version. Referenced by
-      # both the pip install step and the cache key so a future bump
-      # only needs to change this one line.
+      # Single source of truth for the Semgrep version. The install step
+      # fails unless .github/semgrep/requirements.txt pins the same
+      # version, so a bump changes this line and that file together.
       SEMGREP_VERSION: '1.121.0'
       EXTERNAL_VERDICT: ${{ inputs.external-verdict }}
     steps:
@@ -190,7 +190,7 @@ jobs:
         if: inputs.run-custom || inputs.run-community || inputs.run-canary
         # The pip install below re-downloads the semgrep wheel set
         # (~30 MB incl. deps) on every run. Caching pip's wheel cache
-        # keyed on the pinned version makes the install a local unpack.
+        # keyed on the hash-locked requirements makes the install a local unpack.
         # Stock actions/cache is deliberate: Blacksmith transparently
         # intercepts it against the colocated cache (ADR-0016 §Decision 4
         # verification note, #1438) — do NOT swap to the archived
@@ -198,12 +198,16 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pip
-          key: pip-semgrep-${{ runner.os }}-py${{ steps.py.outputs.version }}-${{ env.SEMGREP_VERSION }}
+          key: pip-semgrep-${{ runner.os }}-py${{ steps.py.outputs.version }}-${{ env.SEMGREP_VERSION }}-${{ hashFiles('.github/semgrep/requirements.txt') }}
 
       - name: Install Semgrep
         if: inputs.run-custom || inputs.run-community || inputs.run-canary
         run: |
-          python3 -m pip install --user "semgrep==${SEMGREP_VERSION}"
+          if ! grep -qxF "semgrep==${SEMGREP_VERSION} \\" .github/semgrep/requirements.txt; then
+            echo "::error file=.github/semgrep/requirements.txt::.github/semgrep/requirements.txt does not pin semgrep==${SEMGREP_VERSION}. Set SEMGREP_VERSION in semgrep.yml and the file's semgrep pin to the same version (regenerate the file with the command in its header)."
+            exit 1
+          fi
+          python3 -m pip install --user --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r .github/semgrep/requirements.txt
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run Semgrep (custom rules)

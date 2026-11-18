@@ -336,9 +336,12 @@ updates:
   # .github/requirements-pyyaml.txt is consumed by ioc-scanning.yml, pr-ci.yml,
   # workflow-validate.yml, selfhost-release-guards.yml and the pin check in
   # required-pr-build.yml, which installs it on the runner's system Python, so it
-  # carries the cp312-cp314 x86_64 wheel hashes. It is the repo's only pip manifest and appears
-  # in the CycloneDX SBOM as the sole pkg:pypi component, so it was the one
+  # carries the cp312-cp314 x86_64 wheel hashes. It was the repo's first pip manifest and
+  # the sole pkg:pypi component in the CycloneDX SBOM, so it was the one
   # ecosystem in the SBOM with no dependabot coverage at all.
+  # .github/semgrep/requirements.txt (semgrep.yml) is NOT in this directory on purpose:
+  # it is a resolved hash lock that only a full regenerate can bump correctly. Its
+  # header holds the command and the reason.
   - package-ecosystem: "pip"
     directory: "/.github"
     schedule:
