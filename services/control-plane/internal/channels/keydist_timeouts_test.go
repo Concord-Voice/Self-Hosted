@@ -90,3 +90,25 @@ func TestDistribution_DMLockTimeoutReturns503(t *testing.T) {
 		`SELECT COUNT(*) FROM dm_channel_keys WHERE conversation_id = $1`, convID),
 		"a timed-out distribution writes no key")
 }
+
+func TestRotateDMKey_LockTimeoutReturns503(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "locktimeoutrot1")
+	user2 := ts.CreateTestUser(t, "locktimeoutrot2")
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+	ts.SeedDMKey(t, convID, user1.ID, 1)
+	ts.SeedDMKey(t, convID, user2.ID, 1)
+
+	w, elapsed := distributeWhileLocked(t, ts, `SELECT id FROM dm_conversations WHERE id = $1 FOR UPDATE`, convID,
+		func() *httptest.ResponseRecorder {
+			return ts.DoRequest(http.MethodPost, pathDMConversationsPrefix+convID+pathRotateKey,
+				dmRotationBody(2, user1.ID, user2.ID), testhelpers.AuthHeaders(user1.AccessToken))
+		})
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "Failed to rotate key")
+	assert.GreaterOrEqual(t, elapsed, 4*time.Second, "the request ended on the lock wait, not earlier")
+	assert.Equal(t, []int{1}, dmKeyVersions(t, ts, convID, user1.ID), "no successor wrap is written")
+	assert.Equal(t, []int{1}, dmKeyVersions(t, ts, convID, user2.ID), "no successor wrap is written")
+	assert.Equal(t, 0, dmRevocationCount(t, ts, convID), "no rotation is recorded")
+}
