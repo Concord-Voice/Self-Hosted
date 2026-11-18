@@ -6,12 +6,6 @@
       "dep": "eslint",
       "range": "^8.9.0",
       "resolved": "10.15.0"
-    },
-    {
-      "consumer": "node_modules/ajv",
-      "dep": "uri-js",
-      "range": "^4.2.2",
-      "resolved": "1.0.3"
     }
   ]
 }

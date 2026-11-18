@@ -29,7 +29,6 @@
   "overrides": {
     "@microsoft/eslint-formatter-sarif": {
       "eslint": "$eslint"
-    },
-    "uri-js": "npm:uri-js-replace@^1.0.3"
+    }
   }
 }
