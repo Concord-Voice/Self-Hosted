@@ -86,7 +86,7 @@ func TestRecoveryResetPasswordBadToken_SpoofedForwardingKeysPeer(t *testing.T) {
 	ts := setupTS(t)
 	_, priv, salt := testhelpers.E2EETestKeys()
 
-	w := ts.DoRequest(http.MethodPost, pathRecoveryResetPwd, map[string]string{
+	w := ts.DoRequest(http.MethodPost, pathRecoveryResetPwd, map[string]string{ //nolint:gosec // G101 false positive: test fixture, not a credential
 		"recovery_token":      "not-a-valid-recovery-token",
 		"new_password":        testNewPassword,
 		"wrapped_private_key": priv,
