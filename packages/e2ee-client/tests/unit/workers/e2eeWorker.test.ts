@@ -20,13 +20,6 @@ vi.mock('@/renderer/services/e2ee/mediaEncryption', () => ({
   },
 }));
 
-// The worker addresses its dedicated-worker scope through `globalThis`. Under jsdom
-// `globalThis` is the window, so stub each scope member on it (restored by
-// vi.unstubAllGlobals) rather than replacing `self`.
-function stubWorkerScope(scope: Record<string, unknown>): void {
-  for (const [name, value] of Object.entries(scope)) vi.stubGlobal(name, value);
-}
-
 describe('e2eeWorker codec dispatch', () => {
   it('selects H.264 nal-aware, AV1 per-OBU, and whole-frame for every other codec', () => {
     expect(selectCryptoScheme('h264')).toBe('nal-aware');
@@ -49,7 +42,7 @@ describe('e2eeWorker keyframe recovery', () => {
     mockDecryptFrame.mockResolvedValue(undefined);
     postMessage = vi.fn();
     rtctransformListener = undefined;
-    stubWorkerScope({
+    vi.stubGlobal('self', {
       postMessage,
       onmessage: null,
       addEventListener: vi.fn((event: string, listener: EventListener) => {
@@ -170,7 +163,7 @@ describe('e2eeWorker key-miss observability', () => {
     mockEncryptFrame.mockResolvedValue(undefined);
     postMessage = vi.fn();
     rtctransformListener = undefined;
-    stubWorkerScope({
+    vi.stubGlobal('self', {
       postMessage,
       onmessage: null,
       addEventListener: vi.fn((event: string, listener: EventListener) => {
@@ -259,9 +252,9 @@ describe('e2eeWorker decrypt entered-frame counter (bypass probe)', () => {
         }
       }),
     };
-    stubWorkerScope(stub);
+    vi.stubGlobal('self', stub);
     await import('@/renderer/workers/e2eeWorker');
-    workerOnMessage = globalThis.onmessage as typeof workerOnMessage;
+    workerOnMessage = stub.onmessage;
   });
 
   afterEach(() => {
@@ -344,7 +337,7 @@ describe('e2eeWorker requestFrameKey retry policy (#1885)', () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     postMessage = vi.fn();
-    stubWorkerScope({
+    vi.stubGlobal('self', {
       postMessage,
       onmessage: null,
       addEventListener: vi.fn(),
