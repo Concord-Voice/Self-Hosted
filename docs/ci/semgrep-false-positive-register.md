@@ -76,7 +76,7 @@ Per-finding justifications for specific suppressions. Each entry names the file,
 |---|---|
 | File | `services/control-plane/internal/spa/handler.go` |
 | Approximate line | 141 (line numbers shift with PRs; see latest commit) |
-| First recorded | 2026-05-28 (issue [#977](https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/977)) |
+| First recorded | 2026-05-28 (pre-split issue 977) |
 | Rule | `go.gin.path-traversal.gin-path-traversal-taint.gin-path-traversal-taint` (Pro ruleset, `p/gosec`) |
 | Suppressed by | `// nosemgrep:` on the line immediately above the `fs.Open(path.Join(...))` call |
 | Rationale | The rule traces the gin-derived `parts[]` slice (from `c.Param("filepath")` → `strings.SplitN`) into the `fs.Open` sink as untrusted user input. Two independent mechanisms defend the code structurally. First, `http.Dir(h.spaDir)` on the line above: Go's built-in `http.FileSystem` sandbox prevents path-traversal by design, and the in-tree comment immediately above the `fs := http.Dir(...)` line notes this. Second, `resolveSafePath(h.spaDir, parts[0], parts[1])` called earlier in `ServeAsset` (defined in the same file): it validates the version segment via `isValidVersion`, calls `filepath.Clean`, rejects `..` segments, and asserts the resolved path stays under `absSpaDir + "/"` via `strings.HasPrefix`. The Semgrep taint rule pattern-matches the sink without seeing these structural guards. |
@@ -89,7 +89,7 @@ Per-finding justifications for specific suppressions. Each entry names the file,
 |---|---|
 | File | `services/control-plane/internal/database/opsmetrics_reader_test.go` |
 | Approximate lines | 209-579 (line numbers shift with PRs; see latest commit) |
-| First recorded | 2026-07-14 (PR [#2228](https://github.com/Concord-Voice/Concord-Voice-Alpha/pull/2228), GitHub code-scanning alerts [#978](https://github.com/Concord-Voice/Concord-Voice-Alpha/security/code-scanning/978)-[#990](https://github.com/Concord-Voice/Concord-Voice-Alpha/security/code-scanning/990)) |
+| First recorded | 2026-07-14 (pre-split PR 2228, GitHub code-scanning pre-split alerts 978-990) |
 | Rule | `go.lang.security.audit.database.string-formatted-query.string-formatted-query` (`p/security-audit` / `p/owasp-top-ten` community scan) |
 | Suppressed by | `// nosemgrep:` on the line immediately above each of the 13 `ExecContext` calls; each directive names only this rule and states whether the identifier is fixed or migration-owned. The corresponding GitHub code-scanning alerts are dismissed individually as `false positive`, not accepted. |
 | Rationale | These integration tests must create, grant, alter, revoke, and remove PostgreSQL roles and databases. PostgreSQL query parameters cannot represent identifiers. Every dynamic identifier is either a test-local constant or the role name read from migration-owned PostgreSQL catalog state, and every one is passed through `pq.QuoteIdentifier` before it enters SQL text. No request, user, environment, or other externally supplied value is interpolated. The rule recognizes string assembly but does not model `pq.QuoteIdentifier` as the required identifier sanitizer. |
@@ -100,7 +100,7 @@ Per-finding justifications for specific suppressions. Each entry names the file,
 |---|---|
 | File | `services/control-plane/internal/dm/handlers.go` |
 | Approximate lines | 318–339 (line numbers shift with PRs; see latest commit) |
-| First recorded | 2026-09-07 (alert [#1430](https://github.com/Concord-Voice/Concord-Voice-Alpha/security/code-scanning/1430)) |
+| First recorded | 2026-09-07 (pre-split alert 1430) |
 | Rule | `go.lang.security.audit.database.string-formatted-query.string-formatted-query` (`p/security-audit` / `p/owasp-top-ten`) |
 | Suppressed by | Existing rule-specific `// nosemgrep:` immediately above the `queryConversations` statement at line 317. |
 | Rationale | The query concatenates only the fixed SQL fragment produced by `hiddenRangeFilter` (`internal/dm/hidden_ranges.go:107-108`), which fixes the table alias to `m`; the authenticated `userID` remains the `$1` bound parameter. `purge/hiddenfilter.go:20-25` generates only the fixed alias and integer placeholders. No request-shaped identifier or value enters the SQL text. |
@@ -113,7 +113,7 @@ Per-finding justifications for specific suppressions. Each entry names the file,
 | Approximate lines | 85, 94 (line numbers shift with PRs; see latest commit) |
 | First recorded | 2026-09-07 (PR #3144) |
 | Rule | `go.lang.security.audit.database.string-formatted-query.string-formatted-query` (`p/security-audit` / `p/owasp-top-ten`) |
-| Suppressed by | `// nosemgrep:` immediately above the `CREATE DATABASE` and cleanup `DROP DATABASE` statements. The GitHub code-scanning alerts [#1433](https://github.com/Concord-Voice/Concord-Voice-Alpha/security/code-scanning/1433) (line 85) and [#1434](https://github.com/Concord-Voice/Concord-Voice-Alpha/security/code-scanning/1434) (line 94) were dismissed individually as `false positive` at `fc359db6a`; no broad rule tuning was applied. |
+| Suppressed by | `// nosemgrep:` immediately above the `CREATE DATABASE` and cleanup `DROP DATABASE` statements. The GitHub code-scanning pre-split alerts 1433 (line 85) and 1434 (line 94) were dismissed individually as `false positive` at `fc359db6a`; no broad rule tuning was applied. |
 | Rationale | The disposable database name is generated locally from a UUID and is never request, user, or environment input. PostgreSQL identifiers cannot be query parameters; both statements use `pq.QuoteIdentifier` before assembling SQL text. The rule flags the required identifier assembly without modeling the sanitizer. |
 | Verification | Focused migration round-trip test passes with race detection against PostgreSQL 16 (2.730s). Pinned Semgrep 1.121.0 with `p/security-audit` and `p/owasp-top-ten` returns zero unsuppressed findings in the JSON result; its SARIF output retains the two source-suppressed results and recognizes both suppressions. No externally supplied value reaches either statement. |
 | Disposition | False positive under the Section 1 calibration. Retain the rule-specific inline directives and the individual GitHub dismissals; do not broaden the rule suppression. Re-evaluate if the identifier source or quoting path changes. |
@@ -124,7 +124,7 @@ Per-finding justifications for specific suppressions. Each entry names the file,
 |---|---|
 | File | `services/control-plane/internal/members/security_event_test.go` |
 | Approximate lines | 171, 175, and 178 (line numbers shift with PRs; see latest commit) |
-| First recorded | 2026-09-05 (issue [#2273](https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/2273)) |
+| First recorded | 2026-09-05 (pre-split issue 2273) |
 | Rule | `go.lang.security.audit.database.string-formatted-query.string-formatted-query` (`p/security-audit` / `p/owasp-top-ten` community scan) |
 | Suppressed by | Rule-specific `// nosemgrep:` comments immediately above the test-only `CREATE TRIGGER`, `DROP TRIGGER`, and `DROP FUNCTION` statements. |
 | Rationale | The test must vary PostgreSQL event and table identifiers, which cannot be query parameters. `mutationEvent` and `mutationTable` come only from the three literal test cases (`UPDATE`/`DELETE` and `server_members`/`server_bans`); the remaining identifiers are local constants. No request, fixture, environment, database result, or other external value reaches the SQL text. |
@@ -150,7 +150,7 @@ Per-finding justifications for specific suppressions. Each entry names the file,
 |---|---|
 | File | `services/control-plane/internal/middleware/auth_test.go`, `services/control-plane/internal/middleware/auth_tokenclass_test.go`, `services/control-plane/internal/websocket/handler_test.go`, `services/control-plane/internal/mfa/security_event_test.go` |
 | Approximate line | `auth_test.go` `makeToken`; `auth_tokenclass_test.go` in `TestBothReadersRejectAnyPurposeClaim`; `handler_test.go` 378, 399, 421, 594; `mfa/security_event_test.go` 251 and 296 (line numbers shift with PRs) |
-| First recorded | 2026-08-22 (PR [#2900](https://github.com/Concord-Voice/Concord-Voice-Alpha/pull/2900)) — the four `handler_test.go` suppressions predate this entry and are **backfilled** here; the MFA fixture was added 2026-09-05 for issue [#2273](https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/2273) |
+| First recorded | 2026-08-22 (pre-split PR 2900) — the four `handler_test.go` suppressions predate this entry and are **backfilled** here; the MFA fixture was added 2026-09-05 for pre-split issue 2273 |
 | Rule | `go.jwt-go.security.jwt.hardcoded-jwt-key` (`p/security-audit`) |
 | Suppressed by | `// nosemgrep:` on the line immediately above the `SignedString([]byte(secret))` call |
 | Rationale | The rule flags a literal passed as a JWT signing key. Every flagged site is a **test fixture minting a token for the validator under test**. A validator test cannot exercise signature verification without holding the key both sides use, and the alternatives are worse: reading a real secret into the test suite or making deterministic expiry/classification tests depend on external state. The keys are test-local constants or the literal `"test"`; they appear in no production path and authenticate nothing. |
@@ -163,12 +163,12 @@ Per-finding justifications for specific suppressions. Each entry names the file,
 |---|---|
 | File | `services/control-plane/cmd/migrate-media/main.go` |
 | Approximate lines | 381, 436, 578 (line numbers shift with PRs; see latest commit) |
-| First recorded | 2026-08-30 (PR [#3043](https://github.com/Concord-Voice/Concord-Voice-Alpha/pull/3043)) |
+| First recorded | 2026-08-30 (pre-split PR 3043) |
 | Rule | `semgrep.concord-go-sql-sprintf` (in-repo `.semgrep/concord-go-security.yml`) |
 | Suppressed by | Rule-specific `// nosemgrep:concord-go-sql-sprintf` suffixes on the opening line of each of the three multiline `fmt.Sprintf` calls. |
 | Rationale | The formatted fragments are column identifiers selected only from the two hard-coded profile migration options (`avatar_url` and `header_image_url`) or from the strict manifest parser that maps exact `avatars/<canonical-uuid>` and `banners/<canonical-uuid>` entries to those same identifiers. User IDs, original URLs, and replacement URLs remain `$N` query parameters; no external value enters SQL text. |
 | Verification | Pinned Semgrep 1.121.0 reports zero findings when the CI custom config is emitted in one output format. The combined JSON + SARIF invocation preserves the ignored matches in SARIF with `suppressions[].state = accepted`; manual review confirms the identifier sources and parameter boundary above. The targeted migrate-media package tests pass. |
-| Disposition | False positive. Retain the rule-specific suppressions and dismiss GitHub code-scanning alerts [#1366](https://github.com/Concord-Voice/Concord-Voice-Alpha/security/code-scanning/1366)-[#1371](https://github.com/Concord-Voice/Concord-Voice-Alpha/security/code-scanning/1371) individually as `false positive`; re-evaluate if either identifier source changes. |
+| Disposition | False positive. Retain the rule-specific suppressions and dismiss GitHub code-scanning pre-split alerts 1366-1371 individually as `false positive`; re-evaluate if either identifier source changes. |
 
 #### Platform-triaged AI findings — MFA settings step-up and SuppressEmbeds authorization review
 
