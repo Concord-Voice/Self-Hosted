@@ -9,6 +9,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -492,7 +493,7 @@ func TestServerMove_GrantNeededMoverLacksSpeak_403NoGrant(t *testing.T) {
 	_, err := f.ts.DB.Exec(`UPDATE channel_permission_overrides SET deny = 0
 		WHERE channel_id = $1 AND target_type = 'user' AND target_id = $2`, f.to, f.mover.ID)
 	require.NoError(t, err)
-	require.NoError(t, f.ts.Redis.FlushDB(context.Background()).Err())
+	require.NoError(t, redistest.Reset(context.Background(), f.ts.Redis))
 	code, body = f.move(t, f.mover, f.target.ID, f.to)
 	assert.Equal(t, http.StatusOK, code, body)
 }
