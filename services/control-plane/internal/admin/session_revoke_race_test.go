@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,4 +78,21 @@ func TestSessionStore_ConcurrentLogoutWinsOverSlidingGet(t *testing.T) {
 	n, err := rdb.Exists(ctx, "admin_session:"+sid).Result()
 	require.NoError(t, err)
 	assert.Zero(t, n, "the sliding Get must not recreate a revoked session key")
+}
+
+// TestSessionStore_MethodSetHasNoUnfencedWrites pins the store's exported
+// surface. Every method that writes a session key must keep a concurrent
+// Revoke final: Mint writes only a fresh random id, Get slides with SET XX, and
+// Revoke deletes. A read-then-copy primitive such as the removed Rotate (Get,
+// then a plain SET of a new id, then Revoke) lets a logout that lands between
+// its steps leave a live session, so adding one must come with its own race
+// test and an update here.
+func TestSessionStore_MethodSetHasNoUnfencedWrites(t *testing.T) {
+	typ := reflect.TypeOf(&admin.SessionStore{})
+	got := make([]string, 0, typ.NumMethod())
+	for i := 0; i < typ.NumMethod(); i++ {
+		got = append(got, typ.Method(i).Name)
+	}
+	sort.Strings(got)
+	assert.Equal(t, []string{"Get", "Mint", "Revoke"}, got)
 }

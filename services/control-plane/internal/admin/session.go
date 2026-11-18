@@ -54,7 +54,7 @@ type Session struct {
 	AbsoluteExpiry    time.Time `json:"absolute_expiry"`
 }
 
-// SessionStore mints, resolves, rotates, and revokes opaque admin sessions in
+// SessionStore mints, resolves, and revokes opaque admin sessions in
 // Redis (#1688 §6). The injected clock makes idle/absolute expiry deterministic
 // in tests (no time.Now() in the hot path).
 type SessionStore struct {
@@ -158,29 +158,6 @@ func (s *SessionStore) Get(ctx context.Context, sid string) (Session, error) {
 		return Session{}, err
 	}
 	return sess, nil
-}
-
-// Rotate issues a fresh session id for the same admin and revokes the old id,
-// preserving the original absolute expiry (rotation does not extend the 8h cap).
-// Used to defend against session fixation on privilege transitions (login).
-func (s *SessionStore) Rotate(ctx context.Context, oldSID string) (string, error) {
-	sess, err := s.Get(ctx, oldSID)
-	if err != nil {
-		return "", err
-	}
-	newSID, err := newSessionID()
-	if err != nil {
-		return "", err
-	}
-	now := s.now()
-	sess.LastSeen = now
-	if err := s.persist(ctx, newSID, sess, now); err != nil {
-		return "", err
-	}
-	if err := s.Revoke(ctx, oldSID); err != nil {
-		return "", err
-	}
-	return newSID, nil
 }
 
 // Revoke deletes a session id (instant logout / forced revocation). Deleting an
