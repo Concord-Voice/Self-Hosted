@@ -9,7 +9,7 @@
 
 ## Purpose
 
-This file is the canonical record of CodeQL (GitHub code-scanning) false-positive dismissals for Concord Voice. When a CodeQL alert is dismissed as `false positive` via the code-scanning API or UI, a corresponding entry MUST be appended here to preserve the reasoning for future reviewers. Scope note: despite the CodeQL-centric title, this register houses `false positive` dismissals for **every** GitHub Code Scanning tool (govulncheck, Scorecard, ESLint SARIF, …) — one register per surface, not per tool.
+This file is the canonical record of CodeQL (GitHub code-scanning) false-positive dismissals for Concord Voice. When a CodeQL alert is dismissed as `false positive` via the code-scanning API or UI, a corresponding entry MUST be appended here to preserve the reasoning for future reviewers. Scope note: despite the CodeQL-centric title, this register houses `false positive` dismissals for **every** GitHub Code Scanning tool (govulncheck, Scorecard, ESLint SARIF, …) — one register per surface, not per tool. GitHub Code Quality (`py/*`) findings are recorded here too; their API has no dismiss endpoint, so they are dismissed in the UI.
 
 GitHub's dismissal `dismissed_comment` is capped at 280 characters and is not discoverable from the codebase. This register holds the full justification and links each dismissal to the PR that made the finding safe.
 
@@ -392,7 +392,14 @@ Stances on CodeQL rules whose mismatch with this project's idioms is **structura
 
 ### Rule-Calibration Notes
 
-_None yet._
+#### `py/file-not-closed` — descriptors closed through a list in `finally`
+
+| Field | Value |
+|---|---|
+| First recorded | 2026-11-18 (PR #333) |
+| Rationale | GitHub Code Quality's `py/file-not-closed` does not follow a descriptor once it is appended to a list. It flags `descriptors.append(os.open(...))` even when the enclosing `try` has a `finally` that runs `for descriptor in descriptors: os.close(descriptor)`. This pattern is correct when the descriptors must stay open for the whole `try` body (for example FIFO ends that hold a pipe open while child processes run), or when a helper records each descriptor it opens in a list that the caller closes from a saved mark. Treat such a finding as a false positive only when the `finally` covers every append. A plain `with` block would close the descriptor too early. The Code Quality findings API is read-only (list and get only), so dismissal is a UI action and this register is the record. |
+| Instance count in Instance-Specific Entries | 4 |
+| Disposition | Per-instance `false positive` dismissal in the UI, with an entry below, when the `finally` closes every listed descriptor. |
 
 ### Instance-Specific Entries
 
@@ -430,3 +437,27 @@ _None yet._
 | Justification | `value` comes from `JSON.parse` of untrusted envelope text, and `JSON.parse('null')` returns `null`. Because `typeof null === 'object'`, the `typeof` check alone does not reject `null`. The `value === null` check is what keeps this validation fail-closed on a `null` envelope. CodeQL's type inference wrongly treats the narrowed value as non-null. Removing the check would let `null` reach `Object.keys`-style access and throw an unexpected `TypeError` there, outside the defined `reject()` path. |
 | Dismissal | Not dismissed in GitHub. The Code Quality findings API is read-only (see above). Recorded here only. |
 | Re-check | Reopen if the value stops coming from `JSON.parse`, or if this guard is replaced by a decoder that already rejects `null`. |
+
+#### Code Quality findings #51, #52, #53 — `py/file-not-closed` — `infrastructure/deploy/tests/selfhost_acceptance_support.py`
+
+| Field | Value |
+|---|---|
+| Findings | GitHub Code Quality #51 (line 1189 on `65646fc8`), #52 (line 1971), #53 (line 2430), all `py/file-not-closed` |
+| Location | On the PR head, `descriptors.append(os.open(fifo, os.O_RDWR \| os.O_NONBLOCK))` at lines 1181, 1963 and 2422. Each is closed by `for descriptor in descriptors: os.close(descriptor)` in the enclosing `finally` at lines 1200, 1986 and 2450 |
+| Decided | 2026-11-18, in PR #333 |
+| Reason | `false positive` (see the rule-calibration note above) |
+| Justification | Each test opens the read-write end of one or more FIFOs so the pipes stay open while the queue scripts under test run as subprocesses in the `try` body. Every descriptor goes into `descriptors` right after `os.open`, and the `finally` closes all of them, on success and on failure. A `with` block per descriptor would close a FIFO before the subprocesses read it and change what the test exercises. CodeQL does not track the close through the list. |
+| Dismissal | The Code Quality findings API has no dismiss endpoint (2026-11-18), so the finding is dismissed in the repository UI. This entry is the record. |
+| Re-check | Reopen if any of these blocks moves an `os.open` outside the `try`, or stops closing `descriptors` in `finally`. |
+
+#### Code Quality finding #55 — `py/file-not-closed` — `infrastructure/deploy/voice-boot-containment.py`
+
+| Field | Value |
+|---|---|
+| Finding | GitHub Code Quality #55 (line 255 on `65646fc8`), `py/file-not-closed`; raised again inline on this PR at line 265 |
+| Location | `canonical = self.open_trusted_directory(self.parent)` in `AssociationStore.recheck()`. `open_trusted_directory` appends every descriptor it opens to `self.fds` (lines 246 and 249) |
+| Decided | 2026-11-18, in PR #333 |
+| Reason | `false positive` on the PR head; the underlying leak was fixed in PR #333 (see the `py/file-not-closed` rule-calibration note above) |
+| Justification | On `origin/main` this finding was a real leak in effect: every `recheck()` call left one more set of ancestry descriptors in `self.fds` until `close()`. This PR fixes that. `recheck()` records `mark = len(self.fds)` before the re-walk, and its `finally` (line 271) pops every descriptor after `mark` from the list and closes it, on success and on refusal. `canonical` is one of those descriptors. CodeQL does not track the close through the list. An explicit `os.close(canonical)` would close it twice. |
+| Dismissal | The Code Quality findings API has no dismiss endpoint (2026-11-18), so the finding is dismissed in the repository UI. This entry is the record. |
+| Re-check | Reopen if `open_trusted_directory` stops appending to `self.fds`, or if `recheck()` stops closing the descriptors after `mark` in `finally`. `test-voice-boot-containment.py` fails if it does. |

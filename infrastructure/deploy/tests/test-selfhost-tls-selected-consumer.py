@@ -10,7 +10,6 @@ this host runner performs a restart only for the captured owned container ID.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import ast
 import json
 import os
@@ -484,6 +483,7 @@ def start_consumer(project_model: dict, project: Path, cert_volume: str,
             try:
                 docker("rm", "--force", container_id, timeout=30)
             except AcceptanceFailure:
+                # Best-effort cleanup; the bare raise below reports the original failure.
                 pass
         raise
 
@@ -615,8 +615,6 @@ def main() -> None:
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             observe(DEPLOY / "selfhost-tls.py", cert_path,
                     port, 15.0, should_succeed=True)
-            if mode == "local":
-                local_port = port
         require(consumer_id is not None, "owned selected coturn consumer was not created")
         print(f"selected-consumer identity mapping: runtime project={runtime_project}; container-name projection={runtime_name}; hook project={runtime_project}/coturn")
         print(f"selected-consumer image mapping: compose={CANONICAL_IMAGE}; runtime={IMAGE}; id={coturn_image_id}")
