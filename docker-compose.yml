@@ -35,7 +35,7 @@ services:
     # Exact version plus digest, refreshed by Dependabot's docker-compose block.
     # A floating tag never updates on a long-lived host: Compose pulls only a
     # missing image. Same for nats below.
-    image: redis:8.10.2-alpine@sha256:9f8d2d789b9a1d1e3f283f979aa9cbf393373806472e1ccd460e2f9c869b833b
+    image: redis:8.10.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3
     container_name: concordvoice-redis
     # Deliberately NOT raising `--databases` (#2680 review). Widening the pool was
     # proposed as test headroom, but it buys nothing measurable — collision needs
@@ -67,7 +67,7 @@ services:
 
   # NATS Message Broker (for inter-service messaging)
   nats:
-    image: nats:2.15.2-alpine@sha256:afae2fdbe2e326c65e1246cb83b9d05d319188734f3bd577ac8072daae78a10f
+    image: nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
     container_name: concordvoice-nats
     # -js enables JetStream; -c points at our config which pins store_dir to
     # /data/jetstream with a 5G max_file cap. The nats-data named volume below
@@ -90,7 +90,7 @@ services:
 
   # TURN/STUN Server (coturn)
   coturn:
-    image: coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e
+    image: coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e
     container_name: concordvoice-coturn
     # PUBLIC_IP is REQUIRED. If left unset coturn would advertise
     # 127.0.0.1 as the relay address and every relayed media packet would
