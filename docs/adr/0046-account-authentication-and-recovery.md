@@ -40,12 +40,13 @@ TTL. The account-wide bound stays
 for the same reason as recovery's: a limit tied to a pending row would let a
 caller cancel, re-register and restart guessing.
 
-**Security #160 registration-code binding:** a registration verification code is
+**Registration code binding:** a registration verification code is
 evidence for its canonical pending UUID and normalized recipient email. The
 control plane carries that recipient through verification and compares it with
 the pending row while locked before promotion. Email rotation invalidates current
-code material before the row changes, preserves #157's pending-lifetime attempt
-budget, and leaves a newer racing code intact.
+code material before the row changes, preserves the pending registration's attempt
+budget, and leaves a newer racing code intact. A code record with no bound
+recipient is refused, so a code issued before this binding must be resent.
 
 #2553 assumes CP user authentication is sound (ADR-0045 decision-table row D21, `0045:672`) and freezes its protocol-v1 contract at #3587 PR-A, so any factor this design needs must be named first.
 
