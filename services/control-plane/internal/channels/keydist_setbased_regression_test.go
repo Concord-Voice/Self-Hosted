@@ -87,9 +87,11 @@ func bulkViewingMembers(t *testing.T, ts *testhelpers.TestServer, serverID strin
 // the channel row lock, so each must hold it briefly enough that the last one
 // in the queue still gets it inside lock_timeout. With one access check per
 // target the queue behind a 500-target batch ran past 5 s and honest requests
-// got 503 on a healthy database.
+// got 503 on a healthy database; 250 targets still does on that code (about
+// 7 s per batch under -race), and leaves the set-based path a wide margin on a
+// slow CI runner.
 func TestDistribution_ConcurrentHonestDistributionsSucceed(t *testing.T) {
-	const holders, targets = 8, 500
+	const holders, targets = 8, 250
 	ts, _, serverID, channelID := setupEncryptedChannel(t)
 	hs := make([]testhelpers.TestUser, holders)
 	for i := range hs {
