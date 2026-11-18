@@ -97,3 +97,12 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+// golang-migrate's go.mod requires otel/sdk v1.45.0, which CVE-2026-128085 affects
+// (fixed in v1.47.0). No package of otel/sdk is compiled. Excluding the vulnerable
+// versions drops that requirement from the module graph, and `go mod tidy` keeps
+// the exclusion. Remove it once golang-migrate requires v1.47.0 or later.
+exclude (
+	go.opentelemetry.io/otel/sdk v1.45.0
+	go.opentelemetry.io/otel/sdk v1.46.0
+)
