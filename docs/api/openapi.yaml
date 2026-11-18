@@ -7163,13 +7163,36 @@ paths:
       tags:
       - E2EE
       summary: Get pending key requests
-      description: 'List channels where the current user needs to distribute keys to new members.
+      description: 'List the channel and DM key requests the current user can fulfil,
+        one page at a time. Rows are ordered by creation time, then source (channel
+        before DM), then ID. Follow `next_cursor` until it is null. A page can hold
+        fewer than `limit` rows, or none, while `next_cursor` is still set: one
+        request examines a bounded number of rows, and only rows the caller may
+        see are returned.
 
         Rate limit: 30 requests per minute.
 
         '
       security:
       - BearerAuth: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        description: Maximum rows in the page. Defaults to 100.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 100
+      - name: cursor
+        in: query
+        required: false
+        description: Opaque `next_cursor` from the previous page. Omit it for the
+          first page.
+        schema:
+          type: string
+          maxLength: 160
       responses:
         '200':
           description: Pending key requests
@@ -7177,11 +7200,24 @@ paths:
             application/json:
               schema:
                 type: object
+                required:
+                - pending_requests
+                - next_cursor
                 properties:
                   pending_requests:
                     type: array
                     items:
                       $ref: '#/components/schemas/PendingKeyRequest'
+                  next_cursor:
+                    type: string
+                    nullable: true
+                    description: Cursor for the next page, or null on the last page.
+        '400':
+          description: '`limit` is not an integer from 1 to 200, or `cursor` is malformed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /e2ee/validate-epochs:
     post:
       tags:

@@ -44,7 +44,7 @@ const (
 	dmDistributionTopologyAttempts = 2
 	// Per-conversation ceiling on DM key distribution (#1218). Sized by
 	// legitimate peer-fulfillment fan-out, not by attacker modelling:
-	// appendDMPendingRequests shows every key holder every non-self pending
+	// the pending-keys reader shows every key holder every non-self DM pending
 	// row, so an N-participant conversation emits up to (N/2)^2 POSTs per
 	// sweep — 25 at the 10-participant group cap (dm/handlers.go). 40 is
 	// 1.6x that. The window matches the client's own retry cadence
@@ -2311,11 +2311,17 @@ func readChannelKeyTarget(ctx context.Context, q dmKeyVersionQueryRower, channel
 	if qErr != nil {
 		return target, false, qErr
 	}
-	target.viewPerm = rbac.PermViewTextChannels
-	if channelType == "voice" {
-		target.viewPerm = rbac.PermViewVoiceChannels
-	}
+	target.viewPerm = channelViewPermission(channelType)
 	return target, true, nil
+}
+
+// channelViewPermission is the permission that grants VIEW on a channel of
+// channelType.
+func channelViewPermission(channelType string) rbac.Permission {
+	if channelType == "voice" {
+		return rbac.PermViewVoiceChannels
+	}
+	return rbac.PermViewTextChannels
 }
 
 // GetChannelKeys returns the caller's own wrapped channel key (optionally a
@@ -3373,175 +3379,32 @@ type pendingKeyRequest struct {
 	CreatedAt  string `json:"created_at"`
 }
 
-// GetPendingKeyRequests lists pending channel-key requests the caller may
-// service, filtered fail-closed to channels the caller can view and requesters
-// who still hold view permission (CV-CAN-005).
+// GetPendingKeyRequests lists, one page at a time, the pending channel and DM
+// key requests the caller may service: channel requests filtered fail-closed
+// to channels the caller and the requester can both view (CV-CAN-005), DM
+// requests to conversations still available to the caller. The page is
+// bounded by ?limit= (default 100, max 200) and the work by a scan cap
+// (VULN-080, VULN-207); next_cursor is null on the last page.
 // GET /api/v1/e2ee/pending-keys
 func (h *Handler) GetPendingKeyRequests(c *gin.Context) {
 	userID := c.GetString("user_id")
-
-	// Return pending requests only to a holder of the active epoch. An active
-	// initial-distribution marker pins its successor epoch and remains
-	// creator-only; otherwise the active epoch comes from the newer of the
-	// surviving wrapped-key rows and the revocation ledger.
-	query := `
-		SELECT DISTINCT pkr.id, pkr.channel_id, pkr.user_id, COALESCE(cid.key_version, active_epoch.key_version), pkr.created_at
-		FROM pending_key_requests pkr
-		LEFT JOIN channel_initial_key_distributions cid ON cid.channel_id = pkr.channel_id
-		CROSS JOIN LATERAL (
-			SELECT GREATEST(
-				COALESCE(MAX(key_version), 1),
-				COALESCE((SELECT MAX(successor_epoch) FROM key_revocations WHERE channel_id = pkr.channel_id), 1)
-			) AS key_version
-			FROM channel_keys
-			WHERE channel_id = pkr.channel_id
-		) active_epoch
-		INNER JOIN channel_keys ck ON pkr.channel_id = ck.channel_id
-			AND ck.user_id = $1
-			AND (
-				(cid.key_version IS NULL AND ck.key_version = active_epoch.key_version)
-				OR (cid.creator_id = $1 AND ck.key_version = cid.key_version)
-			)
-		ORDER BY pkr.created_at ASC
-	`
-
-	rows, err := h.db.Query(query, userID)
+	limit, after, err := parsePendingKeysPage(c)
 	if err != nil {
-		h.log.Error("Failed to query pending key requests", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchPendingKeys})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidPendingKeysPage})
 		return
 	}
-	defer func() {
-		if closeErr := rows.Close(); closeErr != nil {
-			h.log.Error("Failed to close pending key request rows", "error", closeErr)
-		}
-	}()
-	// Drain the cursor fully before running the per-request VIEW filter below.
-	// The filter calls channelKeyAccess (a DB query + RBAC resolver lookup) per
-	// row, so filtering inline would hold this cursor's pooled connection open
-	// for the duration of N round-trips (CV-CAN-005 review). Collect first, then
-	// close, then filter.
-	candidates := make([]pendingKeyRequest, 0)
-	for rows.Next() {
-		var req pendingKeyRequest
-		if err := rows.Scan(&req.ID, &req.ChannelID, &req.UserID, &req.KeyVersion, &req.CreatedAt); err != nil {
-			h.log.Error("Failed to scan pending request", "error", err)
-			continue
-		}
-		candidates = append(candidates, req)
-	}
-	rowsErr := rows.Err()
-	closeErr := rows.Close()
-	if rowsErr != nil {
-		h.log.Error("Error iterating pending requests", "error", rowsErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchPendingKeys})
-		return
-	}
-	if closeErr != nil {
-		h.log.Error("Failed to close pending key request rows", "error", closeErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchPendingKeys})
-		return
-	}
-
-	requests := h.filterVisiblePendingRequests(c.Request.Context(), userID, candidates)
-	requests, err = h.appendDMPendingRequests(c.Request.Context(), userID, requests)
+	requests, next, err := h.pendingKeyRequestsPage(c.Request.Context(), userID, after, limit)
 	if err != nil {
-		h.log.Error("Failed to fetch pending DM key requests", "error", err)
+		h.log.Error("Failed to fetch pending key requests", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchPendingKeys})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{"pending_requests": requests})
-}
-
-// filterVisiblePendingRequests drops channel pending requests the caller may no
-// longer VIEW. The source query selected channels solely because the CALLER
-// holds a channel_keys row; CV-CAN-005 requires that a caller who received a key
-// and was later denied VIEW is neither shown nor prompted to fulfill a hidden
-// channel's pending queue. Gate the caller's own VIEW per channel (memoised —
-// many pending requests share a channel), then also drop requests whose
-// requester no longer holds VIEW (defence in depth). Fail CLOSED on a resolver
-// error so a persistent failure cannot re-expose a hidden channel's queue.
-func (h *Handler) filterVisiblePendingRequests(ctx context.Context, callerID string, candidates []pendingKeyRequest) []pendingKeyRequest {
-	requests := []pendingKeyRequest{}
-	callerCanView := make(map[string]bool, len(candidates))
-	for _, req := range candidates {
-		canView, known := callerCanView[req.ChannelID]
-		if !known {
-			_, cv, vErr := h.channelKeyAccess(ctx, req.ChannelID, callerID)
-			canView = vErr == nil && cv
-			callerCanView[req.ChannelID] = canView
-		}
-		if !canView {
-			continue
-		}
-		if _, cv, vErr := h.channelKeyAccess(ctx, req.ChannelID, req.UserID); vErr != nil || !cv {
-			continue
-		}
-		requests = append(requests, req)
+	var nextCursor *string
+	if next != nil {
+		encoded := next.encode()
+		nextCursor = &encoded
 	}
-	return requests
-}
-
-// appendDMPendingRequests appends the caller's DM pending key requests to
-// requests. DM membership is scoped by the dm_channel_keys join, so no extra
-// VIEW gate applies here.
-func (h *Handler) appendDMPendingRequests(ctx context.Context, userID string, requests []pendingKeyRequest) ([]pendingKeyRequest, error) {
-	// A fulfiller distributes the key it holds but the server stamps the row at
-	// the conversation's current epoch. Never offer a stale holder a pending
-	// request: it could wrap an old CSK and label it as the current epoch.
-	dmQuery := `
-		SELECT dpkr.id, dpkr.conversation_id, dpkr.user_id, dpkr.created_at
-		FROM dm_pending_key_requests dpkr
-		INNER JOIN dm_channel_keys dck ON dpkr.conversation_id = dck.conversation_id AND dck.user_id = $1
-		WHERE dpkr.user_id != $1
-		  AND dck.key_version = (
-			SELECT MAX(key_version) FROM dm_channel_keys WHERE conversation_id = dpkr.conversation_id
-		  )
-		ORDER BY dpkr.created_at ASC
-	`
-	dmRows, dmErr := h.db.QueryContext(ctx, dmQuery, userID)
-	if dmErr != nil {
-		return nil, fmt.Errorf("query pending DM key requests: %w", dmErr)
-	}
-	candidates := make([]pendingKeyRequest, 0)
-	for dmRows.Next() {
-		var req pendingKeyRequest
-		if err := dmRows.Scan(&req.ID, &req.ChannelID, &req.UserID, &req.CreatedAt); err != nil {
-			return nil, errors.Join(
-				fmt.Errorf("scan pending DM key request: %w", err),
-				closePendingDMRequestRows(dmRows),
-			)
-		}
-		candidates = append(candidates, req)
-	}
-	if err := dmRows.Err(); err != nil {
-		return nil, errors.Join(
-			fmt.Errorf("iterate pending DM key requests: %w", err),
-			closePendingDMRequestRows(dmRows),
-		)
-	}
-	if err := closePendingDMRequestRows(dmRows); err != nil {
-		return nil, err
-	}
-	for _, req := range candidates {
-		available, guardErr := h.dmPendingConversationAvailable(ctx, req.ChannelID, userID)
-		if guardErr != nil {
-			return nil, fmt.Errorf("check pending DM conversation availability: %w", guardErr)
-		}
-		if !available {
-			continue
-		}
-		requests = append(requests, req)
-	}
-	return requests, nil
-}
-
-func closePendingDMRequestRows(rows *sql.Rows) error {
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close pending DM key request rows: %w", err)
-	}
-	return nil
+	c.JSON(http.StatusOK, gin.H{"pending_requests": requests, "next_cursor": nextCursor})
 }
 
 func (h *Handler) dmPendingConversationAvailable(ctx context.Context, conversationID, userID string) (bool, error) {
@@ -4003,7 +3866,7 @@ type dmKey struct {
 // undeliverableVersionedMiss reports whether a versioned fetch that found no
 // row asked for an epoch no pending request can deliver. A pending request is
 // only ever fulfilled with the context's issued epoch (the channel query's
-// active-epoch join, appendDMPendingRequests), so a miss for any other epoch —
+// active-epoch join, pendingKeyRequestsPage), so a miss for any other epoch —
 // superseded, or above anything issued — would only page holders for a key
 // they will never send, and pending:true leaves the row waiting forever
 // (#2822). The issued epoch itself stays pending, including a successor whose
@@ -5011,7 +4874,7 @@ func (h *Handler) notifyDMKeyDistribution(conversationID string, delivered, clea
 // deletePendingDMKeyRequest is best-effort POST-commit cleanup — see
 // deletePendingChannelKeyRequest, which logs this same failure. A failure must
 // be logged, not discarded: it is self-amplifying, because a pending row that
-// outlives its own fulfilment keeps the recipient in appendDMPendingRequests,
+// outlives its own fulfilment keeps the recipient in pendingKeyRequestsPage,
 // so every holder re-POSTs for them each sweep, against the per-conversation
 // budget.
 func (h *Handler) deletePendingDMKeyRequest(conversationID, memberUserID string) {

@@ -341,7 +341,8 @@ func (h *Handler) broadcastDMKeyRevocation(convID string, revokedEpoch, successo
 // queue after requesterID enrolled a request on convID. The payload is the
 // server-channel key_needed shape minus server_id, which a DM does not have;
 // the client's handler reads only channel_ids. Non-holders fetch an empty
-// queue — appendDMPendingRequests serves a row to current-epoch holders only.
+// queue — the pending-keys reader (pendingKeyRequestsPage) serves a DM row to
+// current-epoch holders only.
 func (h *Handler) notifyDMKeyNeeded(convID, requesterID string) {
 	h.broadcastToDMParticipants(convID, requesterID, websocket.OutgoingMessage{
 		Type: "key_needed",
