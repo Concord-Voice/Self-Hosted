@@ -30,6 +30,7 @@ import {
   type LayeredCodecKind,
   type LayerValue,
   type StoredCameraLayerDemand,
+  type ViewerCameraLayerDemand,
 } from './cameraLayerGovernor.js';
 import { computeScreenLayeringGate, type StoredScreenLayerDemand } from './screenLayerGovernor.js';
 import type { EmitSecurityEvent, SecurityReasonCode } from './securityEvent.js';
@@ -488,8 +489,10 @@ export interface Room {
   callParticipantHistory: Map<string, Date>;
   /** Channel rooms only (#1542): the server-owner cap tier from join-authorize. Undefined for DMs. */
   ownerTier?: string;
-  /** Raw client camera layer demand, parsed and stored by consumer ID. */
-  cameraLayerDemands: Map<string, StoredCameraLayerDemand>;
+  /** Raw client camera layer demand, parsed and stored by consumer ID. Values
+   *  carry the owning viewer userId so the gate counts DISTINCT viewers, not
+   *  consumer entries (VULN-158). */
+  cameraLayerDemands: Map<string, ViewerCameraLayerDemand>;
   /** Current room-level camera layering gate state. */
   cameraLayeringGateEnabled: boolean;
   /** Pending room-level camera gate-OFF debounce timer. */
@@ -4765,7 +4768,7 @@ export class RoomManager {
     const consumerType = (consumer as { type?: unknown }).type;
     const source = (consumer.appData as { source?: unknown } | undefined)?.source;
     if (source === 'camera') {
-      room.cameraLayerDemands.set(stored.consumerId, stored);
+      room.cameraLayerDemands.set(stored.consumerId, { ...stored, userId });
       // After validation and clamping, so this counts demands the SFU ACCEPTED
       // rather than every arriving payload. Before #3094 no client ever sent the
       // flag, so any non-zero total is itself proof the activated path is live.

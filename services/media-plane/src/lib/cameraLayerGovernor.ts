@@ -22,6 +22,16 @@ export interface StoredCameraLayerDemand {
   pressureStepDown: boolean;
 }
 
+/**
+ * Stored demand plus the owning viewer's `userId` (VULN-158). The layering
+ * gates count DISTINCT viewers, not consumer entries: one participant can own
+ * many consumers of one producer, so counting entries let a single client
+ * force every publisher into layered egress.
+ */
+export interface ViewerCameraLayerDemand extends StoredCameraLayerDemand {
+  userId: string;
+}
+
 export type ParseDemandResult =
   | { ok: true; value: CameraLayerDemand }
   | { ok: false; error: 'invalid-consumer-id' | 'invalid-layer' | 'invalid-render-state' };
@@ -141,16 +151,17 @@ export function storedDemand(
 export function computeCameraLayeringGate(input: {
   codecKind: LayeredCodecKind;
   cameraProducerCount: number;
-  demands: StoredCameraLayerDemand[];
+  demands: ViewerCameraLayerDemand[];
   previouslyEnabled?: boolean;
 }): boolean {
   // Closing the last producer precedes asynchronous consumer-demand cleanup.
   // Stale demands must not arm an SVC gate while no camera can provide layers.
   if (input.cameraProducerCount === 0) return false;
   const visible = input.demands.filter((demand) => demand.visible);
-  const visibleThreshold = input.previouslyEnabled ? 1 : 2;
+  const distinctViewers = new Set(visible.map((demand) => demand.userId)).size;
+  const viewerThreshold = input.previouslyEnabled ? 1 : 2;
   const hasLayerBenefit =
-    visible.length >= visibleThreshold &&
+    distinctViewers >= viewerThreshold &&
     visible.some((demand) => demand.maxUsefulSpatialLayer < 2 || demand.pressureStepDown);
 
   if (!hasLayerBenefit) return false;

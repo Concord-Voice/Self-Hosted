@@ -224,8 +224,20 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'svc',
         cameraProducerCount: 0,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 1, pressureStepDown: false },
-          { consumerId: 'c2', visible: true, maxUsefulSpatialLayer: 2, pressureStepDown: false },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 1,
+            pressureStepDown: false,
+          },
+          {
+            consumerId: 'c2',
+            userId: 'v2',
+            visible: true,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: false,
+          },
         ],
         previouslyEnabled: true,
       })
@@ -238,8 +250,20 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'svc',
         cameraProducerCount: 2,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 1, pressureStepDown: false },
-          { consumerId: 'c2', visible: true, maxUsefulSpatialLayer: 2, pressureStepDown: false },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 1,
+            pressureStepDown: false,
+          },
+          {
+            consumerId: 'c2',
+            userId: 'v2',
+            visible: true,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: false,
+          },
         ],
       })
     ).toBe(true);
@@ -251,8 +275,20 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'simulcast',
         cameraProducerCount: 2,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 1, pressureStepDown: false },
-          { consumerId: 'c2', visible: true, maxUsefulSpatialLayer: 2, pressureStepDown: false },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 1,
+            pressureStepDown: false,
+          },
+          {
+            consumerId: 'c2',
+            userId: 'v2',
+            visible: true,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: false,
+          },
         ],
       })
     ).toBe(false);
@@ -264,8 +300,20 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'simulcast',
         cameraProducerCount: 3,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 1, pressureStepDown: false },
-          { consumerId: 'c2', visible: true, maxUsefulSpatialLayer: 2, pressureStepDown: false },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 1,
+            pressureStepDown: false,
+          },
+          {
+            consumerId: 'c2',
+            userId: 'v2',
+            visible: true,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: false,
+          },
         ],
       })
     ).toBe(true);
@@ -277,8 +325,20 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'svc',
         cameraProducerCount: 2,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 2, pressureStepDown: true },
-          { consumerId: 'c2', visible: true, maxUsefulSpatialLayer: 2, pressureStepDown: false },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: true,
+          },
+          {
+            consumerId: 'c2',
+            userId: 'v2',
+            visible: true,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: false,
+          },
         ],
       })
     ).toBe(true);
@@ -290,8 +350,20 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'svc',
         cameraProducerCount: 2,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 2, pressureStepDown: false },
-          { consumerId: 'c2', visible: false, maxUsefulSpatialLayer: 1, pressureStepDown: true },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: false,
+          },
+          {
+            consumerId: 'c2',
+            userId: 'v2',
+            visible: false,
+            maxUsefulSpatialLayer: 1,
+            pressureStepDown: true,
+          },
         ],
       })
     ).toBe(false);
@@ -303,8 +375,20 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'svc',
         cameraProducerCount: 3,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 1, pressureStepDown: false },
-          { consumerId: 'c2', visible: false, maxUsefulSpatialLayer: 2, pressureStepDown: false },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 1,
+            pressureStepDown: false,
+          },
+          {
+            consumerId: 'c2',
+            userId: 'v2',
+            visible: false,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: false,
+          },
         ],
       })
     ).toBe(false);
@@ -316,7 +400,13 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'svc',
         cameraProducerCount: 2,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 1, pressureStepDown: false },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 1,
+            pressureStepDown: false,
+          },
         ],
         previouslyEnabled: true,
       })
@@ -329,11 +419,66 @@ describe('computeCameraLayeringGate', () => {
         codecKind: 'simulcast',
         cameraProducerCount: 2,
         demands: [
-          { consumerId: 'c1', visible: true, maxUsefulSpatialLayer: 1, pressureStepDown: false },
-          { consumerId: 'c2', visible: true, maxUsefulSpatialLayer: 2, pressureStepDown: false },
+          {
+            consumerId: 'c1',
+            userId: 'v1',
+            visible: true,
+            maxUsefulSpatialLayer: 1,
+            pressureStepDown: false,
+          },
+          {
+            consumerId: 'c2',
+            userId: 'v2',
+            visible: true,
+            maxUsefulSpatialLayer: 2,
+            pressureStepDown: false,
+          },
         ],
         previouslyEnabled: true,
       })
     ).toBe(true);
+  });
+
+  // VULN-158: the threshold counts distinct viewers, not consumer entries. One
+  // client opening many camera consumers is still one viewer.
+  describe('distinct viewers (VULN-158)', () => {
+    const demand = (consumerId: string, userId: string, maxUsefulSpatialLayer: 0 | 1 | 2) => ({
+      consumerId,
+      userId,
+      visible: true,
+      maxUsefulSpatialLayer,
+      pressureStepDown: false,
+    });
+
+    it('one viewer with many visible consumers does not enable the gate', () => {
+      expect(
+        computeCameraLayeringGate({
+          codecKind: 'svc',
+          cameraProducerCount: 3,
+          demands: [demand('c1', 'v1', 1), demand('c2', 'v1', 2), demand('c3', 'v1', 0)],
+        })
+      ).toBe(false);
+    });
+
+    it('two distinct viewers enable the gate', () => {
+      expect(
+        computeCameraLayeringGate({
+          codecKind: 'svc',
+          cameraProducerCount: 3,
+          demands: [demand('c1', 'v1', 1), demand('c2', 'v2', 2)],
+        })
+      ).toBe(true);
+    });
+
+    it('one viewer keeps an enabled gate on', () => {
+      expect(
+        computeCameraLayeringGate({
+          codecKind: 'svc',
+          cameraProducerCount: 3,
+          demands: [demand('c1', 'v1', 1), demand('c2', 'v1', 2)],
+          previouslyEnabled: true,
+        })
+      ).toBe(true);
+    });
   });
 });

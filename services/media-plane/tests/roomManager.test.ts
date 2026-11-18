@@ -6017,6 +6017,13 @@ describe('RoomManager', () => {
       return { participant, consumer };
     }
 
+    // VULN-158: the gate counts distinct viewers, so a fixture that needs two
+    // viewers must put its second consumer on a second participant.
+    async function cameraViewer(userId: string) {
+      await ensureParticipant(userId);
+      return manager.getParticipant('room-1', userId)!;
+    }
+
     async function addCameraProducer(
       userId: string,
       producerId: string,
@@ -6181,7 +6188,6 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', svcCodecs);
       await addCameraProducer('u-2', 'p2', svcCodecs);
       const { consumer: consumer1 } = await addCameraConsumer('u-1', 'c1');
-      const participant = manager.getParticipant('room-1', 'u-1')!;
       const consumer2 = createMockConsumer({
         id: 'c2',
         kind: 'video',
@@ -6191,12 +6197,12 @@ describe('RoomManager', () => {
       });
       (consumer1 as any).type = 'simple';
       consumer1.setPreferredLayers.mockRejectedValue(new Error('simple consumer'));
-      participant.consumers.set('c2', consumer2 as any);
+      (await cameraViewer('u-v2')).consumers.set('c2', consumer2 as any);
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6213,23 +6219,22 @@ describe('RoomManager', () => {
       manager.onEvent(handler);
       await addCameraProducer('u-1', 'p1', ['video/VP9']);
       await addCameraConsumer('u-1', 'c1');
-      const participant = manager.getParticipant('room-1', 'u-1')!;
       const consumer2 = createMockConsumer({
         id: 'c2',
         kind: 'video',
         appData: { source: 'camera' },
       });
-      participant.consumers.set('c2', consumer2 as any);
+      (await cameraViewer('u-v2')).consumers.set('c2', consumer2 as any);
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6238,12 +6243,35 @@ describe('RoomManager', () => {
       ]);
     });
 
+    // VULN-158: one client opening several camera consumers is still one viewer.
+    it('one viewer with several camera consumers does not enable the gate', async () => {
+      const handler = vi.fn();
+      manager.onEvent(handler);
+      await addCameraProducer('u-2', 'p2', ['video/VP9']);
+      await addCameraProducer('u-3', 'p3', ['video/VP9']);
+      await addCameraConsumer('u-1', 'c1');
+      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-1', 'c3');
+
+      await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
+      await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c2'));
+      await manager.setPreferredLayers(
+        'room-1',
+        'u-1',
+        validLayerDemand('c3', { cssWidth: 1920, cssHeight: 1080 })
+      );
+
+      expect(manager.getRoom('room-1')!.cameraLayerDemands.size).toBe(3);
+      expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(false);
+      expect(gateEvents(handler)).toEqual([]);
+    });
+
     it('keeps the simulcast threshold when a capability update removes the common codec', async () => {
       const handler = vi.fn();
       manager.onEvent(handler);
       await addCameraProducer('u-1', 'camera-1', ['video/VP8']);
-      const { participant } = await addCameraConsumer('u-2', 'c1', ['video/VP8']);
-      participant.consumers.set(
+      await addCameraConsumer('u-2', 'c1', ['video/VP8']);
+      (await cameraViewer('u-v2')).consumers.set(
         'c2',
         createMockConsumer({ id: 'c2', kind: 'video', appData: { source: 'camera' } }) as any
       );
@@ -6252,7 +6280,7 @@ describe('RoomManager', () => {
         'u-2',
         validLayerDemand('c1', { cssWidth: 320, cssHeight: 180 })
       );
-      await manager.setPreferredLayers('room-1', 'u-2', validLayerDemand('c2'));
+      await manager.setPreferredLayers('room-1', 'u-v2', validLayerDemand('c2'));
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(false);
 
       manager.updateRtpCapabilities('room-1', 'u-2', createRtpCapabilities(['video/VP9']) as any);
@@ -6265,15 +6293,15 @@ describe('RoomManager', () => {
       const handler = vi.fn();
       manager.onEvent(handler);
       await addCameraProducer('u-1', 'p1', ['video/VP9'], 'video/VP8');
-      const { participant } = await addCameraConsumer('u-1', 'c1');
-      participant.consumers.set(
+      await addCameraConsumer('u-1', 'c1');
+      (await cameraViewer('u-v2')).consumers.set(
         'c2',
         createMockConsumer({ id: 'c2', kind: 'video', appData: { source: 'camera' } }) as any
       );
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(false);
@@ -6291,11 +6319,11 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', ['video/VP9']);
       await addCameraProducer('u-2', 'p2', ['video/VP9']);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(true);
@@ -6316,20 +6344,20 @@ describe('RoomManager', () => {
         await addCameraProducer('u-1', 'p1', ['video/VP9']);
         await addCameraConsumer('u-1', 'c1');
         const participant = manager.getParticipant('room-1', 'u-1')!;
-        participant.consumers.set(
+        (await cameraViewer('u-v2')).consumers.set(
           'c2',
           createMockConsumer({ id: 'c2', kind: 'video', appData: { source: 'camera' } }) as any
         );
         await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
         await manager.setPreferredLayers(
           'room-1',
-          'u-1',
+          'u-v2',
           validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
         );
 
         expect(manager.closeConsumer('room-1', 'u-1', 'c1')).toBe(true);
         expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(true);
-        expect(manager.closeConsumer('room-1', 'u-1', 'c2')).toBe(true);
+        expect(manager.closeConsumer('room-1', 'u-v2', 'c2')).toBe(true);
 
         // Re-consuming during producer replacement restores live demand before
         // the pending OFF; the room gate must not flap and trigger another publish.
@@ -6364,20 +6392,19 @@ describe('RoomManager', () => {
         manager.onEvent(handler);
         await addCameraProducer('u-1', 'p1', ['video/VP9']);
         await addCameraConsumer('u-1', 'c1');
-        const participant = manager.getParticipant('room-1', 'u-1')!;
-        participant.consumers.set(
+        (await cameraViewer('u-v2')).consumers.set(
           'c2',
           createMockConsumer({ id: 'c2', kind: 'video', appData: { source: 'camera' } }) as any
         );
         await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
         await manager.setPreferredLayers(
           'room-1',
-          'u-1',
+          'u-v2',
           validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
         );
         const staleRoom = manager.getRoom('room-1')!;
         expect(manager.closeConsumer('room-1', 'u-1', 'c1')).toBe(true);
-        expect(manager.closeConsumer('room-1', 'u-1', 'c2')).toBe(true);
+        expect(manager.closeConsumer('room-1', 'u-v2', 'c2')).toBe(true);
         expect(staleRoom.cameraGateOffTimer).toBeDefined();
 
         mockRouter.closed = true;
@@ -6408,12 +6435,12 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', fallbackCodecs);
       await addCameraProducer('u-2', 'p2', fallbackCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6432,11 +6459,11 @@ describe('RoomManager', () => {
       await addCameraProducer('u-2', 'p2', fallbackCodecs);
       await addCameraProducer('u-3', 'p3', fallbackCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(true);
@@ -6530,11 +6557,11 @@ describe('RoomManager', () => {
       await addCameraProducer('u-2', 'p2', fallbackCodecs);
       await addCameraProducer('u-3', 'p3', fallbackCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(true);
@@ -6625,12 +6652,12 @@ describe('RoomManager', () => {
       await addCameraProducer('u-2', 'p2', fallbackCodecs);
       await addCameraProducer('u-3', 'p3', fallbackCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6650,11 +6677,11 @@ describe('RoomManager', () => {
         await addCameraProducer('u-2', 'p2', fallbackCodecs);
         await addCameraProducer('u-3', 'p3', fallbackCodecs);
         await addCameraConsumer('u-1', 'c1');
-        await addCameraConsumer('u-1', 'c2');
+        await addCameraConsumer('u-v2', 'c2');
         await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
         await manager.setPreferredLayers(
           'room-1',
-          'u-1',
+          'u-v2',
           validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
         );
 
@@ -6684,12 +6711,12 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', svcCodecs);
       await addCameraProducer('u-2', 'p2', svcCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6703,12 +6730,12 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', ['video/VP9'], 'video/VP8');
       await addCameraProducer('u-2', 'p2', ['video/VP9']);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
