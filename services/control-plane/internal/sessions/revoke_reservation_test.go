@@ -179,7 +179,7 @@ func TestDetermineAuthRequired_RedisDownRequiresPassword(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dead.Close()) })
 	handler := NewHandler(rig.db, dead, logger.New("test"), &securityEventDisconnector{}, nil)
 
-	needsPassword, _, reservation := handler.determineAuthRequired(context.Background(), rig.user, rig.familyID(t), rig.sid)
+	needsPassword, _, reservation := handler.determineAuthRequired(context.Background(), rig.user, simpleWindow{family: rig.familyID(t)}, rig.sid)
 	require.True(t, needsPassword, "a failed reservation must require step-up")
 	require.Empty(t, reservation)
 }
@@ -225,7 +225,7 @@ func TestDetermineAuthRequired_SessionCountFailureRequiresPassword(t *testing.T)
 	require.NoError(t, db.Close())
 	handler := NewHandler(db, client, logger.New("test"), &securityEventDisconnector{}, nil)
 
-	needsPassword, mode, reservation := handler.determineAuthRequired(context.Background(), uuid.NewString(), uuid.NewString(), uuid.NewString())
+	needsPassword, mode, reservation := handler.determineAuthRequired(context.Background(), uuid.NewString(), simpleWindow{family: uuid.NewString()}, uuid.NewString())
 	require.True(t, needsPassword)
 	require.Equal(t, "secure", mode)
 	require.Empty(t, reservation)

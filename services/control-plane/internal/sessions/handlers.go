@@ -4,6 +4,7 @@ package sessions
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -57,6 +58,20 @@ redis.call('ZADD', key, ARGV[2], ARGV[3])
 redis.call('EXPIRE', key, ARGV[4])
 return 1
 `)
+
+	// currentModeGenerationScript returns the user's revocation-mode
+	// generation, storing ARGV[1] first when there is none, and renews its TTL.
+	// A missing generation (never set, expired or evicted) is replaced by a
+	// fresh random one, so a window stored under an earlier one cannot match it.
+	currentModeGenerationScript = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+if current then
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  return current
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return ARGV[1]
+`)
 )
 
 // SessionDisconnector synchronously fences the WebSocket transports of one
@@ -96,7 +111,10 @@ const (
 	revokeTrackingTTL               = 25 * time.Hour
 	revokeReservationCleanupTimeout = 2 * time.Second
 	simpleAuthWindowTTL             = 5 * time.Minute
-	freeRevokeSessionThreshold      = 3 // Must have >= 3 active sessions for a free revoke
+	// revocationModeGenerationTTL bounds an idle generation key. Every read
+	// renews it, and its expiry can only end live windows, never revive one.
+	revocationModeGenerationTTL = 25 * time.Hour
+	freeRevokeSessionThreshold  = 3 // Must have >= 3 active sessions for a free revoke
 	// freeRevokeReservationFractions is the count of non-zero microsecond
 	// fractions a free revoke reservation score can take.
 	freeRevokeReservationFractions = 999999
@@ -184,6 +202,72 @@ func simpleAuthWindowKey(userID, familyID string) string {
 	return fmt.Sprintf("session_revoke_auth:%s:%s", userID, familyID)
 }
 
+// revocationModeGenerationKey names the user's revocation-mode generation: a
+// random token every mode change replaces. It shares the window keys' prefix,
+// and so their managed Redis ACL pattern; "mode_generation" is never a family
+// ID, which is always a UUID.
+func revocationModeGenerationKey(userID string) string {
+	return fmt.Sprintf("session_revoke_auth:%s:mode_generation", userID)
+}
+
+// simpleWindow is the scope a Simple-mode window is earned and spent under:
+// the requester's verified login family, and the user's revocation-mode
+// generation as it stood before the request read the mode. A window holds the
+// generation it was earned under and waives a password only while that
+// generation is current, so one mode change ends every family's window.
+type simpleWindow struct {
+	family     string
+	generation string
+}
+
+// newModeGeneration draws a random revocation-mode generation.
+func newModeGeneration() (string, error) {
+	generation, err := uuid.NewRandom()
+	if err != nil {
+		return "", fmt.Errorf("draw revocation mode generation: %w", err)
+	}
+	return generation.String(), nil
+}
+
+// currentSimpleWindow reads the requester's window scope. Call it before the
+// revocation mode is read: a mode change replaces the generation before it
+// writes the mode, so a window earned at the generation read here was earned
+// under the mode read after it, or under a later one. No verified family, or
+// any failure to read the generation, yields a scope that earns and spends no
+// window, so the request must prove.
+func (h *Handler) currentSimpleWindow(ctx context.Context, c *gin.Context, userID string) simpleWindow {
+	scope := simpleWindow{family: authenticatingFamily(c, userID)}
+	if scope.family == "" {
+		return scope
+	}
+	fresh, err := newModeGeneration()
+	if err != nil {
+		h.log.Error("Failed to draw revocation mode generation, requiring password", "error_class", "entropy")
+		return scope
+	}
+	generation, err := currentModeGenerationScript.Run(ctx, h.redis, []string{revocationModeGenerationKey(userID)},
+		fresh, revocationModeGenerationTTL.Milliseconds()).Text()
+	if err != nil || generation == "" {
+		h.log.Error("Failed to read revocation mode generation, requiring password", "error_class", "redis")
+		return scope
+	}
+	scope.generation = generation
+	return scope
+}
+
+// endSimpleAuthWindows replaces the user's revocation-mode generation, which
+// ends every login family's Simple-mode window at once.
+func (h *Handler) endSimpleAuthWindows(ctx context.Context, userID string) error {
+	fresh, err := newModeGeneration()
+	if err != nil {
+		return err
+	}
+	if err := h.redis.Set(ctx, revocationModeGenerationKey(userID), fresh, revocationModeGenerationTTL).Err(); err != nil {
+		return fmt.Errorf("replace revocation mode generation: %w", err)
+	}
+	return nil
+}
+
 // authenticatingFamily returns the login family AuthRequired verified for this
 // request's bearer token, or "" when there is no verified family. It never
 // reads a request header or the target session ID. An empty family earns and
@@ -225,27 +309,29 @@ func (h *Handler) recordRevoke(ctx context.Context, userID, sessionID string) er
 }
 
 // hasSimpleAuthWindow checks if this login family has an active 5-minute
-// authentication window (Simple mode). No verified family has no window.
-func (h *Handler) hasSimpleAuthWindow(ctx context.Context, userID, familyID string) bool {
-	if familyID == "" {
+// authentication window (Simple mode) earned under the current revocation-mode
+// generation. No verified family, or no generation, has no window.
+func (h *Handler) hasSimpleAuthWindow(ctx context.Context, userID string, scope simpleWindow) bool {
+	if scope.family == "" || scope.generation == "" {
 		return false
 	}
-	val, err := h.redis.Get(ctx, simpleAuthWindowKey(userID, familyID)).Result()
-	return err == nil && val == "1"
+	val, err := h.redis.Get(ctx, simpleAuthWindowKey(userID, scope.family)).Result()
+	return err == nil && subtle.ConstantTimeCompare([]byte(val), []byte(scope.generation)) == 1
 }
 
 // grantSimpleAuthWindow sets a 5-minute authentication window for the login
-// family that just proved its credentials.
-func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID, familyID string) {
-	if familyID == "" {
+// family that just proved its credentials, bound to the generation the request
+// read before the mode.
+func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID string, scope simpleWindow) {
+	if scope.family == "" || scope.generation == "" {
 		return
 	}
-	h.redis.Set(ctx, simpleAuthWindowKey(userID, familyID), "1", simpleAuthWindowTTL)
+	h.redis.Set(ctx, simpleAuthWindowKey(userID, scope.family), scope.generation, simpleAuthWindowTTL)
 }
 
-// clearSimpleAuthWindow removes the requesting family's window. Other families'
-// windows were each earned by that family's own proof, and are inert while the
-// mode is secure or once their family is revoked.
+// clearSimpleAuthWindow removes the requesting family's window. Revoke-all
+// uses it: every other family is revoked with it. A mode change ends every
+// family's window by replacing the generation instead (endSimpleAuthWindows).
 func (h *Handler) clearSimpleAuthWindow(ctx context.Context, userID, familyID string) {
 	if familyID == "" {
 		return
@@ -444,8 +530,8 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		return
 	}
 
-	family := authenticatingFamily(c, uid)
-	needsPassword, mode, freeRevokeReservationScore := h.determineAuthRequired(ctx, uid, family, sessionID)
+	window := h.currentSimpleWindow(ctx, c, uid)
+	needsPassword, mode, freeRevokeReservationScore := h.determineAuthRequired(ctx, uid, window, sessionID)
 
 	// Parse optional password from request body
 	var req struct {
@@ -464,7 +550,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 			return
 		}
 		if mode == "simple" {
-			h.grantSimpleAuthWindow(ctx, uid, family)
+			h.grantSimpleAuthWindow(ctx, uid, window)
 		}
 	}
 
@@ -502,9 +588,10 @@ func (h *Handler) verifySessionOwnership(ctx context.Context, c *gin.Context, se
 // A non-empty reservation score means this request atomically consumed the one
 // free revoke and must either retain or conclusively release that exact entry.
 //
-// family is the requester's verified login family: only its own Simple-mode
-// window can waive the password.
-func (h *Handler) determineAuthRequired(ctx context.Context, uid, family, sessionID string) (needsPassword bool, mode, reservationScore string) {
+// window is the requester's verified login family and revocation-mode
+// generation, read before the mode: only that family's own window, earned
+// under that generation, can waive the password.
+func (h *Handler) determineAuthRequired(ctx context.Context, uid string, window simpleWindow, sessionID string) (needsPassword bool, mode, reservationScore string) {
 	activeCount, err := h.countActiveSessions(ctx, uid)
 	if err != nil {
 		h.log.Error("Failed to count active sessions", "error", err)
@@ -513,7 +600,7 @@ func (h *Handler) determineAuthRequired(ctx context.Context, uid, family, sessio
 
 	mode = h.getUserRevocationMode(ctx, uid)
 
-	if mode == "simple" && h.hasSimpleAuthWindow(ctx, uid, family) {
+	if mode == "simple" && h.hasSimpleAuthWindow(ctx, uid, window) {
 		return false, mode, ""
 	}
 	if activeCount < freeRevokeSessionThreshold {
@@ -849,6 +936,9 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	if blocked {
 		return
 	}
+	if !h.endWindowsBeforeModeChange(ctx, c, uid, req.Mode) {
+		return
+	}
 
 	_, err := h.db.ExecContext(ctx, //nolint:gosec // parameterized query — not injectable
 		`UPDATE users SET revocation_mode = $1 WHERE id = $2`,
@@ -860,9 +950,6 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 		return
 	}
 
-	if req.Mode == "secure" {
-		h.clearSimpleAuthWindow(ctx, uid, authenticatingFamily(c, uid))
-	}
 	if mfaVerified {
 		h.clearRevokeMFABudget(ctx, uid)
 	}
@@ -873,4 +960,23 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"revocation_mode": req.Mode,
 	})
+}
+
+// endWindowsBeforeModeChange ends every family's Simple-mode window before the
+// mode is written, whichever mode is chosen. A change to simple cannot proceed
+// without it, since a window earned before the change would otherwise waive a
+// password again: it is refused with a retryable 503 and the mode is left as it
+// was. A change to secure proceeds, because no window waives anything while the
+// mode is secure and the next change to simple must replace the generation.
+// It returns false once it has written a refusal.
+func (h *Handler) endWindowsBeforeModeChange(ctx context.Context, c *gin.Context, uid, mode string) bool {
+	if err := h.endSimpleAuthWindows(ctx, uid); err != nil {
+		if mode == "simple" {
+			h.log.Error("Revocation mode change refused: Simple-mode windows could not be ended", "error_class", "redis")
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgAuthUnavailable})
+			return false
+		}
+		h.log.Warn("Simple-mode windows could not be ended; secure mode leaves them inert", "error_class", "redis")
+	}
+	return true
 }

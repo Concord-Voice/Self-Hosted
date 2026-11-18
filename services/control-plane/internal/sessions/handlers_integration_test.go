@@ -724,7 +724,9 @@ func TestSimpleMode_AuthWindowAllowsSubsequentRevokes(t *testing.T) {
 	assertSessionFamilyRevoked(t, ts, user.ID, sessionID)
 	window, err := ts.Redis.Get(context.Background(), simpleWindowKey(t, ts, user.ID, user.AccessToken)).Result()
 	require.NoError(t, err)
-	require.Equal(t, "1", window)
+	generation, err := ts.Redis.Get(context.Background(), "session_revoke_auth:"+user.ID+":mode_generation").Result()
+	require.NoError(t, err)
+	require.Equal(t, generation, window, "the window holds the current revocation-mode generation")
 	// Second revoke within window should NOT require password
 	sessionID2 := createSession(t, ts, user.ID, "Device2", testIP2)
 	w = ts.DoRequest("DELETE", sessionsPath+"/"+sessionID2, nil, testhelpers.AuthHeaders(user.AccessToken))
