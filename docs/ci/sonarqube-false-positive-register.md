@@ -13,6 +13,10 @@ This file is the canonical record of SonarQube false-positive decisions for the 
 
 The register exists because the `mcp__sonarqube__change_sonar_issue_status` tool used by Claude Code cannot attach justification comments to the marked issue in SonarQube — the tool only flips the status. Without this register, FP decisions would live silently in SonarQube's state with no discoverable reasoning.
 
+> **Reverted (2026-11-15):** SonarCloud runs the full stock profiles again, so
+> the taint rules are active. The history below is kept for the FP decisions
+> made under it.
+>
 > **Security-signal re-homing (2026-06-11, #1426 / ADR-0017):** SAST security
 > detection is re-homing from SonarQube's security sensors to per-tool GitHub
 > Code Scanning (CodeQL #1424, Semgrep #1426 — categories `semgrep-custom` /
@@ -304,6 +308,15 @@ High-level stances on SonarQube rules whose mismatch with this project's idiomat
 
 ### Rule-Calibration Notes
 
+#### `css:S9423` — `!important` in a universal reduced-motion override
+
+| Field | Value |
+|---|---|
+| First recorded | 2026-11-18 (carried over from the legacy project's decision on the same code) |
+| Rationale | The rule asks for each `!important` to be replaced by a specificity fix. That cannot work for an override whose job is to beat every component rule, such as the `*, *::before, *::after` block under `@media (prefers-reduced-motion: reduce)`: any specificity a component adds outranks a universal selector, so `!important` is the only cascade-correct way to make the accessibility setting win everywhere. |
+| Instance count in Section 2 | 4 (rows 87–90) |
+| Disposition | Per-instance `FALSE_POSITIVE` only for an accessibility motion override or a scheme-wide override that must beat all component rules. An `!important` that settles an ordinary conflict between two known selectors is fixed, not registered. Rule-level disable is prohibited by project SonarQube AI-Code Assurance policy. |
+
 #### `go:S5332` — sub-pattern: SMTP dial before a mandatory STARTTLS
 
 | Field | Value |
@@ -431,6 +444,19 @@ Rows marked one at a time after the sweep. Paths are relative to the repo root. 
 |---|---|---|---|---|---|---|
 | 77 | 2026-11-08 | `AaG9AnwuTyWH8afVCQo8` | `docker:S8431` | `services/control-plane/Dockerfile.account-authority:5` | Claude (#213) | `golang:1.27.3-alpine@sha256:<digest>`, the same reviewed builder pin as `Dockerfile.ops-agent`. The tag is the Dependabot lineage anchor and the digest gives immutability. Legacy note `docker:S8431`. |
 | 78 | 2026-11-11 | `AaHLw8t_1M2WySR0ou3q` | `go:S2077` | `services/control-plane/internal/migrationrunner/status.go:104-105` (raised on line 121, before the PR review removed the `Verify` wrapper above it) | Claude (#259) | Version-table read in the current schema; both identifiers driver-quoted, schema from `current_schema()`, table name constant (sub-pattern C). Marked with Mark's explicit approval. |
+| 79 | 2026-11-18 | `AaGQ965Ki6y9d045l-1g` | `godre:S8196` | `services/control-plane/internal/accountguard/decide/types.go:454` | Claude (#331; owner-approved) | `type Action interface{ isAction() }` is a sealed sum type: its one method is an unexported marker that closes the set of actions `Decide` accepts, not a behaviour. The mechanical rename (`Actioner`) would describe a value as an agent. Legacy note `godre:S8196`. Marked with Mark's explicit approval. |
+| 80 | 2026-11-18 | `AaGQ964Xi6y9d045l-1Q` | `godre:S8196` | `services/control-plane/internal/voiceauthprotocol/types.go:273` | Claude (#331; owner-approved) | `type ResponsePayload interface{ responsePayload() }` is a sealed sum type whose unexported marker closes the set of success payloads. The name mirrors the `ResponsePayload` union in `services/media-plane/src/lib/voiceAuthProtocol.ts`, so both sides of the wire contract use one name; `ResponsePayloader` would break that. Legacy note `godre:S8196`. Marked with Mark's explicit approval. |
+| 81 | 2026-11-18 | `AaGQ962fi6y9d045l-05` | `godre:S8188` | `services/control-plane/internal/authority/store/serve.go:70` | Claude (#331; owner-approved) | `ServeLock.Watch` creates `wctx, cancel := context.WithCancelCause(ctx)` and returns a stop func that calls `cancel(nil)` and waits for the watch goroutine, which also cancels with a cause when the lock is lost. Deferring `cancel` inside `Watch` would end the watch before the caller used it. The per-ping `WithTimeout` cancel is called right after the ping. Legacy note `godre:S8188`. Marked with Mark's explicit approval. |
+| 82 | 2026-11-18 | `AaGQ9659i6y9d045l-2B` | `docker:S8431` | `services/control-plane/Dockerfile.redis-auth-controller:1` (`builder` stage) | Claude (#331; owner-approved) | `golang:1.27.4-alpine@sha256:<digest>`, the reviewed builder pin of row 77 and the 2026-11-11 re-verification. The digest gives immutability and the tag is the Dependabot lineage anchor (`.github/dependabot.yml` watches `/services/control-plane`). The build checks Go 1.27.4 and Alpine 3.24 before use. Legacy note `docker:S8431`. Marked with Mark's explicit approval. |
+| 83 | 2026-11-18 | `AaGQ9659i6y9d045l-2C` | `docker:S8431` | `services/control-plane/Dockerfile.redis-auth-controller:12` (`runtime` stage) | Claude (#331; owner-approved) | `alpine:3.24@sha256:<digest>`. The digest pins the image and the tag documents the reviewed release line; the build checks `/etc/alpine-release` is 3.24, so a mismatched digest fails the build. Legacy note `docker:S8431`. Marked with Mark's explicit approval. |
+| 84 | 2026-11-18 | `AaGQ962ii6y9d045l-06` | `godre:S8196` | `services/control-plane/internal/authority/store/gate.go:13` | Claude (#331; owner-approved) | `ReplicationProbe` has one predicate method, `Replicated(ctx, conn, lsn) (bool, error)`; `SQLProbe` is the real one and tests inject a fake. The mechanical rename gives "Replicateder", which is not a name. Same shape as rows 85 and 86. Legacy note `godre:S8196`. Marked with Mark's explicit approval. |
+| 85 | 2026-11-18 | `AaGQ962Hi6y9d045l-0x` | `godre:S8196` | `services/control-plane/internal/activepresence/reconciler.go:73` | Claude (#331; owner-approved) | `Gate` is itself an agent noun, within Effective Go's "or similar agent noun" allowance; the rename would be "WithSenderser". `GenerationDeleter` in the same file, whose method is `CompareAndDelete`, is equally non-derivable and goes unflagged only because its name ends in `-er`. Legacy note `godre:S8196`. Marked with Mark's explicit approval. |
+| 86 | 2026-11-18 | `AaGQ96zdi6y9d045l-0Y` | `godre:S8196` | `services/control-plane/internal/rbac/presence_recheck.go:12` | Claude (#331; owner-approved) | `PresenceRecheckPlan` is an opaque pre-mutation capture that `internal/rbac` never inspects; its one method `HasWork() bool` is a predicate on that value. The rename yields `WorkHaver` or `Worker`, which misdescribes it as an executor. Go's single-method `error` interface is the precedent for a non-`-er` name. Legacy note `godre:S8196`. Marked with Mark's explicit approval. |
+| 87 | 2026-11-18 | `AaGQ966Mi6y9d045l-2G` | `css:S9423` | `client/admin/src/styles.css:1221` | Claude (#331; owner-approved) | `scroll-behavior: … !important` inside the `*, *::before, *::after` block under `@media (prefers-reduced-motion: reduce)`, which must beat every component's own motion rule. See rule note `css:S9423`. Marked with Mark's explicit approval. |
+| 88 | 2026-11-18 | `AaGQ966Mi6y9d045l-2H` | `css:S9423` | `client/admin/src/styles.css:1222` | Claude (#331; owner-approved) | `transition-duration: … !important` inside the `*, *::before, *::after` block under `@media (prefers-reduced-motion: reduce)`, which must beat every component's own motion rule. See rule note `css:S9423`. Marked with Mark's explicit approval. |
+| 89 | 2026-11-18 | `AaGQ966Mi6y9d045l-2I` | `css:S9423` | `client/admin/src/styles.css:1223` | Claude (#331; owner-approved) | `animation-duration: … !important` inside the `*, *::before, *::after` block under `@media (prefers-reduced-motion: reduce)`, which must beat every component's own motion rule. See rule note `css:S9423`. Marked with Mark's explicit approval. |
+| 90 | 2026-11-18 | `AaGQ966Mi6y9d045l-2J` | `css:S9423` | `client/admin/src/styles.css:1224` | Claude (#331; owner-approved) | `animation-iteration-count: … !important` inside the `*, *::before, *::after` block under `@media (prefers-reduced-motion: reduce)`, which must beat every component's own motion rule. See rule note `css:S9423`. Marked with Mark's explicit approval. |
+| 91 | 2026-11-18 | `AaGQ9618i6y9d045l-0v` | `go:S1313` | `services/control-plane/internal/klipy/handlers.go:159` | Claude (#331; owner-approved) | `cgnatPrefix` (100.64.0.0/10) is one of the ranges the KLIPY SSRF egress guard refuses (`isDeniedEgressIP`), because `netip.Addr.IsPrivate` does not cover it. The literal is the denylist, not an address the code connects to. Same reasoning as legacy note `typescript:S1313`. Marked with Mark's explicit approval. |
 
 ### Builder-pin re-verification — 2026-11-11 (PR #256)
 
@@ -443,29 +469,13 @@ alignment guard passes, and it now also checks that build-time version
 assertion. This records the new pin's evidence; no SonarCloud finding status or
 historical decision was changed.
 
-## Recreation-recovery / drift-guard (ADR-0017 narrowed profile)
+## Recreation-recovery / drift-guard (retired 2026-11-15)
 
-The **2026-06-14 SonarCloud project recreation** (see the Section 2 banner) did
-more than invalidate issue keys: a freshly-recreated project reverts to the
-stock **`Sonar way`** quality profiles, silently undoing the ADR-0017 narrowing
-(the deactivation of the `injection`-tagged VULNERABILITY taint rules in the
-custom `Concord way (<lang>) — ADR-0017 narrowed` profiles). With the narrowing
-reverted, SonarCloud's JS/TS/Go security sensors run again — re-introducing both
-the #1381 timeout and a duplicate SAST signal that ADR-0017 deliberately re-homed
-to CodeQL + Semgrep.
-
-A CI **drift-guard** now detects that regression:
-[`scripts/sonar/check-narrowed-profile.sh`](../../scripts/sonar/check-narrowed-profile.sh)
-(read-only) asserts, per language (js/ts/go), that (1) the profile *assigned to
-the project* is the narrowed one, and (2) it has **zero active**
-injection-tagged VULNERABILITY rules — querying `rules/search` scoped with
-`qprofile=<key>&activation=true` (an org-wide query would always find injection
-rules in the catalog and false-positive forever). In Concord-Voice-Alpha it
-runs as an advisory step of the `sonar-profile-drift` job; this repo's CI does
-not run it yet (Sonar CI wiring is #36). The restore op
-(`scripts/sonar/narrow-security-profiles.sh --apply`) stays in Alpha, which
-manages the shared org profiles. The hermetic self-test
-(`scripts/sonar/test-check-narrowed-profile.sh`) is in this repo.
+The narrowed-profile drift guard (`scripts/sonar/check-narrowed-profile.sh` and
+its self-test) was deleted when the ADR-0017 narrowing was reverted. A recreated
+project now gets the stock profiles, which is the intended state. A recreation
+still issues new issue keys (see the Section 2 banner), so FP decisions are
+re-registered after one.
 
 ## Schema Rules
 

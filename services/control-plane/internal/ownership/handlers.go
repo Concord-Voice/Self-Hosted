@@ -1706,6 +1706,6 @@ func (h *Handler) sendTransferEmail(ctx context.Context, ownerID, serverID, targ
 	}
 
 	if err := h.emailSvc.SendOwnershipTransferNotification(ownerEmail, serverName, targetUsername, reversalToken); err != nil {
-		h.log.Error("Failed to send ownership transfer email", "error", err, "to", ownerEmail)
+		h.log.Error("Failed to send ownership transfer email", "failure_class", "ownership_transfer_email_delivery")
 	}
 }

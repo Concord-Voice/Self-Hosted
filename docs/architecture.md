@@ -782,15 +782,17 @@ Admin Portal does not expose that operation in its UI.
 | Verb | What it does |
 |---|---|
 | `bootstrap --username <handle>` | Creates a pending admin and prints a one-time enrollment URL and token. |
-| `reset-enrollment --username <handle>` | Revokes the admin's hardware keys, returns the admin to pending, and prints a new enrollment token. It does not change the password. |
+| `reset-enrollment --username <handle>` | Revokes the admin's hardware keys and sessions, invalidates in-flight enrollment, returns the admin to pending, and prints a new enrollment token. It does not change the password. |
 | `unlock <username>` | Clears the admin's sign-in lock, failed attempts and escalation level, so the next correct sign-in succeeds. It does not touch the IP lock, which expires within an hour. It writes one audit row. |
+
+After upgrading to the release that adds enrollment and session generations, every admin signs in once again, and enrollment tokens issued before the upgrade fail closed; reissue them with `reset-enrollment`. Do not run `reset-enrollment` or finish an enrollment while containers from an earlier release still serve, because they do not check the generations.
 
 **Auth flow (2FA mandatory):**
 
 1. `POST /admin/api/v1/auth/password` — constant-time password verify. Returns a short-lived challenge handle + WebAuthn `BeginLogin` assertion. **Password alone never yields a session.**
-2. `POST /admin/api/v1/auth/webauthn` — `FinishLogin` with `userVerification: required`. On success mints an opaque Redis session.
+2. `POST /admin/api/v1/auth/webauthn` — `FinishLogin` with `userVerification: required`. The active admin and exact credential are rechecked under a database lock; the credential counter is persisted and an opaque Redis session is minted before that transaction commits. A failed finalization returns no session.
 
-**Sessions:** 256-bit CSPRNG session id stored in Redis under `admin_session:{sid}`. Cookie `__Host-cv_admin_sid`: `Secure; HttpOnly; SameSite=Strict; Path=/`. Idle TTL 30 min (sliding). Absolute cap 8 h. Logout `DEL`s the key (instant revocation). `AdminAuthRequired` validates the cookie → Redis → expiry only for protected administration, metrics and Server routes. The SPA shell, assets, authentication, logout, and enrollment routes remain outside the local-session gate.
+**Sessions:** 256-bit CSPRNG session id stored in Redis under `admin_session:{sid}` with the admin's durable `session_generation`. Cookie `__Host-cv_admin_sid`: `Secure; HttpOnly; SameSite=Strict; Path=/`. Idle TTL 30 min (sliding). Absolute cap 8 h. Logout `DEL`s the key (instant revocation). `AdminAuthRequired` validates the cookie → Redis → expiry → active admin with the same session generation for protected administration, metrics and Server routes. Reset increments that generation and a separate `credential_generation` in the same transaction that removes credentials; old sessions stay rejected after re-enrollment, and old enrollment tokens and ceremonies cannot activate the admin. The SPA shell, assets, authentication, logout, and enrollment routes remain outside the local-session gate.
 
 **Hardware key requirement:** `attestation: direct` is enforced at enrollment. The server checks the AAGUID against `ADMIN_WEBAUTHN_ALLOWED_AAGUIDS` (canonical YubiKey 5-series set). Only approved hardware keys can become admin credentials.
 

@@ -55,7 +55,7 @@ func requireSerializedEventPrivacy(t *testing.T, events []securityevent.Event, s
 func TestExecuteRevocationEmitsOnlyAfterDurableUpdate(t *testing.T) {
 	rig := newSecurityEventFamilyRig(t)
 	rig.router.DELETE("/api/v1/sessions/:id", func(c *gin.Context) {
-		rig.handler.executeRevocation(c.Request.Context(), c, c.GetString("user_id"), c.Param("id"))
+		rig.handler.executeRevocation(c.Request.Context(), c, c.GetString("user_id"), c.Param("id"), "")
 	})
 	removeFault := installSecurityEventCommitFault(t, rig.db)
 	failed := rig.request(http.MethodDelete, "/api/v1/sessions/"+rig.sid, "")
