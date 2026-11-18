@@ -2245,38 +2245,77 @@ func sanitizeID(s string) string {
 }
 
 func (h *Handler) channelKeyAccess(ctx context.Context, channelID, userID string) (isMember, canView bool, err error) {
-	channelID, err = requestid.Canonical(channelID)
-	if err != nil {
-		return false, false, fmt.Errorf("canonicalize channel key access channel: %w", err)
-	}
-	userID, err = requestid.Canonical(userID)
-	if err != nil {
-		return false, false, fmt.Errorf("canonicalize channel key access user: %w", err)
-	}
-	var serverID, channelType string
-	qErr := h.db.QueryRowContext(ctx, `
-		SELECT c.server_id, c.type FROM channels c
-		INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
-		WHERE c.id = $1
-	`, channelID, userID).Scan(&serverID, &channelType)
-	if qErr == sql.ErrNoRows {
-		return false, false, nil
-	}
-	if qErr != nil {
-		return false, false, qErr
+	target, isMember, err := readChannelKeyTarget(ctx, h.db, channelID, userID)
+	if err != nil || !isMember {
+		return false, false, err
 	}
 	if h.resolver == nil {
 		return true, true, nil
 	}
-	viewPerm := rbac.PermViewTextChannels
-	if channelType == "voice" {
-		viewPerm = rbac.PermViewVoiceChannels
-	}
-	perms, permErr := h.resolver.ResolveEffectivePermissionsUncached(ctx, serverID, userID, channelID)
+	perms, permErr := h.resolver.ResolveEffectivePermissionsUncached(ctx, target.serverID, target.userID, target.channelID)
 	if permErr != nil {
 		return true, false, permErr
 	}
-	return true, perms.Has(viewPerm), nil
+	return true, perms.Has(target.viewPerm), nil
+}
+
+// channelKeyAccessTx is channelKeyAccess on the caller's transaction
+// (VULN-079). A check called while a key-distribution transaction holds the
+// channel row lock must not take a second pool connection: each distribution
+// would then hold one connection while waiting for another, and enough of them
+// exhaust the shared pool. Both the membership read and the permission resolve
+// run on tx; ResolveChannelPermissionsTx reads and publishes no cache entry and
+// opens no transaction of its own. The result is the same as channelKeyAccess.
+func (h *Handler) channelKeyAccessTx(ctx context.Context, tx *sql.Tx, channelID, userID string) (isMember, canView bool, err error) {
+	target, isMember, err := readChannelKeyTarget(ctx, tx, channelID, userID)
+	if err != nil || !isMember {
+		return false, false, err
+	}
+	if h.resolver == nil {
+		return true, true, nil
+	}
+	perms, permErr := h.resolver.ResolveChannelPermissionsTx(ctx, tx, target.serverID, target.userID, target.channelID)
+	if permErr != nil {
+		return true, false, permErr
+	}
+	return true, perms.Has(target.viewPerm), nil
+}
+
+// channelKeyTarget is one (channel, user) pair after canonicalization, with the
+// channel's server and the view permission its type requires.
+type channelKeyTarget struct {
+	channelID, userID, serverID string
+	viewPerm                    rbac.Permission
+}
+
+// readChannelKeyTarget canonicalizes the pair and reads the channel's server and
+// type, joined on the user's membership of that server, through q (the pool or
+// a transaction). isMember=false with a nil error is a missing channel or a
+// non-member.
+func readChannelKeyTarget(ctx context.Context, q dmKeyVersionQueryRower, channelID, userID string) (target channelKeyTarget, isMember bool, err error) {
+	if target.channelID, err = requestid.Canonical(channelID); err != nil {
+		return target, false, fmt.Errorf("canonicalize channel key access channel: %w", err)
+	}
+	if target.userID, err = requestid.Canonical(userID); err != nil {
+		return target, false, fmt.Errorf("canonicalize channel key access user: %w", err)
+	}
+	var channelType string
+	qErr := q.QueryRowContext(ctx, `
+		SELECT c.server_id, c.type FROM channels c
+		INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
+		WHERE c.id = $1
+	`, target.channelID, target.userID).Scan(&target.serverID, &channelType)
+	if qErr == sql.ErrNoRows {
+		return target, false, nil
+	}
+	if qErr != nil {
+		return target, false, qErr
+	}
+	target.viewPerm = rbac.PermViewTextChannels
+	if channelType == "voice" {
+		target.viewPerm = rbac.PermViewVoiceChannels
+	}
+	return target, true, nil
 }
 
 // GetChannelKeys returns the caller's own wrapped channel key (optionally a
@@ -2651,8 +2690,13 @@ func claimChannelKeyRotationTx(ctx context.Context, tx *sql.Tx, channelID, actor
 // into the peer-fulfillment queue (idempotent) so a viewer re-delivers the key
 // once the resolver recovers; fulfillment re-checks VIEW, so this cannot
 // re-open CV-CAN-005 for a genuinely no-view user.
+//
+// The check runs on tx (VULN-079), inside a savepoint: a statement error in it,
+// including a lock or statement timeout, would otherwise abort the whole
+// transaction (25P02) and fail every later target. Rolling back to the
+// savepoint keeps skip-and-continue for the rest of the batch.
 func (h *Handler) distributionTargetAdmitted(ctx context.Context, tx *sql.Tx, channelID, memberUserID string) (admitted, skippedOnError bool) {
-	_, canView, vErr := h.channelKeyAccess(ctx, channelID, memberUserID)
+	canView, vErr := h.channelKeyViewCheckTx(ctx, tx, channelID, memberUserID)
 	if vErr != nil {
 		if enrollErr := enqueueChannelKeyRequest(ctx, tx, channelID, memberUserID); enrollErr != nil {
 			h.log.Error("key distribution: failed to enroll skipped target for retry",
@@ -2662,6 +2706,25 @@ func (h *Handler) distributionTargetAdmitted(ctx context.Context, tx *sql.Tx, ch
 		return false, true
 	}
 	return canView, false
+}
+
+// channelKeyViewCheckTx runs channelKeyAccessTx inside SAVEPOINT
+// keydist_target. On error it rolls back to the savepoint and releases it, so
+// the transaction stays usable and savepoints do not nest across a batch.
+func (h *Handler) channelKeyViewCheckTx(ctx context.Context, tx *sql.Tx, channelID, memberUserID string) (bool, error) {
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT keydist_target`); err != nil {
+		return false, fmt.Errorf("open target check savepoint: %w", err)
+	}
+	_, canView, vErr := h.channelKeyAccessTx(ctx, tx, channelID, memberUserID)
+	if vErr != nil {
+		if _, rbErr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT keydist_target`); rbErr != nil {
+			return false, errors.Join(vErr, fmt.Errorf("roll back target check savepoint: %w", rbErr))
+		}
+	}
+	if _, relErr := tx.ExecContext(ctx, `RELEASE SAVEPOINT keydist_target`); relErr != nil {
+		return false, errors.Join(vErr, fmt.Errorf("release target check savepoint: %w", relErr))
+	}
+	return canView, vErr
 }
 
 // distributionOutcome classifies one target of a channel-key distribution.
