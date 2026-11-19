@@ -184,6 +184,25 @@ func TestDetermineAuthRequired_RedisDownRequiresPassword(t *testing.T) {
 	require.Empty(t, reservation)
 }
 
+func TestRevokeSession_FreeRevokeDoesNotDependOnRedis(t *testing.T) {
+	rig := newSecurityEventFamilyRig(t)
+	const secret = "security-event-family-test-signing-secret" // pragma: allowlist secret
+	minter := auth.NewHandler(rig.db, rig.redis, logger.New("test"), secret, testDisconnector{})
+	_, _, target, err := minter.IssueAccessAndRefresh(context.Background(), rig.user)
+	require.NoError(t, err)
+	_, _, _, err = minter.IssueAccessAndRefresh(context.Background(), rig.user)
+	require.NoError(t, err)
+
+	rig.handler.redis = deadRedisClient(t)
+	rig.router.DELETE("/api/v1/sessions/:id", rig.handler.RevokeSession)
+	response := rig.request(http.MethodDelete, "/api/v1/sessions/"+target, "")
+
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var revoked bool
+	require.NoError(t, rig.db.QueryRow(`SELECT revoked_at IS NOT NULL FROM refresh_tokens WHERE id=$1`, target).Scan(&revoked))
+	require.True(t, revoked)
+}
+
 func deadRedisClient(t *testing.T) *redis.Client {
 	t.Helper()
 	dead := redis.NewClient(&redis.Options{
