@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -423,6 +424,7 @@ type Hub struct {
 	// Force-disconnect a specific session (targeted single-session revocation)
 	disconnectSession chan string
 	disconnectFamily  chan familyDisconnect
+	snapshotFamilies  chan familySnapshot
 	securityCleanup   chan *Client
 
 	// rebindSession moves a client to its successor refresh session after an
@@ -793,6 +795,7 @@ func newHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *H
 		disconnectUser:               make(chan uuid.UUID, 16),
 		disconnectSession:            make(chan string, 16),
 		disconnectFamily:             make(chan familyDisconnect),
+		snapshotFamilies:             make(chan familySnapshot),
 		securityCleanup:              make(chan *Client),
 		rebindSession:                make(chan sessionRebind),
 		voiceCountSignal:             make(chan struct{}, 1),
@@ -1471,6 +1474,9 @@ func (h *Hub) Run() {
 
 		case command := <-h.disconnectFamily:
 			h.handleDisconnectFamily(command)
+
+		case command := <-h.snapshotFamilies:
+			h.handleSnapshotFamilies(command)
 
 		case client := <-h.securityCleanup:
 			client.securityCleanupReady = true
@@ -8204,7 +8210,73 @@ func (h *Hub) BroadcastServerVoiceCounts() {
 type familyDisconnect struct {
 	userID   uuid.UUID
 	familyID uuid.UUID
+	families []uuid.UUID
 	done     chan error
+}
+
+type familySnapshot struct {
+	userID uuid.UUID
+	done   chan familySnapshotResult
+}
+
+type familySnapshotResult struct {
+	families []uuid.UUID
+	err      error
+}
+
+// SnapshotUserFamiliesContext orders the bounded local socket frontier against
+// registrations on Run. Pending upgrades are checked after registration.
+func (h *Hub) SnapshotUserFamiliesContext(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	if userID == uuid.Nil {
+		return nil, errors.New("invalid family snapshot identity")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	command := familySnapshot{userID: userID, done: make(chan familySnapshotResult, 1)}
+	select {
+	case h.snapshotFamilies <- command:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-h.done:
+		return nil, errors.New("family snapshot incomplete: hub stopped")
+	}
+	select {
+	case result := <-command.done:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return result.families, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-h.done:
+		return nil, errors.New("family snapshot incomplete: hub stopped")
+	}
+}
+
+func (h *Hub) handleSnapshotFamilies(command familySnapshot) {
+	families := make([]uuid.UUID, 0, maxConnectionsPerUser)
+	seen := make(map[uuid.UUID]struct{}, maxConnectionsPerUser)
+	for clientID := range h.userClients[command.userID] {
+		client := h.clients[clientID]
+		if client == nil {
+			continue
+		}
+		if client.UserID != command.userID || client.FamilyID == uuid.Nil {
+			command.done <- familySnapshotResult{err: errors.New("invalid local family binding")}
+			return
+		}
+		if _, ok := seen[client.FamilyID]; ok {
+			continue
+		}
+		if len(families) == maxConnectionsPerUser {
+			command.done <- familySnapshotResult{err: errors.New("local family limit exceeded")}
+			return
+		}
+		seen[client.FamilyID] = struct{}{}
+		families = append(families, client.FamilyID)
+	}
+	command.done <- familySnapshotResult{families: families}
 }
 
 // DisconnectFamilyContext waits for fencing and transport closure, not presence cleanup.
@@ -8212,10 +8284,28 @@ func (h *Hub) DisconnectFamilyContext(ctx context.Context, userID, familyID uuid
 	if userID == uuid.Nil || familyID == uuid.Nil {
 		return errors.New("invalid family disconnect identity")
 	}
+	return h.disconnectFamiliesContext(ctx, familyDisconnect{userID: userID, familyID: familyID})
+}
+
+// DisconnectFamiliesContext fences a bounded captured frontier before closing
+// any one of its transports.
+func (h *Hub) DisconnectFamiliesContext(ctx context.Context, userID uuid.UUID, families []uuid.UUID) error {
+	if userID == uuid.Nil || len(families) == 0 || len(families) > maxConnectionsPerUser {
+		return errors.New("invalid family disconnect frontier")
+	}
+	for _, family := range families {
+		if family == uuid.Nil {
+			return errors.New("invalid family disconnect frontier")
+		}
+	}
+	return h.disconnectFamiliesContext(ctx, familyDisconnect{userID: userID, families: slices.Clone(families)})
+}
+
+func (h *Hub) disconnectFamiliesContext(ctx context.Context, command familyDisconnect) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	command := familyDisconnect{userID: userID, familyID: familyID, done: make(chan error, 1)}
+	command.done = make(chan error, 1)
 	select {
 	case h.disconnectFamily <- command:
 	case <-ctx.Done():
@@ -8240,7 +8330,9 @@ func (h *Hub) handleDisconnectFamily(command familyDisconnect) {
 	matches := make([]*Client, 0, len(h.userClients[command.userID]))
 	for clientID := range h.userClients[command.userID] {
 		client := h.clients[clientID]
-		if client != nil && client.UserID == command.userID && client.FamilyID == command.familyID {
+		if client != nil && client.UserID == command.userID &&
+			((command.familyID != uuid.Nil && client.FamilyID == command.familyID) ||
+				slices.Contains(command.families, client.FamilyID)) {
 			matches = append(matches, client)
 		}
 	}
