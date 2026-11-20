@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
 	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
@@ -224,6 +226,33 @@ func TestRevokeSession_AmbiguousCommitFencesExactTargetWhenOwnerLookupFails(t *t
 			requireRefreshRevoked(t, rig, targets[1], false)
 		})
 	}
+}
+
+func TestHandleRevokeSessionErrorReportsUnconfirmedAmbiguousFence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodDelete, "/", nil)
+	handler := &Handler{log: logger.New("test")}
+	target := loginfamily.Binding{UserID: uuid.New(), FamilyID: uuid.New()}
+
+	handler.handleRevokeSessionError(context.Background(), ctx, target.UserID.String(),
+		singleRevocationResult{target: target},
+		loginfamily.NewError(loginfamily.ReasonCommitUnknown, fmt.Errorf("commit result unknown")))
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+}
+
+func TestHandleRevokeSessionErrorReportsUnexpectedFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodDelete, "/", nil)
+	handler := &Handler{log: logger.New("test")}
+
+	handler.handleRevokeSessionError(context.Background(), ctx, uuid.NewString(), singleRevocationResult{}, fmt.Errorf("unexpected failure"))
+
+	require.Equal(t, http.StatusInternalServerError, recorder.Code)
 }
 
 func TestRevokeSession_PostCommitLookupFailureFencesTarget(t *testing.T) {

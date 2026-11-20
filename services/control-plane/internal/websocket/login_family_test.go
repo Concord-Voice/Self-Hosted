@@ -177,6 +177,28 @@ func TestLoginFamilyPostRegistrationRecheckWaitsForUserMutation(t *testing.T) {
 	}
 }
 
+func TestLoginFamilyPostRegistrationRecheckRejectsInvalidClientBinding(t *testing.T) {
+	r := loginFamilyRig(t)
+	client := &Client{
+		UserID:         r.user,
+		FamilyID:       r.family,
+		SessionID:      r.sid.String(),
+		TokenExpiresAt: r.expiry,
+	}
+
+	invalidSession := *client
+	invalidSession.SessionID = "not-a-session-id"
+	require.Error(t, r.h.recheckClientFamily(context.Background(), &invalidSession))
+
+	mismatchedFamily := *client
+	mismatchedFamily.FamilyID = uuid.New()
+	require.Error(t, r.h.recheckClientFamily(context.Background(), &mismatchedFamily))
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Error(t, r.h.recheckClientFamily(canceled, client))
+}
+
 type familyRenewalAuthority struct {
 	verified     accessTokenAuth
 	calls        atomic.Int32

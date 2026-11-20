@@ -407,26 +407,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		result, revokeErr = h.executeRevocation(ctx, uid, sessionID, middleware.TokenCredentialEpoch(c), true)
 	}
 	if revokeErr != nil {
-		var fenced []loginfamily.Binding
-		if commitOutcomeUnknown(revokeErr) {
-			if err := h.closeCommittedFamily(ctx, result.target); err != nil {
-				h.log.Warn("Uncertain session revocation socket fence unconfirmed", "user_id", uid, "error", err)
-			} else {
-				fenced = append(fenced, result.target)
-			}
-		}
-		_ = h.closeCommittedFamilies(ctx, result.revocation, fenced)
-		switch {
-		case errors.Is(revokeErr, loginfamily.ErrTargetNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": sessionNotFoundMessage})
-		case errors.Is(revokeErr, loginfamily.ErrUnavailable):
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgAuthUnavailable})
-		case errors.Is(revokeErr, loginfamily.ErrDenied), errors.Is(revokeErr, credepoch.ErrEpochMismatch), errors.Is(revokeErr, credepoch.ErrBlocked):
-			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
-		default:
-			h.log.Error("Failed to revoke session")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRevokeSession})
-		}
+		h.handleRevokeSessionError(ctx, c, uid, result, revokeErr)
 		return
 	}
 	if err := h.closeCommittedFamily(ctx, result.target); err != nil {
@@ -450,6 +431,29 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		"message":    "Session revoked successfully",
 		"session_id": sessionID,
 	})
+}
+
+func (h *Handler) handleRevokeSessionError(ctx context.Context, c *gin.Context, uid string, result singleRevocationResult, revokeErr error) {
+	var fenced []loginfamily.Binding
+	if commitOutcomeUnknown(revokeErr) {
+		if err := h.closeCommittedFamily(ctx, result.target); err != nil {
+			h.log.Warn("Uncertain session revocation socket fence unconfirmed", "user_id", uid, "error", err)
+		} else {
+			fenced = append(fenced, result.target)
+		}
+	}
+	_ = h.closeCommittedFamilies(ctx, result.revocation, fenced)
+	switch {
+	case errors.Is(revokeErr, loginfamily.ErrTargetNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": sessionNotFoundMessage})
+	case errors.Is(revokeErr, loginfamily.ErrUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgAuthUnavailable})
+	case errors.Is(revokeErr, loginfamily.ErrDenied), errors.Is(revokeErr, credepoch.ErrEpochMismatch), errors.Is(revokeErr, credepoch.ErrBlocked):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
+	default:
+		h.log.Error("Failed to revoke session")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRevokeSession})
+	}
 }
 
 // verifySessionOwnership checks immutable SID ownership, including terminal families.
@@ -779,25 +783,7 @@ func (h *Handler) revokeAllSessionsDB(uid string, includeCurrent bool, c *gin.Co
 	}
 	if h.hub != nil {
 		options.CaptureLocalFamilies = func(ctx context.Context, tx *sql.Tx, targets loginfamily.Targets) error {
-			userID, err := uuid.Parse(uid)
-			if err != nil || userID == uuid.Nil {
-				return loginfamily.NewError(loginfamily.ReasonAccessIdentity, err)
-			}
-			snapshotCtx, cancel := context.WithTimeout(ctx, loginfamily.PostCommitCloseTimeout)
-			defer cancel()
-			candidates, err := h.hub.SnapshotUserFamiliesContext(snapshotCtx, userID)
-			if err != nil {
-				h.log.Warn("Local session socket snapshot unavailable", "user_id", uid, "error", err)
-				return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
-			}
-			families, err := loginfamily.CapturedFamilySubsetTx(ctx, tx, targets, candidates)
-			if err != nil {
-				return err
-			}
-			for _, family := range families {
-				result.localTargets = append(result.localTargets, loginfamily.Binding{UserID: userID, FamilyID: family})
-			}
-			return nil
+			return h.captureLocalFamiliesTx(ctx, tx, uid, &result, targets)
 		}
 	}
 	var err error
@@ -806,6 +792,28 @@ func (h *Handler) revokeAllSessionsDB(uid string, includeCurrent bool, c *gin.Co
 		return bulkRevocationResult{}, errCurrentSessionUnknown
 	}
 	return result, err
+}
+
+func (h *Handler) captureLocalFamiliesTx(ctx context.Context, tx *sql.Tx, uid string, result *bulkRevocationResult, targets loginfamily.Targets) error {
+	userID, err := uuid.Parse(uid)
+	if err != nil || userID == uuid.Nil {
+		return loginfamily.NewError(loginfamily.ReasonAccessIdentity, err)
+	}
+	snapshotCtx, cancel := context.WithTimeout(ctx, loginfamily.PostCommitCloseTimeout)
+	defer cancel()
+	candidates, err := h.hub.SnapshotUserFamiliesContext(snapshotCtx, userID)
+	if err != nil {
+		h.log.Warn("Local session socket snapshot unavailable", "user_id", uid, "error", err)
+		return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+	}
+	families, err := loginfamily.CapturedFamilySubsetTx(ctx, tx, targets, candidates)
+	if err != nil {
+		return err
+	}
+	for _, family := range families {
+		result.localTargets = append(result.localTargets, loginfamily.Binding{UserID: userID, FamilyID: family})
+	}
+	return nil
 }
 
 // excludeCurrentSession spares the requester's own session by its access

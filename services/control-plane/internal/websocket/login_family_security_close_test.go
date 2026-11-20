@@ -160,6 +160,62 @@ func TestLoginFamilySnapshotRejectsAnUnboundedOrInvalidFrontier(t *testing.T) {
 	}
 }
 
+func TestLoginFamilySnapshotStopsWhenHubOrRequestStops(t *testing.T) {
+	user := uuid.New()
+
+	t.Run("hub stopped before request", func(t *testing.T) {
+		hub := NewHub(nil, nil)
+		close(hub.done)
+		_, err := hub.SnapshotUserFamiliesContext(context.Background(), user)
+		require.ErrorContains(t, err, "hub stopped")
+	})
+
+	t.Run("request canceled after enqueue", func(t *testing.T) {
+		hub := NewHub(nil, nil)
+		accepted := make(chan struct{})
+		go func() {
+			<-hub.snapshotFamilies
+			close(accepted)
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, err := hub.SnapshotUserFamiliesContext(ctx, user)
+			result <- err
+		}()
+		<-accepted
+		cancel()
+		require.ErrorIs(t, <-result, context.Canceled)
+	})
+
+	t.Run("hub stops after enqueue", func(t *testing.T) {
+		hub := NewHub(nil, nil)
+		accepted := make(chan struct{})
+		go func() {
+			<-hub.snapshotFamilies
+			close(accepted)
+		}()
+		result := make(chan error, 1)
+		go func() {
+			_, err := hub.SnapshotUserFamiliesContext(context.Background(), user)
+			result <- err
+		}()
+		<-accepted
+		close(hub.done)
+		require.ErrorContains(t, <-result, "hub stopped")
+	})
+}
+
+func TestLoginFamilyDisconnectWaitHonorsContextBeforeEnqueue(t *testing.T) {
+	hub := NewHub(nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := hub.DisconnectFamiliesContext(ctx, uuid.New(), []uuid.UUID{uuid.New()})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 func TestLoginFamilySecurityReceiptFencesEverySiblingBeforeTransportClose(t *testing.T) {
 	user, family := uuid.New(), uuid.New()
 	var selected []*Client
