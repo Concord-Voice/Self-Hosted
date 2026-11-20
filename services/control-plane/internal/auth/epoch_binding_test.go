@@ -444,7 +444,9 @@ func TestUpdateSessionRevocationModeRejectsUnknownUser(t *testing.T) {
 func TestUpdateSessionRevocationModeReportsUnavailableDatabase(t *testing.T) {
 	db, err := sql.Open("postgres", "host=127.0.0.1 port=1 user=test dbname=missing sslmode=disable connect_timeout=1")
 	require.NoError(t, err)
-	defer db.Close()
+	t.Cleanup(func() {
+		assert.NoError(t, db.Close())
+	})
 
 	err = UpdateSessionRevocationMode(context.Background(), db, uuid.NewString(), "restricted", "")
 	var familyErr *loginfamily.Error

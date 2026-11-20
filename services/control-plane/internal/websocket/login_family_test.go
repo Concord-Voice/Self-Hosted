@@ -186,13 +186,21 @@ func TestLoginFamilyPostRegistrationRecheckRejectsInvalidClientBinding(t *testin
 		TokenExpiresAt: r.expiry,
 	}
 
-	invalidSession := *client
-	invalidSession.SessionID = "not-a-session-id"
-	require.Error(t, r.h.recheckClientFamily(context.Background(), &invalidSession))
+	invalidSession := &Client{
+		UserID:         client.UserID,
+		FamilyID:       client.FamilyID,
+		SessionID:      "not-a-session-id",
+		TokenExpiresAt: client.TokenExpiresAt,
+	}
+	require.Error(t, r.h.recheckClientFamily(context.Background(), invalidSession))
 
-	mismatchedFamily := *client
-	mismatchedFamily.FamilyID = uuid.New()
-	require.Error(t, r.h.recheckClientFamily(context.Background(), &mismatchedFamily))
+	mismatchedFamily := &Client{
+		UserID:         client.UserID,
+		FamilyID:       uuid.New(),
+		SessionID:      client.SessionID,
+		TokenExpiresAt: client.TokenExpiresAt,
+	}
+	require.Error(t, r.h.recheckClientFamily(context.Background(), mismatchedFamily))
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
