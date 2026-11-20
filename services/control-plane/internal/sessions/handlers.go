@@ -172,6 +172,16 @@ func (h *Handler) readSimpleAuthWindow(ctx context.Context, userID string) (stri
 	return h.redis.Get(ctx, simpleAuthWindowKey(userID)).Result()
 }
 
+func (h *Handler) simpleAuthWindowMatches(userID, value string, err error, generation int64) bool {
+	if err != nil {
+		if !errors.Is(err, redis.Nil) {
+			h.log.Warn("Simple-mode authentication window unavailable", "user_id", userID, "error", err)
+		}
+		return false
+	}
+	return value == fmt.Sprintf("%s%d", simpleAuthWindowVersion, generation)
+}
+
 // grantSimpleAuthWindow sets a 5-minute authentication window in Redis.
 func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID string, generation int64) {
 	if h.redis == nil {
@@ -591,14 +601,9 @@ func (h *Handler) executeRevocation(ctx context.Context, uid, sessionID, epoch s
 			return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
 		}
 		freeRevoke := freeAvailable && activeCount >= freeRevokeSessionThreshold
-		if !authenticated && !freeRevoke {
-			hasAuthWindow := authWindowErr == nil && authWindowValue == fmt.Sprintf("%s%d", simpleAuthWindowVersion, result.generation)
-			if result.mode != "simple" || !hasAuthWindow {
-				if result.mode == "simple" && authWindowErr != nil && !errors.Is(authWindowErr, redis.Nil) {
-					h.log.Warn("Simple-mode authentication window unavailable", "user_id", uid, "error", authWindowErr)
-				}
-				return errRevokeAuthenticationNeeded
-			}
+		if !authenticated && !freeRevoke && (result.mode != "simple" ||
+			!h.simpleAuthWindowMatches(uid, authWindowValue, authWindowErr, result.generation)) {
+			return errRevokeAuthenticationNeeded
 		}
 		var updated int
 		if err := tx.QueryRowContext(ctx, `UPDATE users SET last_session_revoke_at=clock_timestamp() WHERE id=$1 RETURNING 1`, uid).Scan(&updated); err != nil {
