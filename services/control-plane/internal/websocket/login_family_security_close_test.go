@@ -104,6 +104,7 @@ func familyHubWithPublished(t *testing.T, clients ...*Client) *Hub {
 			hub.userClients[c.UserID] = map[uuid.UUID]bool{}
 		}
 		hub.userClients[c.UserID][c.ID] = true
+		hub.recordFamilySnapshotBinding(c)
 	}
 	go hub.Run()
 	t.Cleanup(hub.Shutdown)
@@ -150,12 +151,10 @@ func TestLoginFamilySnapshotRejectsAnUnboundedOrInvalidFrontier(t *testing.T) {
 				}
 				hub.clients[client.ID] = client
 				hub.userClients[user][client.ID] = true
+				hub.recordFamilySnapshotBinding(client)
 			}
-			command := familySnapshot{userID: user, done: make(chan familySnapshotResult, 1)}
-			hub.handleSnapshotFamilies(command)
-			result := <-command.done
-			require.Error(t, result.err)
-			require.Empty(t, result.families)
+			_, err := hub.SnapshotUserFamiliesContext(context.Background(), user)
+			require.Error(t, err)
 		})
 	}
 }
@@ -170,41 +169,32 @@ func TestLoginFamilySnapshotStopsWhenHubOrRequestStops(t *testing.T) {
 		require.ErrorContains(t, err, "hub stopped")
 	})
 
-	t.Run("request canceled after enqueue", func(t *testing.T) {
+	t.Run("request already canceled", func(t *testing.T) {
 		hub := NewHub(nil, nil)
-		accepted := make(chan struct{})
-		go func() {
-			<-hub.snapshotFamilies
-			close(accepted)
-		}()
-
 		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
 		result := make(chan error, 1)
 		go func() {
 			_, err := hub.SnapshotUserFamiliesContext(ctx, user)
 			result <- err
 		}()
-		<-accepted
-		cancel()
 		require.ErrorIs(t, <-result, context.Canceled)
 	})
+}
 
-	t.Run("hub stops after enqueue", func(t *testing.T) {
-		hub := NewHub(nil, nil)
-		accepted := make(chan struct{})
-		go func() {
-			<-hub.snapshotFamilies
-			close(accepted)
-		}()
-		result := make(chan error, 1)
-		go func() {
-			_, err := hub.SnapshotUserFamiliesContext(context.Background(), user)
-			result <- err
-		}()
-		<-accepted
-		close(hub.done)
-		require.ErrorContains(t, <-result, "hub stopped")
-	})
+func TestSnapshotUserFamiliesDoesNotWaitForHubRunLoop(t *testing.T) {
+	user, family := uuid.New(), uuid.New()
+	hub := NewHub(nil, nil)
+	client := familyPublishedClient(user, family, nil)
+	hub.clients[client.ID] = client
+	hub.userClients[user] = map[uuid.UUID]bool{client.ID: true}
+	hub.recordFamilySnapshotBinding(client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	families, err := hub.SnapshotUserFamiliesContext(ctx, user)
+	require.NoError(t, err, "snapshot must not wait for the Hub Run loop")
+	require.Equal(t, []uuid.UUID{family}, families)
 }
 
 func TestLoginFamilyDisconnectWaitHonorsContextBeforeEnqueue(t *testing.T) {

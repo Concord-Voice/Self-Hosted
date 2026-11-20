@@ -215,6 +215,9 @@ type Hub struct {
 
 	// Mutex protecting maps accessed from outside the Run goroutine
 	mu sync.RWMutex
+	// The family index has its own lock so revocation can snapshot it without
+	// waiting behind Run work that may itself be waiting on a user-row lock.
+	familySnapshotMu sync.RWMutex
 
 	// Deterministic test seam invoked after a custom-text snapshot authorizes a
 	// viewer but before it enqueues the frame. Nil in production.
@@ -277,6 +280,8 @@ type Hub struct {
 
 	// User ID to client IDs mapping (for multi-device support)
 	userClients map[uuid.UUID]map[uuid.UUID]bool
+	// User ID to client ID to family ID, maintained with client publication.
+	familySnapshotByUser map[uuid.UUID]map[uuid.UUID]uuid.UUID
 
 	// lastInboundAt is the wall time of each user's most recent inbound
 	// APPLICATION frame, and is the presence sweeper's evidence that a renderer
@@ -424,7 +429,6 @@ type Hub struct {
 	// Force-disconnect a specific session (targeted single-session revocation)
 	disconnectSession chan string
 	disconnectFamily  chan familyDisconnect
-	snapshotFamilies  chan familySnapshot
 	securityCleanup   chan *Client
 
 	// rebindSession moves a client to its successor refresh session after an
@@ -771,6 +775,7 @@ func newHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *H
 		redis:                        redisClient,
 		clients:                      make(map[uuid.UUID]*Client),
 		userClients:                  make(map[uuid.UUID]map[uuid.UUID]bool),
+		familySnapshotByUser:         make(map[uuid.UUID]map[uuid.UUID]uuid.UUID),
 		lastInboundAt:                make(map[uuid.UUID]time.Time),
 		hiddenPresence:               make(map[uuid.UUID]string),
 		presenceRecovery:             make(map[uuid.UUID]presenceRecoveryState),
@@ -795,7 +800,6 @@ func newHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *H
 		disconnectUser:               make(chan uuid.UUID, 16),
 		disconnectSession:            make(chan string, 16),
 		disconnectFamily:             make(chan familyDisconnect),
-		snapshotFamilies:             make(chan familySnapshot),
 		securityCleanup:              make(chan *Client),
 		rebindSession:                make(chan sessionRebind),
 		voiceCountSignal:             make(chan struct{}, 1),
@@ -1475,9 +1479,6 @@ func (h *Hub) Run() {
 		case command := <-h.disconnectFamily:
 			h.handleDisconnectFamily(command)
 
-		case command := <-h.snapshotFamilies:
-			h.handleSnapshotFamilies(command)
-
 		case client := <-h.securityCleanup:
 			client.securityCleanupReady = true
 			h.handleUnregister(client)
@@ -1554,6 +1555,7 @@ func (h *Hub) shutdownClients() {
 	}
 	observer := h.activityObserver
 	clear(h.userClients)
+	h.clearFamilySnapshot()
 	h.mu.Unlock()
 
 	if observer != nil {
@@ -1688,6 +1690,7 @@ func (h *Hub) registerClient(client *Client) bool {
 	client.presenceDispatchSeq = h.presenceGenCounter
 
 	h.clients[client.ID] = client
+	h.recordFamilySnapshotBinding(client)
 
 	if _, ok := h.userClients[client.UserID]; !ok {
 		h.userClients[client.UserID] = make(map[uuid.UUID]bool)
@@ -2001,6 +2004,7 @@ func (h *Hub) unregisterClient(client *Client) (bool, bool, int) {
 	}
 
 	delete(h.clients, client.ID)
+	h.removeFamilySnapshotBinding(client)
 	isLastConnection := h.removeUserClient(client)
 	h.removeClientSubscriptions(client)
 	remaining := len(h.clients)
@@ -8214,18 +8218,38 @@ type familyDisconnect struct {
 	done     chan error
 }
 
-type familySnapshot struct {
-	userID uuid.UUID
-	done   chan familySnapshotResult
+func (h *Hub) recordFamilySnapshotBinding(client *Client) {
+	h.familySnapshotMu.Lock()
+	defer h.familySnapshotMu.Unlock()
+	if h.familySnapshotByUser == nil {
+		h.familySnapshotByUser = make(map[uuid.UUID]map[uuid.UUID]uuid.UUID)
+	}
+	if h.familySnapshotByUser[client.UserID] == nil {
+		h.familySnapshotByUser[client.UserID] = make(map[uuid.UUID]uuid.UUID)
+	}
+	h.familySnapshotByUser[client.UserID][client.ID] = client.FamilyID
 }
 
-type familySnapshotResult struct {
-	families []uuid.UUID
-	err      error
+func (h *Hub) removeFamilySnapshotBinding(client *Client) {
+	h.familySnapshotMu.Lock()
+	defer h.familySnapshotMu.Unlock()
+	clients := h.familySnapshotByUser[client.UserID]
+	delete(clients, client.ID)
+	if len(clients) == 0 {
+		delete(h.familySnapshotByUser, client.UserID)
+	}
 }
 
-// SnapshotUserFamiliesContext orders the bounded local socket frontier against
-// registrations on Run. Pending upgrades are checked after registration.
+func (h *Hub) clearFamilySnapshot() {
+	h.familySnapshotMu.Lock()
+	clear(h.familySnapshotByUser)
+	h.familySnapshotMu.Unlock()
+}
+
+// SnapshotUserFamiliesContext reads the published local frontier without
+// queueing behind Run, which may be waiting on a user lock held by revocation.
+// Registration publishes its family before the post-registration DB recheck;
+// an unpublished upgrade therefore cannot pass that recheck before revocation.
 func (h *Hub) SnapshotUserFamiliesContext(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
 	if userID == uuid.Nil {
 		return nil, errors.New("invalid family snapshot identity")
@@ -8233,50 +8257,41 @@ func (h *Hub) SnapshotUserFamiliesContext(ctx context.Context, userID uuid.UUID)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	command := familySnapshot{userID: userID, done: make(chan familySnapshotResult, 1)}
 	select {
-	case h.snapshotFamilies <- command:
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	case <-h.done:
 		return nil, errors.New("family snapshot incomplete: hub stopped")
+	default:
 	}
-	select {
-	case result := <-command.done:
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		return result.families, result.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-h.done:
-		return nil, errors.New("family snapshot incomplete: hub stopped")
-	}
-}
 
-func (h *Hub) handleSnapshotFamilies(command familySnapshot) {
+	h.familySnapshotMu.RLock()
 	families := make([]uuid.UUID, 0, maxConnectionsPerUser)
 	seen := make(map[uuid.UUID]struct{}, maxConnectionsPerUser)
-	for clientID := range h.userClients[command.userID] {
-		client := h.clients[clientID]
-		if client == nil {
-			continue
+	for _, familyID := range h.familySnapshotByUser[userID] {
+		if familyID == uuid.Nil {
+			h.familySnapshotMu.RUnlock()
+			return nil, errors.New("invalid local family binding")
 		}
-		if client.UserID != command.userID || client.FamilyID == uuid.Nil {
-			command.done <- familySnapshotResult{err: errors.New("invalid local family binding")}
-			return
-		}
-		if _, ok := seen[client.FamilyID]; ok {
+		if _, ok := seen[familyID]; ok {
 			continue
 		}
 		if len(families) == maxConnectionsPerUser {
-			command.done <- familySnapshotResult{err: errors.New("local family limit exceeded")}
-			return
+			h.familySnapshotMu.RUnlock()
+			return nil, errors.New("local family limit exceeded")
 		}
-		seen[client.FamilyID] = struct{}{}
-		families = append(families, client.FamilyID)
+		seen[familyID] = struct{}{}
+		families = append(families, familyID)
 	}
-	command.done <- familySnapshotResult{families: families}
+	h.familySnapshotMu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-h.done:
+		return nil, errors.New("family snapshot incomplete: hub stopped")
+	default:
+	}
+	return families, nil
 }
 
 // DisconnectFamilyContext waits for fencing and transport closure, not presence cleanup.
