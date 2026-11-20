@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +56,31 @@ func deadRedisClient(t *testing.T) *redis.Client {
 	return dead
 }
 
+type authWindowReadHook struct {
+	key      string
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (*authWindowReadHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *authWindowReadHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "get" {
+			if args := cmd.Args(); len(args) >= 2 {
+				if key, ok := args[1].(string); ok && key == h.key {
+					h.once.Do(func() { close(h.observed) })
+				}
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (*authWindowReadHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
 func TestRevokeSession_FreeRevokeDoesNotDependOnRedis(t *testing.T) {
 	rig := newSecurityEventFamilyRig(t)
 	targets := issueRevocationTargets(t, rig, 2)
@@ -70,6 +96,47 @@ func TestRevokeSession_FreeRevokeDoesNotDependOnRedis(t *testing.T) {
 	var last sql.NullTime
 	require.NoError(t, rig.db.QueryRow(`SELECT last_session_revoke_at FROM users WHERE id=$1`, rig.user).Scan(&last))
 	require.True(t, last.Valid)
+}
+
+func TestRevokeSessionReadsAuthWindowBeforeUserLock(t *testing.T) {
+	rig := newSecurityEventFamilyRig(t)
+	target := issueRevocationTargets(t, rig, 1)[0]
+	rig.handler.hub = testDisconnector{}
+	rig.router.DELETE("/api/v1/sessions/:id", rig.handler.RevokeSession)
+	_, err := rig.db.Exec(`UPDATE users SET revocation_mode='simple', last_session_revoke_at=clock_timestamp() WHERE id=$1`, rig.user)
+	require.NoError(t, err)
+
+	read := make(chan struct{})
+	rig.redis.AddHook(&authWindowReadHook{key: simpleAuthWindowKey(rig.user), observed: read})
+
+	tx, err := rig.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	var lockedUser string
+	require.NoError(t, tx.QueryRow(`SELECT id FROM users WHERE id=$1 FOR UPDATE`, rig.user).Scan(&lockedUser))
+
+	responseCh := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responseCh <- rig.request(http.MethodDelete, "/api/v1/sessions/"+target, "")
+	}()
+
+	observedBeforeUnlock := false
+	select {
+	case <-read:
+		observedBeforeUnlock = true
+	case <-time.After(2 * time.Second):
+	}
+	require.NoError(t, tx.Rollback())
+
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-responseCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session revocation did not complete after releasing the user lock")
+	}
+
+	require.True(t, observedBeforeUnlock, "Redis auth-window GET must happen before the transaction waits for the user lock")
+	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
+	requireRefreshRevoked(t, rig, target, false)
 }
 
 func TestRevokeAllowance_ConcurrentRequestsSpendOnce(t *testing.T) {
