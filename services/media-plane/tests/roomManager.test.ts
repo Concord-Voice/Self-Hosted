@@ -6096,6 +6096,36 @@ describe('RoomManager', () => {
       ).resolves.not.toBeNull();
     });
 
+    it.each([false, true])('rejects a consumer returned after its receive transport closes (already closed: %s)', async (alreadyClosed) => {
+      const transport = await addRecvTransport();
+      const lateConsumer = createMockConsumer({
+        producerId,
+        appData: { producerId, recvTransportId: transport.id },
+      });
+      let resolveConsumer!: (consumer: typeof lateConsumer) => void;
+      transport.consume.mockImplementationOnce(
+        () => new Promise<typeof lateConsumer>((resolve) => { resolveConsumer = resolve; })
+      );
+
+      const consuming = manager.consume('room-1', 'u-2', producerId, transport.id);
+      expect(transport.consume).toHaveBeenCalledOnce();
+      expect(manager.closeRecvTransport('room-1', 'u-2', transport.id)).toBe(true);
+      transport.closed = true;
+      lateConsumer.closed = alreadyClosed;
+      resolveConsumer(lateConsumer);
+
+      await expect(consuming).rejects.toThrow('Receive transport changed during consume');
+
+      const participant = manager.getParticipant('room-1', 'u-2')!;
+      expect(participant.consumers.size).toBe(0);
+      expect(participant.consumersByKey.size).toBe(0);
+      expect(participant.pendingConsumeKeys.size).toBe(0);
+      expect(lateConsumer.close).toHaveBeenCalledTimes(alreadyClosed ? 0 : 1);
+
+      const replacement = await addRecvTransport();
+      await expect(manager.consume('room-1', 'u-2', producerId, replacement.id)).resolves.not.toBeNull();
+    });
+
     describe('consumer index release paths', () => {
       it.each(['transportclose', 'producerclose', 'closeConsumer', 'closeParticipantConsumers'])(
         'empties consumersByKey on %s',
