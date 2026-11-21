@@ -207,52 +207,31 @@ jobs:
           restore-keys: |
             semgrep-${{ runner.os }}-${{ env.SEMGREP_VERSION }}-
 
-      - name: Capture Python version (pip cache key component)
-        if: inputs.run-custom || inputs.run-community || inputs.run-canary
-        # Without the interpreter version in the key, a runner-image
-        # Python bump would keep hitting the stale exact key forever
-        # (actions/cache never re-saves on exact-key hit) while the old
-        # cpXX wheels go unused — silent permanent re-download.
-        id: py
-        run: echo "version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')" >> "$GITHUB_OUTPUT"
-
-      - name: Cache pip wheels (semgrep install)
-        # Not in the protected run (see the registry cache above): an archive is
-        # unpacked before any hash is checked, so it could plant a .pth file.
-        if: (inputs.run-custom || inputs.run-community || inputs.run-canary) && !inputs.external-verdict
-        # The pip install below re-downloads the semgrep wheel set
-        # (~30 MB incl. deps) on every run. Caching pip's wheel cache
-        # keyed on the hash-locked requirements makes the install a local unpack.
-        # Stock actions/cache is deliberate: Blacksmith transparently
-        # intercepts it against the colocated cache (ADR-0016 §Decision 4
-        # verification note, #1438) — do NOT swap to the archived
-        # useblacksmith/cache fork.
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/pip
-          key: pip-semgrep-${{ runner.os }}-py${{ steps.py.outputs.version }}-${{ env.SEMGREP_VERSION }}-${{ hashFiles('.github/semgrep/requirements.txt') }}
-
-      # The protected run installs from the protected main parent that "Validate
-      # protected scan revision" proved, never from the PR: with --no-deps any
-      # hash-pinned wheel a PR adds would run as code in this job, which uploads
-      # the SARIF the protected verdict trusts. The advisory run installs the
-      # PR's copy, so a change to the lock is tested before it merges.
+      # The protected run installs from the merge parent that "Validate protected
+      # scan revision" proved. The ordinary fallback installs from the PR event's
+      # base commit. Neither installs the PR's lock in this write-scoped job; the
+      # read-only compatibility job tests the candidate lock before it merges.
       - name: Install Semgrep
         if: inputs.run-custom || inputs.run-community || inputs.run-canary
         env:
           MERGE_BASE_SHA: ${{ inputs.selected-merge-base-sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           reqs=.github/semgrep/requirements.txt
+          lock_sha="$PR_BASE_SHA"
+          shown="$reqs (the event base copy)"
           if [ "$EXTERNAL_VERDICT" = 'true' ]; then
-            if [[ ! "$MERGE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${MERGE_BASE_SHA}^{commit}" ||
-                [ "$(git ls-tree "$MERGE_BASE_SHA" -- "$reqs" | cut -c1-6)" != 100644 ]; then
-              echo "::error::The protected base commit ${MERGE_BASE_SHA:-none} has no regular $reqs."
-              exit 1
-            fi
-            git show "$MERGE_BASE_SHA:$reqs" > "$RUNNER_TEMP/semgrep-requirements.txt"
-            reqs="$RUNNER_TEMP/semgrep-requirements.txt"
+            lock_sha="$MERGE_BASE_SHA"
+            shown="$reqs (the protected base copy)"
           fi
+          if [[ ! "$lock_sha" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${lock_sha}^{commit}" ||
+              [ "$(git ls-tree "$lock_sha" -- "$reqs" | cut -c1-6)" != 100644 ]; then
+            echo "::error::The trusted base commit ${lock_sha:-none} has no regular $reqs."
+            exit 1
+          fi
+          git show "$lock_sha:$reqs" > "$RUNNER_TEMP/semgrep-requirements.txt"
+          reqs="$RUNNER_TEMP/semgrep-requirements.txt"
           # Comments, "name==version [; marker] \" pins and --hash lines only: no
           # index, find-links, editable, include, URL or other option lines. A
           # name starts with a letter or digit and a marker has no "-", so
@@ -261,7 +240,6 @@ jobs:
           # also honours a "coding:" comment (UTF-7 can spell a newline in
           # printable ASCII), so no encoding declaration either.
           # grep exit 2 (unreadable file, bad pattern) stops the job too.
-          shown="$reqs"; [ "$EXTERNAL_VERDICT" != 'true' ] || shown="$reqs (the protected base copy)"
           rc=0; LC_ALL=C grep -nE '[^ -~]|coding[:=]' "$reqs" || rc=$?
           if [ "$rc" -ne 1 ]; then
             echo "::error::$shown may hold printable ASCII lines only, with no encoding declaration; the lines above are not, or it could not be read."
