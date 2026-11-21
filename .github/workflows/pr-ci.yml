@@ -125,15 +125,6 @@ jobs:
       dev-stack-changed: ${{ needs.detect-changes.outputs.dev-stack }}
       dev-checks-relevant: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.dev_checks }}
 
-  # ─── Per-tool scanners (workflow_call conversions, ADR-0018 / #1476) ─
-  # Every scanner that installs or executes repo code carries `needs: ioc`.
-  # OSV retains a standalone pull_request scan for legacy or unverified
-  # enforcement. Selected OSV runs from the protected required workflow after
-  # this workflow's IOC and relevance classification (see osv-scanner.yml).
-  # Caller-job permissions are exact supersets of each called workflow's
-  # declared needs (GitHub requires superset; the called side stays the
-  # effective ceiling). Scanner calls follow the shared relevance selection;
-  # unknown selection retains the full scan.
   semgrep-lock-compatibility:
     name: semgrep-lock-compatibility
     needs: [ioc]
@@ -152,10 +143,10 @@ jobs:
         run: |
           set -euo pipefail
           changed="$(git diff --name-only HEAD^1 HEAD -- \
-            .github/semgrep/requirements.txt \
+            .github/semgrep/ \
             .github/scripts/tests/test_semgrep_dependency_compatibility.py \
             .github/workflows/semgrep.yml .github/workflows/pr-ci.yml \
-            .semgrep/concord-go-security.yml)"
+            .semgrep/)"
           if [[ -n "$changed" ]]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
           fi
@@ -178,6 +169,15 @@ jobs:
         run: |
           "$RUNNER_TEMP/semgrep-compat/bin/python" .github/scripts/tests/test_semgrep_dependency_compatibility.py
 
+  # ─── Per-tool scanners (workflow_call conversions, ADR-0018 / #1476) ─
+  # Every scanner that installs or executes repo code carries `needs: ioc`.
+  # OSV retains a standalone pull_request scan for legacy or unverified
+  # enforcement. Selected OSV runs from the protected required workflow after
+  # this workflow's IOC and relevance classification (see osv-scanner.yml).
+  # Caller-job permissions are exact supersets of each called workflow's
+  # declared needs (GitHub requires superset; the called side stays the
+  # effective ceiling). Scanner calls follow the shared relevance selection;
+  # unknown selection retains the full scan.
   semgrep:
     name: semgrep
     needs: [ioc, detect-changes]
