@@ -593,13 +593,46 @@ func (h *Handler) resolveAccessFamily(ctx context.Context, userID uuid.UUID, ses
 	return loginfamily.ResolveVerifiedAccess(ctx, h.db, loginfamily.AccessIdentity{UserID: userID, SID: sid, CredentialEpoch: epoch, AccessExpiresAt: expiry})
 }
 
-func (h *Handler) recheckClientFamily(ctx context.Context, client *Client) error {
-	grant, err := h.resolveAccessFamily(ctx, client.UserID, client.SessionID, client.CredEpoch, client.tokenDeadline())
+func (h *Handler) recheckClientFamily(ctx context.Context, client *Client) (retErr error) {
+	sid, err := uuid.Parse(client.SessionID)
+	if err != nil || sid == uuid.Nil {
+		return loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil)
+	}
+	ctx, cancel := context.WithTimeout(ctx, pendingRegistrationTimeout)
+	defer cancel()
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			retErr = loginfamily.NewError(loginfamily.ReasonSQLUnavailable, errors.Join(retErr, rollbackErr))
+		}
+	}()
+	barrier, err := loginfamily.AcquireWriterBarrierTx(ctx, tx)
 	if err != nil {
 		return err
 	}
-	if grant.FamilyID != client.FamilyID {
+	users, err := loginfamily.LockUsersTx(ctx, tx, barrier, []uuid.UUID{client.UserID}, loginfamily.UserShare)
+	if err != nil {
+		return err
+	}
+	user, err := users.ForUser(client.UserID)
+	if err != nil {
+		return err
+	}
+	identity := loginfamily.AccessIdentity{
+		UserID: client.UserID, SID: sid, CredentialEpoch: client.CredEpoch, AccessExpiresAt: client.tokenDeadline(),
+	}
+	family, err := loginfamily.GuardAfterUserLockTx(ctx, tx, user, identity, loginfamily.FamilyShare)
+	if err != nil {
+		return err
+	}
+	if family.Binding().FamilyID != client.FamilyID {
 		return loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil)
+	}
+	if err = tx.Commit(); err != nil {
+		return loginfamily.NewError(loginfamily.ReasonCommitUnknown, err)
 	}
 	return nil
 }
