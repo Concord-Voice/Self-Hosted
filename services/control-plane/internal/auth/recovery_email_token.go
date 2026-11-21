@@ -116,15 +116,19 @@ type recoveryIssue struct {
 // that code (KEYS[4]): an attacker must not hold the slot with a code its owner
 // cannot use. The code is deleted last, after both writes, because Redis
 // refuses INCR and SET (not DEL) when it is out of memory.
+// A code record written before send slots existed has no slot. A code request
+// treats it as held, so its attempt count is never reset, and a key request
+// deletes it like a code that holds the slot.
 // KEYS: slot, sends, record, code. ARGV: send_id, record, fast ms, slow ms,
 // fast sends, window ms, replace, code send prefix. Returns 0 when held, else
 // the TTL in ms.
 var issueRecoveryRecordLua = redis.NewScript(`
 local slot = redis.call("GET", KEYS[1])
-local replaced = false
+local replaced = ARGV[7] == "1"
 if slot then
-  if ARGV[7] ~= "1" or string.sub(slot, 1, string.len(ARGV[8])) ~= ARGV[8] then return 0 end
-  replaced = true
+  if not replaced or string.sub(slot, 1, string.len(ARGV[8])) ~= ARGV[8] then return 0 end
+elseif not replaced and redis.call("EXISTS", KEYS[4]) == 1 then
+  return 0
 end
 local n = redis.call("INCR", KEYS[2])
 if redis.call("PTTL", KEYS[2]) < 0 then redis.call("PEXPIRE", KEYS[2], ARGV[6]) end
@@ -195,6 +199,26 @@ func (h *Handler) releaseRecoverySlot(ctx context.Context, userID, sendID string
 	if err := releaseRecoverySlotLua.Run(ctx, h.redis, []string{recoverySlotKey(userID)}, sendID).Err(); err != nil {
 		h.log.Warn("Failed to release recovery send slot", "failure_class", recoveryRedisFailureClass("recovery_slot_release", err))
 	}
+}
+
+// recoverySendStillCurrent reports whether a code delivery still owns its
+// account's send slot. Only a code can be replaced (by a key), so a key always
+// is. A Redis error answers true: this check only narrows a race, and failing
+// toward no email would cost the owner a send they asked for.
+// ponytail: a code whose SMTP send is already under way when the key replaces
+// it can still arrive after the key email; closing that needs a per-account
+// delivery lock across both formats.
+func (h *Handler) recoverySendStillCurrent(d *recoveryDelivery) bool {
+	if d.format == recoveryFormatToken {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	slot, err := h.redis.Get(ctx, d.issue.SlotKey).Result()
+	if errors.Is(err, redis.Nil) {
+		return false
+	}
+	return err != nil || slot == d.issue.SendID
 }
 
 // recoveryRedisFailureClass names a Redis failure by cause, so a timeout and a

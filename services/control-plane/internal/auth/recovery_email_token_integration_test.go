@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +165,57 @@ func TestRecoveryKeyUniformFailures(t *testing.T) {
 	unknown := postFrom(t, ts, "198.51.100.41", pathRecoveryBegin, map[string]string{"email": "nobody@test.concord.chat", "format": "token"})
 	require.Equal(t, known.Code, unknown.Code)
 	require.Equal(t, known.Body.String(), unknown.Body.String())
+}
+
+func recoveryKeyRecordKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "recovery_code:token:" + hex.EncodeToString(sum[:])
+}
+
+// A key works only while the account still uses the address it was sent to,
+// and a refused key gets the same answer as a key never issued.
+func TestRecoveryKeyRefusedAfterAddressChange(t *testing.T) {
+	ts := setupTS(t)
+	ctx := context.Background()
+	user := ts.CreateTestUser(t, "recoverykeymoved")
+	key := requestRecoveryKey(t, ts, "198.51.100.80", user.Email)
+	_, err := ts.DB.ExecContext(ctx, `UPDATE users SET email = $1 WHERE id = $2`, "moved-"+user.Email, user.ID)
+	require.NoError(t, err)
+
+	moved := postFrom(t, ts, "198.51.100.81", pathRecoveryVerifyCode, map[string]string{"token": key})
+	never := postFrom(t, ts, "198.51.100.82", pathRecoveryVerifyCode, map[string]string{"token": randomRecoveryKey(t)})
+	require.Equal(t, http.StatusUnauthorized, moved.Code, moved.Body.String())
+	require.Equal(t, never.Body.String(), moved.Body.String())
+	require.Zero(t, ts.Redis.Exists(ctx, recoveryKeyRecordKey(key)).Val(), "a refused key is discarded")
+}
+
+// An unreadable key record is a server fault, not a wrong key: it answers 500
+// and is left in place rather than spent.
+func TestRecoveryKeyMalformedRecordAnswers500(t *testing.T) {
+	ts := setupTS(t)
+	ctx := context.Background()
+	user := ts.CreateTestUser(t, "recoverykeymalformed")
+	key := requestRecoveryKey(t, ts, "198.51.100.85", user.Email)
+	require.NoError(t, ts.Redis.Set(ctx, recoveryKeyRecordKey(key), `{}`, time.Minute).Err())
+
+	w := postFrom(t, ts, "198.51.100.86", pathRecoveryVerifyCode, map[string]string{"token": key})
+	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+	require.Equal(t, int64(1), ts.Redis.Exists(ctx, recoveryKeyRecordKey(key)).Val())
+}
+
+// A completed key recovery clears the address's legacy code budget, as a
+// completed code recovery does.
+func TestRecoveryKeyCompletionClearsCodeBudget(t *testing.T) {
+	ts := setupTS(t)
+	ctx := context.Background()
+	user := ts.CreateTestUser(t, "recoverykeybudget")
+	key := requestRecoveryKey(t, ts, "198.51.100.90", user.Email)
+	budget := "recovery_fail:" + strings.ToLower(user.Email)
+	require.NoError(t, ts.Redis.Set(ctx, budget, "7", time.Hour).Err())
+
+	w := postFrom(t, ts, "198.51.100.91", pathRecoveryVerifyCode, map[string]string{"token": key})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Eventually(t, func() bool { return ts.Redis.Exists(ctx, budget).Val() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
 func TestRecoveryKeyMFAAccountGetsChallenge(t *testing.T) {

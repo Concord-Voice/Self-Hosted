@@ -3579,6 +3579,12 @@ func (h *Handler) deliverRecoveryCode(d *recoveryDelivery) {
 		h.clearUnsentRecoveryCode(d)
 		return
 	}
+	if !h.recoverySendStillCurrent(d) {
+		// A key replaced this code before it went out. Sending it now would
+		// make the newest email hold a code that no longer works.
+		h.log.Info("Recovery code replaced before delivery; not sent")
+		return
+	}
 	if h.recoveryMail == nil {
 		h.log.Error("Recovery email delivery is not configured", "failure_class", "recovery_delivery_not_configured", "format", d.format)
 		h.clearUnsentRecoveryCode(d)

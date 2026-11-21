@@ -151,6 +151,58 @@ func TestIssueRecoveryRecordTokenReplacesCodeHeldSlot(t *testing.T) {
 	require.Equal(t, "t-1", mustGet(t, mini, token.SlotKey))
 }
 
+// A code record written before slots existed has no slot. A code request keeps
+// it (with its attempt count) and sends nothing; a key request deletes it.
+func TestIssueRecoveryRecordPreUpgradeCodeWithoutSlot(t *testing.T) {
+	rdb, mini := newRecoveryRedis(t)
+	h := NewHandler(nil, rdb, logger.New("test"), "test", nil)
+	ctx := context.Background()
+	codeKey := recoveryRedisKey("user@example.test")
+	const preUpgrade = `{"code_hash":"h","user_id":"u1","attempts":3}`
+	require.NoError(t, mini.Set(codeKey, preUpgrade))
+
+	_, held, err := h.issueRecoveryRecord(ctx, testRecoveryIssue("u1", recoveryCodeSendPrefix+"1", codeKey))
+	require.NoError(t, err)
+	require.True(t, held, "a code request leaves a live pre-upgrade code alone")
+	require.Equal(t, preUpgrade, mustGet(t, mini, codeKey), "its attempt count is not reset")
+	require.False(t, mini.Exists(recoverySendsKey("u1")), "a held request counts no send")
+
+	token := testRecoveryIssue("u1", "t-1", recoveryTokenKeyPrefix+"one")
+	token.CodeKey = codeKey
+	_, held, err = h.issueRecoveryRecord(ctx, token)
+	require.NoError(t, err)
+	require.False(t, held)
+	require.False(t, mini.Exists(codeKey), "a key request deletes the pre-upgrade code")
+	require.Equal(t, "t-1", mustGet(t, mini, token.SlotKey))
+}
+
+// A code email whose slot a key took before the code was sent is not sent:
+// the newest email the owner gets must hold a usable secret.
+func TestRecoveryCodeDeliverySkippedAfterKeyReplacement(t *testing.T) {
+	rdb, _ := newRecoveryRedis(t)
+	h := NewHandler(nil, rdb, logger.New("test"), "test", nil)
+	mail := &fakeRecoveryMailer{}
+	h.recoveryMail = mail
+	t.Cleanup(h.CloseRecoveryJobs)
+	ctx := context.Background()
+	codeKey := recoveryRedisKey("owner@example.test")
+
+	code := testRecoveryIssue("u1", recoveryCodeSendPrefix+"1", codeKey)
+	_, _, err := h.issueRecoveryRecord(ctx, code)
+	require.NoError(t, err)
+	token := testRecoveryIssue("u1", "t-1", recoveryTokenKeyPrefix+"one")
+	token.CodeKey = codeKey
+	_, _, err = h.issueRecoveryRecord(ctx, token)
+	require.NoError(t, err)
+
+	// Deliveries finish in reverse order: the key email first, then the code.
+	h.deliverRecoveryCode(&recoveryDelivery{addr: "owner@example.test", secret: "k", format: recoveryFormatToken, minutes: 15, issue: token})
+	h.deliverRecoveryCode(&recoveryDelivery{addr: "owner@example.test", secret: "123456", format: recoveryFormatCode, minutes: 15, issue: code})
+
+	require.Len(t, mail.keys, 1)
+	require.Empty(t, mail.codes, "a replaced code is never emailed")
+}
+
 // The begin path wires the replacement: an attacker who holds the slot with a
 // code email cannot stop the owner's key email.
 func TestRecoveryBeginTokenAfterCodeSendsKey(t *testing.T) {
@@ -335,7 +387,11 @@ func TestRecoveryBeginAlternatingFormatsShareSlot(t *testing.T) {
 	h.recoveryMail = mail
 	t.Cleanup(h.CloseRecoveryJobs)
 
-	for _, f := range []recoveryFormat{recoveryFormatCode, recoveryFormatToken, recoveryFormatCode, recoveryFormatToken} {
+	// Let the code go out first; a code a key replaces before it is sent is
+	// never sent (TestRecoveryCodeDeliverySkippedAfterKeyReplacement).
+	h.issueAndDeliverRecovery(t.Context(), recoveryJob{addr: "owner@example.test", format: recoveryFormatCode}, "user-1")
+	h.recoveryDeliveries.Wait()
+	for _, f := range []recoveryFormat{recoveryFormatToken, recoveryFormatCode, recoveryFormatToken} {
 		h.issueAndDeliverRecovery(t.Context(), recoveryJob{addr: "owner@example.test", format: f}, "user-1")
 	}
 	// A second address spelling for the same account shares the limit too.
