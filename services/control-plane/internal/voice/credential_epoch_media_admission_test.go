@@ -136,6 +136,8 @@ func TestVoiceMoveGrantRejectsModeratorDemotedAfterPreflight(t *testing.T) {
 	fromID := ts.CreateVoiceChannel(t, serverID, "from")
 	toID := ts.CreateVoiceChannel(t, serverID, "to")
 	hideVoiceChannel(t, ts, serverID, toID)
+	// Destination VIEW|JOIN via a user override so the demotion is the only refusal cause.
+	ts.CreateChannelOverride(t, toID, "user", moderator.ID, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice|rbac.PermSpeak), 0)
 	_, err := ts.DB.Exec(`INSERT INTO voice_participants (channel_id, user_id) VALUES ($1, $2)`, fromID, target.ID)
 	require.NoError(t, err)
 

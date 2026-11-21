@@ -86,6 +86,7 @@ readers accept the versioned formats needed for a later storage migration.
 - **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
 - **Voice:** A participant can no longer multiply media consumers across receive transports to exhaust shared voice capacity ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
+- **Voice:** Voice moderation now checks the moderator before it reveals anything about the target's voice state, and a refused caller gets the same answer whatever the target is doing. User-mute, user-deafen, disconnect and temporary-access revoke now honour channel denies of Mute Members, Deafen Members and Move Members, and a moderator can no longer act on someone in a channel the moderator cannot see. Moving a member now needs Move Members on both channels and the mover's own access to the destination, including Speak when the move gives temporary access, and every such move is audited. Server mute and server deafen stay server-wide. Several of these routes now answer 403 where they answered 400.
 
 ### Changed
 
@@ -95,6 +96,10 @@ readers accept the versioned formats needed for a later storage migration.
 - **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
 - **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
 - **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
+
+### Removed
+
+- **Voice:** Removed the unused `POST /channels/{id}/voice/authorize-action` route. No client or service called it, and it now returns 404.
 
 ### Fixed
 

@@ -26,6 +26,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/roomplacement"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voicecommand"
@@ -1271,10 +1272,8 @@ func (h *Handler) notifyGroupCreated(convID string, memberIDs []string) {
 // GET /dm/conversations/:id
 func (h *Handler) GetConversation(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -1307,10 +1306,8 @@ type AddMemberRequest struct {
 // PATCH /dm/conversations/:id
 func (h *Handler) UpdateConversation(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -1422,10 +1419,8 @@ func (h *Handler) updateConversationTx(ctx context.Context, convID, userID strin
 // POST /dm/conversations/:id/members
 func (h *Handler) AddMember(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -1435,10 +1430,12 @@ func (h *Handler) AddMember(c *gin.Context) {
 		return
 	}
 
-	if _, err := uuid.Parse(req.UserID); err != nil {
+	canonicalUserID, err := requestid.Canonical(req.UserID)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
 		return
 	}
+	req.UserID = canonicalUserID
 
 	// Verify caller is participant, group status, and admin role
 	isGroup, role, err := h.getParticipantGroupRole(convID, userID)
@@ -1722,17 +1719,19 @@ func dmKeyRevocationEvent(convID string, revokedEpoch int, reason string) websoc
 }
 
 // RemoveMember removes a user from a group DM (admin action or self-leave).
+// Both path IDs are canonicalised before use, so the self-leave and creator
+// comparisons and every query see one spelling; userID is canonical by
+// construction (AuthRequired) and created_by is read from a uuid column.
 // DELETE /dm/conversations/:id/members/:userId
 func (h *Handler) RemoveMember(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-	targetUserID := c.Param("userId")
-
-	if _, err := uuid.Parse(convID); err != nil {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
-	if _, err := uuid.Parse(targetUserID); err != nil {
+	targetUserID, err := requestid.Param(c, "userId")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
@@ -1740,7 +1739,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	// Verify caller is participant and get conversation info
 	var isGroup bool
 	var createdBy, role string
-	err := h.db.QueryRow(`
+	err = h.db.QueryRow(`
 		SELECT dc.is_group, dc.created_by, dp.role FROM dm_conversations dc
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
 		WHERE dc.id = $1
@@ -2336,10 +2335,8 @@ func (h *Handler) getParticipantGroupRole(convID, userID string) (bool, string, 
 // GET /dm/conversations/:id/messages
 func (h *Handler) GetMessages(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -2444,10 +2441,8 @@ func (h *Handler) GetMessages(c *gin.Context) {
 // POST /dm/conversations/:id/read
 func (h *Handler) MarkRead(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -2485,10 +2480,8 @@ type dmKeyResponse struct {
 // GET /dm/conversations/:id/keys
 func (h *Handler) GetKeys(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 	actor, err := uuid.Parse(userID)
@@ -2597,6 +2590,18 @@ func (h *Handler) parseUnpausedDMVoiceIDs(c *gin.Context, convID, userID string)
 		return uuid.Nil, uuid.Nil, false
 	}
 	return convUUID, userUUID, true
+}
+
+// conversationIDParam returns the canonical spelling of the :id route
+// parameter so every downstream key, payload, and enforcement subject agrees
+// with the media plane. On failure the 400 has already been written.
+func conversationIDParam(c *gin.Context) (string, bool) {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return "", false
+	}
+	return convID, true
 }
 
 func parseDMVoiceIDs(c *gin.Context, convID, userID string) (uuid.UUID, uuid.UUID, bool) {
@@ -3098,8 +3103,10 @@ func (h *Handler) bindDMVoiceJoinAdmission(c *gin.Context, convUUID, userUUID, c
 // POST /dm/conversations/:id/voice/join
 func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
+	convID, validID := conversationIDParam(c)
+	if !validID {
+		return
+	}
 	convUUID, userUUID, validIDs := h.parseUnpausedDMVoiceIDs(c, convID, userID)
 	if !validIDs {
 		return
@@ -3185,10 +3192,8 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 // GET /dm/conversations/:id/voice/participants
 func (h *Handler) GetVoiceParticipants(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, validID := conversationIDParam(c)
+	if !validID {
 		return
 	}
 
@@ -3640,14 +3645,11 @@ func (h *Handler) updateDMMessageCiphertextAttempt(c *gin.Context, convID, messa
 // written and ok is false.
 func (h *Handler) resolveDMMessageRequest(c *gin.Context) (convID, messageID, userID string, ok bool) {
 	userID = c.GetString("user_id")
-	convID = c.Param("id")
-	messageID = c.Param("message_id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	if convID, ok = conversationIDParam(c); !ok {
 		return "", "", "", false
 	}
-	if _, err := uuid.Parse(messageID); err != nil {
+	messageID, err := requestid.Param(c, "message_id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
 		return "", "", "", false
 	}
@@ -3858,25 +3860,25 @@ func (h *Handler) loadDMAttachments(messageIDs []string) (map[string][]models.At
 // ---------------------------------------------------------------------------
 
 // authorizeDMGroupAdmin validates params, verifies group DM membership, and checks admin role.
-// Returns the conversation ID, target ID, and true if authorization succeeds.
+// Returns the canonical conversation ID, canonical target ID, and true if
+// authorization succeeds, so callers query and emit one spelling.
 // Returns empty strings and false (with HTTP error already sent) on failure.
 func (h *Handler) authorizeDMGroupAdmin(c *gin.Context, errMsgNotAdmin string) (convID, targetID string, ok bool) {
 	actorID := c.GetString("user_id")
-	convID = c.Param("id")
-	targetID = c.Param("userId")
-
-	if _, err := uuid.Parse(convID); err != nil {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return "", "", false
 	}
-	if _, err := uuid.Parse(targetID); err != nil {
+	targetID, err = requestid.Param(c, "userId")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return "", "", false
 	}
 
 	var isGroup bool
 	var actorRole string
-	err := h.db.QueryRow(`SELECT dc.is_group, dp.role FROM dm_conversations dc
+	err = h.db.QueryRow(`SELECT dc.is_group, dp.role FROM dm_conversations dc
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
 		WHERE dc.id = $1`, convID, actorID).Scan(&isGroup, &actorRole)
 	if err == sql.ErrNoRows {
@@ -3966,14 +3968,21 @@ func (h *Handler) respondDMVoiceTopologyEffectError(c *gin.Context, err error, l
 }
 
 // DMUserMute queues a soft mute for exact sessions of an in-call participant.
+// Any participant of the conversation may soft-mute an in-call peer; no admin
+// role is required; applies to 1:1 and group conversations.
+// Both path IDs are canonicalised before use, so every comparison and query
+// sees one spelling; actorID is canonical by construction (AuthRequired).
 // POST /dm/conversations/:id/voice/:userId/user-mute
 func (h *Handler) DMUserMute(c *gin.Context) {
 	actorID := c.GetString("user_id")
-	convID := c.Param("id")
-	targetID := c.Param("userId")
-
-	if _, err := uuid.Parse(convID); err != nil {
+	convID, err := requestid.Param(c, "id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+	targetID, err := requestid.Param(c, "userId")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
 	target, err := uuid.Parse(targetID)
@@ -4695,8 +4704,10 @@ func (h *Handler) rejectFailedPendingDMCall(c *gin.Context, convUUID uuid.UUID, 
 // (group follow-up #1219 wires that UX; #1209 returns the metadata anyway).
 func (h *Handler) RingDMCall(c *gin.Context) {
 	callerIDStr := c.GetString("user_id")
-	convIDStr := c.Param("id")
-
+	convIDStr, validID := conversationIDParam(c)
+	if !validID {
+		return
+	}
 	convUUID, callerUUID, validIDs := h.parseUnpausedDMVoiceIDs(c, convIDStr, callerIDStr)
 	if !validIDs {
 		return
@@ -4868,8 +4879,10 @@ func (h *Handler) onRingTimeout(convUUID uuid.UUID, ring *PendingCall) {
 // 409. On failure the HTTP error has already been written and ok is false.
 func (h *Handler) resolvePendingDMRing(c *gin.Context) (ring *PendingCall, convUUID, actorUUID uuid.UUID, tx *sql.Tx, ok bool) {
 	actorIDStr := c.GetString("user_id")
-	convIDStr := c.Param("id")
-
+	convIDStr, validID := conversationIDParam(c)
+	if !validID {
+		return nil, uuid.Nil, uuid.Nil, nil, false
+	}
 	convUUID, err := uuid.Parse(convIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
@@ -5220,8 +5233,10 @@ func (h *Handler) resolveDMVoiceAuthorizeLease(
 // DM room-cap input per ADR-0029) is sourced from here.
 func (h *Handler) AuthorizeDMVoiceForMediaPlane(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
+	convID, validID := conversationIDParam(c)
+	if !validID {
+		return
+	}
 	convUUID, userUUID, validIDs := h.parseUnpausedDMVoiceIDs(c, convID, userID)
 	if !validIDs {
 		return
@@ -5369,8 +5384,10 @@ func nextDMVoiceAuthorizationRevision(ctx context.Context, tx *sql.Tx) (int64, e
 // refuses promoted calls, accepted rings, and successor call IDs.
 func (h *Handler) AbortDMVoiceMediaAuthorization(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
+	convID, validID := conversationIDParam(c)
+	if !validID {
+		return
+	}
 	convUUID, userUUID, validIDs := parseDMVoiceIDs(c, convID, userID)
 	if !validIDs {
 		return
