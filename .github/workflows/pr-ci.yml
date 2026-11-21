@@ -134,6 +134,50 @@ jobs:
   # declared needs (GitHub requires superset; the called side stays the
   # effective ceiling). Scanner calls follow the shared relevance selection;
   # unknown selection retains the full scan.
+  semgrep-lock-compatibility:
+    name: semgrep-lock-compatibility
+    needs: [ioc]
+    if: ${{ !inputs.enforcement-only && needs.ioc.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check compatibility inputs
+        id: changes
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only HEAD^1 HEAD -- \
+            .github/semgrep/requirements.txt \
+            .github/scripts/tests/test_semgrep_dependency_compatibility.py \
+            .github/workflows/semgrep.yml .github/workflows/pr-ci.yml \
+            .semgrep/concord-go-security.yml)"
+          if [[ -n "$changed" ]]; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          fi
+      # This job executes PR-controlled code with read-only permissions. It
+      # never uploads SARIF and is not part of the protected scanner verdict.
+      - name: Install proposed Semgrep lock
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), "wcmatch requires Python >=3.11"'
+          python3 -m venv "$RUNNER_TEMP/semgrep-compat"
+          "$RUNNER_TEMP/semgrep-compat/bin/python" -m pip install \
+            --quiet --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: \
+            -r .github/semgrep/requirements.txt
+      - name: Exercise Semgrep compatibility
+        if: steps.changes.outputs.run == 'true'
+        env:
+          PYTHONSAFEPATH: '1'
+          PYTHONPATH: ''
+        run: |
+          "$RUNNER_TEMP/semgrep-compat/bin/python" .github/scripts/tests/test_semgrep_dependency_compatibility.py
+
   semgrep:
     name: semgrep
     needs: [ioc, detect-changes]
