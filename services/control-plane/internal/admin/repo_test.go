@@ -54,6 +54,8 @@ func TestAdminRepo_CreatePending(t *testing.T) {
 		assert.Equal(t, username, u.Username)
 		assert.Equal(t, admin.StatusPending, u.Status)
 		assert.False(t, u.CreatedAt.IsZero())
+		_, err = db.ExecContext(ctx, `UPDATE admin_users SET session_generation = 0 WHERE id = $1`, u.ID)
+		require.ErrorContains(t, err, "admin_users_session_generation_positive")
 	})
 
 	t.Run("rejects a duplicate username", func(t *testing.T) {
