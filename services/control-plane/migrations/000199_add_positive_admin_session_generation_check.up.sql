@@ -4,7 +4,7 @@ SET LOCAL lock_timeout = '3s';
 
 -- Refuse a partially upgraded installation that already has a zero row. The
 -- write-blocking lock keeps a zero writer from racing the check and ADD.
-LOCK TABLE admin_users IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE admin_users IN SHARE ROW EXCLUSIVE MODE;
 
 DO $$
 BEGIN
