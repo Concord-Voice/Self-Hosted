@@ -310,6 +310,8 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000199 | add_positive_admin_session_generation_check | Aborts under a bounded write-blocking lock if any existing admin generation is nonpositive, then adds a positive check for future writes. The original nonnegative check remains. |
 | 000200 | validate_positive_admin_session_generation | Validates the positive check against existing administrator rows without holding an exclusive lock across the scan. Existing nonpositive rows are already rejected by 000199. |
 
+If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
+
 ### Session-revocation allowance cutover (migration 000198)
 
 This migration is **not safe with old and new control-plane writers running at
