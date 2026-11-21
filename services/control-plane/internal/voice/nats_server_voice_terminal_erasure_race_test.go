@@ -12,6 +12,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	concordws "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -177,11 +178,7 @@ func TestServerVoiceMoveFencesTheRemovedChannelTerminalDelivery(t *testing.T) {
 }
 
 func TestServerVoiceCrossServerMoveFencesTheRemovedChannelTerminalDelivery(t *testing.T) {
-	publisher, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping cross-server admission fence test", err)
-	}
-	t.Cleanup(func() { _ = publisher.Close() })
+	publisher := natstest.Connect(t, natsTestURL())
 	observer, err := natsclient.Connect(natsTestURL())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = observer.Close() })

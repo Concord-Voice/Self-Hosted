@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
 	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
@@ -194,10 +195,7 @@ func TestServerMove_AmbiguousTemporaryGrantCommitSuppressesSignal(t *testing.T) 
 
 	var effects atomic.Int32
 	h := newCommitFailureVoiceEffectHandler(t, db, redisClient, &effects)
-	publisher, err := natsclient.Connect(commitEffectNATSURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping exact-xmin successor delivery assertion", err)
-	}
+	publisher := natstest.Connect(t, commitEffectNATSURL())
 	t.Cleanup(func() {
 		if closeErr := publisher.Close(); closeErr != nil {
 			t.Errorf("close NATS publisher: %v", closeErr)

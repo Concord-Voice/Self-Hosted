@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 	rawnats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
@@ -261,7 +261,7 @@ func TestRedTeamUnauthenticatedNATSResponderCannotSpoofMediaTeardownACK(t *testi
 	}
 	attacker, err := rawnats.Connect(url)
 	if err != nil {
-		t.Skipf("live NATS unavailable: %v", err)
+		natstest.Unavailable(t, "the raw connection failed")
 	}
 	t.Cleanup(attacker.Close)
 	received := make(chan struct{}, 1)
@@ -273,11 +273,7 @@ func TestRedTeamUnauthenticatedNATSResponderCannotSpoofMediaTeardownACK(t *testi
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	require.NoError(t, attacker.Flush())
 
-	requester, err := natsclient.Connect(url)
-	if err != nil {
-		t.Skipf("live NATS unavailable: %v", err)
-	}
-	t.Cleanup(func() { _ = requester.Close() })
+	requester := natstest.Connect(t, url)
 	err = publishDMBlockVoiceEjection(
 		context.Background(), requester, dmBlockVoiceEjectionTestSecret, uuid.NewString(), uuid.New(),
 	)

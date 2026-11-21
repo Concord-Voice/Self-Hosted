@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/roomplacement"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
@@ -231,11 +232,7 @@ func TestRefreshOnlyJoinSpendsIntentAfterDatabaseRollback(t *testing.T) {
 	if url == "" {
 		url = "nats://localhost:4222"
 	}
-	publisher, err := natsclient.Connect(url)
-	if err != nil {
-		t.Skipf("NATS unavailable for exact disconnect check: %v", err)
-	}
-	t.Cleanup(func() { _ = publisher.Close() })
+	publisher := natstest.Connect(t, url)
 	observer, err := natsclient.Connect(url)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = observer.Close() })
@@ -329,11 +326,7 @@ func TestRefreshOnlyJoinRejectsMismatchedAdmissionAtExactSocket(t *testing.T) {
 	if url == "" {
 		url = "nats://localhost:4222"
 	}
-	publisher, err := natsclient.Connect(url)
-	if err != nil {
-		t.Skipf("NATS unavailable: %v", err)
-	}
-	t.Cleanup(func() { _ = publisher.Close() })
+	publisher := natstest.Connect(t, url)
 	observer, err := natsclient.Connect(url)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = observer.Close() })

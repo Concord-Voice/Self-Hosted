@@ -10,6 +10,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voice"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
@@ -33,11 +34,7 @@ func natsTestURL() string {
 // NATS server (dev env / CI); skips if NATS is unreachable.
 func TestPublishForceDisconnect_PublishesPayload(t *testing.T) {
 	// Control-side client passed into the subscriber (the publisher).
-	pubClient, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live publish test (runs in CI)", err)
-	}
-	t.Cleanup(func() { _ = pubClient.Close() })
+	pubClient := natstest.Connect(t, natsTestURL())
 
 	// Observer client subscribes to capture the published message.
 	obsClient, err := natsclient.Connect(natsTestURL())
@@ -85,11 +82,7 @@ func TestPublishForceDisconnect_NilNATSNoop(t *testing.T) {
 }
 
 func TestVoiceJoinedPublishesCompleteRevisionedEnforcementSnapshot(t *testing.T) {
-	pubClient, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live publish test", err)
-	}
-	t.Cleanup(func() { _ = pubClient.Close() })
+	pubClient := natstest.Connect(t, natsTestURL())
 	obsClient, err := natsclient.Connect(natsTestURL())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = obsClient.Close() })

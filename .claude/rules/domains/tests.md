@@ -408,6 +408,41 @@ Measured after the Redis fix landed: seven packages run concurrently **without**
 Postgres test — and pass cleanly with it. Dropping the flag for wall clock is a
 separate, measured change.
 
+### NATS — connect through `natstest`, never guard on the connect error
+
+A test that needs the live NATS server gets its client from
+`internal/testhelpers/natstest`:
+
+```go
+publisher := natstest.Connect(t, natsTestURL())
+```
+
+`natstest.Connect` returns a connected client and closes it at cleanup. With no
+server it ends the test: a skip on a developer machine, a failure when `CI` is
+set. CI starts NATS for these tests (`scripts/ci/start-control-plane-services.sh`),
+so a skip there would report a broken service as a pass.
+
+- **Do not write `if err != nil { t.Skipf(...) }` after `natsclient.Connect`.**
+  `natsclient.Connect` sets `RetryOnFailedConnect`, so with the server down it
+  returns a client that is still dialing and a **nil** error. That guard cannot
+  fire for an outage. Eighteen call sites had no other check; with NATS down their
+  tests waited for a message on a connection that never opened and failed after
+  about ten seconds. The error is non-nil only for a configuration fault.
+- **A second connection in the same test may use `natsclient.Connect` and
+  `require.NoError`.** The first `natstest.Connect` has already proved the server
+  is there.
+- **A test on the raw `nats.go` client** gets a real error from its first dial.
+  It passes the decision to `natstest.Unavailable(t, "<fixed phrase>")`, so it
+  skips and fails on the same rule.
+- **Never put the connect error or the URL in the message.** A NATS URL can carry
+  credentials, and the error can quote the URL. `natstest` prints fixed phrases.
+- `natstest` is a leaf package (standard library, `testing`, `pkg/nats`), for the
+  same reason `redistest` is: `internal/testhelpers` imports the packages whose
+  tests need it.
+
+A test that requires NATS outright, with no skip, still fails without a server.
+That is a decision for that test, not a use of this helper.
+
 ## TypeScript/React Tests
 - Vitest + @testing-library/react
 - **Always call `resetAllStores()` in `beforeEach`** — state leakage causes flaky tests

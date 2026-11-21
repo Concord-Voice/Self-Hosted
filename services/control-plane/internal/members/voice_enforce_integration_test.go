@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,11 +33,7 @@ func membersNATSTestURL() string {
 // payloads, skipping the test if NATS is down.
 func subscribeVoiceDisconnect(t *testing.T) chan map[string]interface{} {
 	t.Helper()
-	obsClient, err := natsclient.Connect(membersNATSTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live enforcement test (runs in CI)", err)
-	}
-	t.Cleanup(func() { _ = obsClient.Close() })
+	obsClient := natstest.Connect(t, membersNATSTestURL())
 
 	msgs := make(chan map[string]interface{}, 8)
 	sub, err := obsClient.Subscribe("voice.enforce.disconnect", func(data []byte) {

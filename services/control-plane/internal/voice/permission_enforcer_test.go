@@ -9,6 +9,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voice"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -32,11 +33,7 @@ type enforcerTestRig struct {
 
 func setupEnforcerRig(t *testing.T) *enforcerTestRig {
 	t.Helper()
-	pubClient, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live enforcer test (runs in CI)", err)
-	}
-	t.Cleanup(func() { _ = pubClient.Close() })
+	pubClient := natstest.Connect(t, natsTestURL())
 
 	obsClient, err := natsclient.Connect(natsTestURL())
 	require.NoError(t, err)

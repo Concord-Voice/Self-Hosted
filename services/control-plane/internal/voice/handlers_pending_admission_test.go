@@ -20,6 +20,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
 	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
@@ -44,7 +45,7 @@ func admissionNATSTestURL() string {
 func TestActivatedAdmissionReleasesInitialFenceBeforePrepareAndRetainsReservation(t *testing.T) {
 	bus, err := rawnats.Connect(admissionNATSTestURL())
 	if err != nil {
-		t.Skipf("NATS unavailable (%v); runs in CI", err)
+		natstest.Unavailable(t, "the raw connection failed")
 	}
 	t.Cleanup(func() { bus.Close() })
 	db, _ := dbtest.SetupTestDB(t)
@@ -144,7 +145,7 @@ func exerciseActivatedAdmissionMutation(
 	t.Helper()
 	bus, err := rawnats.Connect(admissionNATSTestURL())
 	if err != nil {
-		t.Skipf("NATS unavailable (%v); exercised in CI", err)
+		natstest.Unavailable(t, "the raw connection failed")
 	}
 	t.Cleanup(func() { bus.Close() })
 	db, _ := dbtest.SetupTestDB(t)
