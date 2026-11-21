@@ -253,3 +253,90 @@ func TestClearSenderActiveCategoryClearsBootstrapProjection(t *testing.T) {
 	require.NoError(t, json.Unmarshal(frame, &message))
 	assert.Equal(t, "rich_presence_clear", message["type"])
 }
+
+func TestClearSenderActiveCategoryBootstrapReceiptReplay(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		snapshot  bool
+		wantClear bool
+	}{
+		{name: "empty snapshot then buffered update", wantClear: true},
+		{name: "populated snapshot then buffered clear", snapshot: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hub := newTestHubWithRichPresenceClient(t)
+			holder := soleRichPresenceClient(t, hub)
+			senderID := uuid.New()
+			key := richPresenceDeliveryKey{senderID: senderID, category: presence.CategoryPrivateCall}
+			holder.beginBootstrap()
+			if test.snapshot {
+				holder.setRichPresenceSnapshot(map[richPresenceDeliveryKey]struct{}{key: {}})
+			} else {
+				holder.setRichPresenceSnapshot(nil)
+			}
+			plan := presence.DeliveryPlan{
+				SenderID: senderID, Category: presence.CategoryPrivateCall,
+				Payload: json.RawMessage("{}"), UpdatedAt: 1,
+			}
+			if test.snapshot {
+				plan.ClearRecipients = map[uuid.UUID]bool{holder.UserID: true}
+			} else {
+				plan.UpdateRecipients = map[uuid.UUID]bool{holder.UserID: true}
+			}
+			require.NoError(t, hub.DeliverRichPresence(context.Background(), plan))
+			require.Empty(t, holder.Send, "the live delta must wait behind bootstrap")
+			require.True(t, hub.completeClientBootstrap(holder, []byte("{}")))
+			require.Len(t, holder.Send, 2)
+			<-holder.Send
+			<-holder.Send
+
+			hub.ClearSenderActiveCategory(senderID, presence.CategoryPrivateCall)
+			if test.wantClear {
+				var frame map[string]any
+				require.NoError(t, json.Unmarshal(readOneOutboundFrame(t, hub), &frame))
+				assert.Equal(t, "rich_presence_clear", frame["type"])
+			} else {
+				assert.Empty(t, holder.Send, "a buffered clear must consume the snapshot receipt")
+			}
+		})
+	}
+}
+
+func TestClearSenderActiveCategoryBootstrapDiscardedReceipts(t *testing.T) {
+	for _, failFlush := range []bool{false, true} {
+		name := "canceled"
+		if failFlush {
+			name = "failed flush"
+		}
+		t.Run(name, func(t *testing.T) {
+			hub := newTestHubWithRichPresenceClient(t)
+			holder := soleRichPresenceClient(t, hub)
+			senderID := uuid.New()
+			holder.beginBootstrap()
+			holder.setRichPresenceSnapshot(nil)
+			require.NoError(t, hub.DeliverRichPresence(context.Background(), presence.DeliveryPlan{
+				SenderID: senderID, Category: presence.CategoryPrivateCall,
+				Payload: json.RawMessage("{}"), UpdatedAt: 1,
+				UpdateRecipients: map[uuid.UUID]bool{holder.UserID: true},
+			}))
+			require.NotEmpty(t, holder.bootstrapRichPresenceLive)
+			if failFlush {
+				saturateOutboundQueue(t, holder)
+				require.False(t, hub.completeClientBootstrap(holder, []byte("{}")))
+			} else {
+				holder.cancelBootstrap()
+			}
+			assert.Empty(t, holder.richPresenceDelivered)
+			assert.Empty(t, holder.bootstrapRichPresenceLive)
+			assert.False(t, holder.bootstrapRichPresenceSnapshotSet)
+			if !failFlush {
+				holder.beginBootstrap()
+				holder.setRichPresenceSnapshot(nil)
+				require.True(t, hub.completeClientBootstrap(holder, []byte("{}")))
+				<-holder.Send
+				hub.ClearSenderActiveCategory(senderID, presence.CategoryPrivateCall)
+				assert.Empty(t, holder.Send, "canceled delivery must not gain a receipt")
+			}
+		})
+	}
+}
