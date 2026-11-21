@@ -17793,11 +17793,13 @@ paths:
       tags:
       - Sessions
       summary: Set session revocation mode
-      description: 'Set the server-authoritative session revocation mode: `secure` asks for
+      description: 'Set the server-authoritative session revocation mode: `secure` requires
 
-        password AND MFA re-verification on every revoke when MFA is enrolled; `simple` opens a short window
+        password and enrolled MFA when the free allowance is unavailable; `simple` also opens
 
-        after one verified revoke. Changing the mode needs the same step-up as a revoke:
+        a five-minute window after an authenticated revoke. Changing the mode resets the
+
+        allowance and invalidates earlier simple-mode windows. The change needs step-up:
 
         a request with neither credential returns a 403 discovery response, and a
 
@@ -17889,7 +17891,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          $ref: '#/components/responses/StepUpBudgetUnavailable'
+          description: Family authority or persistence is temporarily unavailable, or the MFA attempt
+            budget could not be evaluated before verification; no success or postcommit grant is claimed.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/Error'
+                - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
   /sessions/revoke-all:
     post:
       tags:
@@ -17909,7 +17918,9 @@ paths:
 
         refresh-token cookie family is revoked. Set `include_current` to `true` to revoke the current
 
-        family too. Before success the control WebSockets of every revoked family are synchronously fenced and closed (a failed close is retried by the durable owner, never surfaced as an error); success also retains exact voice-disconnect delivery obligations. The count is changed refresh rows, not families or completed socket closures.
+        family too. A successful revoke-all resets the free allowance and invalidates
+
+        earlier simple-mode windows. Before success, control WebSockets of the revoked families on the handling process are synchronously fenced and closed; success also retains exact voice-disconnect delivery obligations. The fence does not cover sockets on other control-plane processes. The count is changed refresh rows, not families or completed socket closures.
 
         Rate limit: 5 requests per minute (user-based).
 
@@ -17997,8 +18008,12 @@ paths:
         '429':
           $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '503':
-          description: Family authority or persistence is temporarily unavailable, or the MFA attempt
-            budget could not be evaluated before verification; no success or postcommit grant is claimed.
+          description: Family authority or persistence is temporarily unavailable, the MFA attempt
+            budget could not be evaluated before verification, or revocation committed but a local
+            WebSocket fence could not be confirmed. In the last case the response reports that sessions
+            were revoked; a still-pending durable owner can retry disconnection. If the commit outcome
+            is unknown, captured local target sockets are conservatively closed even when the transaction
+            ultimately rolled back and did not revoke those sessions.
           content:
             application/json:
               schema:
@@ -18016,7 +18031,11 @@ paths:
       tags:
       - Sessions
       summary: Revoke a specific session
-      description: 'The owned SID selects its immutable logical login family. A successful revoke terminates the whole family, including other refresh rows and access tokens, synchronously fences and closes that family''s control WebSockets before responding (sibling families stay connected; a failed close is retried by the durable owner), and retains exact voice-disconnect delivery obligations. An already-terminal owned family is idempotent success. Rate limit: 10 requests per minute.'
+      description: 'The owned SID selects its immutable logical login family. A successful revoke terminates the whole family, including other refresh rows and access tokens, synchronously fences and closes that family''s control WebSockets on the handling process before responding (sibling families stay connected), and retains exact voice-disconnect delivery obligations. The fence does not cover sockets on other control-plane processes. An already-terminal owned family is idempotent success.
+
+        One password-free revoke is available when at least three unexpired, unrevoked refresh rows exist and no single-session revoke succeeded in the preceding 24 hours. In simple mode, an authenticated five-minute window can also authorize subsequent revokes. Otherwise password and any enrolled MFA are required. The allowance is stored in PostgreSQL; other authentication gates and the simple-mode window may still depend on Redis.
+
+        Rate limit: 10 requests per minute.'
       security:
       - BearerAuth: []
       parameters:
@@ -18066,8 +18085,12 @@ paths:
         '429':
           $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '503':
-          description: Family authority or persistence is temporarily unavailable, or the MFA attempt
-            budget could not be evaluated before verification; no success or postcommit grant is claimed.
+          description: Family authority or persistence is temporarily unavailable, the MFA attempt
+            budget could not be evaluated before verification, or revocation committed but the local
+            WebSocket fence could not be confirmed. In the last case the response reports that the
+            session was revoked; a still-pending durable owner can retry disconnection. If the commit
+            outcome is unknown, the target's local sockets are conservatively closed even when the
+            transaction ultimately rolled back and did not revoke the session.
           content:
             application/json:
               schema:
@@ -20116,7 +20139,9 @@ paths:
         | `rich_presence_clear` | `user_id`, `category` | Remove the exact `custom_text`, `server_voice`, or
         `private_call` category when it ends or the viewer leaves the sender''s effective audience.
         Activity-category clears are sent only to devices that opted in with exactly one
-        `activity_rich_presence=1` query value. |
+        `activity_rich_presence=1` query value. Best-effort terminal clears from
+        `ClearSenderActiveCategory` additionally require a previously delivered sender/category
+        projection on this connection. |
 
         | `server_updated` | `server_id`, `name`, `icon_url` | Server modified |
 
