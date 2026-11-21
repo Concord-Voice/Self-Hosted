@@ -364,6 +364,10 @@ func TestMigration000199Up_RefusesExistingZero(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
+	var validated bool
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT convalidated FROM pg_constraint
+		WHERE conrelid = 'admin_users'::regclass AND conname = 'admin_users_session_generation_positive'`).Scan(&validated))
+	assert.True(t, validated, "000200 must validate the positive-generation check")
 	created, err := admin.NewAdminRepo(db).CreatePending(ctx, uniqueAdminUsername("zero-guard"), "test-hash")
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, created.ID)
