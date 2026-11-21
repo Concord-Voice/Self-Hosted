@@ -786,17 +786,23 @@ exit "$MOCK_SCAN_EXIT"
                 self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
                 self.assertIn("(the protected base copy)", result.stdout)
                 self.assertFalse(capture.exists(), "nothing may be installed")
-            with self.subTest(case="pin differs from SEMGREP_VERSION"):
+            with self.subTest(case="ordinary fallback uses trusted lock version"):
                 result = run("false", "", base, version="2.0.0")
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual(base_lock, capture.read_text(),
+                                 "the event-base lock, not the PR workflow version, selects the scanner")
+            with self.subTest(case="event-base lock has multiple semgrep pins"):
+                bad_event_base = commit(base_lock + pin, "duplicate semgrep pin")
+                result = run("false", "", bad_event_base)
                 self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-                self.assertIn("does not pin semgrep==", result.stdout)
-                self.assertFalse(capture.exists(), "nothing may be installed")
+                self.assertIn("must contain exactly one pinned semgrep version", result.stdout)
+                self.assertFalse(capture.exists(), "an ambiguous trusted version must not be installed")
             with self.subTest(case="protected base pins another version than the PR"):
                 other = commit(pr_lock.replace("semgrep==1.0.0", "semgrep==0.9.0"), "older base")
                 commit(pr_lock, "pr again")
                 result = run("true", other, "")
                 self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-                self.assertIn("does not pin semgrep==", result.stdout)
+                self.assertIn("this protected workflow expects semgrep==", result.stdout)
                 self.assertFalse(capture.exists(), "the protected run checks the pin of the copy it installs")
             with self.subTest(case="event base lock is not a regular file"):
                 target.unlink()

@@ -87,9 +87,9 @@ jobs:
       # Robust against shallow clones (paired with fetch-depth: 0 below)
       # and fork PRs.
       BASELINE_COMMIT: ${{ inputs.external-verdict && inputs.selected-merge-base-sha || github.event.pull_request.base.sha }}
-      # Single source of truth for the Semgrep version. The install step
-      # fails unless .github/semgrep/requirements.txt pins the same
-      # version, so a bump changes this line and that file together.
+      # Protected scan version and registry-cache key. The ordinary fallback
+      # derives its scanner version from the trusted event-base lock instead
+      # of comparing that lock with this PR-controlled value.
       SEMGREP_VERSION: '1.186.0'
       EXTERNAL_VERDICT: ${{ inputs.external-verdict }}
       # Python runs in the PR checkout (pip, the report parsers): keep the
@@ -252,8 +252,18 @@ jobs:
             echo "::error::Only comments, name==version pins and --hash lines are allowed in $shown; the lines above are not."
             exit 1
           fi
-          if ! grep -qxF "semgrep==${SEMGREP_VERSION} \\" "$reqs"; then
-            echo "::error::$shown does not pin semgrep==${SEMGREP_VERSION}. Set SEMGREP_VERSION in semgrep.yml and the file's semgrep pin to the same version (regenerate the file with the command in its header)."
+          semgrep_pin_count=$(grep -c '^semgrep==' "$reqs" || true)
+          lock_semgrep_version=$(sed -nE 's/^semgrep==([A-Za-z0-9._+!-]+) \\$/\1/p' "$reqs")
+          if [ "$semgrep_pin_count" -ne 1 ] || [ -z "$lock_semgrep_version" ]; then
+            echo "::error::$shown must contain exactly one pinned semgrep version."
+            exit 1
+          fi
+          expected_semgrep_version="$SEMGREP_VERSION"
+          if [ "$EXTERNAL_VERDICT" != 'true' ]; then
+            expected_semgrep_version="$lock_semgrep_version"
+          fi
+          if [ "$lock_semgrep_version" != "$expected_semgrep_version" ]; then
+            echo "::error::$shown pins semgrep==$lock_semgrep_version, but this protected workflow expects semgrep==$expected_semgrep_version."
             exit 1
           fi
           # --no-deps: the lock overrides some of semgrep's own exact pins to fixed

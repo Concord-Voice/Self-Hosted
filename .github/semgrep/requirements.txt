@@ -1,5 +1,8 @@
 # Hash-locked Semgrep install for .github/workflows/semgrep.yml (pip --no-deps --require-hashes).
-# The semgrep pin must equal SEMGREP_VERSION in that workflow; its install step fails otherwise.
+# Within one revision, the semgrep pin must equal SEMGREP_VERSION in that
+# revision's workflow. The write-scoped ordinary fallback gets both its lock
+# and expected engine version from the trusted event-base lock; the separate
+# read-only compatibility job tests the PR's proposed lock and version.
 #
 # OVERRIDES. semgrep pins vulnerable versions of some dependencies exactly, so this lock overrides
 # them and the workflow installs with --no-deps, which skips pip's constraint check:
