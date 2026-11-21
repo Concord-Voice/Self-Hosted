@@ -20104,7 +20104,9 @@ paths:
         | `rich_presence_clear` | `user_id`, `category` | Remove the exact `custom_text`, `server_voice`, or
         `private_call` category when it ends or the viewer leaves the sender''s effective audience.
         Activity-category clears are sent only to devices that opted in with exactly one
-        `activity_rich_presence=1` query value. |
+        `activity_rich_presence=1` query value. Best-effort terminal clears from
+        `ClearSenderActiveCategory` additionally require a previously delivered sender/category
+        projection on this connection. |
 
         | `server_updated` | `server_id`, `name`, `icon_url` | Server modified |
 
