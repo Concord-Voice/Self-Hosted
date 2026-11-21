@@ -1277,9 +1277,13 @@ visibility checks. The full local audience may span multiple batches; offline
 server membership does not consume the cleanup bound or trigger global socket
 teardown. Scope loading and generation validation run once around the audience
 batches, including when the connected snapshot is empty. Category-specific clears
-and targeted reconnects retain their existing delivery and cleanup-receipt
-semantics. Clients registering after capture receive
-a freshly authorized snapshot under the existing sender publication gate.
+and targeted reconnects retain their delivery and cleanup-receipt semantics.
+The best-effort `ClearSenderActiveCategory` terminal reaches only an opted-in
+connection with a previously enqueued sender/category projection, and a successfully
+enqueued clear consumes that receipt. Bootstrap snapshots and buffered updates publish
+receipts only after a successful flush; cancellation or failure discards staged receipts.
+Clients registering after capture receive a freshly authorized snapshot under the
+existing sender publication gate.
 Legacy devices are included because their reconnect snapshot can contain activity
 even when live activity frames are disabled. A live clear reconnects only the
 targeted legacy devices; capable devices consume the clear normally.
