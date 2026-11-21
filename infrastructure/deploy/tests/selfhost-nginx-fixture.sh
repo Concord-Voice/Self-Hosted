@@ -2,9 +2,11 @@
 # Prepare an isolated nginx unit configuration on the disposable acceptance VM.
 set -euo pipefail
 umask 077
+# Exact matching only: an inherited BASHOPTS=nocasematch would case-fold the guard.
+shopt -u nocasematch
 
 if [[ $# != 0 || ${GITHUB_ACTIONS:-} != true ||
-      ${GITHUB_REPOSITORY:-} != Concord-Voice/Concord-Voice-Alpha ||
+      ${GITHUB_REPOSITORY:-} != Concord-Voice/Self-Hosted ||
       ${RUNNER_ENVIRONMENT:-} != self-hosted ||
       ${SELFHOST_ACCEPTANCE_RUNNER_PROFILE:-} != blacksmith-4vcpu-ubuntu-2404 ]]; then
   echo 'Invalid disposable acceptance CI context' >&2

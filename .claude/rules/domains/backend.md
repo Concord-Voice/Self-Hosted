@@ -32,7 +32,7 @@ paths:
 
 ## Database
 - Always parameterized queries: `$1, $2, ...` — never `fmt.Sprintf` for SQL
-- Use `tx.QueryRow`/`tx.Exec` inside transactions (not `db.QueryRow`)
+- Use `tx.QueryRow`/`tx.Exec` inside transactions (not `db.QueryRow`). This includes every helper called while a transaction is open: such a helper takes the `*sql.Tx` and issues every read on it. A pool read, or a helper that opens its own transaction, inside an open transaction needs a second connection while the first holds locks, and enough concurrent requests exhaust the pool and deadlock it (VULN-079, key distribution). Where one target's check may fail without failing the batch, wrap it in a `SAVEPOINT`, since a failed statement aborts the whole transaction (25P02).
 - Always `defer rows.Close()` after `db.Query()`
 - Check `rows.Err()` after iteration loops
 - Verify `argIdx` increments correctly in dynamic UPDATE builders
