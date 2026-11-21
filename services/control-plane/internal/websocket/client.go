@@ -186,6 +186,16 @@ type Client struct {
 	// but misapply them to Custom Status, so live activity deltas remain disabled
 	// until a client opts into the corrected contract.
 	activityRichPresenceCapable bool
+	// richPresenceDelivered is the activity projection currently queued for this
+	// connection. The active-category erasure terminal consults it before naming
+	// a sender, so an opted-in client cannot observe clears for state it never
+	// received. Direct delivery is serialized by sendMu; bootstrap replacements
+	// stage their baseline and ordered live transitions under bootstrapMu, then
+	// publish the resulting projection while holding both locks.
+	richPresenceDelivered            map[richPresenceDeliveryKey]struct{}
+	bootstrapRichPresenceSnapshot    map[richPresenceDeliveryKey]struct{}
+	bootstrapRichPresenceSnapshotSet bool
+	bootstrapRichPresenceLive        []richPresenceDeliveryTransition
 	// sendMu serializes every production producer. Code that needs both client
 	// locks acquires sendMu before bootstrapMu. The reconnect replacement
 	// holds it across its full multi-frame flush so unrelated events cannot
@@ -300,6 +310,9 @@ func (c *Client) beginBootstrap() {
 	c.bootstrapFailed = false
 	c.bootstrapReplay = nil
 	c.bootstrapLive = nil
+	c.bootstrapRichPresenceSnapshot = nil
+	c.bootstrapRichPresenceSnapshotSet = false
+	c.bootstrapRichPresenceLive = nil
 }
 
 func (c *Client) appendBootstrapReplay(data []byte) error {
@@ -353,6 +366,9 @@ func (c *Client) cancelBootstrap() {
 	c.bootstrapCanceled = true
 	c.bootstrapReplay = nil
 	c.bootstrapLive = nil
+	c.bootstrapRichPresenceSnapshot = nil
+	c.bootstrapRichPresenceSnapshotSet = false
+	c.bootstrapRichPresenceLive = nil
 }
 
 func (c *Client) enqueueOutbound(data []byte) bool {

@@ -61,21 +61,18 @@ func TestRespondKeyDistributionError_Mapping(t *testing.T) {
 	})
 }
 
-func TestDistributeOneChannelKey_Outcomes(t *testing.T) {
+func TestInsertWrappedChannelKeysTx_StatementErrorFailsBatch(t *testing.T) {
 	db, cleanup := dbtest.SetupTestDB(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
 
-	t.Run("insert failure fails the batch", func(t *testing.T) {
-		member := dbtest.CreateUser(t, db)
-		tx, err := db.BeginTx(ctx, nil)
-		require.NoError(t, err)
-		defer func() { _ = tx.Rollback() }()
-		// Nonexistent channel → FK violation → statement error → batch error.
-		// distributionTargetAdmitted's resolver is nil here, so stub admission
-		// by calling the insert helper directly for the error branch...
-		inserted, insErr := insertWrappedChannelKeyTx(ctx, tx, "00000000-0000-0000-0000-000000000bad", member.String(), "a2V5", 1)
-		assert.False(t, inserted)
-		assert.Error(t, insErr, "FK violation must surface as a batch-failing error")
-	})
+	member := dbtest.CreateUser(t, db).String()
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	// Nonexistent channel → FK violation → statement error → batch error.
+	inserted, insErr := insertWrappedChannelKeysTx(ctx, tx, "00000000-0000-0000-0000-000000000bad", 1,
+		[]string{member}, map[string]string{member: "a2V5"})
+	assert.Nil(t, inserted)
+	assert.Error(t, insErr, "FK violation must surface as a batch-failing error")
 }

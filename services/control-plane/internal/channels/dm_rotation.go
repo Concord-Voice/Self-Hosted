@@ -173,6 +173,9 @@ func (h *Handler) RotateDMKey(c *gin.Context) {
 			c.JSON(status, body)
 			return
 		}
+		if h.respondKeyDistributionTimeout(c, rotErr, convID, errMsgFailedRotateKey) {
+			return
+		}
 		h.log.Error("dm key rotation failed", "error", rotErr, "conversation_id", sanitizeID(convID))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRotateKey})
 		return
@@ -189,7 +192,7 @@ func (h *Handler) RotateDMKey(c *gin.Context) {
 		// the epoch already established (one GET).
 		h.broadcastDMKeyRevocation(convID, outcome.previousVersion, outcome.keyVersion, "manual_rotation")
 	}
-	h.notifyDMKeyDistribution(convID, outcome.delivered)
+	h.notifyDMKeyDistribution(convID, outcome.delivered, outcome.alreadyHeld)
 	c.JSON(http.StatusOK, gin.H{"message": "Key rotated", "new_key_version": outcome.keyVersion})
 }
 
@@ -274,6 +277,10 @@ func (h *Handler) rotateDMKeyTx(ctx context.Context, actorID, tokenEpoch, convID
 			return dmDistributionOutcome{}, fmt.Errorf("begin dm rotation tx: %w", err)
 		}
 		defer h.rollbackDMRotationTx(tx)
+		if err := setDistributionTimeouts(ctx, tx); err != nil {
+			h.rollbackDMRotationTx(tx)
+			return dmDistributionOutcome{}, err
+		}
 		outcome, err := distributeDMKeysTx(ctx, tx, batch)
 		if err != nil {
 			h.rollbackDMRotationTx(tx)
@@ -334,7 +341,8 @@ func (h *Handler) broadcastDMKeyRevocation(convID string, revokedEpoch, successo
 // queue after requesterID enrolled a request on convID. The payload is the
 // server-channel key_needed shape minus server_id, which a DM does not have;
 // the client's handler reads only channel_ids. Non-holders fetch an empty
-// queue — appendDMPendingRequests serves a row to current-epoch holders only.
+// queue — the pending-keys reader (pendingKeyRequestsPage) serves a DM row to
+// current-epoch holders only.
 func (h *Handler) notifyDMKeyNeeded(convID, requesterID string) {
 	h.broadcastToDMParticipants(convID, requesterID, websocket.OutgoingMessage{
 		Type: "key_needed",

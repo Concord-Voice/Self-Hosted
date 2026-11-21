@@ -55,6 +55,19 @@ func (h *terminalSessionHub) DisconnectFamilyContext(_ context.Context, user, fa
 	return nil
 }
 
+func (h *terminalSessionHub) SnapshotUserFamiliesContext(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+
+func (h *terminalSessionHub) DisconnectFamiliesContext(ctx context.Context, user uuid.UUID, families []uuid.UUID) error {
+	for _, family := range families {
+		if err := h.DisconnectFamilyContext(ctx, user, family); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (h *terminalSessionHub) recorded() ([]uuid.UUID, []uuid.UUID, []bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -222,8 +235,7 @@ func TestLoginFamilyRevokeAllSessionsFencesEveryOtherFamily(t *testing.T) {
 	}
 }
 
-// failingFamilyHub proves a failed synchronous close never turns a committed
-// revocation into an error response; the durable owner keeps the obligation.
+// failingFamilyHub keeps a committed revocation's fence unconfirmed.
 type failingFamilyHub struct{ calls int }
 
 func (h *failingFamilyHub) DisconnectFamilyContext(context.Context, uuid.UUID, uuid.UUID) error {
@@ -231,7 +243,16 @@ func (h *failingFamilyHub) DisconnectFamilyContext(context.Context, uuid.UUID, u
 	return errors.New("injected hub failure")
 }
 
-func TestLoginFamilyRevokeSessionCloseFailureKeepsCommittedSuccess(t *testing.T) {
+func (h *failingFamilyHub) SnapshotUserFamiliesContext(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+
+func (h *failingFamilyHub) DisconnectFamiliesContext(context.Context, uuid.UUID, []uuid.UUID) error {
+	h.calls++
+	return errors.New("injected hub failure")
+}
+
+func TestLoginFamilyRevokeSessionCloseFailureReportsPendingFence(t *testing.T) {
 	r := newTerminalSessionRig(t)
 	failing := &failingFamilyHub{}
 	rdb := redistest.Client(t)
@@ -239,8 +260,9 @@ func TestLoginFamilyRevokeSessionCloseFailureKeepsCommittedSuccess(t *testing.T)
 	_, _, sid, err := r.mint.IssueAccessAndRefresh(context.Background(), r.user)
 	require.NoError(t, err)
 	w := r.request(t, sid, false, r.claims)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	assert.Equal(t, 1, failing.calls)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "revoked")
+	assert.GreaterOrEqual(t, failing.calls, 1)
 	var pending bool
 	require.NoError(t, r.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM login_family_revocations o
  JOIN login_families f ON f.auth_operation_id=o.operation_id

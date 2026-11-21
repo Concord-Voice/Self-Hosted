@@ -62,7 +62,8 @@ make migrate-version
 4. **Know the runner's transaction boundary** - The runner uses golang-migrate v4 (version pinned in `services/control-plane/go.mod`) with the default PostgreSQL driver configuration. Each file is sent as one simple-query `Exec`; PostgreSQL wraps a multi-statement query in one implicit transaction. Put each `CREATE INDEX CONCURRENTLY` in its own one-statement file, because it cannot run inside a transaction block.
 5. **Avoid data migrations in schema migrations** - Consider separate data migration scripts
 6. **Never modify committed migrations** - Create new migrations to fix issues
-7. **Pass squawk** - The `squawk` pre-commit hook and the `migration-lint` PR CI job lint new and changed `*.up.sql` files against `.squawk.toml` (PostgreSQL 16). Run it by hand with `pre-commit run squawk --files <file>`. Suppress a false positive on one statement with a whole-line `-- squawk-ignore <rule>` and a reason (CI refuses `squawk-ignore-file` and ignores in trailing or block comments); see `[internal]rules/migrations.md` § Migration linting (squawk)
+7. **Pass squawk** - The `squawk` pre-commit hook and the `migration-lint` PR CI job lint new and changed `*.up.sql` files against `.squawk.toml` (PostgreSQL 16). Run it by hand with `pre-commit run squawk --files <file>`. Suppress a false positive on one statement with `-- squawk-ignore <rule>` and a reason; see `[internal]rules/migrations.md` § Migration linting (squawk)
+   - The ignore line must be exactly `-- squawk-ignore <rule>[, <rule>]`, directly above the statement, with the reason on its own comment line above it. CI refuses any other line that mentions `squawk-ignore`: `squawk-ignore-file`, a bare ignore with no rule, text after the rules, or an ignore in a trailing or block comment.
 
 ## Migration Structure
 
@@ -82,7 +83,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000197)
+## Existing Migrations (000001–000198)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -305,6 +306,31 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000195 | add_voice_participant_admission_id | Adds nullable `voice_participants.admission_id` and `admission_socket_id`: the admission and socket a Server Voice join consumed. A redelivered `voice.joined` whose reservation is gone is a replay when the row holds that exact pair (#253). The down drops only replay evidence. |
 | 000196 | admin_credential_generation | Adds an administrator credential generation that enrollment ceremonies must match; reset increments it atomically with credential removal. Down refuses once a generation has advanced. |
 | 000197 | add_admin_session_generation | Adds a nonnegative durable generation to `admin_users`; reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; every administrator starts at 1, so pre-migration sessions stop matching and any value above 1 records a revocation; down refuses once any generation passes 1. |
+| 000198 | add_session_revoke_allowance | Moves the rolling session-revocation allowance to a nullable users timestamp and binds simple-mode auth windows to a reset generation. Existing users start a conservative 24-hour window; new users start with no timestamp. Down refuses while any recorded window is active. |
+
+### Session-revocation allowance cutover (migration 000198)
+
+This migration is **not safe with old and new control-plane writers running at
+the same time**: the old binaries authorize the free revoke in Redis, while the
+new binaries authorize it in PostgreSQL. Stop admitting requests, drain all
+in-flight requests, and stop every old control-plane writer before applying
+000198. Apply the migration using the normal migration runner, then start only
+the new binaries and resume traffic. Do not rely on a rolling or blue-green
+overlap for this cutover.
+
+Existing accounts are conservatively treated as having just revoked a session,
+so a free revoke may require password and any enrolled MFA for up to 24 hours.
+New accounts receive the normal fresh allowance. Existing simple-mode Redis
+authentication windows are invalidated; a new one may be granted after a
+successful authenticated revoke. Revoke-all and mode changes advance the
+generation, so a delayed Redis write cannot revive a previous auth window.
+
+For rollback, stop and drain every new writer first. The down migration refuses
+while any PostgreSQL timestamp is within its 24-hour window, because an older
+binary cannot see those revokes. Wait until the guard passes, and at least five
+minutes after draining for simple-mode authentication windows to expire, before
+running the down migration and starting old binaries. A binary-only rollback
+does not transfer the PostgreSQL allowance back into Redis and is unsafe.
 
 ### Logical login authority (migration 000194, #2272)
 

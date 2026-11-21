@@ -73,6 +73,10 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Security
 
+- **Sessions:** The password-free revocation allowance is now committed atomically with session revocation. This change requires a coordinated control-plane cutover; existing accounts may need their password and enrolled MFA for up to 24 hours after migration.
+- **Encryption keys:** Channel and DM key distribution no longer takes a second database connection while it holds a lock, so many concurrent distributions can no longer stall every other request. Distribution and DM key rotation now give up after a 5-second lock wait or a 15-second statement and return 503 instead of hanging, and the pool closes connections left idle inside a transaction for 60 seconds (VULN-079).
+- **Encryption keys:** A key request for someone who already holds the current key is no longer stored, and such requests are cleared after a distribution. `GET /api/v1/e2ee/pending-keys` is now paged (`limit`, `cursor`, `next_cursor`; 100 per page by default, up to 200) and reads at most 1,000 rows per request. The cursor is opaque and sealed, so it reveals nothing about requests the caller cannot see. Older clients still get the first page (VULN-080, VULN-207).
+- **Calls:** Clearing private-call activity now reaches only clients that received the participant state, preventing cross-tenant participant disclosure ([#305](https://github.com/Concord-Voice/Self-Hosted/pull/305)).
 - **Media plane:** Updated `qs` to 6.17.1, which encodes keys when `stringify` runs with `allowEmptyArrays` (CVE-2026-110910) ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)).
 - **Development tooling:** Updated the root package and the Admin Console to patched `undici` 8.12.4 and `minimatch` 11.0.7 ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)), and removed the second ESLint 8 copy that the root lint tooling installed ([#334](https://github.com/Concord-Voice/Self-Hosted/pull/334)).
 - **Admin Console:** Enrollment reset now invalidates earlier enrollment tokens, ceremonies, and console sessions. WebAuthn sign-in persists the credential counter before issuing a session and rejects a stale nonzero counter; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
@@ -80,6 +84,7 @@ readers accept the versioned formats needed for a later storage migration.
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
 - **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
+- **Voice:** A participant can no longer multiply media consumers across receive transports to exhaust shared voice capacity ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed
@@ -94,6 +99,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Fixed
 
+- **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
 - **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
 - **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
 - **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.

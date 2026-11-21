@@ -7,6 +7,7 @@ package dm_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
@@ -83,10 +85,18 @@ func TestRingDMCall_ExpiredStaleRowClearsViewerBadge(t *testing.T) {
 
 	caller := ts.CreateTestUser(t, "ring_clear_caller")
 	callee := ts.CreateTestUser(t, "ring_clear_callee")
-	viewer := ts.CreateTestUser(t, "ring_clear_viewer")
 	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
 	insertStaleDMVoiceRow(t, ts, convID, callee.ID)
-	viewerConn := dialRichPresenceViewer(t, ts, viewer.AccessToken)
+	viewerConn := dialRichPresenceViewer(t, ts, caller.AccessToken)
+	require.NoError(t, ts.Hub.DeliverRichPresence(context.Background(), presence.DeliveryPlan{
+		SenderID:         uuid.MustParse(callee.ID),
+		Category:         presence.CategoryPrivateCall,
+		UpdateRecipients: map[uuid.UUID]bool{uuid.MustParse(caller.ID): true},
+		Payload:          json.RawMessage(`{"call_type":"dm","participant_count":2}`),
+		UpdatedAt:        1,
+	}))
+	badge := readUntilDMEvent(t, viewerConn, "rich_presence_update")
+	require.Equal(t, callee.ID, badge["user_id"], "the viewer must hold the badge before its clear")
 
 	require.Equal(t, http.StatusOK, ringDM(t, ts, caller, convID))
 	require.Zero(t, dmVoiceRowCount(t, ts, convID, callee.ID))

@@ -199,6 +199,41 @@ func checkTargets(ctx context.Context, tx *sql.Tx, targets Targets) error {
 	}
 	return checkToken(targets.token)
 }
+
+// CapturedFamilySubsetTx intersects a caller's bounded local candidates with
+// the exact transaction-captured frontier without loading that frontier.
+func CapturedFamilySubsetTx(ctx context.Context, tx *sql.Tx, targets Targets, candidates []uuid.UUID) ([]uuid.UUID, error) {
+	if err := checkTargets(ctx, tx, targets); err != nil {
+		return nil, err
+	}
+	ids, err := sortedIDs(candidates)
+	if err != nil || len(ids) == 0 {
+		return nil, err
+	}
+	values := make([]string, 0, len(ids))
+	for _, id := range ids {
+		values = append(values, id.String())
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT family_id FROM pg_temp.loginfamily_targets
+ WHERE capture=$1 AND family_id=ANY($2::uuid[]) ORDER BY family_id`, targets.token, pq.Array(values))
+	if err != nil {
+		return nil, sqlFailure(err)
+	}
+	var selected []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err = rows.Scan(&id); err != nil {
+			break
+		}
+		selected = append(selected, id)
+	}
+	err = errors.Join(err, rows.Err(), rows.Close())
+	if err != nil {
+		return nil, sqlFailure(err)
+	}
+	return selected, nil
+}
+
 func capturedPage(ctx context.Context, tx *sql.Tx, targets Targets, after uuid.UUID) (page []familyRecord, retErr error) {
 	rows, err := tx.QueryContext(ctx, `SELECT f.user_id,f.family_id,f.credential_epoch,f.terminal_at,f.auth_operation_id,f.epoch_generation
  FROM pg_temp.loginfamily_targets t JOIN login_families f ON f.family_id=t.family_id
