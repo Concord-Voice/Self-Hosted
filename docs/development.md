@@ -632,7 +632,7 @@ directory belong to the intended service.
 | `REDIS_URL` | `redis://:concord_dev_redis@localhost:6379` | Redis connection. Compose starts Redis with `--requirepass "$REDIS_PASSWORD"`, so the URL must carry that password (repo-root `.env`); an uncredentialed URL fails every Redis call with `NOAUTH` |
 | `JWT_SECRET` | (dev secret) | JWT signing key |
 | `INSTANCE_TYPE` | `saas` | Deployment/entitlement mode (`saas` or `self-hosted`) |
-| `RECOVERY_LEGACY_CODE` | `true` | `false` stops issuing and accepting the deprecated 6-digit email recovery code; recovery emails then always carry a recovery key. Clients that cannot accept a key cannot recover by email while it is `false`. Turning it off needs no wait: the next key request replaces any live code. Values other than `true` and `false` keep the code on and log a warning. |
+| `RECOVERY_LEGACY_CODE` | `true` | `false` stops issuing and accepting the deprecated 6-digit email recovery code; recovery emails then always carry a recovery key. Clients that cannot accept a key cannot recover by email while it is `false`. Turning it off needs no wait: the next key request replaces any live code. It takes any boolean spelling (`false`, `0`, `FALSE`, …); a value that is not a boolean stops the control plane at startup. |
 | `SERVER_VERSION` | `dev` | Advertised server version for capability discovery |
 | `NATS_URL` | `nats://localhost:4222` | NATS connection |
 | `ACTIVITY_HISTORY_CLUSTER_ENABLED` | `false` | Global Activity History rollout gate. Keep false for ordinary development unless you test the guarded single-replica path |

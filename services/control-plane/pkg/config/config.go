@@ -457,19 +457,19 @@ type Config struct {
 	RedemptionAdminToken string // #nosec G117 -- config field name, secret loaded from env
 }
 
-// recoveryLegacyCodeDisabled reads RECOVERY_LEGACY_CODE. Only "false" turns the
-// 6-digit code off; any other value keeps it on, and a value that is not "true"
-// is logged so the operator knows the switch did nothing.
-func recoveryLegacyCodeDisabled(raw string) bool {
-	switch v := strings.TrimSpace(raw); v {
-	case "false":
-		return true
-	case "true", "":
-		return false
-	default:
-		log.Printf("WARN: RECOVERY_LEGACY_CODE=%q is not \"true\" or \"false\"; the 6-digit recovery code stays on", v)
-		return false
+// recoveryLegacyCodeDisabled reads RECOVERY_LEGACY_CODE. Unset keeps the
+// 6-digit code on. A value that is not a boolean is an error, so a typo cannot
+// leave the code on while the operator believes it is off.
+func recoveryLegacyCodeDisabled(raw string) (bool, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return false, nil
 	}
+	on, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("RECOVERY_LEGACY_CODE=%q is not true or false", v)
+	}
+	return !on, nil
 }
 
 // Load reads configuration from environment variables
@@ -644,7 +644,9 @@ func Load() (*Config, error) {
 		OIDCBinaryWorkflow: getEnv("ATTESTATION_OIDC_BINARY_WORKFLOW", "build-desktop.yml"),
 		OIDCBinaryRef:      getEnv("ATTESTATION_OIDC_BINARY_REF", "refs/heads/main"),
 	}
-	cfg.RecoveryLegacyCodeDisabled = recoveryLegacyCodeDisabled(getEnv("RECOVERY_LEGACY_CODE", "true"))
+	if cfg.RecoveryLegacyCodeDisabled, err = recoveryLegacyCodeDisabled(os.Getenv("RECOVERY_LEGACY_CODE")); err != nil {
+		return nil, err
+	}
 
 	if err := loadActivityHistoryConfig(cfg); err != nil {
 		return nil, err

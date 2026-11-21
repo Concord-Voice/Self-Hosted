@@ -1975,19 +1975,20 @@ func TestRecoveryLegacyCodeDefaultsOn(t *testing.T) {
 	assert.True(t, cfg.RecoveryLegacyCodeDisabled)
 }
 
-// Only "false" turns the code off; any other value except "true" keeps it on
-// and warns, so an operator who writes FALSE or 0 is told the switch did nothing.
-func TestRecoveryLegacyCodeUnrecognizedValueWarns(t *testing.T) {
-	var logs bytes.Buffer
-	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	for _, v := range []string{"true", "false", ""} {
-		_ = recoveryLegacyCodeDisabled(v)
+// The switch takes any boolean spelling. A value that is not a boolean stops
+// startup, so an operator who writes "no" is not left with the code still on.
+func TestRecoveryLegacyCodeParsing(t *testing.T) {
+	for v, off := range map[string]bool{"": false, "true": false, "1": false, "TRUE": false, "false": true, "FALSE": true, "0": true, " false ": true} {
+		got, err := recoveryLegacyCodeDisabled(v)
+		require.NoError(t, err, v)
+		assert.Equal(t, off, got, v)
 	}
-	assert.Empty(t, logs.String())
-	for _, v := range []string{"FALSE", "0", "no"} {
-		logs.Reset()
-		assert.False(t, recoveryLegacyCodeDisabled(v), v)
-		assert.Contains(t, logs.String(), "RECOVERY_LEGACY_CODE", v)
+	for _, v := range []string{"no", "off", "maybe"} {
+		_, err := recoveryLegacyCodeDisabled(v)
+		require.ErrorContains(t, err, "RECOVERY_LEGACY_CODE", v)
 	}
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("RECOVERY_LEGACY_CODE", "no")
+	_, err := Load()
+	require.ErrorContains(t, err, "RECOVERY_LEGACY_CODE")
 }
