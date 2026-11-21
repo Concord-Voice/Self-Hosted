@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
@@ -396,13 +397,81 @@ func (s *NATSSubscriber) MutateServerVoiceParticipantForTest(
 // ClearClaimResolverForTest models a subscriber built without a resolver.
 func (s *NATSSubscriber) ClearClaimResolverForTest() { s.resolver = nil }
 
+// testAdmissionNamespace derives a fixture's admission from its exact payload,
+// so a replayed delivery of one join carries the same admission pair.
+var testAdmissionNamespace = uuid.MustParse("3a4f1c9e-7b2d-4e6a-9c1f-5d8e2b7a0c43")
+
+// testAdmissionsReserved remembers each derived admission once it is reserved,
+// so a replay of the same payload finds its reservation consumed, exactly as a
+// second delivery of one admitted join does in production.
+var testAdmissionsReserved sync.Map
+
+// withTestAdmission models the media plane's admitted server join for a
+// fixture payload that names none: the media plane always sends the A1 pair on
+// a channel join (VULN-109), and the control plane reserved it at A1. It
+// reserves a pending admission derived from the payload and adds the pair. A
+// payload that already names an admission, a DM room, or anything that cannot
+// be reserved is returned unchanged. A test of the missing-admission rule
+// itself calls HandleJoinedWithoutAdmissionAt.
+func (s *NATSSubscriber) withTestAdmission(data []byte) []byte {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || fields == nil {
+		return data
+	}
+	if _, named := fields["admissionId"]; named {
+		return data
+	}
+	if _, named := fields["socketId"]; named {
+		return data
+	}
+	var channelID, userID string
+	if json.Unmarshal(fields["channelId"], &channelID) != nil || json.Unmarshal(fields["userId"], &userID) != nil {
+		return data
+	}
+	if _, err := uuid.Parse(channelID); err != nil || s.db == nil {
+		return data
+	}
+	admission := uuid.NewSHA1(testAdmissionNamespace, data)
+	socketID := "test-socket-" + admission.String()[:8]
+	if _, replay := testAdmissionsReserved.LoadOrStore(admission, true); !replay {
+		if _, err := s.db.Exec(`
+			INSERT INTO voice_pending_admissions (channel_id, user_id, admission_id, socket_id, expires_at)
+			SELECT c.id, $2, $3, $4, clock_timestamp() + INTERVAL '1 minute'
+			FROM channels c WHERE c.id = $1
+			ON CONFLICT (channel_id, user_id) DO UPDATE
+			SET admission_id = EXCLUDED.admission_id, socket_id = EXCLUDED.socket_id,
+			    expires_at = EXCLUDED.expires_at
+		`, channelID, userID, admission, socketID); err != nil {
+			testAdmissionsReserved.Delete(admission)
+			return data
+		}
+	}
+	var isChannel bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)`, channelID).Scan(&isChannel); err != nil || !isChannel {
+		return data
+	}
+	fields["admissionId"] = json.RawMessage(`"` + admission.String() + `"`)
+	fields["socketId"] = json.RawMessage(`"` + socketID + `"`)
+	stamped, err := json.Marshal(fields)
+	if err != nil {
+		return data
+	}
+	return stamped
+}
+
 // HandleJoined exposes handleJoined for testing.
 func (s *NATSSubscriber) HandleJoined(data []byte) {
-	s.handleJoined(withTestMediaBoot(data), time.Now())
+	s.handleJoined(s.withTestAdmission(withTestMediaBoot(data)), time.Now())
 }
 
 // HandleJoinedAt exposes handleJoined with an explicit NATS receipt time.
 func (s *NATSSubscriber) HandleJoinedAt(data []byte, receivedAt time.Time) {
+	s.handleJoined(s.withTestAdmission(withTestMediaBoot(data)), receivedAt)
+}
+
+// HandleJoinedWithoutAdmissionAt delivers voice.joined exactly as given, with
+// no admission added.
+func (s *NATSSubscriber) HandleJoinedWithoutAdmissionAt(data []byte, receivedAt time.Time) {
 	s.handleJoined(withTestMediaBoot(data), receivedAt)
 }
 
@@ -417,7 +486,11 @@ func (s *NATSSubscriber) HandleLeftAt(data []byte, receivedAt time.Time) {
 // HandleVoiceLifecycleEventForTest exercises the same placement dispatcher
 // used for NATS lifecycle delivery.
 func (s *NATSSubscriber) HandleVoiceLifecycleEventForTest(subject string, data []byte, receivedAt time.Time) {
-	s.handleVoiceLifecycleEvent(subject, withTestMediaBoot(data), receivedAt)
+	data = withTestMediaBoot(data)
+	if subject == natsSubjectVoiceJoined {
+		data = s.withTestAdmission(data)
+	}
+	s.handleVoiceLifecycleEvent(subject, data, receivedAt)
 }
 
 // HandleRoomEmpty exposes handleRoomEmpty for testing.

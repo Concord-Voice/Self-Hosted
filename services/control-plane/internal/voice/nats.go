@@ -6666,6 +6666,14 @@ func (s *NATSSubscriber) handleServerVoiceJoined(
 		s.log.Error("Rejected voice.joined with invalid admission")
 		return false
 	}
+	if admission == nil {
+		// VULN-109: a Server Voice row exists only for a join the control plane
+		// admitted. Without the admission pair the join is refused before the
+		// write sink; the heartbeat claim rule is the only admission-free writer.
+		// A determined no-op, never a replica-wide disconnect.
+		s.log.Warn("Rejected server voice.joined without admission", "failure_class", "admission_missing")
+		return false
+	}
 	s.convergeServerVoiceParticipant(ctx, room, channelID, senderID)
 	if s.activity == nil {
 		s.log.Error(logServerBridgeUnavailable)
