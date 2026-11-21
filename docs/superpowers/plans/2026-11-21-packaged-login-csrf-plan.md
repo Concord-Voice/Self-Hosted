@@ -6,4 +6,4 @@
 2. Change the cross-site decision by the smallest amount: permit it only for a single exact `app://concord` header that the existing configured-origin checker accepts; leave the normal origin check in place.
 3. Record the user-visible compatibility repair in the prerelease changelog, run formatting, focused race tests, lint, and the changelog guard, then inspect the diff before committing.
 
-**Verification:** use `go test -race ./internal/middleware/...`, `golangci-lint run ./internal/middleware/...`, and the repository changelog verifier. No database or Redis service is required.
+**Verification:** use `go test -race ./internal/middleware/... -run '^TestLoginCSRF' -count=1`, `golangci-lint run ./internal/middleware/...`, and the repository changelog verifier. The focused login-CSRF tests need no database or Redis service; the unfiltered middleware package also contains integration tests that do.
