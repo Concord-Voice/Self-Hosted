@@ -1,0 +1,13 @@
+# OSV-Scanner reads this file only for the package-lock.json in this
+# directory; it does not apply to subdirectories.
+# Same picomatch exception as the npm audit allowlists. This tool's lockfile
+# has no npm audit gate, so OSV is the only scanner that needs it here.
+
+[[PackageOverrides]]
+name = "picomatch"
+ecosystem = "npm"
+version = "4.0.7"
+group = "dev"
+vulnerability.ignore = true
+effectiveUntil = 2026-12-18
+reason = "GHSA-fc5q-39xc-vjpf (ReDoS via repeated extglobs) has no fixed release, and picomatch is a dev/build-time dependency here. https://github.com/advisories/GHSA-fc5q-39xc-vjpf"

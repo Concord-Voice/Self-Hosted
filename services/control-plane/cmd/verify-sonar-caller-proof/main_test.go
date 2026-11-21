@@ -79,7 +79,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 	t.Cleanup(fixture.server.Close)
 	fixture.claims = map[string]any{
 		"iss": fixture.server.URL, "aud": audienceBase + hex.EncodeToString(digest[:]),
-		"sub": "repo:Concord-Voice/Self-Hosted:pull_request",
+		"sub": "repo:Concord-Voice@264583090/Self-Hosted@1359565266:pull_request",
 		// GitHub's live shape: nbf five minutes before iat, five-minute lifetime.
 		"iat": now.Add(-time.Minute).Unix(), "nbf": now.Add(-6 * time.Minute).Unix(),
 		"exp":           now.Add(4 * time.Minute).Unix(),
@@ -182,10 +182,10 @@ func TestVerifyProofRejectsBadProofs(t *testing.T) {
 			return f.key
 		}},
 		{"sibling split repository", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {
-			// The split repos share this verifier; a proof minted for another
-			// one (here Alpha, whose identity this file once pinned) must fail.
-			c["repository_id"] = "1158152129"
-			c["repository"] = "Concord-Voice/Concord-Voice-Alpha"
+			// The split repos share this verifier; a proof minted for a sibling
+			// repository (its own id and name) must fail.
+			c["repository_id"] = "1359565267"
+			c["repository"] = "Concord-Voice/sibling-repo"
 			return f.key
 		}},
 		{"event", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {

@@ -50,52 +50,46 @@ export interface TrustedProxies {
 
 type IpFamily = 'ipv4' | 'ipv6';
 
+const ipv4AddressSpace = new BlockList();
+ipv4AddressSpace.addSubnet('0.0.0.0', 0, 'ipv4');
+
 function ipFamily(address: string): IpFamily | null {
   if (isIPv4(address)) return 'ipv4';
   if (isIPv6(address)) return 'ipv6';
   return null;
 }
 
-/**
- * Add one `TRUSTED_PROXIES` entry to `list`. Returns false when the entry is
- * malformed, so the caller can skip it rather than throw: a single typo must
- * not take the SFU down at startup.
- */
-function addTrustedEntry(list: BlockList, entry: string): boolean {
+function isIPv4MappedIPv6(address: string, family: IpFamily): boolean {
+  return family === 'ipv6' && ipv4AddressSpace.check(address, 'ipv6');
+}
+
+/** Parse once for both the development matcher and production startup guard. */
+export function parseTrustedProxyEntry(
+  raw: string
+): { address: string; prefix: number; family: IpFamily } | null {
+  const entry = raw.trim();
   const slash = entry.lastIndexOf('/');
+  const address = slash < 0 ? entry : entry.slice(0, slash);
+  const family = ipFamily(address);
+  if (!family || isIPv4MappedIPv6(address, family)) return null;
+  if (slash < 0) return { address, prefix: family === 'ipv4' ? 32 : 128, family };
 
+  const prefixText = entry.slice(slash + 1);
+  if (!/^\d{1,3}$/.test(prefixText)) return null;
+  const prefix = Number(prefixText);
+  if (prefix === 0 || prefix > (family === 'ipv4' ? 32 : 128)) return null;
+  return { address, prefix, family };
+}
+
+/** Invalid development entries are skipped; production rejects them on import. */
+function addTrustedEntry(list: BlockList, entry: string): boolean {
+  const parsed = parseTrustedProxyEntry(entry);
+  if (!parsed) return false;
   try {
-    if (slash === -1) {
-      // A bare address is its own /32 (or /128) — BlockList.addAddress is
-      // exactly that single-address rule.
-      const family = ipFamily(entry);
-      if (!family) return false;
-      list.addAddress(entry, family);
-      return true;
-    }
-
-    const address = entry.slice(0, slash);
-    const prefixText = entry.slice(slash + 1);
-    const family = ipFamily(address);
-    if (!family) return false;
-    if (!/^\d{1,3}$/.test(prefixText)) return false;
-    const prefix = Number(prefixText);
-    if (prefix > (family === 'ipv4' ? 32 : 128)) return false;
-    // Reject an all-traffic rule (CWE-348). A /0 trusts EVERY source, which
-    // makes X-Real-IP universally spoofable and the handshake ceiling trivially
-    // evadable — the gate would authenticate the attacker's own claim about
-    // where they came from. Mirrors the control-plane's explicit 0.0.0.0/0 and
-    // ::/0 rejection in infrastructure/deploy/install-selfhost.sh, but guards on
-    // the prefix length so every spelling is covered, not just those two
-    // literals. Skipping (not throwing) keeps startup alive; a list that was
-    // ONLY /0 entries compiles to size 0 and degrades to the inert gate.
-    if (prefix === 0) return false;
-    list.addSubnet(address, prefix, family);
+    if (entry.includes('/')) list.addSubnet(parsed.address, parsed.prefix, parsed.family);
+    else list.addAddress(parsed.address, parsed.family);
     return true;
   } catch {
-    // Defence in depth: node throws on inputs isIPv4/isIPv6 accepted but
-    // BlockList rejects. Skipping keeps startup alive; an all-skipped list
-    // degrades to the inert gate, never to a deployment-wide shared bucket.
     return false;
   }
 }
@@ -103,16 +97,8 @@ function addTrustedEntry(list: BlockList, entry: string): boolean {
 /**
  * Compile the configured trusted-proxy entries into a matcher.
  *
- * Exact string equality cannot work here: nginx reaches the media-plane over a
- * docker bridge whose container address is not a stable literal, so the peer
- * has to be matched by RANGE. Mirrors the control-plane's `TRUSTED_PROXY_CIDRS`
- * (`services/control-plane/pkg/config/config.go:1155` `parseTrustedProxyCIDRs`
- * → gin `SetTrustedProxies`, `internal/api/router.go:131`) — with one deliberate
- * difference: the control-plane REJECTS a malformed entry at startup, while the
- * media-plane skips it. Go's guard exists because an empty control-plane list
- * silently regresses `c.ClientIP()`; here an empty list disables the gate
- * outright and is reported, so failing startup would trade a bounded capacity
- * loss for a voice outage.
+ * Production configuration admits only exact host routes. Development keeps
+ * CIDR support and malformed-entry warnings to preserve local test topology.
  *
  * Accepts bare addresses (`10.0.0.9` → /32, `2001:db8::1` → /128) and CIDR
  * blocks, IPv4 and IPv6.
@@ -187,12 +173,7 @@ export function resolveClientIp(
   const peer = req.socket?.remoteAddress;
 
   if (peer && trustedProxies.has(peer)) {
-    // Only accept a header value that actually PARSES as an address. Production
-    // trusts the whole RFC1918 space, so any container or LAN host that reaches
-    // this port directly is inside the trusted set and could otherwise set an
-    // arbitrary string as its own counter key — churning the bounded store and
-    // evicting real entries. A non-address value falls through to
-    // X-Forwarded-For, and then to the fail-open return below.
+    // Reject malformed headers so they cannot become arbitrary counter keys.
     const realIp = firstHeader(req.headers['x-real-ip'])?.trim();
     if (realIp && ipFamily(realIp)) return realIp;
 
@@ -202,8 +183,7 @@ export function resolveClientIp(
         .split(',')
         .map((h) => h.trim())
         .filter(Boolean);
-      // $proxy_add_x_forwarded_for appends the peer, so the LAST hop is the
-      // address nginx observed — the one we can actually attribute.
+      // nginx overwrites XFF with the observed client address.
       const last = hops.at(-1);
       // Same parse guard as X-Real-IP above — validating only one of the two
       // headers would leave the identical arbitrary-key path open on the other.
@@ -265,7 +245,7 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
       'Admission gate INACTIVE: no trusted proxies configured (TRUSTED_PROXIES). ' +
         'Every client would otherwise be attributed to the reverse proxy and share ' +
         'one handshake budget, so the per-source-IP ceiling is disabled. Set ' +
-        'TRUSTED_PROXIES to the CIDR the media-plane sees nginx on to enable it.'
+        'TRUSTED_PROXIES to the exact peer the media-plane sees nginx on to enable it.'
     );
     const inert = ((_req, callback) => {
       callback(null, true);

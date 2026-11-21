@@ -33,13 +33,15 @@ belongs in it, and write it if the section has none. Do not edit the
 WebSocket event budgets are ready for self-hosted operators and stay off
 until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
-Android. Backup-code readers now accept the versioned formats needed for a
-later storage migration.
+Android. SSO account linking now requires current account policy and MFA,
+SSO initiation is bound to the Desktop flow that started it, and backup-code
+readers accept the versioned formats needed for a later storage migration.
 
-**22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
+**23 Total Changes** | 8 Added | 6 Changed | 7 Fixed | 2 Security
 
 ### Added
 
+- **Operations:** The nightly main-branch SonarQube Cloud scan now runs dependency analysis (SCA), and a daily `sonar-container-scan.yml` sends the service images and every digest-pinned image to SonarQube Cloud container scanning (beta). Neither blocks a pull request: OSV-Scanner and Dependabot keep the pull-request dependency checks, and Trivy keeps the image gate.
 - **Operations:** Added a default-off control-plane blue-green rail to `concord-ctl.sh` (`CONTROL_PLANE_DEPLOY_PROFILE=control-plane-bluegreen`, managed production and staging only, never self-host) that rebuilds the control plane without 502s when no migration is pending, plus a read-only `control-plane migrations status` subcommand and a `MIGRATIONS_MODE=verify` startup setting that refuses to start on a schema that is not current. Do not turn the rail on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 ship.
 - **Authentication:** Added `authority-ceremony`, an operator tool that signs account-key authority delegations and successions with two hardware keys, or with two key files on a self-hosted install (`--key-file`, `--yes`). It also writes a realm's anchors file (`make-anchors`) and prints a trust file's current delegation window (`show-trust`). Nothing runs it yet.
 - **Authentication:** Added dormant checks to the account-key authority contract that refuse a delegation or succession before it is signed when clients would ignore it, halt on it, or see its cutover or supersession move backward. Nothing calls them yet.
@@ -71,11 +73,22 @@ later storage migration.
 
 ### Security
 
-- **Voice:** A participant can no longer multiply media consumers across receive transports to exhaust shared voice capacity ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303), [Hosted #4433](https://github.com/Concord-Voice/Hosted/pull/4433)).
+- **Sessions:** The password-free revocation allowance is now committed atomically with session revocation. This change requires a coordinated control-plane cutover; existing accounts may need their password and enrolled MFA for up to 24 hours after migration.
+- **Encryption keys:** Channel and DM key distribution no longer takes a second database connection while it holds a lock, so many concurrent distributions can no longer stall every other request. Distribution and DM key rotation now give up after a 5-second lock wait or a 15-second statement and return 503 instead of hanging, and the pool closes connections left idle inside a transaction for 60 seconds (VULN-079).
+- **Encryption keys:** A key request for someone who already holds the current key is no longer stored, and such requests are cleared after a distribution. `GET /api/v1/e2ee/pending-keys` is now paged (`limit`, `cursor`, `next_cursor`; 100 per page by default, up to 200) and reads at most 1,000 rows per request. The cursor is opaque and sealed, so it reveals nothing about requests the caller cannot see. Older clients still get the first page (VULN-080, VULN-207).
+- **Media plane:** Updated `qs` to 6.17.1, which encodes keys when `stringify` runs with `allowEmptyArrays` (CVE-2026-110910) ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)).
+- **Development tooling:** Updated the root package and the Admin Console to patched `undici` 8.12.4 and `minimatch` 11.0.7 ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)), and removed the second ESLint 8 copy that the root lint tooling installed ([#334](https://github.com/Concord-Voice/Self-Hosted/pull/334)).
+- **Admin Console:** Enrollment reset now invalidates earlier enrollment tokens, ceremonies, and console sessions. WebAuthn sign-in persists the credential counter before issuing a session and rejects a stale nonzero counter; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
+- **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
+- **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
+- **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
+- **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
+- **Voice:** A participant can no longer multiply media consumers across receive transports to exhaust shared voice capacity ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed
 
+- **Operations:** `ATTESTATION_OIDC_SUBJECT_PREFIX` now defaults to `repo:Concord-Voice@264583090/Self-Hosted@1359565266:`, the immutable subject form this repository's GitHub OIDC tokens carry. Set it to bind attestation to a different repository. The self-hosted acceptance runner checks now admit this repository too.
 - **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.
 - **Self-hosted setup:** Fresh installs now write `WS_EVENT_BUDGET_ENABLED=false`, so budgets stay off until an operator sets `true`. The `concord-selfhost`, `concord-ctl.sh` and installer entrypoints, and the TLS helper's reader shell, start Bash in privileged mode, so shell functions and `BASH_ENV` from the calling environment cannot bypass their environment cleanup. Run the wrapper directly, not as `bash concord-selfhost`.
 - **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
@@ -84,6 +97,7 @@ later storage migration.
 
 ### Fixed
 
+- **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
 - **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
 - **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
 - **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.
@@ -103,10 +117,15 @@ later storage migration.
 
 ### Security
 
+- **Self-host:** Restore now rotates the JWT signing secret, revokes restored refresh tokens, and clears old opaque authorization state from Redis before startup, invalidating captured credentials that an older backup could otherwise revive ([#308](https://github.com/Concord-Voice/Self-Hosted/pull/308)).
+- **Privacy:** Invisible presence now stays indistinguishable from offline in server counts, member timestamps, and group-DM calls. Member `last_seen` is available only on your own row. Profile and transfer details reach only people allowed to see them, and blocking a stranger no longer notifies them.
 - **Authentication:** Backup-code verification and status reads now accept only exact bare SHA-256, `v1$` SHA-256, or bounded `v2$` Argon2id hashes, and fail closed on malformed stored values. New codes still use the bare format until all serving replicas have this reader; the v2 writer and database migration follow in a separate rollout ([#290](https://github.com/Concord-Voice/Self-Hosted/pull/290)).
 - **Registration:** New account requests now reject bodies over 64 KiB and oversized decoded key material before password hashing, and check existing email and username conflicts before expensive work ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **WebSocket:** When client attestation is required, JWT fallback upgrades now validate the session's attestation proof before admitting the socket; the single-use ticket path remains unchanged ([Self-Hosted PR #293](https://github.com/Concord-Voice/Self-Hosted/pull/293)).
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
+- **Authentication:** **BREAKING** SSO account linking now completes only after any enrolled MFA factor is verified and current password policy is rechecked. Apple and Google initiation require the Desktop client-binding header, reject provider-wide bursts above 600 per minute, and stop allocating state on Redis errors; the six public cookie-creating auth routes require JSON and reject cross-site requests. SSO registration, linking, session creation, and Apple client-secret requests now reject bodies over 128 KiB with 413 `request_too_large`. Registration caps encoded and decoded E2EE wrapped keys and salts, while provider JWKS refreshes replace withdrawn keys and bound unknown-key fetches. In-flight SSO attempts must restart after upgrade, and older Desktop builds cannot initiate SSO once server enforcement is deployed ([#299](https://github.com/Concord-Voice/Self-Hosted/pull/299)).
+- **Self-hosted setup:** Client IP limits and bans use the address nginx has authenticated: forwarding headers are overwritten, and both services trust only the measured exact proxy address. Cloudflare client addresses are restored only after a deployment-specific Authenticated Origin Pull check; direct media remains separate ([#291](https://github.com/Concord-Voice/Self-Hosted/pull/291)).
+- **Accounts:** **BREAKING** MFA step-up attempts now share one per-account limit of five codes in fifteen minutes across session, security, ownership, DM purge and clear-history actions and turning off purge verification; recovery and registration code guesses keep their limits across new codes, email changes and re-registration. Exhausted budgets return 429 with a retry delay, and unavailable budget checks fail closed. API: `POST /sessions/revoke-all`, `DELETE /sessions/{id}` and `PUT /sessions/revocation-mode` now require `password` and, if MFA is enrolled, `mfa_code`; an exhausted budget is 429 with `step_up_budget_exhausted`, an unavailable one 503 with `step_up_budget_unavailable` ([#285](https://github.com/Concord-Voice/Self-Hosted/pull/285)).
 - **Accounts:** WebAuthn sign-in and inline confirmation now atomically advance authenticator counters and reject clone warnings before granting access, while credential registration enforces the ten-key limit again when the final write commits ([#288](https://github.com/Concord-Voice/Self-Hosted/pull/288)).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.

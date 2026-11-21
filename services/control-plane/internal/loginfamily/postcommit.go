@@ -31,11 +31,12 @@ const (
 
 // CloseCommittedFamilies synchronously fences the live transports of every
 // family the committed owners made terminal, so a revoked socket stops sending
-// and receiving before the revoking request answers. Call it only after a
-// definite commit. It is a fast path, never the obligation: an error leaves
-// the sealed owner for the reconciler to retry and must not rescind or fail
-// the committed revocation. The caller's cancellation is detached so a client
-// disconnect cannot abandon the fence; PostCommitCloseTimeout bounds it.
+// and receiving before the revoking request answers. Call it after a definite
+// commit, or to inspect committed owners after an ambiguous commit. It is a
+// fast path, never the obligation: an error cannot undo a committed revocation,
+// and the reconciler can retry while the sealed owner is still pending. The
+// caller's cancellation is detached so a client disconnect cannot abandon the
+// fence; PostCommitCloseTimeout bounds it.
 func CloseCommittedFamilies(ctx context.Context, db *sql.DB, closer FamilyCloser, owners []DeliveryOwner) error {
 	if db == nil || closer == nil {
 		return errors.New("post-commit family close unavailable")

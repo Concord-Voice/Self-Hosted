@@ -1040,19 +1040,27 @@ func TestRemoveAllChannelSubscriptionsClearsHubAndClientState(t *testing.T) {
 // --- IsUserOnline / MarkUserOnlineForTest tests ---
 
 func TestHub_IsUserOnline(t *testing.T) {
-	h := newMinimalHub()
+	redisClient := setupHubTestRedis(t)
+	h := NewHub(nil, redisClient)
 	uid := uuid.New()
 	assert.False(t, h.IsUserOnline(uid))
 	cid := uuid.New()
 	h.userClients[uid] = map[uuid.UUID]bool{cid: true} // direct registration, matches existing hub tests
+	assert.False(t, h.IsUserOnline(uid), "connected users without explicit Redis presence fail closed")
+	require.NoError(t, redisClient.Set(context.Background(), "presence:"+uid.String(), statusOnline, 0).Err())
 	assert.True(t, h.IsUserOnline(uid))
+	require.NoError(t, redisClient.Set(context.Background(), "presence:"+uid.String(), statusInvisible, 0).Err())
+	assert.False(t, h.IsUserOnline(uid), "invisible connected users must appear offline")
 }
 
 func TestHub_MarkUserOnlineForTest(t *testing.T) {
-	h := newMinimalHub()
+	redisClient := setupHubTestRedis(t)
+	h := NewHub(nil, redisClient)
 	uid := uuid.New()
 	assert.False(t, h.IsUserOnline(uid))
 	h.MarkUserOnlineForTest(uid)
+	assert.False(t, h.IsUserOnline(uid), "synthetic connection alone must not bypass visibility")
+	require.NoError(t, redisClient.Set(context.Background(), "presence:"+uid.String(), statusOnline, 0).Err())
 	assert.True(t, h.IsUserOnline(uid))
 }
 
@@ -1074,6 +1082,34 @@ func TestHandleUnregisterRemovesClient(t *testing.T) {
 	_, exists := hub.clients[client.ID]
 	assert.False(t, exists, "client should be removed from clients map")
 	assert.True(t, hub.userClients[userID][otherClient.ID], "other client should remain")
+}
+
+func TestSecurity171_HandleUnregisterInvisibleUserWritesPrivateLastSeen(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.userClients[userID] = map[uuid.UUID]bool{client.ID: true}
+	hub.hiddenPresence[userID] = statusInvisible
+
+	before := time.Now().Unix()
+	hub.handleUnregister(client)
+
+	lastSeen, err := redisClient.Get(context.Background(), "last_seen:"+userID.String()).Int64()
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, lastSeen, before, "invisible activity must advance the private inactivity clock")
+	assert.LessOrEqual(t, lastSeen, time.Now().Unix())
+}
+
+func TestSecurity171_HandleUnregisterWithoutRedis(t *testing.T) {
+	hub := newMinimalHub()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.userClients[userID] = map[uuid.UUID]bool{client.ID: true}
+
+	assert.NotPanics(t, func() { hub.handleUnregister(client) })
 }
 
 func TestHandleUnregisterMultiDeviceKeepsOtherClients(t *testing.T) {
@@ -3025,19 +3061,40 @@ func TestHubActivityObserverCountsPresenceHiddenUsers(t *testing.T) {
 }
 
 func TestGetConnectedUsers(t *testing.T) {
-	hub := newMinimalHub()
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
 	hub.mu.Lock()
 	user1 := uuid.New()
 	user2 := uuid.New()
 	hub.userClients[user1] = map[uuid.UUID]bool{uuid.New(): true}
 	hub.userClients[user2] = map[uuid.UUID]bool{uuid.New(): true}
 	hub.mu.Unlock()
+	require.NoError(t, redisClient.Set(context.Background(), "presence:"+user1.String(), statusOnline, 0).Err())
+	require.NoError(t, redisClient.Set(context.Background(), "presence:"+user2.String(), statusDND, 0).Err())
 
 	users := hub.GetConnectedUsers()
 
 	assert.Len(t, users, 2)
 	assert.True(t, users[user1])
 	assert.True(t, users[user2])
+}
+
+func TestSecurity171_GetConnectedUsersExcludesInvisibleAttacker(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+	visibleUser := uuid.New()
+	invisibleAttacker := uuid.New()
+	missingPresenceUser := uuid.New()
+	hub.userClients[visibleUser] = map[uuid.UUID]bool{uuid.New(): true}
+	hub.userClients[invisibleAttacker] = map[uuid.UUID]bool{uuid.New(): true}
+	hub.userClients[missingPresenceUser] = map[uuid.UUID]bool{uuid.New(): true}
+	require.NoError(t, redisClient.Set(context.Background(), "presence:"+visibleUser.String(), statusOnline, 0).Err())
+	require.NoError(t, redisClient.Set(context.Background(), "presence:"+invisibleAttacker.String(), statusInvisible, 0).Err())
+
+	users := hub.GetConnectedUsers()
+
+	assert.Equal(t, map[uuid.UUID]bool{visibleUser: true}, users,
+		"the exported accessor must not expose invisible or missing-presence connections")
 }
 
 func TestGetConnectedUsersEmpty(t *testing.T) {

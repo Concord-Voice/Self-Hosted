@@ -124,6 +124,9 @@ type LoginCompleter interface {
 	// transaction has committed. MFA must not record challenge verification
 	// before that point.
 	CompleteLogin(c *gin.Context, userID string, rememberMe bool, expectedEpoch string, primaryAuthMethod securityevent.AuthMethod) bool
+	// CompleteSSOLink receives only signed challenge identity and a verified
+	// factor after the one-use challenge claim succeeds.
+	CompleteSSOLink(c *gin.Context, userID, challengeJTI, expectedEpoch, verifiedMethod string) bool
 }
 
 // PermissionInvalidator makes a user's cached permissions miss on their next
@@ -380,7 +383,7 @@ func (h *Handler) verifyCodeMatchedMethod(ctx context.Context, store codeVerific
 			return false, "", fmt.Errorf("TOTP secret decryption failed: %w", decErr)
 		}
 		if step, matched := MatchCodeStep(string(secret), code); matched {
-			return acceptTOTPStep(ctx, store, userID, step)
+			return acceptTOTPStep(ctx, store, userID, step, secretNonce)
 		}
 
 		backupVerified, backupErr := consumeBackupCode(ctx, store, userID, code)
@@ -428,10 +431,14 @@ func (h *Handler) consumeWebAuthnInlineToken(ctx context.Context, store codeVeri
 // rollback un-burns the step with everything else, as it does a backup code.
 // On the pool the advance commits at once, so an action that fails after
 // verification has still spent the step.
-func acceptTOTPStep(ctx context.Context, store codeVerificationStore, userID string, step int64) (bool, string, error) {
+//
+// The update is fenced on the secret the code was matched against (its nonce)
+// and on TOTP still being enabled and confirmed: a re-enrollment or disable
+// that lands between the read and this update must make the old code fail.
+func acceptTOTPStep(ctx context.Context, store codeVerificationStore, userID string, step int64, secretNonce []byte) (bool, string, error) {
 	result, err := store.ExecContext(ctx,
-		`UPDATE user_mfa_totp SET last_used_step = $2, updated_at = NOW() WHERE user_id = $1 AND (last_used_step IS NULL OR last_used_step < $2)`,
-		userID, step,
+		`UPDATE user_mfa_totp SET last_used_step = $2, updated_at = NOW() WHERE user_id = $1 AND (last_used_step IS NULL OR last_used_step < $2) AND enabled AND confirmed AND totp_secret_nonce = $3`,
+		userID, step, secretNonce,
 	)
 	if err != nil {
 		return false, "", fmt.Errorf("record TOTP step: %w", err)
@@ -464,11 +471,11 @@ func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID 
 		return false, nil
 	}
 
-	updatedUsed := append([]bool(nil), used...)
-	updatedUsed[idx] = true
 	result, err := store.ExecContext(ctx,
-		`UPDATE user_mfa_totp SET backup_codes_used = $1, updated_at = NOW() WHERE user_id = $2 AND backup_codes_used = $3`,
-		pq.Array(updatedUsed), userID, pq.Array(used),
+		// Fence the matched set and factor state while allowing other codes in the
+		// same set to be claimed concurrently.
+		`UPDATE user_mfa_totp SET backup_codes_used[$2] = TRUE, updated_at = NOW() WHERE user_id = $1 AND enabled AND confirmed AND backup_codes_hash = $3 AND backup_codes_used[$2] = FALSE`,
+		userID, idx+1, pq.Array(hashes),
 	)
 	if err != nil {
 		return false, fmt.Errorf("consume backup code: %w", err)
@@ -547,6 +554,15 @@ func (h *Handler) GenerateLoginChallenge(ctx context.Context, userID string, rem
 	}
 
 	return token, jti, nil
+}
+
+// GenerateSSOLinkChallenge signs a dedicated continuation for an account link.
+// The auth adapter stores the provider identity separately under this JTI.
+func (h *Handler) GenerateSSOLinkChallenge(_ context.Context, userID, credEpoch string) (string, string, error) {
+	return generateChallengeTokenWithTTL(ChallengeClaims{
+		UserID: userID, Purpose: PurposeLogin, CompletionKind: CompletionKindSSOLink,
+		CredentialEpoch: credEpoch, PrimaryAuthMethod: securityevent.AuthSSO,
+	}, JWTSecret(h.jwtSecret), challengeTTL)
 }
 
 // GenerateUpgradeChallenge creates a challenge token for pre-MFA session upgrades.
@@ -1420,11 +1436,10 @@ type totpDisableRequest struct {
 
 // TOTPDisable disables TOTP MFA. Requires password + a valid MFA code.
 //
-// Everything runs in ONE transaction that takes the users row FOR NO KEY
-// UPDATE first (it writes the flags): the password and code are checked under
-// that lock, the code on the transaction so a rollback cannot burn a backup
-// code, the delete and the flags commit together (B1), and D1 is checked
-// before the commit.
+// The enrollment probe and any attempt-budget admission run before the
+// transaction. The transaction then takes the users row FOR NO KEY UPDATE:
+// password/factor verification, delete, and flags sync commit together (B1),
+// so a rollback cannot burn a backup code; D1 remains checked before commit.
 func (h *Handler) TOTPDisable(c *gin.Context) {
 	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
@@ -1432,6 +1447,19 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	var req totpDisableRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password and MFA code are required"})
+		return
+	}
+	// Probe enrollment before beginning the locked transaction. A Redis charge
+	// while LockSubjectTx holds the users row would let a slow Redis consume a
+	// scarce SQL connection and block factor writers. The locked recheck below
+	// is still authoritative.
+	var preflightTOTPExists bool
+	if err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&preflightTOTPExists); err != nil {
+		h.log.Error("Failed to read TOTP enrollment", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
+		return
+	}
+	if preflightTOTPExists && !h.chargeMFASettingsCode(c, userID, req.Code) {
 		return
 	}
 
@@ -1466,8 +1494,19 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	}
 	// Row gone but mfa_methods may still list 'totp': the sync below cleans
 	// the denormalized flags either way.
-	if totpExists && !h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, req, es) {
-		return
+	mfaVerified := false
+	if totpExists {
+		// A factor appearing after the preflight has not been charged. Refuse it
+		// for a retry instead of offering a free verifier guess; charging here
+		// would reintroduce a Redis round trip while the users row is locked.
+		if !preflightTOTPExists {
+			c.JSON(http.StatusConflict, gin.H{"error": "TOTP enrollment changed; retry"})
+			return
+		}
+		var verified bool
+		if verified, mfaVerified = h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, req, es); !verified {
+			return
+		}
 	}
 	if err := syncMFAFlagsTx(ctx, tx, userID, es); err != nil {
 		h.log.Error("Failed to sync MFA flags after TOTP disable", "error", err)
@@ -1482,6 +1521,9 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
+	if mfaVerified {
+		h.clearTxStepUpAfterCommit(c, userID)
+	}
 
 	if totpExists {
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonFactorDisabled, AuthMethod: securityevent.AuthTOTP})
@@ -1495,31 +1537,31 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 func (h *Handler) verifyAndDeleteTOTPTx(
 	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, attempt *stepup.PasswordAttempt,
 	req totpDisableRequest, es emailSmsState,
-) bool {
+) (proceed, mfaVerified bool) {
 	ctx := c.Request.Context()
 
 	if !h.verifyFactorRemovalPassword(c, subj, attempt, req.Password, "Password verification failed during TOTP disable") {
-		return false
+		return false, false
 	}
 
 	valid, err := h.VerifyCodeTx(ctx, tx, userID, stepup.PurposeTOTPDisable, req.Code)
 	if err != nil {
 		h.log.Error("MFA code verification error during TOTP disable", "user_id", userID, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed because of a server error. Contact support if this continues."})
-		return false
+		return false, false
 	}
 	if !valid {
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid})
 		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidMFACode})
-		return false
+		return false, false
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_mfa_totp WHERE user_id = $1`, userID); err != nil {
 		h.log.Error("Failed to disable TOTP MFA", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
-		return false
+		return false, false
 	}
-	return !h.refuseLastInlineFactorTx(c, tx, userID, es, errMsgFailedDisableMFA)
+	return !h.refuseLastInlineFactorTx(c, tx, userID, es, errMsgFailedDisableMFA), true
 }
 
 // RegenerateBackupCodes generates new backup codes. Requires password + TOTP code.
@@ -1582,6 +1624,9 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidTOTPCode})
 		return
 	}
+	if !h.chargeMFASettingsCode(c, userID, req.Code) {
+		return
+	}
 	step, matched := MatchCodeStep(string(secret), req.Code)
 	if !matched {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidTOTPCode})
@@ -1620,6 +1665,7 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 		return
 	}
 
+	h.clearStepUpAfterSuccess(c, userID)
 	c.JSON(http.StatusOK, gin.H{"backup_codes": codes})
 }
 
@@ -2393,7 +2439,7 @@ func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verify
 		return verified, "webauthn", responded
 	case "email":
 		verified, responded := h.verifyEmailCode(ctx, c, req.Code, claims)
-		return verified, "", responded
+		return verified, "email", responded
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid method. Use 'totp', 'backup_code', 'webauthn', or 'email'"})
 		return false, "", true
@@ -2527,6 +2573,12 @@ func (h *Handler) completeVerifyPurpose(ctx context.Context, c *gin.Context, cla
 		return h.recoveryCompleter.CompleteRecovery(c, claims.UserID, recoveryFactor(verifiedMethod))
 
 	case PurposeLogin:
+		switch claims.CompletionKind {
+		case "", CompletionKindLogin, CompletionKindSSOLink:
+		default:
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid MFA challenge"})
+			return false
+		}
 		if h.loginCompleter == nil {
 			h.log.Error("MFA login verified with no login completer wired", "user_id", claims.UserID)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Login completion not configured"})
@@ -2534,6 +2586,9 @@ func (h *Handler) completeVerifyPurpose(ctx context.Context, c *gin.Context, cla
 		}
 		// The key expires with the challenge, which is already claimed.
 		h.delBestEffort(ctx, "Failed to clear MFA challenge remember-me state", claims.UserID, auth.MFAChallengeRememberMeKey(claims.ID))
+		if claims.CompletionKind == CompletionKindSSOLink {
+			return h.loginCompleter.CompleteSSOLink(c, claims.UserID, claims.ID, claims.CredentialEpoch, verifiedMethod)
+		}
 		primaryAuthMethod, err := normalizePrimaryAuthMethod(claims.PrimaryAuthMethod)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid MFA challenge"})

@@ -12,6 +12,34 @@ Concord treats every credential as interchangeable, and the weakest can rebuild 
 
 **Current implementation note (2026-10-15):** the ad-hoc `recovery-only-challenge` patch closes this immediate recovery-policy bypass (Codex Security finding `csf_13551019f403b6ab218b09ef`) on this branch, pending deployment. A recovery email is atomically consumed and, where current raw policy reserves an actually enrolled TOTP or WebAuthn factor, a distinct five-minute recovery challenge must prove one before final recovery authority is issued. The final `recovery_v2` token carries signed server-verified factor provenance and every reset, device, and social-recovery consumer rechecks current policy. The patch does not implement this ADR's broader proposed hardening: universal MFA accounts, the 15-minute recovery-token TTL, credential-epoch recovery binding, recovery-key authority, or the seniority/hold model remain proposed work.
 
+**Recovery attempt policy:** email-code verification has a separate
+ten-attempt, twenty-four-hour Redis budget keyed by normalized email. Starting
+recovery again preserves a live code record and never resets either its local
+attempts or the account budget. A successfully consumed email code clears the
+account budget; password proof or a new email send does not. Exhaustion returns
+429 with `Retry-After`; an unavailable budget store fails closed with 503. This
+is an active guess limit, independent of the broader recovery authority changes
+proposed by this ADR. Accepted trade-off: anyone who knows an account's email can
+spend this budget with wrong codes and block email-code recovery for up to 24
+hours. Keying the budget to a live challenge, or resetting it on recovery begin,
+would let a caller reissue challenges and restart guessing, so the account-wide
+bound stays. The per-IP limit is a separate bound, not this defense.
+
+**Registration code issuance:** each registration code admits four guesses, and
+a password takeover of a pending registration carries the replaced row's
+attempt count and resend state into the new row. A cancel then register leaves
+no row to carry from, so every code-issuing path (register, resend, and
+change-email for the new address) charges a per-address issuance limit of the
+initial code plus the resend cap per pending lifetime, keyed by normalized
+email. It gates issuance only: a confirm of a code already sent is never
+refused because of it, and it counts only codes minted, so a request that
+sends none is refunded. An unavailable store fails closed with 503. Accepted
+trade-off: anyone who knows an address can spend this limit, by causing codes
+to be sent to it, and delay that address's registration for up to the pending
+TTL. The account-wide bound stays
+for the same reason as recovery's: a limit tied to a pending row would let a
+caller cancel, re-register and restart guessing.
+
 #2553 assumes CP user authentication is sound (ADR-0045 decision-table row D21, `0045:672`) and freezes its protocol-v1 contract at #3587 PR-A, so any factor this design needs must be named first.
 
 Two hard constraints pull against each other. An attacker who changed the password or email must not lock the owner out or stop the owner's recovery. And an intimate-partner abuser who knows the old password or shares the mailbox must be cut off quickly, with no delay that shields the abuser. When owner and attacker hold the same credentials, no rule over credentials alone can separate them: the two cases are mirror images.
@@ -49,6 +77,32 @@ Two hard constraints pull against each other. An attacker who changed the passwo
 - **Scope boundary (lead, 2026-10-08; #2553 LD-55).** An adversary holding three or more of the owner's independent ways in (the mailbox, the password, an MFA method or backup codes, the recovery key, a root-holding device) is out of scope. Residuals that need that many get no mechanism; adversaries holding one or two stay in scope. Option B, decided before the boundary, stays as designed; nothing further is built for such an adversary (lead, 2026-10-08).
 - **Delivery becomes a security control.** Notices go through a durable outbox, and completion holds while they are undelivered.
 - **To revisit:** passwordless accounts (needs a floor branch and PRF); Touch ID for the recovery device (needs a signed-build entitlements spike); a hardware security key used only for recovery.
+
+## Current SSO authentication boundary
+
+The account-link path proves the existing password, applies the deployment's
+effective password-login policy, then either mints under a locked final policy
+read or issues a signed `sso_link` MFA challenge. A five-minute Redis record
+holds only target user, credential epoch and provider identity under the
+challenge JTI. The verifier claims the challenge once, checks the factor and
+dispatches by the signed completion kind; the SSO-link completer consumes that
+pending record with `GETDEL`. The final users-row lock rechecks disabled state,
+password policy, epoch and current login MFA before one transaction inserts
+identity, login family and refresh row. Cookie and session response follow
+commit. Factor writers and recovery-only preference writes take the same
+users-row lock, so an enrollment or removal cannot cross the final read.
+
+Desktop main binds each Apple or Google state to the initiating process with
+the same canonical 32-byte client secret on initiation and session exchange;
+Redis holds only a domain-separated SHA-256 digest. A missing or mismatched
+binding consumes state and fails before provider token validation. Six public
+cookie-establishing auth POST routes require JSON, reject cross-site Fetch
+Metadata and enforce an exact configured Origin when one is supplied; native
+clients may omit Origin. Provider initiation also has a fail-closed per-provider
+600/minute cap alongside the existing per-IP cap. Registration bounds encoded
+and decoded E2EE envelopes and salts. A valid JWKS fetch replaces the provider
+snapshot so withdrawn keys disappear; unknown-key refresh attempts are bounded
+to one per provider per minute, which can briefly delay a new provider key.
 
 ## Action items
 

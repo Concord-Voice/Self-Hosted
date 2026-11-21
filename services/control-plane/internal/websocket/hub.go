@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -214,6 +215,9 @@ type Hub struct {
 
 	// Mutex protecting maps accessed from outside the Run goroutine
 	mu sync.RWMutex
+	// The family index has its own lock so revocation can snapshot it without
+	// waiting behind Run work that may itself be waiting on a user-row lock.
+	familySnapshotMu sync.RWMutex
 
 	// Deterministic test seam invoked after a custom-text snapshot authorizes a
 	// viewer but before it enqueues the frame. Nil in production.
@@ -276,6 +280,8 @@ type Hub struct {
 
 	// User ID to client IDs mapping (for multi-device support)
 	userClients map[uuid.UUID]map[uuid.UUID]bool
+	// User ID to client ID to family ID, maintained with client publication.
+	familySnapshotByUser map[uuid.UUID]map[uuid.UUID]uuid.UUID
 
 	// lastInboundAt is the wall time of each user's most recent inbound
 	// APPLICATION frame, and is the presence sweeper's evidence that a renderer
@@ -769,6 +775,7 @@ func newHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *H
 		redis:                        redisClient,
 		clients:                      make(map[uuid.UUID]*Client),
 		userClients:                  make(map[uuid.UUID]map[uuid.UUID]bool),
+		familySnapshotByUser:         make(map[uuid.UUID]map[uuid.UUID]uuid.UUID),
 		lastInboundAt:                make(map[uuid.UUID]time.Time),
 		hiddenPresence:               make(map[uuid.UUID]string),
 		presenceRecovery:             make(map[uuid.UUID]presenceRecoveryState),
@@ -1548,6 +1555,7 @@ func (h *Hub) shutdownClients() {
 	}
 	observer := h.activityObserver
 	clear(h.userClients)
+	h.clearFamilySnapshot()
 	h.mu.Unlock()
 
 	if observer != nil {
@@ -1682,6 +1690,7 @@ func (h *Hub) registerClient(client *Client) bool {
 	client.presenceDispatchSeq = h.presenceGenCounter
 
 	h.clients[client.ID] = client
+	h.recordFamilySnapshotBinding(client)
 
 	if _, ok := h.userClients[client.UserID]; !ok {
 		h.userClients[client.UserID] = make(map[uuid.UUID]bool)
@@ -1912,8 +1921,11 @@ func (h *Hub) handleUnregister(client *Client) {
 			defer cancel()
 		}
 		h.transitionUserOffline(ctx, client.UserID, false)
-		if err := h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0).Err(); err != nil {
-			log.Printf("[hub] failed to persist last_seen for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
+		if h.redis != nil {
+			// Auth inactivity needs this even for invisible users; member reads are owner-only.
+			if err := h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0).Err(); err != nil {
+				log.Printf("[hub] failed to persist last_seen for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
+			}
 		}
 
 		// Cancel any DM voice rings this user initiated (#1209 B7 Part 2).
@@ -1992,6 +2004,7 @@ func (h *Hub) unregisterClient(client *Client) (bool, bool, int) {
 	}
 
 	delete(h.clients, client.ID)
+	h.removeFamilySnapshotBinding(client)
 	isLastConnection := h.removeUserClient(client)
 	h.removeClientSubscriptions(client)
 	remaining := len(h.clients)
@@ -4901,15 +4914,23 @@ func (h *Hub) BroadcastToChannelAuthorized(channelID uuid.UUID, message Outgoing
 	}
 }
 
-// GetConnectedUsers returns a map of user IDs currently connected (thread-safe).
-func (h *Hub) GetConnectedUsers() map[uuid.UUID]bool {
+// GetVisibleConnectedUsers returns the connected users whose persisted presence
+// is explicitly visible. Missing, hidden, and unreadable states fail closed.
+func (h *Hub) GetVisibleConnectedUsers(ctx context.Context) map[uuid.UUID]bool {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
 	users := make(map[uuid.UUID]bool, len(h.userClients))
 	for userID := range h.userClients {
 		users[userID] = true
 	}
-	return users
+	h.mu.RUnlock()
+	return h.resolveVisibleOnlineWithContext(ctx, users)
+}
+
+// GetConnectedUsers returns only connected users whose presence is explicitly
+// visible. It retains the historical exported API without leaving a raw
+// connected-user privacy exit for future callers.
+func (h *Hub) GetConnectedUsers() map[uuid.UUID]bool {
+	return h.GetVisibleConnectedUsers(context.Background())
 }
 
 // GetUserClientCount returns the number of connected clients for a user (thread-safe).
@@ -4922,12 +4943,28 @@ func (h *Hub) GetUserClientCount(userID uuid.UUID) int {
 	return 0
 }
 
-// IsUserOnline reports whether the user has at least one live WS client on
-// this (single-replica) control-plane. Authoritative per spec §5.4.
+// VisibleOnlineSubset preserves the caller's order while removing users whose
+// presence is not explicitly visible. It is suitable for privacy-sensitive
+// recipient lists such as group-DM rings.
+func (h *Hub) VisibleOnlineSubset(ctx context.Context, userIDs []uuid.UUID) []uuid.UUID {
+	candidates := make(map[uuid.UUID]bool, len(userIDs))
+	for _, userID := range userIDs {
+		candidates[userID] = true
+	}
+	visible := h.resolveVisibleOnlineWithContext(ctx, candidates)
+	result := make([]uuid.UUID, 0, len(userIDs))
+	for _, userID := range userIDs {
+		if visible[userID] {
+			result = append(result, userID)
+		}
+	}
+	return result
+}
+
+// IsUserOnline reports whether a user is connected with explicitly visible
+// presence. Missing, hidden, and unreadable states fail closed.
 func (h *Hub) IsUserOnline(userID uuid.UUID) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.userClients[userID]) > 0
+	return len(h.VisibleOnlineSubset(context.Background(), []uuid.UUID{userID})) == 1
 }
 
 // PresenceAuthzStateForTest exposes the packed fence word so wiring locks in
@@ -4957,8 +4994,8 @@ func (h *Hub) PresenceAuthzOpenForTest() uint64 {
 }
 
 // MarkUserOnlineForTest registers a synthetic client so unit/integration
-// tests in OTHER packages (e.g. internal/dm) can make a user appear online
-// to IsUserOnline without a real WS upgrade. Test-only; not used in prod.
+// tests in other packages can make a user appear connected without a real WS
+// upgrade. Test-only; not used in prod.
 func (h *Hub) MarkUserOnlineForTest(userID uuid.UUID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -7930,9 +7967,15 @@ func (h *Hub) queryServerMemberships(userIDs []uuid.UUID) (map[string][]uuid.UUI
 	return serverMembers, allMemberIDs, nil
 }
 
-// resolveVisibleOnline determines which member IDs are connected and not invisible,
-// using a single Redis MGET round-trip for status checks.
+// resolveVisibleOnline determines which candidate IDs are connected and visibly
+// online. It snapshots Hub-owned state under the mutex, then releases it before
+// the single Redis MGET so a slow presence store cannot stall websocket state.
 func (h *Hub) resolveVisibleOnline(allMemberIDs map[uuid.UUID]bool) map[uuid.UUID]bool {
+	return h.resolveVisibleOnlineWithContext(context.Background(), allMemberIDs)
+}
+
+func (h *Hub) resolveVisibleOnlineWithContext(ctx context.Context, allMemberIDs map[uuid.UUID]bool) map[uuid.UUID]bool {
+	h.mu.RLock()
 	connectedUIDs := make([]uuid.UUID, 0, len(allMemberIDs))
 	redisKeys := make([]string, 0, len(allMemberIDs))
 	for uid := range allMemberIDs {
@@ -7942,13 +7985,14 @@ func (h *Hub) resolveVisibleOnline(allMemberIDs map[uuid.UUID]bool) map[uuid.UUI
 			redisKeys = append(redisKeys, presence.StatusRedisKey(uid))
 		}
 	}
+	h.mu.RUnlock()
 
 	visibleOnline := make(map[uuid.UUID]bool, len(connectedUIDs))
-	if len(redisKeys) == 0 {
+	if len(redisKeys) == 0 || h.redis == nil {
 		return visibleOnline
 	}
 
-	statuses, err := h.redis.MGet(context.Background(), redisKeys...).Result()
+	statuses, err := h.redis.MGet(ctx, redisKeys...).Result()
 	if err != nil {
 		// Status is privacy-sensitive: on Redis failure, do not expose connected
 		// users whose persisted state might be invisible.
@@ -8170,7 +8214,84 @@ func (h *Hub) BroadcastServerVoiceCounts() {
 type familyDisconnect struct {
 	userID   uuid.UUID
 	familyID uuid.UUID
+	families []uuid.UUID
 	done     chan error
+}
+
+func (h *Hub) recordFamilySnapshotBinding(client *Client) {
+	h.familySnapshotMu.Lock()
+	defer h.familySnapshotMu.Unlock()
+	if h.familySnapshotByUser == nil {
+		h.familySnapshotByUser = make(map[uuid.UUID]map[uuid.UUID]uuid.UUID)
+	}
+	if h.familySnapshotByUser[client.UserID] == nil {
+		h.familySnapshotByUser[client.UserID] = make(map[uuid.UUID]uuid.UUID)
+	}
+	h.familySnapshotByUser[client.UserID][client.ID] = client.FamilyID
+}
+
+func (h *Hub) removeFamilySnapshotBinding(client *Client) {
+	h.familySnapshotMu.Lock()
+	defer h.familySnapshotMu.Unlock()
+	clients := h.familySnapshotByUser[client.UserID]
+	delete(clients, client.ID)
+	if len(clients) == 0 {
+		delete(h.familySnapshotByUser, client.UserID)
+	}
+}
+
+func (h *Hub) clearFamilySnapshot() {
+	h.familySnapshotMu.Lock()
+	clear(h.familySnapshotByUser)
+	h.familySnapshotMu.Unlock()
+}
+
+// SnapshotUserFamiliesContext reads the published local frontier without
+// queueing behind Run, which may be waiting on a user lock held by revocation.
+// Registration publishes its family before the post-registration DB recheck;
+// an unpublished upgrade therefore cannot pass that recheck before revocation.
+func (h *Hub) SnapshotUserFamiliesContext(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	if userID == uuid.Nil {
+		return nil, errors.New("invalid family snapshot identity")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-h.done:
+		return nil, errors.New("family snapshot incomplete: hub stopped")
+	default:
+	}
+
+	h.familySnapshotMu.RLock()
+	families := make([]uuid.UUID, 0, maxConnectionsPerUser)
+	seen := make(map[uuid.UUID]struct{}, maxConnectionsPerUser)
+	for _, familyID := range h.familySnapshotByUser[userID] {
+		if familyID == uuid.Nil {
+			h.familySnapshotMu.RUnlock()
+			return nil, errors.New("invalid local family binding")
+		}
+		if _, ok := seen[familyID]; ok {
+			continue
+		}
+		if len(families) == maxConnectionsPerUser {
+			h.familySnapshotMu.RUnlock()
+			return nil, errors.New("local family limit exceeded")
+		}
+		seen[familyID] = struct{}{}
+		families = append(families, familyID)
+	}
+	h.familySnapshotMu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-h.done:
+		return nil, errors.New("family snapshot incomplete: hub stopped")
+	default:
+	}
+	return families, nil
 }
 
 // DisconnectFamilyContext waits for fencing and transport closure, not presence cleanup.
@@ -8178,10 +8299,28 @@ func (h *Hub) DisconnectFamilyContext(ctx context.Context, userID, familyID uuid
 	if userID == uuid.Nil || familyID == uuid.Nil {
 		return errors.New("invalid family disconnect identity")
 	}
+	return h.disconnectFamiliesContext(ctx, familyDisconnect{userID: userID, familyID: familyID})
+}
+
+// DisconnectFamiliesContext fences a bounded captured frontier before closing
+// any one of its transports.
+func (h *Hub) DisconnectFamiliesContext(ctx context.Context, userID uuid.UUID, families []uuid.UUID) error {
+	if userID == uuid.Nil || len(families) == 0 || len(families) > maxConnectionsPerUser {
+		return errors.New("invalid family disconnect frontier")
+	}
+	for _, family := range families {
+		if family == uuid.Nil {
+			return errors.New("invalid family disconnect frontier")
+		}
+	}
+	return h.disconnectFamiliesContext(ctx, familyDisconnect{userID: userID, families: slices.Clone(families)})
+}
+
+func (h *Hub) disconnectFamiliesContext(ctx context.Context, command familyDisconnect) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	command := familyDisconnect{userID: userID, familyID: familyID, done: make(chan error, 1)}
+	command.done = make(chan error, 1)
 	select {
 	case h.disconnectFamily <- command:
 	case <-ctx.Done():
@@ -8206,7 +8345,9 @@ func (h *Hub) handleDisconnectFamily(command familyDisconnect) {
 	matches := make([]*Client, 0, len(h.userClients[command.userID]))
 	for clientID := range h.userClients[command.userID] {
 		client := h.clients[clientID]
-		if client != nil && client.UserID == command.userID && client.FamilyID == command.familyID {
+		if client != nil && client.UserID == command.userID &&
+			((command.familyID != uuid.Nil && client.FamilyID == command.familyID) ||
+				slices.Contains(command.families, client.FamilyID)) {
 			matches = append(matches, client)
 		}
 	}

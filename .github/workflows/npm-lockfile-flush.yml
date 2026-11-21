@@ -107,9 +107,11 @@ jobs:
           DEFERRAL
 
           # Idempotency: skip a PR that already got a deferral comment in the last 6 days (518400s).
+          # --paginate runs --jq once per page, so print one line per match and count lines.
+          # Only this workflow's own comments count: anyone can post the marker.
           for PR in $OPEN_PRS; do
-            RECENT=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
-              --jq '[.[] | select(.body | contains("<!-- npm-lockfile-flush-deferral-")) | select(.created_at | fromdateiso8601 > (now - 518400))] | length')
+            RECENT=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- npm-lockfile-flush-deferral-")) | select(.created_at | fromdateiso8601 > (now - 518400)) | .id' | wc -l)
 
             if [ "$RECENT" -gt 0 ]; then
               echo "PR #${PR} already has a recent deferral comment. Skipping."
@@ -171,33 +173,53 @@ jobs:
           # No downgrades. With no package names, `npm update` re-resolves the whole
           # tree under min-release-age, so a version locked less than 7 days ago
           # (a Dependabot security fix has no cooldown) is pulled back to an
-          # older one in range. Fail and list them; the next run, once they are
-          # 7 days old, keeps them. Two checks: per install path, and per package
-          # name and major (the highest copy), because a dedupe or hoist can move
-          # a package to another path and drop the newer copy.
-          DOWNGRADES=""
+          # older one. Fail and list them; once they are 7 days old the next run
+          # keeps them.
+          #
+          # npm re-hoists and dedupes, so the lockfile shape alone cannot tell a
+          # pull-back from a reshuffle. Two steps:
+          #   1. Candidates: every name@version held at fewer install paths than
+          #      before, including none. A pull-back always removes a copy.
+          #   2. Only the cooldown pulls a version back, and it holds back only
+          #      versions published in the last 7 days. So a candidate fails the
+          #      run only when it was published in the last 8 days (one day of
+          #      margin). An older one left because the tree changed: an upgrade,
+          #      a dependent that dropped it, or a swap between paths. An upgrade
+          #      away from a recent version (published out of order) also fails,
+          #      until that version is 8 days old. An unreadable publish time
+          #      fails the run.
+          CANDIDATES=""
           for lock in package-lock.json client/admin/package-lock.json services/media-plane/package-lock.json; do
             FOUND=$(jq -rn --slurpfile old <(git show "HEAD:$lock") --slurpfile new "$lock" --arg lock "$lock" '
-              def core: capture("^(?<a>[0-9]+)[.](?<b>[0-9]+)[.](?<c>[0-9]+)(-(?<p>[0-9A-Za-z.-]+))?([+].*)?$")
-                | [(.a | tonumber), (.b | tonumber), (.c | tonumber), (if .p then 0 else 1 end),
-                   ((.p // "") | split(".") | map(tonumber? // .))];
-              def semver: type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?([+].*)?$");
-              def paths: .packages | with_entries(.value = .value.version);
-              def bymajor: [.packages | to_entries[] | select(.key != "" and (.value.version | semver))
-                  | {k: "\(.value.name // (.key | sub("^.*node_modules/"; "")))@\(.value.version | core | .[0])",
-                     v: (.value.version | core), s: .value.version}]
-                | group_by(.k) | map({key: .[0].k, value: max_by(.v)}) | from_entries;
-              ($old[0] | paths) as $o | ($new[0] | paths) as $n
-              | ($old[0] | bymajor) as $O | ($new[0] | bymajor) as $N
-              | [ ($o | keys[] | select(($o[.] | semver) and ($n[.] | semver))
-                    | select(($n[.] | core) < ($o[.] | core)) | "\($lock): \(.) \($o[.]) -> \($n[.])"),
-                  ($O | keys[] | select($N[.] != null and ($N[.].v < $O[.].v))
-                    | "\($lock): \(.) \($O[.].s) -> \($N[.].s)") ]
-              | unique[]')
-            if [ -n "$FOUND" ]; then DOWNGRADES+="$FOUND"$'\n'; fi
+              def entries: [.packages | to_entries[] | select(.key != "" and (.value.version | type) == "string")
+                  | {n: (.value.name // (.key | sub("^.*node_modules/"; ""))), s: .value.version}];
+              def copies: group_by([.n, .s]) | map({key: "\(.[0].n)@\(.[0].s)", value: {n: .[0].n, s: .[0].s, c: length}})
+                | from_entries;
+              ($old[0] | entries | copies) as $o | ($new[0] | entries) as $ne | ($ne | copies) as $nc
+              | $o[] | select(.c > ($nc["\(.n)@\(.s)"].c // 0)) | . as $e
+              | [$lock, .n, .s, ([$ne[] | select(.n == $e.n) | .s] | unique | join(" ") | if . == "" then "none" else . end),
+                 "\(.c) -> \($nc["\(.n)@\(.s)"].c // 0)"] | @tsv')
+            if [ -n "$FOUND" ]; then CANDIDATES+="$FOUND"$'\n'; fi
           done
+          DOWNGRADES=""
+          LOOKED_UP=""
+          # Sorted by name, so each name is looked up once.
+          while IFS=$'\t' read -r lock name old now copies; do
+            [ -n "$lock" ] || continue
+            if [ "$name" != "$LOOKED_UP" ]; then
+              # The cooldown setting stays out of this lookup: `time` must list every version.
+              if ! TIMES=$(env -u npm_config_min_release_age npm view --json -- "$name" time </dev/null); then
+                echo "::error::could not read the publish times of $name, so $lock: $name $old cannot be checked"
+                exit 1
+              fi
+              LOOKED_UP=$name
+            fi
+            AGE=$(jq -r --arg v "$old" '(.[$v] // "") as $t
+              | if $t == "" then "unknown" elif now - ($t | sub("[.][0-9]+Z$"; "Z") | fromdateiso8601) < 691200 then $t else "old" end' <<<"$TIMES")
+            if [ "$AGE" != old ]; then DOWNGRADES+="$lock: $name $old -> $now (copies $copies; published: ${AGE:-unknown})"$'\n'; fi
+          done < <(printf '%s' "$CANDIDATES" | sort -t$'\t' -k2,2)
           if [ -n "$DOWNGRADES" ]; then
-            echo "::error::the refresh would downgrade these locked versions (each is newer than the 7-day window):"
+            echo "::error::the refresh would downgrade these locked versions (each was published in the last 8 days):"
             printf '%s' "$DOWNGRADES"
             exit 1
           fi
@@ -324,7 +346,7 @@ jobs:
 
       - name: Open PR
         # Same SHA as go-transitive-flush.yml and refresh-ioc-list.yml.
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        uses: peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8 # v8.1.2
         with:
           token: ${{ steps.app-token.outputs.token }}
           # Pin BOTH identities, as go-transitive-flush.yml does: the default

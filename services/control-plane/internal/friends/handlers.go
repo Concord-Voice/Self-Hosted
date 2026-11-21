@@ -813,6 +813,14 @@ func (h *Handler) executeBlockTx(
 	ctx context.Context, gated presencecapture.GraphPresenceCapture,
 	probeSkippedGate bool, tx *sql.Tx, userID, targetUserID string,
 ) (presencecapture.Plan, error) {
+	plan, _, err := h.executeBlockTxWithAudience(ctx, gated, probeSkippedGate, tx, userID, targetUserID)
+	return plan, err
+}
+
+func (h *Handler) executeBlockTxWithAudience(
+	ctx context.Context, gated presencecapture.GraphPresenceCapture,
+	probeSkippedGate bool, tx *sql.Tx, userID, targetUserID string,
+) (presencecapture.Plan, bool, error) {
 	// Fail closed on a stale probe. On the ungated path CaptureInTx's own
 	// accepted-edge gate never runs, so this read is the authoritative one.
 	// A live edge here means the probe went stale and the block would revoke a
@@ -827,29 +835,42 @@ func (h *Handler) executeBlockTx(
 		if pErr == nil && cErr == nil {
 			edge, edgeErr := presencehook.AcceptedEdgeExists(ctx, tx, principal, counterpart)
 			if edgeErr != nil {
-				return nil, fmt.Errorf("re-assert accepted edge: %w", edgeErr)
+				return nil, false, fmt.Errorf("re-assert accepted edge: %w", edgeErr)
 			}
 			if edge {
-				return nil, presencehook.ErrProbeStale
+				return nil, false, presencehook.ErrProbeStale
 			}
 		}
 	}
 
 	plan, err := presencehook.Capture(ctx, gated, tx, blockCaptureSpec(userID, targetUserID))
 	if err != nil {
-		return nil, fmt.Errorf("capture block presence: %w", err)
+		return nil, false, fmt.Errorf("capture block presence: %w", err)
 	}
+
+	var priorStatus string
+	err = tx.QueryRowContext(ctx, `
+		SELECT status
+		FROM friendships
+		WHERE (requester_id = $1 AND addressee_id = $2)
+		   OR (requester_id = $2 AND addressee_id = $1)
+		FOR UPDATE
+	`, userID, targetUserID).Scan(&priorStatus)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return plan, false, fmt.Errorf("lock prior friendship status: %w", err)
+	}
+	wasAcceptedFriendship := err == nil && priorStatus == "accepted"
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE friendships SET status = 'blocked', updated_at = NOW()
 		WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)
 	`, userID, targetUserID)
 	if err != nil {
-		return plan, fmt.Errorf("update friendship to blocked: %w", err)
+		return plan, false, fmt.Errorf("update friendship to blocked: %w", err)
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		return plan, fmt.Errorf("read block rows affected: %w", err)
+		return plan, false, fmt.Errorf("read block rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
 		_, err = tx.ExecContext(ctx, `
@@ -857,17 +878,17 @@ func (h *Handler) executeBlockTx(
 			VALUES ($1, $2, 'blocked')
 		`, userID, targetUserID)
 		if err != nil {
-			return plan, fmt.Errorf("insert block row: %w", err)
+			return plan, false, fmt.Errorf("insert block row: %w", err)
 		}
 	}
-	return plan, nil
+	return plan, wasAcceptedFriendship, nil
 }
 
-func (h *Handler) notifyBlock(userID, targetUserID string) {
+func (h *Handler) notifyBlock(userID, targetUserID string, wasAcceptedFriendship bool) {
 	if h.hub == nil {
 		return
 	}
-	if targetUUID, parseErr := uuid.Parse(targetUserID); parseErr == nil {
+	if targetUUID, parseErr := uuid.Parse(targetUserID); wasAcceptedFriendship && parseErr == nil {
 		h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
 			Type: "friend_removed",
 			Data: map[string]interface{}{
@@ -923,6 +944,7 @@ func (h *Handler) BlockUser(c *gin.Context) {
 	ctx := c.Request.Context()
 	tokenEpoch := middleware.TokenCredentialEpoch(c)
 	operationID := uuid.NewString()
+	wasAcceptedFriendship := false
 
 	// blockCaptureSpec is the single source for the gates, the capture and the
 	// focal set; executeBlockTx calls it again for its own Capture, so both
@@ -973,11 +995,12 @@ func (h *Handler) BlockUser(c *gin.Context) {
 		if guardErr := credepoch.GuardFamilyTx(ctx, tx, userID, tokenEpoch); guardErr != nil {
 			return fmt.Errorf("guard block credential epoch: %w", guardErr)
 		}
-		plan, blockErr := h.executeBlockTx(ctx, gated, probeSkippedGate, tx, userID, targetUserID)
+		plan, acceptedFriendship, blockErr := h.executeBlockTxWithAudience(ctx, gated, probeSkippedGate, tx, userID, targetUserID)
 		if blockErr != nil {
 			presencehook.Abandon(gated, plan, presencecapture.CauseWriteFailed)
 			return blockErr
 		}
+		wasAcceptedFriendship = acceptedFriendship
 		if obligationErr := dmblock.RecordBlockTx(ctx, tx, userID, targetUserID, operationID); obligationErr != nil {
 			presencehook.Abandon(gated, plan, presencecapture.CauseWriteFailed)
 			return fmt.Errorf("record block DM reconciliation: %w", obligationErr)
@@ -996,7 +1019,7 @@ func (h *Handler) BlockUser(c *gin.Context) {
 
 	h.log.Info("User blocked", "user_id", userID, "blocked", targetUserID)
 	h.notifySeatPair(ctx, userID, targetUserID, true)
-	h.notifyBlock(userID, targetUserID)
+	h.notifyBlock(userID, targetUserID, wasAcceptedFriendship)
 	c.JSON(http.StatusOK, gin.H{"message": "User blocked"})
 }
 

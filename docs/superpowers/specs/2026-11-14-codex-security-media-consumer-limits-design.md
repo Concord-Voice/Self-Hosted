@@ -1,8 +1,6 @@
 # Self-Hosted media consumer limits
 
-Source: [Hosted #4433](https://github.com/Concord-Voice/Hosted/pull/4433).
-
-An authenticated participant can consume each room producer on up to four receive transports. Existing deduplication only rejects a repeated producer on the same transport, so one participant can multiply SFU consumer objects and egress. Self-Hosted shares the vulnerable `RoomManager.consume` path.
+An authenticated participant can consume each room producer on up to four receive transports. Existing deduplication only rejects a repeated producer on the same transport, so one participant can multiply SFU consumer objects and egress. The vulnerable path is `RoomManager.consume`.
 
 ## Behavior
 
@@ -15,4 +13,4 @@ The change is local to media allocation. It adds no configuration or wire event.
 
 ## Verification
 
-Port the Hosted race and close-path regressions into Self-Hosted's media suite. Run the focused suite, typecheck, lint, changelog guard, CI, and security review on the final head.
+Cover race and close-path regressions in the media suite. Run the focused suite, typecheck, lint, changelog guard, CI, and security review on the final head.

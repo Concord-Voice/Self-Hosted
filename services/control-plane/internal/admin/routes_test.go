@@ -36,11 +36,14 @@ func registerAdminEngine(t *testing.T) *gin.Engine {
 	return registerAdminRouteOnlyEngine(t)
 }
 
-func registerAdminEngineAndSessions(t *testing.T) (*gin.Engine, *admin.SessionStore) {
+func registerAdminEngineAndSessions(t *testing.T) (*gin.Engine, *admin.SessionStore, *admin.AdminUser) {
 	return registerAdminEngineAndSessionsWithLimiter(t, nil)
 }
 
-func registerAdminEngineAndSessionsWithLimiter(t *testing.T, limiterRedis *redis.Client) (*gin.Engine, *admin.SessionStore) {
+func registerAdminEngineAndSessionsWithLimiter(
+	t *testing.T,
+	limiterRedis *redis.Client,
+) (*gin.Engine, *admin.SessionStore, *admin.AdminUser) {
 	return registerAdminEngineAndSessionsWithLimiterAndMiddleware(t, limiterRedis)
 }
 
@@ -70,7 +73,7 @@ func registerAdminEngineAndSessionsWithLimiterAndMiddleware(
 	t *testing.T,
 	limiterRedis *redis.Client,
 	middlewares ...gin.HandlerFunc,
-) (*gin.Engine, *admin.SessionStore) {
+) (*gin.Engine, *admin.SessionStore, *admin.AdminUser) {
 	t.Helper()
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
@@ -79,6 +82,14 @@ func registerAdminEngineAndSessionsWithLimiterAndMiddleware(
 	if limiterRedis == nil {
 		limiterRedis = rdb
 	}
+
+	repo := admin.NewAdminRepo(db)
+	created, err := repo.CreatePending(context.Background(), uniqueAdminUsername("route-admin"), "test-hash")
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, created.ID)
+	require.NoError(t, repo.SetStatus(context.Background(), created.ID, admin.StatusActive))
+	activeAdmin, err := repo.GetByUsername(context.Background(), created.Username)
+	require.NoError(t, err)
 
 	gin.SetMode(gin.TestMode)
 	log := logger.NewWithWriter(&bytes.Buffer{})
@@ -95,7 +106,7 @@ func registerAdminEngineAndSessionsWithLimiterAndMiddleware(
 	engine := gin.New()
 	engine.Use(middlewares...)
 	admin.RegisterRoutes(&engine.RouterGroup, h, metricsHandler, limiterRedis, admin.NewUI(adminUITestFS()))
-	return engine, admin.NewSessionStore(rdb, time.Now)
+	return engine, admin.NewSessionStore(rdb, time.Now), activeAdmin
 }
 
 // TestAdminRoutes_DenyByDefault is the reflective gate test: it enumerates EVERY

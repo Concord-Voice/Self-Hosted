@@ -338,6 +338,7 @@ func (h *Handler) verifyServerStepUp(ctx context.Context, adminID, action, handl
 	}
 	if err := h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount)); err != nil {
 		h.log.Warn("admin sign-count persist failed", "error", err)
+		return false
 	}
 	return true
 }

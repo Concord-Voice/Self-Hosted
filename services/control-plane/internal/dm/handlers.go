@@ -1919,8 +1919,7 @@ func (h *Handler) removeActiveMemberTx(
 	ctx context.Context,
 	convID string,
 	targetID uuid.UUID,
-	callerUserID string,
-	credentialEpoch string,
+	callerUserID, credentialEpoch string,
 	preflight memberRemovalPreflight,
 ) (string, int, error) {
 	if h.activePlans == nil {
@@ -1978,8 +1977,7 @@ func (h *Handler) removeInactiveMemberTx(
 	ctx context.Context,
 	convID string,
 	targetID uuid.UUID,
-	callerUserID string,
-	credentialEpoch string,
+	callerUserID, credentialEpoch string,
 	preflight memberRemovalPreflight,
 ) (string, int, error) {
 	tx, err := h.db.BeginTx(ctx, nil)
@@ -2141,8 +2139,7 @@ func (h *Handler) transferMemberRemovalCreator(
 	tx *sql.Tx,
 	convID string,
 	targetID uuid.UUID,
-	createdBy string,
-	preflightSuccessorID string,
+	createdBy, preflightSuccessorID string,
 ) (string, error) {
 	if targetID.String() != createdBy {
 		return "", nil
@@ -4341,17 +4338,10 @@ func dmVoiceInvitedData(convID uuid.UUID, isGroup bool, caller map[string]interf
 	}
 }
 
-// filterOnlineCallees returns the subset of callees with at least one live WS
-// client (#1219 B2, decision G1), keeping offline group members out of the
-// caller's ringing tally. It reuses the input slice's backing array.
-func (h *Handler) filterOnlineCallees(callees []uuid.UUID) []uuid.UUID {
-	online := callees[:0]
-	for _, callee := range callees {
-		if h.hub.IsUserOnline(callee) {
-			online = append(online, callee)
-		}
-	}
-	return online
+// filterOnlineCallees returns only callees whose presence is explicitly
+// visible. It drives the invitation list and the externally visible tally.
+func (h *Handler) filterOnlineCallees(ctx context.Context, callees []uuid.UUID) []uuid.UUID {
+	return h.hub.VisibleOnlineSubset(ctx, callees)
 }
 
 // writeRingConflict writes the 409 Conflict response for a ring already in
@@ -4615,7 +4605,7 @@ func (h *Handler) loadVoiceRingRecipientsTx(
 		return voiceRingRecipients{}, fmt.Errorf("iterate DM ring recipients: %w", err)
 	}
 	if isGroup {
-		callees = h.filterOnlineCallees(callees)
+		callees = h.filterOnlineCallees(ctx, callees)
 	}
 	return voiceRingRecipients{calleeIDs: callees, isGroup: isGroup}, nil
 }
@@ -5246,8 +5236,9 @@ func (h *Handler) AuthorizeDMVoiceForMediaPlane(c *gin.Context) {
 	// round-trip. The media-plane uses username/display_name/avatar_url from here
 	// instead of the client-supplied socket.handshake.auth values, closing the
 	// display-identity spoof for DM voice rooms (mirrors the server-channel path).
-	identity, authorized := h.loadDMVoiceAuthorizeIdentity(c, convID, userID)
-	if !authorized {
+	// This unlocked read is a fast-path membership gate; the identity used in the
+	// response is re-read under the DM topology transaction below.
+	if _, authorized := h.loadDMVoiceAuthorizeIdentity(c, convID, userID); !authorized {
 		return
 	}
 

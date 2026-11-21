@@ -257,8 +257,24 @@ char_wait_healthy_curl_argv() {
 
 # sha256 of the shipped vhost rendered with the default HSTS policy, recorded
 # from an unmodified-tree run.
-NGINX_RENDER_SHA256='e6c88346ed3fdf12bf901b808e6244050591b79a63a1efd054199de51c5ae951'  # pragma: allowlist secret -- sha256 of a rendered fixture, not a secret
+NGINX_RENDER_SHA256='e7df9628501bac82a25555c9e098f9b07a1d0cebeb89ce4d7931d49cfadabd76'  # pragma: allowlist secret -- sha256 of a rendered fixture, not a secret
 HSTS_DEFAULT_VALUE='max-age=63072000; includeSubDomains; preload'
+AOP_FRAGMENT="$ROOT/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
+AOP_CA=/etc/concord/nginx/cloudflare-aop-ca.pem
+
+# The managed renderer deliberately accepts only the provisioned root-owned CA
+# at AOP_CA. This harness must never synthesize it on a developer or CI host.
+managed_aop_fixture_available() {
+  [[ -f "$AOP_FRAGMENT" && ! -L "$AOP_FRAGMENT" && -f "$AOP_CA" && ! -L "$AOP_CA" ]]
+}
+
+need_managed_aop_fixture() {
+  if managed_aop_fixture_available; then
+    return 0
+  fi
+  printf 'SKIP: %s (managed AOP CA is not provisioned at %s)\n' "$1" "$AOP_CA"
+  return 1
+}
 # extract_fn <name>: print the function declared as `    name() {` (4-space
 # indent, inside the nginx-reload arm) through its closing `    }`.
 extract_fn() {
@@ -270,7 +286,8 @@ extract_fn() {
 }
 char_nginx_render_hash() {
   local fns got
-  fns="$(extract_fn encode_hsts_for_nginx; extract_fn render_nginx_config)"
+  need_managed_aop_fixture char_nginx_render_hash || return 0
+  fns="$(extract_fn encode_hsts_for_nginx; extract_fn validate_aop_fragment; extract_fn aop_ca_safe; extract_fn render_nginx_config)"
   if ! grep -qF "HSTS_DEFAULT='$HSTS_DEFAULT_VALUE'" "$CTL_SRC" || [[ -z "$fns" ]]; then
     fail "char_nginx_render_hash could not extract the renderer or the HSTS default"
     return
@@ -281,6 +298,8 @@ char_nginx_render_hash() {
     export NGINX_SRC="$ROOT/infrastructure/deploy/nginx/concordvoice.conf"
     export NGINX_RENDER_DIR="$TMP/render"
     export NGINX_RENDER="$TMP/render/concordvoice.conf"
+    export CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA" \
+      NGINX_CLIENT_IP_MODE=cloudflare-aop
     eval "$fns"
     render_nginx_config "$HSTS_DEFAULT_VALUE" || exit 1
     if command -v sha256sum >/dev/null 2>&1; then
@@ -409,8 +428,9 @@ render_with() {
   # Variables read by the extracted render_nginx_config (dynamic scope).
   # shellcheck disable=SC2034
   local NGINX_SRC="$2" NGINX_RENDER_DIR="$3" NGINX_RENDER="$3/concordvoice.conf" CONTROL_PLANE_BLUEGREEN="$1"
+  local CLOUDFLARE_AOP_FRAGMENT="$AOP_FRAGMENT" CLOUDFLARE_AOP_CA="$AOP_CA" NGINX_CLIENT_IP_MODE=cloudflare-aop
   shift 3
-  fns="$(extract_fn encode_hsts_for_nginx; extract_fn render_nginx_config)"
+  fns="$(extract_fn encode_hsts_for_nginx; extract_fn validate_aop_fragment; extract_fn aop_ca_safe; extract_fn render_nginx_config)"
   [[ -n "$fns" ]] || return 125
   mkdir -p "$NGINX_RENDER_DIR"
   (
@@ -421,6 +441,7 @@ render_with() {
 
 render_rail_on_8080_equals_char_hash() {
   local r=0 got=''
+  need_managed_aop_fixture render_rail_on_8080_equals_char_hash || return 0
   render_with 1 "$VHOST_SRC" "$TMP/r8080" 8080 >/dev/null 2>&1 || r=$?
   [[ $r -ne 0 ]] || got="$(sha256_of "$TMP/r8080/concordvoice.conf")"
   # Mutation that turns this red: change the format of the rewritten server
@@ -434,6 +455,7 @@ render_rail_on_8080_equals_char_hash() {
 
 render_rail_on_8081_changes_only_the_server_line() {
   local r=0 got want
+  need_managed_aop_fixture render_rail_on_8081_changes_only_the_server_line || return 0
   render_with 1 "$VHOST_SRC" "$TMP/r8080" 8080 >/dev/null 2>&1 || r=$?
   render_with 1 "$VHOST_SRC" "$TMP/r8081" 8081 >/dev/null 2>&1 || r=$?
   got="$(diff "$TMP/r8080/concordvoice.conf" "$TMP/r8081/concordvoice.conf" 2>&1 | grep '^[<>]' || true)"
@@ -449,6 +471,7 @@ render_rail_on_8081_changes_only_the_server_line() {
 
 render_rail_off_ignores_port_argument() {
   local r=0 a='' b=''
+  need_managed_aop_fixture render_rail_off_ignores_port_argument || return 0
   render_with 0 "$VHOST_SRC" "$TMP/roff1" 8081 >/dev/null 2>&1 || r=$?
   render_with 0 "$VHOST_SRC" "$TMP/roff2" 9999 >/dev/null 2>&1 || r=$?
   if [[ $r -eq 0 ]]; then
@@ -513,6 +536,19 @@ render_rejections() {
   # Mutation: drop the requested-port check at the top of render_nginx_config.
   render_rejects render_rejects_port_argument_9999 9999 '{ print }'
   render_rejects render_rejects_missing_port_argument '' '{ print }'
+}
+
+managed_aop_missing_ca_refuses_atomically() {
+  local dir="$TMP/aop-ca-missing" r=0 left
+  mkdir -p "$dir"
+  printf 'previous render\n' >"$dir/concordvoice.conf"
+  render_with 1 "$VHOST_SRC" "$dir" 8080 >/dev/null 2>&1 || r=$?
+  left="$(find "$dir" -name 'concordvoice.conf.tmp.*' | wc -l | tr -d ' ')"
+  if [[ $r -eq 1 && "$left" == 0 && "$(cat "$dir/concordvoice.conf")" == 'previous render' ]]; then
+    pass "managed_aop_missing_ca_refuses_atomically"
+  else
+    fail "managed_aop_missing_ca_refuses_atomically rc=$r temp-files=$left target=$(head -c 40 "$dir/concordvoice.conf" | tr '\n' ' ')"
+  fi
 }
 
 # live_port <path>: the extracted reader against <path>.
@@ -608,6 +644,7 @@ live_port_cases() {
 
 live_port_roundtrip() {
   local r=0
+  need_managed_aop_fixture live_port_roundtrip || return 0
   render_with 1 "$VHOST_SRC" "$TMP/rtrip" 8081 >/dev/null 2>&1 || r=$?
   if [[ $r -ne 0 ]]; then
     fail "live_port_roundtrip render rc=$r"
@@ -2683,6 +2720,11 @@ cp_server_in_block() {
 ngx_debris() { find "$TMP/live" -name '.concordvoice.*' | grep -q .; }
 nested_flip_real_nginx_reload() {
   need_flock nested_flip_real_nginx_reload || return 0
+  # The copied controller intentionally keeps the production renderer's fixed
+  # AOP CA admission. Do not synthesize that root-owned file in this harness:
+  # missing-CA rejection is covered above, while this nested success proof
+  # needs a provisioned managed fixture.
+  need_managed_aop_fixture nested_flip_real_nginx_reload || return 0
   local bad=''
   # (a) 8081 is rendered inside the control_plane upstream, activated, reloaded.
   ngx_prepare
@@ -2768,6 +2810,7 @@ render_rail_on_8080_equals_char_hash
 render_rail_on_8081_changes_only_the_server_line
 render_rail_off_ignores_port_argument
 render_rejections
+managed_aop_missing_ca_refuses_atomically
 live_port_cases
 live_port_roundtrip
 live_vhost_literal_matches_nginx_dst

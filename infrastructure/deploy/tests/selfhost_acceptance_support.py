@@ -8,26 +8,18 @@ credentials, or host data.
 from __future__ import annotations
 
 import importlib.util
-import hashlib
-import io
 import copy
 from collections import Counter
-import ipaddress
 import json
-import math
 import os
-import signal
 import shutil
 import subprocess
-import time
 from types import SimpleNamespace
 from pathlib import Path
 import re
 import sys
 import tempfile
-import tarfile
-import unittest
-from unittest import mock
+import unittest.mock
 
 
 TEST_BASH = shutil.which("bash")
@@ -118,7 +110,7 @@ def live_projection(model: dict | None = None) -> list[dict]:
     model = model or rendered_model()
     images = {"postgres": "concordvoice-postgres:16-alpine",
               "redis": "redis:8-alpine", "nats": "nats:2-alpine",
-              "coturn": "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e",
+              "coturn": "coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e",
               "minio": "ghcr.io/concord-voice/minio@sha256:fixture",
               "ops-agent": "concordvoice-ops-agent:local",
               "control-plane": "concordvoice-control-plane:local",
@@ -449,7 +441,7 @@ class SelfhostAcceptanceTests(unittest.TestCase):
     def test_evidence_refuses_symlink_and_unsafe_fields(self):
         safe = {"schema": 1, "candidate_sha": "a" * 40, "run_id": "run-17",
                 "runner_os": "ubuntu-24.04", "tool_versions": {"docker": "29.8.2",
-                                                                      "compose": "2.24.5"},
+                                                                      "compose": "2.33.1"},
                 "local_only": True,
                 "checks": [{"stage": "observe", "assertion": "selected_stack",
                             "status": "PASS", "code": "OK"}],
@@ -509,7 +501,7 @@ class ProtectedMainWorkflowTrustTests(unittest.TestCase):
                           "main_rc": 0, "head": self.MAIN, "head_rc": 0,
                           "origin": self.MAIN, "origin_rc": 0, "ancestor_rc": 0}
         self.env = {"PATH": str(self.bin), "LANG": "C", "LC_ALL": "C",
-                    "GITHUB_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha",
+                    "GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted",
                     "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": self.MAIN, "ALPHA_SHA": self.ALPHA,
                     "PUBLIC_SHA": "c" * 40, "BUNDLE_SHA256": "d" * 64,
                     "STAGE_GIT_BUNDLE_SHA256": "e" * 64, "STAGE_RUN_ID": "701",
@@ -521,7 +513,7 @@ tool = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with pathlib.Path(os.environ["OWNED_GATE_TRACE"]).open("a") as out:
     out.write(json.dumps([tool, *args]) + "\\n")
-if tool == "gh" and args[:3] == ["api", "repos/Concord-Voice/Concord-Voice-Alpha/branches/main", "--jq"] and len(args) == 4:
+if tool == "gh" and args[:3] == ["api", "repos/Concord-Voice/Self-Hosted/branches/main", "--jq"] and len(args) == 4:
     key = {".protected": "protected", ".commit.sha": "main"}.get(args[3])
     if key is not None:
         print(config[key])
@@ -565,7 +557,7 @@ raise SystemExit(97)
         return result, calls
 
     def expected_calls(self):
-        branch = "repos/Concord-Voice/Concord-Voice-Alpha/branches/main"
+        branch = "repos/Concord-Voice/Self-Hosted/branches/main"
         return [["gh", "api", branch, "--jq", ".protected"],
                 ["gh", "api", branch, "--jq", ".commit.sha"],
                 ["git", "rev-parse", "HEAD"],
@@ -835,7 +827,7 @@ if name == "selfhost-acceptance.py" and os.environ.get("OWNED_ACCEPTANCE_FAIL") 
         (bin_dir / "python3").symlink_to(sys.executable)
         (bin_dir / "gh").write_text("#!" + sys.executable + '''
 import os, sys
-assert sys.argv[1:4] == ["api", "repos/Concord-Voice/Concord-Voice-Alpha/branches/main", "--jq"]
+assert sys.argv[1:4] == ["api", "repos/Concord-Voice/Self-Hosted/branches/main", "--jq"]
 assert len(sys.argv) == 5
 print({".protected": "true", ".commit.sha": os.environ["GITHUB_SHA"]}[sys.argv[4]])
 ''')
@@ -843,7 +835,7 @@ print({".protected": "true", ".commit.sha": os.environ["GITHUB_SHA"]}[sys.argv[4
         trace = sandbox / "trace.jsonl"
         env = {"PATH": str(bin_dir) + os.pathsep + os.defpath, "LANG": "C", "LC_ALL": "C",
                "GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(runner_temp),
-               "GITHUB_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha", "GITHUB_REF": "refs/heads/main",
+               "GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted", "GITHUB_REF": "refs/heads/main",
                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": self.main,
                "ALPHA_SHA": self.alpha, "PUBLIC_SHA": "c" * 40, "BUNDLE_SHA256": "d" * 64,
                "STAGE_GIT_BUNDLE_SHA256": "e" * 64, "STAGE_RUN_ID": "701",
@@ -2043,7 +2035,7 @@ if name == config["failing"]:
         storage = "infrastructure/deploy/tests/test-selfhost-storage.sh"
         deployment = (*self.DEPLOY_QUEUE_INVENTORY, storage)
         inventory = deployment + self.LIFECYCLE_QUEUE_INVENTORY
-        with mock.patch.object(self, "DEPLOY_QUEUE_INVENTORY", deployment):
+        with unittest.mock.patch.object(self, "DEPLOY_QUEUE_INVENTORY", deployment):
             result, state, expected = self.invoke_static_script_queue(
                 self.QUEUE_STEPS[0], rendezvous=True)
             filtered_result, filtered_state, filtered_expected = self.invoke_static_script_queue(

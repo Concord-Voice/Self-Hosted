@@ -233,10 +233,14 @@ func (r *PendingRepo) InsertOrTakeover(
 	}
 
 	// --- Phase 3: commit — delete the old row (if any) then insert the new one ---
+	// A takeover carries the old row's resend state into the new one, so
+	// re-registering cannot refund the resend cap or the cooldown.
+	resendCount := 0
+	var lastResendAt sql.NullTime
 	if takeoverID != "" {
-		if _, err = tx.ExecContext(ctx,
-			`DELETE FROM pending_registrations WHERE id = $1`, takeoverID,
-		); err != nil {
+		if err = tx.QueryRowContext(ctx,
+			`DELETE FROM pending_registrations WHERE id = $1 RETURNING resend_count, last_resend_at`, takeoverID,
+		).Scan(&resendCount, &lastResendAt); err != nil {
 			return "", time.Time{}, "", err
 		}
 	}
@@ -250,8 +254,8 @@ func (r *PendingRepo) InsertOrTakeover(
 	if err = tx.QueryRowContext(ctx,
 		`INSERT INTO pending_registrations
 			(id, email, username, password_hash, wrapped_private_key, key_derivation_salt,
-			 key_derivation_alg, public_key, age_verified, resend_count, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, 0, $9)
+			 key_derivation_alg, public_key, age_verified, resend_count, last_resend_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10, $11)
 		RETURNING expires_at`,
 		newID,
 		params.Email,
@@ -261,6 +265,8 @@ func (r *PendingRepo) InsertOrTakeover(
 		params.KeyDerivationSalt,
 		kdAlg,
 		params.PublicKey,
+		resendCount,
+		lastResendAt,
 		time.Now().Add(PendingRegistrationTTL),
 	).Scan(&expiresAt); err != nil {
 		return "", time.Time{}, "", err
@@ -314,56 +320,34 @@ func (r *PendingRepo) GetByID(ctx context.Context, id string) (*PendingRegistrat
 
 // IncrementResend increments the resend counter for a pending registration, enforcing
 // cooldown and max-resend limits. Returns the new resend count.
-func (r *PendingRepo) IncrementResend(ctx context.Context, id string) (int, error) {
+func (r *PendingRepo) IncrementResend(ctx context.Context, id string) (int, time.Time, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return 0, time.Time{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var count int
-	var lastResendAt sql.NullTime
-	var expiresAt time.Time
+	count, err := pendingResendCount(ctx, tx, id)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
 
+	var reservedAt time.Time
 	if err = tx.QueryRowContext(ctx,
-		`SELECT resend_count, last_resend_at, expires_at
-		   FROM pending_registrations
-		  WHERE id = $1
-		  FOR UPDATE`,
-		id,
-	).Scan(&count, &lastResendAt, &expiresAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, ErrPendingNotFound
-		}
-		return 0, err
-	}
-
-	if time.Now().After(expiresAt) {
-		return 0, ErrPendingExpired
-	}
-
-	if count >= MaxResends {
-		return 0, ErrResendsExhausted
-	}
-
-	if lastResendAt.Valid && time.Since(lastResendAt.Time) < ResendCooldown {
-		return 0, ErrResendCooldown
-	}
-
-	if _, err = tx.ExecContext(ctx,
 		`UPDATE pending_registrations
 		    SET resend_count = resend_count + 1, last_resend_at = NOW()
-		  WHERE id = $1`,
+		  WHERE id = $1
+		  RETURNING last_resend_at`,
 		id,
-	); err != nil {
-		return 0, err
+	).Scan(&reservedAt); err != nil {
+		return 0, time.Time{}, err
 	}
 
 	if err = tx.Commit(); err != nil {
-		return 0, err
+		return 0, time.Time{}, err
 	}
 
-	return count + 1, nil
+	return count + 1, reservedAt, nil
 }
 
 // RevertResend decrements the resend counter by one (minimum 0) and clears the
@@ -378,28 +362,45 @@ func (r *PendingRepo) RevertResend(ctx context.Context, id string) error {
 	return err
 }
 
-// UpdateEmail replaces the email on a pending registration, resets the resend
-// counter, and enforces uniqueness against both the pending table and users.
+// RevertResendIfCurrent reverses only the reservation identified by its count
+// and timestamp, so a delayed email failure cannot undo a later resend. It
+// returns the count and keeps last_resend_at: a send that failed, or timed out
+// after it was delivered, still starts the cooldown, so a failing mail path
+// cannot be driven at full speed by retrying.
+func (r *PendingRepo) RevertResendIfCurrent(ctx context.Context, id string, count int, reservedAt time.Time) (bool, error) {
+	result, err := r.db.ExecContext(ctx,
+		`UPDATE pending_registrations
+		    SET resend_count = GREATEST(resend_count - 1, 0)
+		  WHERE id = $1 AND resend_count = $2 AND last_resend_at = $3`,
+		id, count, reservedAt,
+	)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
+}
+
+// UpdateEmail replaces the email on a pending registration and consumes the
+// same row-locked resend budget as an ordinary resend.
 func (r *PendingRepo) UpdateEmail(ctx context.Context, id, newEmail string) error {
+	_, _, err := r.updateEmail(ctx, id, newEmail)
+	return err
+}
+
+func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string) (int, time.Time, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, time.Time{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Step 1: Lock the pending row and check expiry.
-	var expiresAt time.Time
-	if err = tx.QueryRowContext(ctx,
-		`SELECT expires_at FROM pending_registrations WHERE id = $1 FOR UPDATE`,
-		id,
-	).Scan(&expiresAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrPendingNotFound
-		}
-		return err
-	}
-	if time.Now().After(expiresAt) {
-		return ErrPendingExpired
+	count, err := pendingResendCount(ctx, tx, id)
+	if err != nil {
+		return 0, time.Time{}, err
 	}
 
 	lowerEmail := strings.ToLower(strings.TrimSpace(newEmail))
@@ -410,10 +411,10 @@ func (r *PendingRepo) UpdateEmail(ctx context.Context, id, newEmail string) erro
 		`SELECT EXISTS (SELECT 1 FROM pending_registrations WHERE LOWER(email) = $1 AND id <> $2)`,
 		lowerEmail, id,
 	).Scan(&pendingExists); err != nil {
-		return err
+		return 0, time.Time{}, err
 	}
 	if pendingExists {
-		return ErrEmailPending
+		return 0, time.Time{}, ErrEmailPending
 	}
 
 	// Uniqueness check: users table
@@ -422,22 +423,53 @@ func (r *PendingRepo) UpdateEmail(ctx context.Context, id, newEmail string) erro
 		`SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(email) = $1)`,
 		lowerEmail,
 	).Scan(&userExists); err != nil {
-		return err
+		return 0, time.Time{}, err
 	}
 	if userExists {
-		return ErrEmailAlreadyRegister
+		return 0, time.Time{}, ErrEmailAlreadyRegister
 	}
 
-	if _, err = tx.ExecContext(ctx,
+	var reservedAt time.Time
+	if err = tx.QueryRowContext(ctx,
 		`UPDATE pending_registrations
-		    SET email = $1, resend_count = 0, last_resend_at = NULL
-		  WHERE id = $2`,
+		    SET email = $1, resend_count = resend_count + 1, last_resend_at = NOW()
+		  WHERE id = $2
+		  RETURNING last_resend_at`,
 		lowerEmail, id,
-	); err != nil {
-		return err
+	).Scan(&reservedAt); err != nil {
+		return 0, time.Time{}, err
 	}
 
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return 0, time.Time{}, err
+	}
+	return count + 1, reservedAt, nil
+}
+
+func pendingResendCount(ctx context.Context, tx *sql.Tx, id string) (int, error) {
+	var count int
+	var lastResendAt sql.NullTime
+	var expiresAt time.Time
+	err := tx.QueryRowContext(ctx,
+		`SELECT resend_count, last_resend_at, expires_at FROM pending_registrations WHERE id = $1 FOR UPDATE`,
+		id,
+	).Scan(&count, &lastResendAt, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrPendingNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if time.Now().After(expiresAt) {
+		return 0, ErrPendingExpired
+	}
+	if count >= MaxResends {
+		return 0, ErrResendsExhausted
+	}
+	if lastResendAt.Valid && time.Since(lastResendAt.Time) < ResendCooldown {
+		return 0, ErrResendCooldown
+	}
+	return count, nil
 }
 
 // Promote atomically converts a pending registration into a full user account,

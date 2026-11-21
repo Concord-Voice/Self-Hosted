@@ -16,14 +16,27 @@
   "devDependencies": {
     "@eslint-community/eslint-plugin-eslint-comments": "^4.8.1",
     "@microsoft/eslint-formatter-sarif": "3.1.0",
-    "@vitest/coverage-istanbul": "^5.0.5",
+    "@vitest/coverage-istanbul": "^5.1.0",
     "eslint": "^10.14.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.14.0",
-    "jsdom": "^30.1.3",
+    "jsdom": "^31.0.0",
     "prettier": "^3.9.10",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-eslint": "^8.72.1",
+    "typescript-eslint": "^8.72.2",
     "vitest": "^5.0.5"
+  },
+  "//overrides_security": "minimatch@^11.0.3 closes GHSA-g3hv-75wg-m249 (denial of service; affects >= 7.0.0 < 11.0.1) for the three dev-only consumers that declare ^10.2.x: eslint, @eslint/config-array (nested under eslint, so the eslint@^10 entry reaches it) and @typescript-eslint/typescript-estree. The ^11.0.3 floor matches the one services/media-plane already uses. SCOPED, not global: `eslint@^10` (with \".\": \"$eslint\", which npm requires for a direct dependency) and `@typescript-eslint/typescript-estree`. A global minimatch override would have forced glob@7, which crashes on minimatch 11 (docs/ci/minimatch-advisory-repair.md). @microsoft/eslint-formatter-sarif > eslint = $eslint removes the formatter's nested eslint 8 copy (CVE-2025-50537). That copy never ran, because the formatter loads ESLint with require.main.require('eslint'), and it was the only source of the 3.1.5 minimatch copies, glob@7, @eslint/eslintrc and @humanwhocodes/config-array. Its baseline row records that skew. The three minimatch skews and the formatter's eslint skew are the four rows in .override-range-baseline.json. Upstream has shipped the fix: eslint 10.15.0 declares ^11.0.5 and pulls @eslint/config-array 0.23.6 (also ^11.0.5), and @typescript-eslint/typescript-estree 8.73.0 (via typescript-eslint 8.73.0) declares ^11.0.1, all inside the ranges this tree declares. They are not adopted yet because they are inside the 7-day release-age cooldown in .github/dependabot.yml: eslint 10.15.0 clears it on 2026-11-20 and typescript-eslint 8.73.0 on 2026-11-23. Once the lockfile resolves those versions, delete both minimatch entries and their three baseline rows; the formatter entry stays.",
+  "overrides": {
+    "@microsoft/eslint-formatter-sarif": {
+      "eslint": "$eslint"
+    },
+    "eslint@^10": {
+      ".": "$eslint",
+      "minimatch": "^11.0.3"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^11.0.3"
+    }
   }
 }

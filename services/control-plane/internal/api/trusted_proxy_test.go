@@ -99,6 +99,21 @@ func TestClientIP_UntrustedPeer_XFFIgnored(t *testing.T) {
 		"untrusted peer must NOT have its X-Forwarded-For honored — spoof rejection")
 }
 
+func TestClientIP_ExactTrustedPeerRejectsNeighborSpoof(t *testing.T) {
+	r := newEchoRouter(t, []string{"172.19.0.1/32"})
+	for _, tt := range []struct{ peer, want string }{
+		{"172.19.0.1:51234", "1.2.3.4"},
+		{"172.19.0.2:51234", "172.19.0.2"},
+	} {
+		req := httptest.NewRequest("GET", "/echo", nil)
+		req.RemoteAddr = tt.peer
+		req.Header.Set("X-Forwarded-For", "1.2.3.4")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		assert.Equal(t, tt.want, w.Body.String())
+	}
+}
+
 func TestClientIP_SpoofAttempt_XRealIPIgnored(t *testing.T) {
 	// Attacker tries to spoof via X-Real-IP from an untrusted peer.
 	// Should be ignored — real peer returned.

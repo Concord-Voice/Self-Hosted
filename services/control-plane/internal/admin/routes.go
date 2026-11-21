@@ -71,7 +71,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 
 		// --- Gated routes (AdminAuthRequired — deny-by-default) ---
 		gated := api.Group("/")
-		gated.Use(AdminAuthRequired(h.sessions))
+		gated.Use(AdminAuthRequired(h.sessions, h.repo))
 		{
 			gated.POST("/admins", h.CreateAdmin)
 			serverRoutes := gated.Group("/server")

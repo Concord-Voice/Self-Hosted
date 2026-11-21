@@ -52,12 +52,42 @@ const GHSA_RE = /GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}/i;
  * @returns {boolean}
  */
 export function isUsableAuditReport(a) {
-  return !!a && typeof a === 'object' && !a.error && typeof a.vulnerabilities === 'object';
+  // `typeof null` and `typeof []` are both 'object', so test for a plain
+  // object: `{"vulnerabilities": null}` is a broken report, not a clean one.
+  const v = a?.vulnerabilities;
+  return !!a && typeof a === 'object' && !a.error
+    && !!v && typeof v === 'object' && !Array.isArray(v);
 }
 
 /**
- * Extract the set of distinct HIGH/CRITICAL advisories from an
- * `npm audit --json` report. Only object-form `via` entries are real
+ * Package names compare trimmed and case-insensitive, everywhere: the dedupe
+ * key, the production check and the allowlist match must agree, or a record
+ * merged under one rule is judged under another.
+ *
+ * @param {unknown} pkg
+ * @returns {string}
+ */
+function normPkg(pkg) {
+  return String(pkg).trim().toLowerCase();
+}
+
+/**
+ * Key for one advisory reported for one package, normalised the way
+ * `evaluate` compares ids (case-insensitive) and packages (`normPkg`), so two
+ * records share a key only when the gate would treat them as the same.
+ *
+ * @param {string} id GHSA id, or the advisory url when it has none
+ * @param {string} pkg package name npm reported
+ * @returns {string}
+ */
+function advisoryKey(id, pkg) {
+  return JSON.stringify([String(id).toUpperCase(), normPkg(pkg)]);
+}
+
+/**
+ * Extract the distinct HIGH/CRITICAL (advisory, package) pairs from an
+ * `npm audit --json` report. One GHSA reported for two packages is two
+ * records. Only object-form `via` entries are real
  * advisories; string-form `via` entries are transitive chain references whose
  * advisory is counted at the dependency that actually carries it.
  *
@@ -73,16 +103,23 @@ export function extractHighCriticalAdvisories(audit) {
       const severity = String(via.severity ?? '').toLowerCase();
       if (severity !== 'high' && severity !== 'critical') continue;
       const m = GHSA_RE.exec(via.url);
-      // Canonical key is the GHSA id. If a non-GHSA advisory url ever appears,
-      // fall back to the full url as the dedupe + allowlist key — an operator
-      // accepting such an advisory must list that exact url in the allowlist.
+      // The advisory id is the GHSA id. If a non-GHSA advisory url ever
+      // appears, the full url stands in as the id (the allowlist key, and half
+      // of the dedupe key): an operator accepting such an advisory must list
+      // that exact url in the allowlist.
       const id = m ? m[0].toUpperCase() : via.url;
-      if (!found.has(id)) {
-        found.set(id, {
+      // Dedupe on (advisory, package), never on the id alone. One GHSA can
+      // list several packages, and keying on the id kept only the first one
+      // seen, so an exception scoped to that package silently waived every
+      // other package npm reported the same advisory for.
+      const pkg = String(via.name ?? node?.name ?? '');
+      const key = advisoryKey(id, pkg);
+      if (!found.has(key)) {
+        found.set(key, {
           id,
           severity,
           title: String(via.title ?? ''),
-          package: String(via.name ?? node?.name ?? ''),
+          package: pkg,
           url: via.url,
         });
       }
@@ -113,12 +150,21 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
   }
   const advisories = extractHighCriticalAdvisories(audit);
 
+  // Entries per advisory id. One GHSA reported for two packages needs one
+  // entry per package, so an id can hold several; each is matched by package.
   const accepted = new Map();
   for (const e of allowlist?.accepted ?? []) {
-    if (e && typeof e.id === 'string') accepted.set(e.id.toUpperCase(), e);
+    if (!e || typeof e.id !== 'string') continue;
+    const id = e.id.toUpperCase();
+    if (!accepted.has(id)) accepted.set(id, []);
+    accepted.get(id).push(e);
   }
 
-  // Advisory ids present in the PRODUCTION-only dependency graph. `null` means
+  // (advisory, package) pairs present in the PRODUCTION-only dependency graph.
+  // Keyed per package like the main report: a dev waiver for package A is void
+  // when A carries the advisory in production. Another package carrying the
+  // same GHSA in production does not void it; that package blocks on its own
+  // record, which the main report also holds. `null` means
   // we have no TRUSTWORTHY production report, which is emphatically not the
   // same as an empty one — see the dev-scope check below, which fails closed on
   // `null` and passes only on a genuine, verified absence.
@@ -133,8 +179,8 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
   const prodUsable = prodAudit === undefined || prodAudit === null
     ? 'absent'
     : (isUsableAuditReport(prodAudit) ? 'usable' : 'unusable');
-  const prodIds = prodUsable === 'usable'
-    ? new Set(extractHighCriticalAdvisories(prodAudit).map((a) => a.id.toUpperCase()))
+  const prodKeys = prodUsable === 'usable'
+    ? new Set(extractHighCriticalAdvisories(prodAudit).map((a) => advisoryKey(a.id, a.package)))
     : null;
 
   const now = nowISO ? Date.parse(nowISO) : Date.now();
@@ -143,33 +189,55 @@ export function evaluate(audit, allowlist, nowISO, prodAudit) {
   const expired = [];
 
   for (const a of advisories) {
-    const entry = accepted.get(a.id.toUpperCase());
-    if (!entry) {
+    const entries = accepted.get(a.id.toUpperCase());
+    if (!entries) {
       blocked.push(a);
       continue;
     }
     // An entry with no `package` cannot be checked against what npm actually
-    // reported, so it does not match anything. Fail closed.
-    if (typeof entry.package !== 'string' || entry.package.trim() === '') {
-      blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} has no "package" field — add "package": "${a.package}" to scope the exception` });
+    // reported. It is an error for the whole id, not an entry to skip: skipping
+    // it would let a reviewer read it while the gate applied a sibling entry.
+    const scoped = entries.filter((e) => typeof e.package === 'string' && e.package.trim() !== '');
+    if (scoped.length < entries.length) {
+      blocked.push({ ...a, mismatch: `allowlist entry ${entries[0].id} has no "package" field — add "package": "${a.package}" to scope the exception` });
       continue;
     }
-    if (entry.package.trim().toLowerCase() !== String(a.package).trim().toLowerCase()) {
-      blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} is scoped to package "${entry.package}" but npm reported it for "${a.package}"` });
+    const matches = scoped.filter((e) => normPkg(e.package) === normPkg(a.package));
+    if (matches.length === 0) {
+      blocked.push({ ...a, mismatch: `allowlist entry ${entries[0].id} is scoped to package ${scoped.map((e) => `"${e.package}"`).join(', ')} but npm reported it for "${a.package}"` });
       continue;
     }
-    // A dev-scoped waiver is void the moment the same advisory appears in the
-    // production graph. With no production report we cannot check the claim, so
-    // it blocks rather than passing vacuously.
-    if (String(entry.scope ?? '').toLowerCase() === 'dev') {
-      if (!prodIds) {
+    // Two entries for one (advisory, package) leave a reviewer reading one
+    // while the gate applies the other, so neither applies.
+    if (matches.length > 1) {
+      blocked.push({ ...a, mismatch: `allowlist has ${matches.length} entries for ${a.id} scoped to package "${a.package}"; keep one` });
+      continue;
+    }
+    const entry = matches[0];
+    // `scope` is absent (undefined or null) or "dev", trimmed and
+    // case-insensitive. Any other value (blank, a look-alike character,
+    // "development", a non-string) is a claim the gate cannot verify. Reading
+    // it as no scope would turn a dev-only exception into an unconditional
+    // one, so it blocks.
+    const scope = entry.scope === undefined || entry.scope === null
+      ? ''
+      : (typeof entry.scope === 'string' && entry.scope.trim() !== '' ? entry.scope.trim().toLowerCase() : null);
+    if (scope !== '' && scope !== 'dev') {
+      blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} has an unrecognized scope ${JSON.stringify(entry.scope)}; only "dev" is supported` });
+      continue;
+    }
+    // A dev-scoped waiver is void the moment npm reports the advisory for the
+    // same package in the production graph. With no production report we
+    // cannot check the claim, so it blocks rather than passing vacuously.
+    if (scope === 'dev') {
+      if (!prodKeys) {
         const why = prodUsable === 'unusable'
           ? 'the production-only audit report was unusable (npm likely failed), so the claim could not be verified'
           : 'no production-only audit report was supplied to verify it';
         blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} claims scope "dev" but ${why}` });
         continue;
       }
-      if (prodIds.has(a.id.toUpperCase())) {
+      if (prodKeys.has(advisoryKey(a.id, a.package))) {
         blocked.push({ ...a, mismatch: `allowlist entry ${entry.id} claims scope "dev" but ${a.package} is reachable in the PRODUCTION dependency graph` });
         continue;
       }
@@ -232,27 +300,34 @@ function parseArgs(argv) {
   return out;
 }
 
+// One call, one line, on stdout and stderr alike. Messages embed allowlist
+// and audit-report text (a JSON parse error quotes the file), and a line break
+// in it could start a line with `::warning::` or another workflow command,
+// which the runner reads from both streams. So line breaks become spaces.
+const oneLine = (s) => String(s).replace(/[\r\n\u2028\u2029]+/g, ' ');
+const log = (s) => process.stdout.write(`${oneLine(s)}\n`);
+const logErr = (s) => process.stderr.write(`${oneLine(s)}\n`);
+
 function readJson(path, label) {
   let raw;
   try {
     raw = readFileSync(path, 'utf8');
   } catch (err) {
-    process.stderr.write(`npm-audit-gate: cannot read ${label} at ${path}: ${(err instanceof Error ? err.message : String(err))}\n`);
+    logErr(`npm-audit-gate: cannot read ${label} at ${path}: ${(err instanceof Error ? err.message : String(err))}`);
     process.exit(2);
   }
   try {
     return JSON.parse(raw);
   } catch (err) {
-    process.stderr.write(`npm-audit-gate: ${label} at ${path} is not valid JSON: ${(err instanceof Error ? err.message : String(err))}\n`);
+    logErr(`npm-audit-gate: ${label} at ${path} is not valid JSON: ${(err instanceof Error ? err.message : String(err))}`);
     process.exit(2);
   }
 }
 
-const log = (s) => process.stdout.write(`${s}\n`);
 
 function runGate(args) {
   if (!args.audit || args.allowlists.length === 0) {
-    process.stderr.write('npm-audit-gate: --audit <file> and --allowlist <file> are required\n');
+    logErr('npm-audit-gate: --audit <file> and --allowlist <file> are required');
     process.exit(2);
   }
   const audit = readJson(args.audit, 'audit report');
@@ -299,7 +374,7 @@ function runGate(args) {
 
 function runExpiryScan(args) {
   if (args.allowlists.length === 0) {
-    process.stderr.write('npm-audit-gate: --expiry-scan requires at least one --allowlist <file>\n');
+    logErr('npm-audit-gate: --expiry-scan requires at least one --allowlist <file>');
     process.exit(2);
   }
   let expiredTotal = 0;

@@ -37,15 +37,21 @@ const (
 	errMsgFailedFetchSessions   = "Failed to fetch sessions"
 	errMsgCurrentSessionUnknown = "Current session cannot be identified"
 	errMsgAuthUnavailable       = "Authentication temporarily unavailable"
+	errMsgSocketFencePending    = "Sessions revoked; WebSocket disconnection pending"
 )
 
-var errCurrentSessionUnknown = errors.New("current session cannot be identified")
+var (
+	errCurrentSessionUnknown      = errors.New("current session cannot be identified")
+	errRevokeAuthenticationNeeded = errors.New("session revocation requires authentication")
+)
 
 // SessionDisconnector synchronously fences the WebSocket transports of one
 // exact login family. Defined as an interface to avoid coupling to the
 // websocket package.
 type SessionDisconnector interface {
 	loginfamily.FamilyCloser
+	SnapshotUserFamiliesContext(context.Context, uuid.UUID) ([]uuid.UUID, error)
+	DisconnectFamiliesContext(context.Context, uuid.UUID, []uuid.UUID) error
 }
 
 // MFAVerifier checks MFA status and verifies codes for sensitive operations.
@@ -67,16 +73,16 @@ type revokeAction struct {
 }
 
 var (
-	revokeSessionAction     = revokeAction{desc: "revoke this session", route: securityevent.RouteSessionDelete, purpose: stepup.PurposeSessionRevoke}
-	revokeAllSessionsAction = revokeAction{desc: "revoke all sessions", route: securityevent.RouteSessionsRevokeAll, purpose: stepup.PurposeSessionsRevokeAll}
-	revocationModeSetAction = revokeAction{desc: "change revocation mode", route: securityevent.RouteSessionsRevocationMode, purpose: stepup.PurposeRevocationModeSet}
+	revokeSessionAction            = revokeAction{desc: "revoke this session", route: securityevent.RouteSessionDelete, purpose: stepup.PurposeSessionRevoke}
+	revokeAllSessionsAction        = revokeAction{desc: "revoke all sessions", route: securityevent.RouteSessionsRevokeAll, purpose: stepup.PurposeSessionsRevokeAll}
+	revocationModeSetAction        = revokeAction{desc: "change revocation mode", route: securityevent.RouteSessionsRevocationMode, purpose: stepup.PurposeRevocationModeSet}
+	errSimpleAuthWindowUnavailable = errors.New("simple-mode authentication window Redis client unavailable")
 )
 
 // Revocation rate-limiting constants.
 const (
-	revokeWindowDuration       = 24 * time.Hour
-	revokeTrackingTTL          = 25 * time.Hour
 	simpleAuthWindowTTL        = 5 * time.Minute
+	simpleAuthWindowVersion    = "v2:"
 	freeRevokeSessionThreshold = 3 // Must have >= 3 active sessions for a free revoke
 )
 
@@ -159,51 +165,47 @@ func simpleAuthWindowKey(userID string) string {
 	return fmt.Sprintf("session_revoke_auth:%s", userID)
 }
 
-// countRevokesInWindow prunes expired entries from the tracking set and returns
-// the number of revokes recorded within the current 24-hour rolling window.
-func (h *Handler) countRevokesInWindow(ctx context.Context, userID string) (int64, error) {
-	key := revokeTrackingKey(userID)
-	cutoff := fmt.Sprintf("%f", float64(time.Now().Add(-revokeWindowDuration).Unix()))
-	h.redis.ZRemRangeByScore(ctx, key, "-inf", cutoff)
-	return h.redis.ZCard(ctx, key).Result()
+func (h *Handler) readSimpleAuthWindow(ctx context.Context, userID string) (string, error) {
+	if h.redis == nil {
+		return "", errSimpleAuthWindowUnavailable
+	}
+	return h.redis.Get(ctx, simpleAuthWindowKey(userID)).Result()
 }
 
-// countActiveSessions returns the number of non-revoked, non-expired sessions for a user.
-func (h *Handler) countActiveSessions(ctx context.Context, userID string) (int, error) {
-	var count int
-	err := h.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW()`,
-		userID,
-	).Scan(&count)
-	return count, err
-}
-
-// recordRevoke adds a revoke entry to the tracking set. Called for ALL revokes
-// (both free and authenticated) so the rolling window slides forward.
-func (h *Handler) recordRevoke(ctx context.Context, userID, sessionID string) {
-	key := revokeTrackingKey(userID)
-	h.redis.ZAdd(ctx, key, redis.Z{
-		Score:  float64(time.Now().Unix()),
-		Member: sessionID,
-	})
-	h.redis.Expire(ctx, key, revokeTrackingTTL)
-}
-
-// hasSimpleAuthWindow checks if the user has an active 5-minute authentication window (Simple mode).
-func (h *Handler) hasSimpleAuthWindow(ctx context.Context, userID string) bool {
-	val, err := h.redis.Get(ctx, simpleAuthWindowKey(userID)).Result()
-	return err == nil && val == "1"
+func (h *Handler) simpleAuthWindowMatches(userID, value string, err error, generation int64) bool {
+	if err != nil {
+		if !errors.Is(err, redis.Nil) {
+			h.log.Warn("Simple-mode authentication window unavailable", "user_id", userID, "error", err)
+		}
+		return false
+	}
+	return value == fmt.Sprintf("%s%d", simpleAuthWindowVersion, generation)
 }
 
 // grantSimpleAuthWindow sets a 5-minute authentication window in Redis.
-func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID string) {
-	h.redis.Set(ctx, simpleAuthWindowKey(userID), "1", simpleAuthWindowTTL)
+func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID string, generation int64) {
+	if h.redis == nil {
+		h.log.Warn("Could not grant simple-mode authentication window")
+		return
+	}
+	ctx, cancel := stepup.SettleContext(ctx)
+	defer cancel()
+	if err := h.redis.Set(ctx, simpleAuthWindowKey(userID), fmt.Sprintf("%s%d", simpleAuthWindowVersion, generation), simpleAuthWindowTTL).Err(); err != nil {
+		h.log.Warn("Could not grant simple-mode authentication window")
+	}
 }
 
-// resetRevokeTracking clears both the revoke tracking set and the auth window.
+// resetRevokeTracking removes the legacy Redis tracking set and auth window.
 func (h *Handler) resetRevokeTracking(ctx context.Context, userID string) {
-	h.redis.Del(ctx, revokeTrackingKey(userID))
-	h.redis.Del(ctx, simpleAuthWindowKey(userID))
+	if h.redis == nil {
+		h.log.Warn("Could not clear session-revocation caches")
+		return
+	}
+	ctx, cancel := stepup.SettleContext(ctx)
+	defer cancel()
+	if err := h.redis.Del(ctx, revokeTrackingKey(userID), simpleAuthWindowKey(userID)).Err(); err != nil {
+		h.log.Warn("Could not clear session-revocation caches")
+	}
 }
 
 // getUserRevocationMode fetches the user's revocation_mode from the database.
@@ -215,16 +217,6 @@ func (h *Handler) getUserRevocationMode(ctx context.Context, userID string) stri
 		return "secure"
 	}
 	return mode
-}
-
-// passwordRequired determines if authentication is needed for this revoke attempt.
-// With fewer than 3 active sessions, password is always required.
-// With 3+ active sessions, one free revoke per 24h rolling window is allowed.
-func passwordRequired(activeCount int, revokesInWindow int64) bool {
-	if activeCount < freeRevokeSessionThreshold {
-		return true
-	}
-	return revokesInWindow >= 1
 }
 
 // verifyUserPassword fetches the stored Argon2id hash and verifies the provided
@@ -400,27 +392,73 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		return
 	}
 
-	needsPassword, mode := h.determineAuthRequired(ctx, uid)
-
 	// Parse optional password from request body
 	var req struct {
 		Password string `json:"password"` // #nosec G117 -- not a secret field, receives user input for auth verification
-		MFACode  string `json:"mfa_code"` // Framework: accepted but unused until MFA is implemented
+		MFACode  string `json:"mfa_code"`
 	}
 	if c.ContentType() == "application/json" {
 		_ = c.ShouldBindJSON(&req)
 	}
 
-	if needsPassword {
-		if h.authenticateForRevoke(ctx, c, uid, req.Password, req.MFACode, revokeSessionAction) {
+	result, revokeErr := h.executeRevocation(ctx, uid, sessionID, middleware.TokenCredentialEpoch(c), false)
+	authenticated, mfaVerified := false, false
+	if errors.Is(revokeErr, errRevokeAuthenticationNeeded) && !errors.Is(revokeErr, loginfamily.ErrUnavailable) {
+		blocked, verified := h.authenticateForRevokeWithMFA(ctx, c, uid, req.Password, req.MFACode, revokeSessionAction)
+		if blocked {
 			return
 		}
-		if mode == "simple" {
-			h.grantSimpleAuthWindow(ctx, uid)
+		authenticated, mfaVerified = true, verified
+		result, revokeErr = h.executeRevocation(ctx, uid, sessionID, middleware.TokenCredentialEpoch(c), true)
+	}
+	if revokeErr != nil {
+		h.handleRevokeSessionError(ctx, c, uid, result, revokeErr)
+		return
+	}
+	if err := h.closeCommittedFamily(ctx, result.target); err != nil {
+		h.log.Error("Revoked session socket fence unconfirmed", "user_id", uid, "error", err)
+		if mfaVerified {
+			h.clearRevokeMFABudget(ctx, uid)
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgSocketFencePending})
+		return
+	}
+	_ = h.closeCommittedFamilies(ctx, result.revocation, []loginfamily.Binding{result.target})
+	if authenticated && result.mode == "simple" {
+		h.grantSimpleAuthWindow(ctx, uid, result.generation)
+	}
+	if mfaVerified {
+		h.clearRevokeMFABudget(ctx, uid)
+	}
+	h.log.Info("Session revoked", "user_id", uid)
+	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonSessionRevoked, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionDelete})
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Session revoked successfully",
+		"session_id": sessionID,
+	})
+}
+
+func (h *Handler) handleRevokeSessionError(ctx context.Context, c *gin.Context, uid string, result singleRevocationResult, revokeErr error) {
+	var fenced []loginfamily.Binding
+	if commitOutcomeUnknown(revokeErr) {
+		if err := h.closeCommittedFamily(ctx, result.target); err != nil {
+			h.log.Warn("Uncertain session revocation socket fence unconfirmed", "user_id", uid, "error", err)
+		} else {
+			fenced = append(fenced, result.target)
 		}
 	}
-
-	h.executeRevocation(ctx, c, uid, sessionID)
+	_ = h.closeCommittedFamilies(ctx, result.revocation, fenced)
+	switch {
+	case errors.Is(revokeErr, loginfamily.ErrTargetNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": sessionNotFoundMessage})
+	case errors.Is(revokeErr, loginfamily.ErrUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgAuthUnavailable})
+	case errors.Is(revokeErr, loginfamily.ErrDenied), errors.Is(revokeErr, credepoch.ErrEpochMismatch), errors.Is(revokeErr, credepoch.ErrBlocked):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
+	default:
+		h.log.Error("Failed to revoke session")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRevokeSession})
+	}
 }
 
 // verifySessionOwnership checks immutable SID ownership, including terminal families.
@@ -447,121 +485,135 @@ func (h *Handler) verifySessionOwnership(ctx context.Context, c *gin.Context, se
 	return true
 }
 
-// determineAuthRequired uses server-authoritative policy checks to decide if password is needed.
-func (h *Handler) determineAuthRequired(ctx context.Context, uid string) (needsPassword bool, mode string) {
-	activeCount, err := h.countActiveSessions(ctx, uid)
-	if err != nil {
-		h.log.Error("Failed to count active sessions", "error", err)
-		return true, "secure" // Fail secure
-	}
-
-	revokesInWindow, err := h.countRevokesInWindow(ctx, uid)
-	if err != nil {
-		h.log.Error("Redis error checking revoke window, requiring password", "error", err)
-		revokesInWindow = 999
-	}
-
-	mode = h.getUserRevocationMode(ctx, uid)
-
-	if mode == "simple" && h.hasSimpleAuthWindow(ctx, uid) {
-		return false, mode
-	}
-	return passwordRequired(activeCount, revokesInWindow), mode
-}
-
 // authenticateForRevoke verifies the user's identity via MFA or password for session revocation.
 // Returns true if the request was blocked (response written), false if authentication passed.
 func (h *Handler) authenticateForRevoke(ctx context.Context, c *gin.Context, uid, password, mfaCode string, action revokeAction) bool {
+	blocked, _ := h.authenticateForRevokeWithMFA(ctx, c, uid, password, mfaCode, action)
+	return blocked
+}
+
+func (h *Handler) authenticateForRevokeWithMFA(ctx context.Context, c *gin.Context, uid, password, mfaCode string, action revokeAction) (blocked, mfaVerified bool) {
 	route := action.route
 	hasMFA := h.mfaVerifier != nil && h.mfaVerifier.IsEnabled(ctx, uid)
 
-	if hasMFA && mfaCode != "" {
-		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
-		if mfaErr != nil {
-			h.log.Error("MFA verification error during session revoke", "error", mfaErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-			return true
-		}
-		if !valid {
-			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
-			return true
-		}
-		return false
-	}
-
-	if password != "" {
-		match, verifyErr := h.verifyUserPassword(ctx, uid, password)
-		if errors.Is(verifyErr, auth.ErrAccountLocked) {
-			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonAccountLocked, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
-			stepup.LockedError().Write(c)
-			return true
-		}
-		if verifyErr != nil {
-			h.log.Error("Password verification failed during session revoke", "error", verifyErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
-			return true
-		}
-		if !match {
-			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgIncorrectPassword})
-			return true
-		}
-		return false
-	}
-
-	// Neither provided — tell client what's needed
-	if hasMFA {
-		methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
-		if err != nil {
-			// A failed read is not an empty method list: answering with one
-			// would tell the client no factor is available.
-			h.log.Error("Failed to read MFA methods during session revoke", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-			return true
-		}
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":   "auth_required",
-			"message": "Authentication required to " + action.desc,
-			"methods": methods,
-		})
-	} else {
+	if password == "" {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "password_required",
 			"message": "Password verification required to " + action.desc,
 		})
+		return true, false
 	}
-	return true
+
+	match, verifyErr := h.verifyUserPassword(ctx, uid, password)
+	if errors.Is(verifyErr, auth.ErrAccountLocked) {
+		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonAccountLocked, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
+		stepup.LockedError().Write(c)
+		return true, false
+	}
+	if verifyErr != nil {
+		h.log.Error("Password verification failed during session revoke", "error", verifyErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
+		return true, false
+	}
+	if !match {
+		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgIncorrectPassword})
+		return true, false
+	}
+
+	if hasMFA {
+		if mfaCode == "" {
+			methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+			if err != nil {
+				h.log.Error("Failed to read MFA methods during session revoke", "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+				return true, false
+			}
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "auth_required",
+				"message": "Authentication required to " + action.desc,
+				"methods": methods,
+			})
+			return true, false
+		}
+		if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), uid, mfaCode); e != nil {
+			if e.Cause != nil {
+				h.log.Error("Session-revoke MFA budget unavailable", "error", e.Cause)
+			}
+			e.Write(c)
+			return true, false
+		}
+		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
+		if mfaErr != nil {
+			h.log.Error("MFA verification error during session revoke", "error", mfaErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+			return true, false
+		}
+		if !valid {
+			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
+			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
+			return true, false
+		}
+		mfaVerified = true
+	}
+	return false, mfaVerified
 }
 
-// executeRevocation performs the actual session revocation, tracking, and disconnect.
-func (h *Handler) executeRevocation(ctx context.Context, c *gin.Context, uid, sessionID string) {
-	result, err := auth.RevokeRefreshSession(ctx, h.db, uid, sessionID, middleware.TokenCredentialEpoch(c))
-	if err != nil {
-		// An unknown commit may have terminalized the family: fence what committed.
-		h.closeCommittedFamilies(ctx, result)
-		switch {
-		case errors.Is(err, loginfamily.ErrTargetNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": sessionNotFoundMessage})
-		case errors.Is(err, loginfamily.ErrUnavailable):
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgAuthUnavailable})
-		case errors.Is(err, loginfamily.ErrDenied), errors.Is(err, credepoch.ErrEpochMismatch), errors.Is(err, credepoch.ErrBlocked):
-			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
-		default:
-			h.log.Error("Failed to revoke session")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRevokeSession})
-		}
-		return
+// clearRevokeMFABudget resets the budget after a committed revocation, on a
+// context detached from the request so a client hang-up cannot cancel it.
+func (h *Handler) clearRevokeMFABudget(ctx context.Context, uid string) {
+	ctx, cancel := stepup.SettleContext(ctx)
+	defer cancel()
+	if err := stepup.DangerousActionBudget(h.redis).Clear(ctx, uid); err != nil {
+		h.log.Warn("Could not reset session-revoke MFA budget after a successful change", "user_id", uid, "error", err)
 	}
-	h.recordRevoke(ctx, uid, sessionID)
-	h.closeCommittedFamilies(ctx, result)
-	h.log.Info("Session revoked", "user_id", uid)
-	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonSessionRevoked, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionDelete})
+}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":    "Session revoked successfully",
-		"session_id": sessionID,
-	})
+type singleRevocationResult struct {
+	revocation loginfamily.RevocationResult
+	target     loginfamily.Binding
+	mode       string
+	generation int64
+}
+
+// executeRevocation reads Redis policy state before the transaction, then
+// validates it against the generation read under the revocation's user lock.
+func (h *Handler) executeRevocation(ctx context.Context, uid, sessionID, epoch string, authenticated bool) (singleRevocationResult, error) {
+	var result singleRevocationResult
+	var authWindowValue string
+	var authWindowErr error
+	if !authenticated {
+		authWindowValue, authWindowErr = h.readSimpleAuthWindow(ctx, uid)
+	}
+	policy := func(ctx context.Context, tx *sql.Tx) error {
+		var freeAvailable bool
+		var activeCount int
+		err := tx.QueryRowContext(ctx, `SELECT revocation_mode, session_revoke_auth_gen,
+ (last_session_revoke_at IS NULL OR last_session_revoke_at <= clock_timestamp() - INTERVAL '24 hours'),
+ (SELECT count(*) FROM refresh_tokens WHERE user_id=users.id AND revoked_at IS NULL AND expires_at>clock_timestamp()),
+ s.user_id,s.family_id
+ FROM users JOIN login_family_sids s ON s.user_id=users.id
+ WHERE users.id=$1 AND s.sid=$2`, uid, sessionID).Scan(&result.mode, &result.generation, &freeAvailable, &activeCount, &result.target.UserID, &result.target.FamilyID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return loginfamily.NewError(loginfamily.ReasonTargetUnknown, nil)
+		}
+		if err != nil {
+			return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+		}
+		freeRevoke := freeAvailable && activeCount >= freeRevokeSessionThreshold
+		if !authenticated && !freeRevoke && (result.mode != "simple" ||
+			!h.simpleAuthWindowMatches(uid, authWindowValue, authWindowErr, result.generation)) {
+			return errRevokeAuthenticationNeeded
+		}
+		var updated int
+		if err := tx.QueryRowContext(ctx, `UPDATE users SET last_session_revoke_at=clock_timestamp() WHERE id=$1 RETURNING 1`, uid).Scan(&updated); err != nil {
+			return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+		}
+		return nil
+	}
+	var err error
+	result.revocation, err = auth.RevokeRefreshSessionWithPolicy(ctx, h.db, uid, sessionID, epoch, policy)
+	return result, err
 }
 
 // RevokeAllSessions revokes all sessions after verifying the user's password.
@@ -588,14 +640,22 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 	uid := userID.(string)
 	ctx := c.Request.Context()
 
-	if h.authenticateForRevoke(ctx, c, uid, req.Password, req.MFACode, revokeAllSessionsAction) {
+	blocked, mfaVerified := h.authenticateForRevokeWithMFA(ctx, c, uid, req.Password, req.MFACode, revokeAllSessionsAction)
+	if blocked {
 		return
 	}
 
 	result, err := h.revokeAllSessionsDB(uid, req.IncludeCurrent, c)
 	if err != nil {
-		// An unknown commit may have terminalized families: fence what committed.
-		h.closeCommittedFamilies(c.Request.Context(), result)
+		var fenced []loginfamily.Binding
+		if commitOutcomeUnknown(err) {
+			var fenceErr error
+			fenced, fenceErr = h.closeCapturedFamilies(ctx, result.localTargets)
+			if fenceErr != nil {
+				h.log.Warn("Uncertain bulk revocation socket fences unconfirmed", "user_id", uid, "error", fenceErr)
+			}
+		}
+		_ = h.closeCommittedFamilies(ctx, result.revocation, fenced)
 		if errors.Is(err, errCurrentSessionUnknown) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCurrentSessionUnknown})
 			return
@@ -617,18 +677,26 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 		return
 	}
 
-	rowsAffected := result.RevokedRefreshRows
-	h.closeCommittedFamilies(c.Request.Context(), result)
+	rowsAffected := result.revocation.RevokedRefreshRows
+	fenced, localErr := h.closeCapturedFamilies(ctx, result.localTargets)
+	fenceErr := errors.Join(localErr, h.closeCommittedFamilies(ctx, result.revocation, fenced))
+	if mfaVerified {
+		h.clearRevokeMFABudget(ctx, uid)
+	}
 
 	h.resetRevokeTracking(ctx, uid)
-	h.log.Info("Sessions revoked", "user_id", uid, "count", rowsAffected, "include_current", req.IncludeCurrent)
-	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonSessionsRevoked, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionsRevokeAll})
-
 	message := "All other sessions revoked successfully"
 	if req.IncludeCurrent {
 		message = "All sessions revoked successfully"
 		c.SetCookie("refresh_token", "", -1, "/", "", c.Request.TLS != nil, true)
 	}
+	if fenceErr != nil {
+		h.log.Error("Revoked session socket fences unconfirmed", "user_id", uid, "error", fenceErr)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgSocketFencePending})
+		return
+	}
+	h.log.Info("Sessions revoked", "user_id", uid, "count", rowsAffected, "include_current", req.IncludeCurrent)
+	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonSessionsRevoked, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionsRevokeAll})
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":         message,
@@ -637,34 +705,126 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 	})
 }
 
-// closeCommittedFamilies fences the revoked families' sockets before the
-// response. The commit already stands: a failed close is logged and left to the
-// durable owner's reconciler, never surfaced as a revocation failure.
-func (h *Handler) closeCommittedFamilies(ctx context.Context, result loginfamily.RevocationResult) {
+// closeCommittedFamily uses the transaction's exact target without relying on
+// another database read after a definite commit.
+func (h *Handler) closeCommittedFamily(ctx context.Context, target loginfamily.Binding) error {
+	if h.hub == nil || target.UserID == uuid.Nil || target.FamilyID == uuid.Nil {
+		return errors.New("session socket fence unavailable")
+	}
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginfamily.PostCommitCloseTimeout)
+	defer cancel()
+	return h.hub.DisconnectFamilyContext(closeCtx, target.UserID, target.FamilyID)
+}
+
+func commitOutcomeUnknown(err error) bool {
+	var failure *loginfamily.Error
+	return errors.As(err, &failure) && failure.Reason() == loginfamily.ReasonCommitUnknown
+}
+
+func (h *Handler) closeCapturedFamilies(ctx context.Context, targets []loginfamily.Binding) ([]loginfamily.Binding, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	if h.hub == nil {
+		return nil, errors.New("session socket fence unavailable")
+	}
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginfamily.PostCommitCloseTimeout)
+	defer cancel()
+	userID := targets[0].UserID
+	families := make([]uuid.UUID, 0, len(targets))
+	for _, target := range targets {
+		if userID == uuid.Nil || target.UserID != userID || target.FamilyID == uuid.Nil {
+			return nil, errors.New("invalid captured session socket frontier")
+		}
+		families = append(families, target.FamilyID)
+	}
+	if err := h.hub.DisconnectFamiliesContext(closeCtx, userID, families); err != nil {
+		return nil, err
+	}
+	return targets, nil
+}
+
+type alreadyFencedCloser struct {
+	closer  loginfamily.FamilyCloser
+	targets []loginfamily.Binding
+}
+
+func (c alreadyFencedCloser) DisconnectFamilyContext(ctx context.Context, userID, familyID uuid.UUID) error {
+	for _, target := range c.targets {
+		if userID == target.UserID && familyID == target.FamilyID {
+			return nil
+		}
+	}
+	return c.closer.DisconnectFamilyContext(ctx, userID, familyID)
+}
+
+// closeCommittedFamilies leaves any failed close with the durable owner.
+func (h *Handler) closeCommittedFamilies(ctx context.Context, result loginfamily.RevocationResult, alreadyFenced []loginfamily.Binding) error {
 	if len(result.Owners) == 0 {
-		return
+		return nil
 	}
-	if err := loginfamily.CloseCommittedFamilies(ctx, h.db, h.hub, result.Owners); err != nil {
-		h.log.Warn("Revoked session socket close deferred to reconciliation")
+	var closer loginfamily.FamilyCloser = h.hub
+	if closer != nil && len(alreadyFenced) > 0 {
+		closer = alreadyFencedCloser{closer: closer, targets: alreadyFenced}
 	}
+	err := loginfamily.CloseCommittedFamilies(ctx, h.db, closer, result.Owners)
+	if err != nil {
+		h.log.Warn("Revoked session socket close deferred to reconciliation", "error", err)
+	}
+	return err
+}
+
+type bulkRevocationResult struct {
+	revocation   loginfamily.RevocationResult
+	localTargets []loginfamily.Binding
 }
 
 // revokeAllSessionsDB revokes all sessions, optionally excluding the current one.
-func (h *Handler) revokeAllSessionsDB(uid string, includeCurrent bool, c *gin.Context) (loginfamily.RevocationResult, error) {
+func (h *Handler) revokeAllSessionsDB(uid string, includeCurrent bool, c *gin.Context) (bulkRevocationResult, error) {
+	var result bulkRevocationResult
 	options := auth.RevokeAllRefreshTokensOptions{
 		ExpectedCredentialEpoch: middleware.TokenCredentialEpoch(c),
 		EnforceCredentialEpoch:  true,
+		ResetRevokeAllowance:    true,
 	}
 	if !includeCurrent {
 		if err := excludeCurrentSession(c, &options); err != nil {
-			return loginfamily.RevocationResult{}, err
+			return result, err
 		}
 	}
-	result, err := auth.RevokeAllRefreshTokens(c.Request.Context(), h.db, uid, options)
+	if h.hub != nil {
+		options.CaptureLocalFamilies = func(ctx context.Context, tx *sql.Tx, targets loginfamily.Targets) error {
+			return h.captureLocalFamiliesTx(ctx, tx, uid, &result, targets)
+		}
+	}
+	var err error
+	result.revocation, err = auth.RevokeAllRefreshTokens(c.Request.Context(), h.db, uid, options)
 	if errors.Is(err, auth.ErrNoActiveRefreshSession) {
-		return loginfamily.RevocationResult{}, errCurrentSessionUnknown
+		return bulkRevocationResult{}, errCurrentSessionUnknown
 	}
 	return result, err
+}
+
+func (h *Handler) captureLocalFamiliesTx(ctx context.Context, tx *sql.Tx, uid string, result *bulkRevocationResult, targets loginfamily.Targets) error {
+	userID, err := uuid.Parse(uid)
+	if err != nil || userID == uuid.Nil {
+		return loginfamily.NewError(loginfamily.ReasonAccessIdentity, err)
+	}
+	snapshotCtx, cancel := context.WithTimeout(ctx, loginfamily.PostCommitCloseTimeout)
+	defer cancel()
+	candidates, err := h.hub.SnapshotUserFamiliesContext(snapshotCtx, userID)
+	if err != nil {
+		h.log.Warn("Local session socket snapshot unavailable", "user_id", uid, "error", err)
+		return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+	}
+	families, err := loginfamily.CapturedFamilySubsetTx(ctx, tx, targets, candidates)
+	if err != nil {
+		return err
+	}
+	for _, family := range families {
+		result.localTargets = append(result.localTargets, loginfamily.Binding{UserID: userID, FamilyID: family})
+	}
+	return nil
 }
 
 // excludeCurrentSession spares the requester's own session by its access
@@ -705,7 +865,7 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	var req struct {
 		Mode     string `json:"mode"`     // "simple" or "secure"
 		Password string `json:"password"` // #nosec G117 -- not a secret field, receives user input for auth verification
-		MFACode  string `json:"mfa_code"` // Framework: accepted but unused until MFA is implemented
+		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
@@ -720,22 +880,34 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	uid := userID.(string)
 	ctx := c.Request.Context()
 
-	if h.authenticateForRevoke(ctx, c, uid, req.Password, req.MFACode, revocationModeSetAction) {
+	blocked, mfaVerified := h.authenticateForRevokeWithMFA(ctx, c, uid, req.Password, req.MFACode, revocationModeSetAction)
+	if blocked {
 		return
 	}
 
-	_, err := h.db.ExecContext(ctx, //nolint:gosec // parameterized query — not injectable
-		`UPDATE users SET revocation_mode = $1 WHERE id = $2`,
-		req.Mode, uid,
-	)
+	err := auth.UpdateSessionRevocationMode(ctx, h.db, uid, req.Mode, middleware.TokenCredentialEpoch(c))
 	if err != nil {
-		h.log.Error("Failed to update revocation mode", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update revocation mode"})
+		h.log.Error("Failed to update revocation mode")
+		switch {
+		case errors.Is(err, loginfamily.ErrUnavailable):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgAuthUnavailable})
+		case errors.Is(err, loginfamily.ErrDenied), errors.Is(err, credepoch.ErrEpochMismatch), errors.Is(err, credepoch.ErrBlocked):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update revocation mode"})
+		}
 		return
 	}
 
 	if req.Mode == "secure" {
-		h.redis.Del(ctx, simpleAuthWindowKey(uid))
+		if h.redis == nil {
+			h.log.Warn("Could not clear simple-mode authentication window")
+		} else if err := h.redis.Del(ctx, simpleAuthWindowKey(uid)).Err(); err != nil {
+			h.log.Warn("Could not clear simple-mode authentication window")
+		}
+	}
+	if mfaVerified {
+		h.clearRevokeMFABudget(ctx, uid)
 	}
 
 	h.log.Info("Revocation mode changed", "user_id", uid, "mode", req.Mode)

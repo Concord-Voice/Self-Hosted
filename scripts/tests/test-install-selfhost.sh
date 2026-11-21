@@ -69,6 +69,7 @@ FIX="$STUB/concordfixture"
 STATE="$STUB/state"
 mkdir -p "$FIX/infrastructure/deploy/nginx" "$STATE" "$STUB/bin"
 cp -- "$SOURCE_TARGET" "$FIX/infrastructure/deploy/install-selfhost.sh"
+cp -- "$ROOT/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf" "$FIX/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
 if [[ -f "$ROOT/infrastructure/deploy/selfhost-storage.sh" ]]; then
   cp -- "$ROOT/infrastructure/deploy/selfhost-storage.sh" "$FIX/infrastructure/deploy/selfhost-storage.sh"
 fi
@@ -79,12 +80,13 @@ fixture_repo() {
   cp -- "$SOURCE_TARGET" "$destination/infrastructure/deploy/install-selfhost.sh"
   cp -- "$ROOT/infrastructure/deploy/selfhost-storage.sh" "$destination/infrastructure/deploy/selfhost-storage.sh"
   cp -- "$ROOT/infrastructure/deploy/nginx/concordvoice.conf" "$destination/infrastructure/deploy/nginx/concordvoice.conf"
+  cp -- "$ROOT/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf" "$destination/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
   for model in docker-compose.yml docker-compose.production.yml docker-compose.selfhost.yml docker-compose.byo-s3.yml; do
     cp -- "$ROOT/$model" "$destination/$model"
   done
   cp -- "$ROOT/.gitignore" "$destination/.gitignore"
 }
-printf 'server_name concordvoice.chat;\n' >"$FIX/infrastructure/deploy/nginx/concordvoice.conf"
+printf '%s\n' '# HTTPS — API + WebSocket Hub' 'server_name concordvoice.chat;' '    # CONCORD_CLIENT_IP_PROVENANCE' '# HTTPS — Media Plane' >"$FIX/infrastructure/deploy/nginx/concordvoice.conf"
 for model in docker-compose.yml docker-compose.production.yml docker-compose.selfhost.yml docker-compose.byo-s3.yml; do
   cp -- "$ROOT/$model" "$FIX/$model"
 done
@@ -124,7 +126,7 @@ def output_form(opts, values):
 if not a: reject()
 if scenario == 'unavailable': sys.exit(127)
 if a in (['compose','version'], ['compose','version','--short']):
-    print('2.29.1'); sys.exit(0)
+    print('2.33.1'); sys.exit(0)
 if a[0] == 'compose':
     b = a[1:]; pairs = []; i = 0
     while i < len(b) and b[i] in ('--env-file','--project-directory','--project-name','-p','-f','--profile'):
@@ -393,7 +395,7 @@ writer_run() {
     : >"$STATE/writer-answers"
     local key
     for key in DOMAIN PUBLIC_IP TURN_REALM TLS_MODE SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM \
-      TRUSTED_CIDRS FEEDBACK_ENABLED FEEDBACK_REPO FEEDBACK_PAT ACTIVITY_HISTORY_OPERATOR_NAME \
+      FEEDBACK_ENABLED FEEDBACK_REPO FEEDBACK_PAT ACTIVITY_HISTORY_OPERATOR_NAME \
       ACTIVITY_HISTORY_PRIVACY_POLICY_URL STORAGE_MODE STORAGE_BACKEND STORAGE_ENDPOINT STORAGE_REGION \
       STORAGE_ACCESS_KEY STORAGE_SECRET_KEY STORAGE_USE_SSL STORAGE_BUCKET; do
       key=CFG_$key
@@ -434,6 +436,7 @@ for line in lines:
     if line and not line.startswith('#'):
         k,v=line.split('=',1); assert k not in fields; fields[k]=v
 assert fields['SELFHOST_STORAGE_MODE']==sys.argv[2]
+assert fields['NGINX_CLIENT_IP_MODE']=='direct'
 def decode(v):
     if not v.startswith('"'): return v
     assert v.endswith('"'); out=''; i=1
@@ -552,10 +555,10 @@ ORDER
   grep -qF 'External storage has not been checked.' "$STATE/entry-output"
 }
 wizard_input() {
-  printf '%s\n' example.com letsencrypt example.com 203.0.113.10 byo-s3 \
+  printf '%s\n' example.com letsencrypt direct example.com 203.0.113.10 byo-s3 \
     objects.example.invalid true concord-media '' synthetic-access synthetic-secret \
     smtp.example.invalid 587 synthetic-user synthetic-smtp-password operator@example.invalid \
-    172.16.0.0/12 '' '' no >"$STATE/stdin"
+    '' '' no >"$STATE/stdin"
 }
 wizard_capture() {
   source "$TARGET"; config_fixture bundled
@@ -936,15 +939,15 @@ PTY
 wizard_bundled_contract() {
   source "$TARGET"
   detect_public_ip() { printf '%s' 203.0.113.10; }
-  printf '%s\n' example.com letsencrypt example.com 203.0.113.10 '' smtp.example.invalid \
-    587 synthetic-user synthetic-password operator@example.invalid 172.16.0.0/12 '' '' no >"$STATE/stdin"
+  printf '%s\n' example.com letsencrypt direct example.com 203.0.113.10 '' smtp.example.invalid \
+    587 synthetic-user synthetic-password operator@example.invalid '' '' no >"$STATE/stdin"
   collect_config <"$STATE/stdin" || return 1
   [[ ${CFG_STORAGE_MODE:-} == bundled && $CFG_SMTP_HOST == smtp.example.invalid
      && $CFG_FEEDBACK_ENABLED == no && -z ${CFG_STORAGE_ACCESS_KEY:-} && -z ${CFG_STORAGE_SECRET_KEY:-} ]]
 }
 wizard_eof_contract() {
   source "$TARGET"; detect_public_ip() { printf '%s' 203.0.113.10; }
-  head -n 9 "$STATE/stdin" >"$STATE/truncated"
+  head -n 10 "$STATE/stdin" >"$STATE/truncated"
   local status=0
   collect_config <"$STATE/truncated" >"$STATE/eof-output" 2>&1 || status=$?
   [[ $status -ne 0 && ! -e "$FIX/.env" && ! -e "$STATE/rendered" && ! -e "$STATE/tls" ]]
@@ -1080,11 +1083,11 @@ UDP_PRIVILEGED
     printf '%s\n' "${answers[@]}" >"$STATE/udp-answers"
     (main --env-file "$STATE/udp-answers") >"$STATE/udp-output" 2>&1 || status=$?
   else
-    wizard=(example.com local example.com 203.0.113.10 "$storage")
+    wizard=(example.com local direct example.com 203.0.113.10 "$storage")
     if [[ $storage == byo-s3 ]]; then
       wizard+=(objects.example.invalid true concord-media '' udp-owned-access udp-owned-secret)
     fi
-    wizard+=(smtp.example.invalid 587 fixture-user fixture-password operator@example.invalid 172.16.0.0/12 '' '' no)
+    wizard+=(smtp.example.invalid 587 fixture-user fixture-password operator@example.invalid '' '' no)
     printf '%s\n' "${wizard[@]}" >"$STATE/udp-stdin"
     (main <"$STATE/udp-stdin") >"$STATE/udp-output" 2>&1 || status=$?
   fi
@@ -1432,7 +1435,7 @@ expected_operator="Example #1 \$Ops \${TOKEN} \"quoted\" O'Brien A\\'B tail\\"
 all_vars_ok=1
 for k in ENVIRONMENT DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET \
          MFA_ENCRYPTION_KEY TURN_SECRET TURN_REALM MINIO_ROOT_USER MINIO_ROOT_PASSWORD \
-         MINIO_BUCKET TRUSTED_PROXY_CIDRS SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD \
+         MINIO_BUCKET TRUSTED_PROXY_CIDRS TRUSTED_PROXIES SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD \
          SMTP_FROM FEEDBACK_PAT FEEDBACK_REPO ACTIVITY_HISTORY_CLUSTER_ENABLED \
          CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME \
          ACTIVITY_HISTORY_PRIVACY_POLICY_URL; do
@@ -1647,8 +1650,11 @@ mode="$(python3 -c "import os; print(oct(os.stat('$out_env').st_mode)[-3:])" 2>/
 
 fake_src="$STUB/concordvoice.conf"
 cat >"$fake_src" <<'EOF'
+# HTTPS — API + WebSocket Hub
 server_name concordvoice.chat api.concordvoice.chat;
 ssl_certificate /etc/letsencrypt/live/concordvoice.chat/fullchain.pem;
+    # CONCORD_CLIENT_IP_PROVENANCE
+# HTTPS — Media Plane
 EOF
 
 rendered="$STUB/rendered.conf"
@@ -1669,6 +1675,47 @@ grep -q 'server_name example.com api.example.com;' "$rendered" \
 grep -q '/etc/letsencrypt/live/example.com/fullchain.pem' "$rendered" \
   && pass "cert path templated" \
   || fail "cert path not templated"
+
+if grep -q 'CONCORD_CLIENT_IP_PROVENANCE' "$rendered"; then
+  fail "direct render retained client-IP marker"
+elif grep -q 'real_ip_header\|set_real_ip_from\|ssl_verify_client' "$rendered"; then
+  fail "direct render emitted client-IP provenance directives"
+else
+  pass "direct render removes client-IP marker"
+fi
+
+aop_ca="$STUB/aop-ca.pem"
+if command -v openssl >/dev/null 2>&1 && openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=fixture-aop-ca -days 1 -keyout "$STUB/aop-ca.key" -out "$aop_ca" >/dev/null 2>&1; then
+  ( source "$TARGET"
+    NGINX_SRC="$fake_src"
+    NGINX_OUT="$STUB/rendered-aop.conf"
+    CFG_DOMAIN=example.com
+    CFG_CLIENT_IP_MODE=cloudflare-aop
+    CFG_CLOUDFLARE_AOP_CA="$aop_ca"
+    render_nginx )
+  if grep -q 'ssl_verify_client on;' "$STUB/rendered-aop.conf" && grep -q 'set_real_ip_from 0.0.0.0/0;' "$STUB/rendered-aop.conf" && ! grep -q 'CONCORD_CLIENT_IP_PROVENANCE' "$STUB/rendered-aop.conf"; then
+    pass "AOP render installs complete provenance boundary"
+  else
+    fail "AOP render omitted provenance boundary"
+  fi
+else
+  fail "openssl unavailable for AOP render fixture"
+fi
+printf '%s\n' 'ssl_client_certificate /etc/concord/nginx/cloudflare-aop-ca.pem;' 'ssl_verify_client off;' >"$FIX/infrastructure/deploy/nginx/cloudflare-aop-client-ip.conf"
+printf '%s\n' previous >"$STUB/rendered-aop-unsafe.conf"
+if ( source "$TARGET"
+  NGINX_SRC="$fake_src"
+  NGINX_OUT="$STUB/rendered-aop-unsafe.conf"
+  CFG_DOMAIN=example.com
+  CFG_CLIENT_IP_MODE=cloudflare-aop
+  CFG_CLOUDFLARE_AOP_CA="$aop_ca"
+  render_nginx ) >/dev/null 2>&1; then
+  fail "AOP render accepted weakened fragment"
+elif [[ "$(cat "$STUB/rendered-aop-unsafe.conf")" == previous ]]; then
+  pass "AOP render rejects a weakened fragment atomically"
+else
+  fail "AOP render changed output after weakened fragment refusal"
+fi
 
 # ── Task 7: preflight-before-mutation ordering ────────────────────────────────
 
@@ -1912,34 +1959,34 @@ pf_docker_rc() {
   echo $?
 }
 
-# 3. Engine security boundary; Compose remains independently fixed at 2.29.1.
+# 3. Engine security boundary; Compose remains independently fixed at 2.33.1.
 for case_ in "27.5.1:2" "28.3.3:2" "29.8.1:2" "29.8.1+dfsg1:2" "29.8.2:0" "29.8.2+dfsg1:0" "29.8.3:0" "30.0.0:0"; do
   ev="${case_%%:*}"; want="${case_##*:}"
-  got="$(pf_docker_rc "$ev" "2.29.1")"
+  got="$(pf_docker_rc "$ev" "2.33.1")"
   [[ "$got" == "$want" ]] \
     && pass "engine floor: '$ev' -> rc $want" \
     || fail "engine floor: '$ev' gave rc $got, want $want"
 done
-[[ "$(pf_docker_rc '29.8.2' '2.29.1' 0 '')" == 0 ]] \
+[[ "$(pf_docker_rc '29.8.2' '2.33.1' 0 '')" == 0 ]] \
   && pass "engine accepts a stable response without terminal LF" \
   || fail "engine refused a stable response without terminal LF"
 invalid_engines=("" "garbage" "v29.8.2" "029.8.2" "29.08.2" "29.8.02" "29.8" "29.8.2-rc1" "29.8.2~rc1" "29.8.2+" "29.8.2+bad_metadata" "29.8.2 REGISTRY_SENTINEL" " 29.8.2" "29.8.2 " $'29.8.2\r' $'29.8.2\n' $'29.8.2\n29.8.3')
 for ev in "${invalid_engines[@]}"; do
-  got="$(pf_docker_rc "$ev" '2.29.1')"
+  got="$(pf_docker_rc "$ev" '2.33.1')"
   [[ "$got" == 2 ]] \
     && pass "engine rejects malformed response $(printf %q "$ev")" \
     || fail "engine admitted malformed response $(printf %q "$ev") (rc=$got)"
 done
-[[ "$(pf_docker_rc '29.8.2' '2.29.1' 42)" == 2 ]] \
+[[ "$(pf_docker_rc '29.8.2' '2.33.1' 42)" == 2 ]] \
   && pass "engine refuses valid-looking stdout from a failed query" \
   || fail "engine accepted valid-looking stdout from a failed query"
-engine_msg="$( source "$TARGET"; PATH="$DSTUB:$PATH" STUB_ENGINE=29.8.1 STUB_COMPOSE=2.29.1 preflight_docker 2>&1 )"
+engine_msg="$( source "$TARGET"; PATH="$DSTUB:$PATH" STUB_ENGINE=29.8.1 STUB_COMPOSE=2.33.1 preflight_docker 2>&1 )"
 if grep -qF 'need >= 29.8.2' <<<"$engine_msg" && grep -qF 'CVE-2026-92543' <<<"$engine_msg" && grep -qF 'CVE-2025-54388' <<<"$engine_msg"; then
   pass "engine refusal names the registry and loopback security reasons"
 else
   fail "engine refusal lacks the current floor or security reasons: $engine_msg"
 fi
-engine_msg="$( source "$TARGET"; PATH="$DSTUB:$PATH" STUB_ENGINE='29.8.2 REGISTRY_SENTINEL' STUB_COMPOSE=2.29.1 preflight_docker 2>&1 )"
+engine_msg="$( source "$TARGET"; PATH="$DSTUB:$PATH" STUB_ENGINE='29.8.2 REGISTRY_SENTINEL' STUB_COMPOSE=2.33.1 preflight_docker 2>&1 )"
 if ! grep -qF 'REGISTRY_SENTINEL' <<<"$engine_msg"; then
   pass "engine refusal does not echo malformed daemon output"
 else
@@ -1947,7 +1994,7 @@ else
 fi
 
 # 4. Compose floor (Engine fixed at a passing 29.8.2).
-for case_ in "2.24.4:2" "2.24.5:0" "v2.24.5:0" "5.5.1:0"; do
+for case_ in "2.24.5:2" "2.33.0:2" "2.33.1:0" "v2.33.1:0" "5.5.1:0"; do
   cv="${case_%%:*}"; want="${case_##*:}"
   got="$(pf_docker_rc "29.8.2" "$cv")"
   [[ "$got" == "$want" ]] \
@@ -1966,7 +2013,7 @@ cp "$DSTUB/docker" "$NOPY/docker"
 # bash 3.2 (stock macOS /bin/bash) does not reset its command hash for a
 # temporary PATH assignment in front of a function, so `command -v python3`
 # kept resolving through the old PATH and this case passed vacuously there.
-( source "$TARGET"; PATH="$NOPY"; STUB_ENGINE="29.8.2" STUB_COMPOSE="2.29.1" preflight_docker ) >/dev/null 2>&1
+( source "$TARGET"; PATH="$NOPY"; STUB_ENGINE="29.8.2" STUB_COMPOSE="2.33.1" preflight_docker ) >/dev/null 2>&1
 rc=$?
 [[ $rc -eq 2 ]] \
   && pass "preflight_docker aborts (rc 2) when python3 is missing" \
@@ -1978,7 +2025,7 @@ for tool in bash grep sort head tr; do
   tool_path="$(command -v "$tool")" && ln -s "$tool_path" "$NOPY_CTL/$tool"
 done
 cp "$DSTUB/docker" "$NOPY_CTL/docker"; cp "$DSTUB/python3" "$NOPY_CTL/python3"
-( source "$TARGET"; PATH="$NOPY_CTL"; STUB_ENGINE="29.8.2" STUB_COMPOSE="2.29.1" preflight_docker ) >/dev/null 2>&1
+( source "$TARGET"; PATH="$NOPY_CTL"; STUB_ENGINE="29.8.2" STUB_COMPOSE="2.33.1" preflight_docker ) >/dev/null 2>&1
 rc=$?
 [[ $rc -eq 0 ]] \
   && pass "preflight_docker passes when python3 is present (control for the missing-python3 case)" \
@@ -2269,7 +2316,7 @@ public_ip_entry_contract() {
   local byo_access=aaaa byo_auth=bbbb
   local smtp_from=operator@example.invalid
   local feedback_repo=fixture/feedback feedback_pat=fixture-feedback-input
-  local trusted_cidrs=172.16.0.0/12 input_path input_metadata template_metadata
+  local trusted_cidrs=127.0.0.1/32 input_path input_metadata template_metadata
   local -a answer_values=() wizard_values=()
   [[ $storage_mode == bundled || $storage_mode == byo-s3 ]] || return 2
   case $setting in
@@ -2515,7 +2562,7 @@ IPPRIVILEGED
   if [[ $entry == answers ]]; then
     answer_values=("CFG_DOMAIN=$domain" 'CFG_TLS_MODE=local' 'CFG_TURN_REALM=example.com'
       "CFG_PUBLIC_IP=$ip" "CFG_STORAGE_MODE=$storage_mode" 'CFG_SMTP_PORT=587'
-      "CFG_SMTP_FROM=$smtp_from" "CFG_TRUSTED_CIDRS=$trusted_cidrs")
+      "CFG_SMTP_FROM=$smtp_from")
     if [[ $storage_mode == byo-s3 ]]; then
       answer_values+=('CFG_STORAGE_BACKEND=s3' "CFG_STORAGE_ENDPOINT=$storage_endpoint"
         'CFG_STORAGE_REGION=' "CFG_STORAGE_USE_SSL=$storage_tls" "CFG_STORAGE_BUCKET=$bucket"
@@ -2535,18 +2582,18 @@ IPPRIVILEGED
     main --env-file "$STATE/ip-answers" >"$STATE/ip-entry-output" 2>&1 || status=$?
     [[ ! -e "$STATE/ip-detection-calls" ]] || return 1
   else
-    wizard_values=("$domain" local example.com "$ip" "$storage_mode")
+    wizard_values=("$domain" local direct example.com "$ip" "$storage_mode")
     if [[ $storage_mode == byo-s3 ]]; then
       wizard_values+=("$storage_endpoint" "$storage_tls" "$bucket" '' "$byo_access" "$byo_auth")
       storage_prompt_count=6
     fi
-    wizard_values+=("$smtp_host" 587 fixture-user fixture-password "$smtp_from" "$trusted_cidrs" '' '' "$feedback_enabled")
+    wizard_values+=("$smtp_host" 587 fixture-user fixture-password "$smtp_from" '' '' "$feedback_enabled")
     [[ $setting != feedback-default ]] || wizard_values[$((13 + storage_prompt_count))]=''
     if [[ $feedback_enabled == yes ]]; then wizard_values+=("$feedback_repo" "$feedback_pat"); fi
     # An omitted interactive answer is EOF at its actual prompt; blank cells
     # keep the rest of the otherwise-valid wizard input complete.
     case $setting in
-      smtp-missing) wizard_values=("${wizard_values[@]:0:$((5 + storage_prompt_count))}") ;;
+      smtp-missing) wizard_values=("${wizard_values[@]:0:$((6 + storage_prompt_count))}") ;;
       feedback-repo-missing) wizard_values=("${wizard_values[@]:0:$((14 + storage_prompt_count))}") ;;
       feedback-pat-missing) wizard_values=("${wizard_values[@]:0:$((15 + storage_prompt_count))}") ;;
     esac
@@ -2672,7 +2719,8 @@ IPPRIVILEGED
     grep -qFx "DOMAIN=\"$domain\"" "$FIX/.env" || return 1
     grep -qFx "SMTP_HOST=\"$smtp_host\"" "$FIX/.env" || return 1
     grep -qFx "SMTP_FROM=\"${smtp_from:-noreply@example.com}\"" "$FIX/.env" || return 1
-    grep -qFx "TRUSTED_PROXY_CIDRS=\"$trusted_cidrs\"" "$FIX/.env" || return 1
+    grep -qFx 'TRUSTED_PROXY_CIDRS="127.0.0.1/32"' "$FIX/.env" || return 1
+    grep -qFx 'TRUSTED_PROXIES="127.0.0.1/32"' "$FIX/.env" || return 1
     grep -qFx "SELFHOST_STORAGE_MODE=$storage_mode" "$FIX/.env" || return 1
     if [[ $storage_mode == byo-s3 ]]; then
       grep -qFx 'STORAGE_BACKEND="s3"' "$FIX/.env" || return 1
@@ -2817,39 +2865,8 @@ consumer_input_contracts() {
       contract "complete $entry main preserves consumer-valid $setting publication" \
         public_ip_entry_contract "$entry" 10.0.0.5 accept "$setting"
     done
-    for setting in cidr-invalid-octets cidr-leading-zero-octets cidr-invalid-compression \
-      cidr-invalid-address cidr-interior-space cidr-invalid-v4-prefix cidr-invalid-v6-prefix \
-      cidr-zone cidr-dotted-mask cidr-plus-prefix cidr-minus-prefix cidr-nonascii-prefix \
-      cidr-space-only cidr-comma-only cidr-all-v4-alias cidr-all-v6-alias \
-      cidr-all-mapped-canonical cidr-all-mapped-host-bits cidr-all-mapped-hex-alias cidr-all-mapped-list; do
-      contract "complete $entry main refuses consumer-invalid $setting before secrets, rendering or publication" \
-        public_ip_entry_contract "$entry" 10.0.0.5 refuse "$setting"
-    done
-    for setting in cidr-valid-v4-host-bits cidr-valid-v6-host-bits cidr-valid-v4-zero-prefix \
-      cidr-valid-v6-zero-prefix cidr-valid-mixed cidr-valid-trimmed-empty-tokens \
-      cidr-valid-mapped-97 cidr-valid-mapped-120; do
-      contract "complete $entry main preserves consumer-valid $setting publication" \
-        public_ip_entry_contract "$entry" 10.0.0.5 accept "$setting"
-    done
-    # Go IPNet.Contains projects mapped CIDRs into IPv4 peer coverage. Complete
-    # effective-family unions must refuse even when each individual CIDR is
-    # restricted. Each admission independently preserves its raw input bytes.
-    for setting in cidr-union-all-v4 cidr-union-all-mapped cidr-union-all-mixed \
-      cidr-union-all-v4-order-hostbits cidr-union-all-v6 cidr-union-all-v6-except-mapped; do
-      contract "complete $entry main refuses all-traffic $setting before secrets, rendering or publication" \
-        public_ip_entry_contract "$entry" 10.0.0.5 refuse "$setting"
-    done
-    for setting in cidr-union-restricted-v4 cidr-union-restricted-mapped cidr-union-overlap-duplicate \
-      cidr-union-restricted-v6 cidr-union-one-gap-v4 cidr-union-one-gap-v6; do
-      contract "complete $entry main preserves restricted $setting bytes through publication" \
-        public_ip_entry_contract "$entry" 10.0.0.5 accept "$setting"
-    done
-    # A representative external-storage pair reaches the same common guard;
-    # storage mode must not change the trust-union admission policy.
-    contract "complete $entry BYO main refuses an all-traffic mixed-family IPv4 union before effects" \
-      public_ip_entry_contract "$entry" 10.0.0.5 refuse cidr-union-all-mixed byo-s3
-    contract "complete $entry BYO main preserves a restricted mapped IPv4 union and owned storage bytes" \
-      public_ip_entry_contract "$entry" 10.0.0.5 accept cidr-union-restricted-mapped byo-s3
+    # The installer no longer accepts a proxy CIDR. The deploy controller
+    # measures and writes its exact host route before application startup.
     # SMTP_FROM is shared by net/mail.ParseAddress and raw Certbot --email.
     # Pin their supported bare ASCII subset without rewriting admitted bytes;
     # deliberately keep local/LAN domains and hyphen-shaped labels admitted.

@@ -24,7 +24,7 @@ import tarfile
 import subprocess
 import tempfile
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 
 _STARTUP_PHASES = frozenset({
@@ -245,6 +245,7 @@ class SubprocessExecutor:
             try:
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
+                # The process group already exited, so nothing is left to kill.
                 pass
             except OSError as error:
                 raise AcceptanceError("COMMAND_FAILED", 124) from error
@@ -313,7 +314,7 @@ _RUN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$")
 
 
-def _fail(code: str, returncode: int | None = None) -> None:
+def _fail(code: str, returncode: int | None = None) -> NoReturn:
     raise AcceptanceError(code, returncode)
 
 
@@ -876,6 +877,7 @@ def write_evidence(directory: Path, record: dict) -> Path:
         try:
             temporary.unlink(missing_ok=True)
         except OSError:
+            # Best-effort temp file cleanup; the result does not depend on it.
             pass
     return destination
 
@@ -896,7 +898,7 @@ def _ci_runner_profile_valid(env) -> bool:
         return profile is None
     return (environment == "self-hosted"
             and profile == _BLACKSMITH_RUNNER_PROFILE
-            and env.get("GITHUB_REPOSITORY") == "Concord-Voice/Concord-Voice-Alpha")
+            and env.get("GITHUB_REPOSITORY") == "Concord-Voice/Self-Hosted")
 
 
 _SELECTED_FILES = (*_BASE_FILES, "docker-compose.selfhost.yml")
@@ -1043,6 +1045,7 @@ def _inspect_rows(output: str) -> list[dict]:
         if isinstance(parsed, list):
             return parsed
     except (TypeError, json.JSONDecodeError):
+        # Not one JSON document; fall back to parsing one object per line.
         pass
     try:
         rows = [json.loads(line) for line in output.splitlines() if line.strip()]
@@ -1218,7 +1221,7 @@ class AcceptanceRunner:
         if (not _VERSION_RE.fullmatch(self.tool_versions["docker"])
                 or not _VERSION_RE.fullmatch(self.tool_versions["compose"])
                 or not _version_at_least(self.tool_versions["docker"], (29, 8, 2))
-                or not _version_at_least(self.tool_versions["compose"], (2, 24, 5))):
+                or not _version_at_least(self.tool_versions["compose"], (2, 33, 1))):
             _fail("TOOL_VERSION_INVALID")
         self._run(["logrotate", "--version"])
         info_text = self._run(["docker", "info", "--format", "{{json .}}"] ).stdout
@@ -1396,6 +1399,7 @@ class AcceptanceRunner:
             return mode, digest.hexdigest()
         except (OSError, ValueError):
             _fail("EVIDENCE_INVALID")
+            return None  # Not reached: _fail always raises.
 
     def _sources_unchanged(self) -> None:
         self.stage, self.assertion = "privacy", "evidence_safety"
