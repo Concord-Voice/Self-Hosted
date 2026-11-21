@@ -7179,11 +7179,14 @@ func (s *NATSSubscriber) persistDMRoomEmptySummary(
 		s.log.Error("Rejected malformed DM room-empty call summary",
 			"failure_class", "invalid_event")
 	case hasSummary:
-		// Persist an exact old-call summary even when a newer call now owns
-		// live presence. The call ID makes this insert idempotent and distinct
-		// from the replacement lifecycle.
+		// The caller has already proved this call owns the conversation's live
+		// lease (or that none exists). The call ID makes this insert idempotent.
 		respawned, insertErr := dm.InsertCompletedCallEvent(ctx, s.db, conversationID, summary)
-		if insertErr != nil {
+		if errors.Is(insertErr, dm.ErrCallParticipantMismatch) {
+			// A determined no-op: nothing was written, so nothing reconnects.
+			s.log.Warn("Rejected DM room-empty call summary",
+				"action", "participant_mismatch")
+		} else if insertErr != nil {
 			s.log.Error("Failed to insert completed call_event row",
 				"failure_class", "state_write")
 		}
@@ -7274,10 +7277,9 @@ func (s *NATSSubscriber) handleDMRoomEmpty(
 		s.disconnectAllRichPresenceClients()
 		return false
 	}
-	hasSummary, summaryErr := s.persistDMRoomEmptySummary(
-		cleanupCtx, event, conversationID, eventAt,
-	)
-
+	// VULN-111: the lease check runs before the call-history write, under the
+	// caller's LockDMCallLifecycle, so only the call that owns the
+	// conversation's live state can write its summary.
 	mayMutate, err := s.dmCallEventMayMutateLiveState(
 		cleanupCtx, conversationID, event.CallID,
 	)
@@ -7292,6 +7294,9 @@ func (s *NATSSubscriber) handleDMRoomEmpty(
 			"failure_class", "stale_event")
 		return false
 	}
+	hasSummary, summaryErr := s.persistDMRoomEmptySummary(
+		cleanupCtx, event, conversationID, eventAt,
+	)
 
 	return s.finishDMRoomEmptyLiveState(
 		cleanupCtx, event, conversationID, eventAt, !hasSummary && summaryErr == nil,

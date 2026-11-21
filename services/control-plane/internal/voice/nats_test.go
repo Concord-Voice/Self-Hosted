@@ -1301,8 +1301,11 @@ func TestHandleVoiceLifecycle_DMStaleTerminalPreservesReplacementLiveState(t *te
 	}))
 	assert.True(t, dmVoiceParticipantExists(t, ts.DB, convID, activeCaller.ID))
 
-	// The old call's self-contained summary is still valuable history, but its
-	// terminal event must not clear or broadcast room_empty for replacement B.
+	// The old call's terminal event must not clear or broadcast room_empty for
+	// replacement B. Since Security#174 (VULN-111) the lease check runs before
+	// the history write, so a call that does not own the lease writes no
+	// summary either: the media plane can no longer write history for a call
+	// the control plane is not tracking.
 	sub.HandleRoomEmpty(mustJSON(t, map[string]interface{}{
 		"channelId":          convID,
 		"callId":             oldCallID.String(),
@@ -1321,7 +1324,7 @@ func TestHandleVoiceLifecycle_DMStaleTerminalPreservesReplacementLiveState(t *te
 	require.NoError(t, ts.DB.QueryRow(
 		`SELECT COUNT(*) FROM dm_messages WHERE id = $1`, oldCallID,
 	).Scan(&oldSummaryRows))
-	assert.Equal(t, 1, oldSummaryRows, "stale exact summary remains idempotent history")
+	assert.Zero(t, oldSummaryRows, "a call that does not own the lease must write no history")
 }
 
 func TestHandleJoined_DirectReservationPromotesToActiveLeaseTTL(t *testing.T) {

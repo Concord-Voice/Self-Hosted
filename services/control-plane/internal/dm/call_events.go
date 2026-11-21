@@ -22,6 +22,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // CallEventStatus is the terminal-state classification persisted in
@@ -241,6 +242,42 @@ func loadLiveDMCallParticipants(
 	return participants, startedAt, nil
 }
 
+// ErrCallParticipantMismatch reports a completed-call summary whose caller or
+// listed participants are not all participants of the conversation (VULN-111).
+// Nothing is written.
+var ErrCallParticipantMismatch = errors.New("dm: completed call names a non-participant")
+
+// requireCallParticipantsTx checks, in the call-event transaction and after
+// prepareCallEventInsert has locked the participant rows, that the caller and
+// every listed participant are dm_participants of convID.
+func requireCallParticipantsTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	convID uuid.UUID,
+	payload CallEventPayload,
+) error {
+	named := make(map[uuid.UUID]struct{}, len(payload.ParticipantUserIDs)+1)
+	named[payload.CallerUserID] = struct{}{}
+	for _, participantID := range payload.ParticipantUserIDs {
+		named[participantID] = struct{}{}
+	}
+	ids := make([]string, 0, len(named))
+	for participantID := range named {
+		ids = append(ids, participantID.String())
+	}
+	var matched int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM dm_participants
+		WHERE conversation_id = $1 AND user_id = ANY($2::uuid[])
+	`, convID, pq.Array(ids)).Scan(&matched); err != nil {
+		return fmt.Errorf("check completed call participants: %w", err)
+	}
+	if matched != len(named) {
+		return ErrCallParticipantMismatch
+	}
+	return nil
+}
+
 func insertCompletedCallEvent(
 	ctx context.Context,
 	db *sql.DB,
@@ -257,6 +294,9 @@ func insertCompletedCallEvent(
 	err = withCallEventTransaction(ctx, db, "completed dm call event transaction", func(tx *sql.Tx) error {
 		windowSeconds, err := prepareCallEventInsert(ctx, tx, convID, payload.CallerUserID)
 		if err != nil {
+			return err
+		}
+		if err := requireCallParticipantsTx(ctx, tx, convID, payload); err != nil {
 			return err
 		}
 		// Call-event metadata has no ciphertext epoch; 1 is only its schema placeholder.
