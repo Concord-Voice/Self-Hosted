@@ -26,7 +26,7 @@ func testRecoveryIssue(userID, sendID, recordKey string) recoveryIssue {
 		SlotKey:   recoverySlotKey(userID),
 		SendsKey:  recoverySendsKey(userID),
 		SendID:    sendID,
-		Record:    []byte(`{"user_id":"` + userID + `","send_id":"` + sendID + `"}`),
+		Record:    []byte(`{"user_id":"` + userID + `","send_id":"` + sendID + `","addr":"owner@example.test"}`),
 	}
 }
 
@@ -314,7 +314,7 @@ func TestRecoveryBeginTokenSendsKeyEmail(t *testing.T) {
 	require.Equal(t, []int{15}, mail.mins)
 	stored, err := mini.Get(recoveryEmailTokenKey(key))
 	require.NoError(t, err)
-	require.JSONEq(t, `{"user_id":"user-1","send_id":"`+mustGet(t, mini, recoverySlotKey("user-1"))+`"}`, stored)
+	require.JSONEq(t, `{"user_id":"user-1","send_id":"`+mustGet(t, mini, recoverySlotKey("user-1"))+`","addr":"owner@example.test"}`, stored)
 	for _, k := range mini.Keys() {
 		v, _ := mini.Get(k)
 		require.NotContains(t, k+v, key, "the raw key must not be stored")
@@ -442,9 +442,9 @@ func TestConsumeRecoveryEmailTokenSingleUse(t *testing.T) {
 	_, _, err = h.issueRecoveryRecord(ctx, in)
 	require.NoError(t, err)
 
-	userID, err := h.consumeRecoveryEmailToken(ctx, token)
+	record, err := h.consumeRecoveryEmailToken(ctx, token)
 	require.NoError(t, err)
-	require.Equal(t, "user-1", userID)
+	require.Equal(t, "user-1", record.UserID)
 	require.False(t, mini.Exists(in.SlotKey), "a redeemed key frees the account's send slot")
 
 	_, err = h.consumeRecoveryEmailToken(ctx, token)
@@ -503,7 +503,7 @@ func TestTokenFailuresWriteNoBudget(t *testing.T) {
 			require.Equal(t, before[k], v, "a wrong key changes no recovery state")
 		}
 	}
-	userID, err := h.consumeRecoveryEmailToken(context.Background(), owner)
+	record, err := h.consumeRecoveryEmailToken(context.Background(), owner)
 	require.NoError(t, err, "the owner's key still works")
-	require.Equal(t, "user-1", userID)
+	require.Equal(t, "user-1", record.UserID)
 }

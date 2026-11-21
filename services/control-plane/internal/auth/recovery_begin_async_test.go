@@ -260,7 +260,7 @@ func TestRecoveryFailureLogsOmitAddress(t *testing.T) {
 
 	out := logs.String()
 	require.Contains(t, out, "failure_class=recovery_account_lookup")
-	require.Contains(t, out, "failure_class=recovery_email_delivery")
-	require.Contains(t, out, "failure_class=recovery_unsent_code_cleanup")
+	require.Contains(t, out, "failure_class=recovery_delivery_not_configured")
+	require.Contains(t, out, "failure_class=recovery_unsent_code_cleanup_redis")
 	require.NotContains(t, out, addr)
 }

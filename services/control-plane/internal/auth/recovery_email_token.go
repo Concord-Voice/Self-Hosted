@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -111,15 +112,19 @@ type recoveryIssue struct {
 // written before the slot: a partial run leaves a usable record and a free
 // slot, never a held slot with nothing behind it.
 // A held slot refuses the send, except that a key (ARGV[7] == "1") replaces a
-// slot held by a 6-digit code and deletes that code (KEYS[4]): an attacker
-// must not hold the slot with a code its owner cannot use.
+// slot held by a 6-digit code (its send_id starts with ARGV[8]) and deletes
+// that code (KEYS[4]): an attacker must not hold the slot with a code its owner
+// cannot use. The code is deleted last, after both writes, because Redis
+// refuses INCR and SET (not DEL) when it is out of memory.
 // KEYS: slot, sends, record, code. ARGV: send_id, record, fast ms, slow ms,
-// fast sends, window ms, replace. Returns 0 when held, else the TTL in ms.
+// fast sends, window ms, replace, code send prefix. Returns 0 when held, else
+// the TTL in ms.
 var issueRecoveryRecordLua = redis.NewScript(`
 local slot = redis.call("GET", KEYS[1])
+local replaced = false
 if slot then
   if ARGV[7] ~= "1" or string.sub(slot, 1, string.len(ARGV[8])) ~= ARGV[8] then return 0 end
-  redis.call("DEL", KEYS[4])
+  replaced = true
 end
 local n = redis.call("INCR", KEYS[2])
 if redis.call("PTTL", KEYS[2]) < 0 then redis.call("PEXPIRE", KEYS[2], ARGV[6]) end
@@ -127,6 +132,7 @@ local ttl = ARGV[3]
 if n > tonumber(ARGV[5]) then ttl = ARGV[4] end
 redis.call("SET", KEYS[3], ARGV[2], "PX", ttl)
 redis.call("SET", KEYS[1], ARGV[1], "PX", ttl)
+if replaced then redis.call("DEL", KEYS[4]) end
 return tonumber(ttl)
 `)
 
@@ -177,33 +183,79 @@ return 0
 `)
 
 // releaseRecoverySlot lets the account request a new recovery email at once.
+// It runs on a context detached from the request: a client that hangs up after
+// its key was spent must not leave the owner waiting out the cooldown.
 // Best-effort: a failure leaves the slot to expire on its own TTL.
 func (h *Handler) releaseRecoverySlot(ctx context.Context, userID, sendID string) {
 	if userID == "" || sendID == "" {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
 	if err := releaseRecoverySlotLua.Run(ctx, h.redis, []string{recoverySlotKey(userID)}, sendID).Err(); err != nil {
-		h.log.Warn("Failed to release recovery send slot", "failure_class", "recovery_slot_release")
+		h.log.Warn("Failed to release recovery send slot", "failure_class", recoveryRedisFailureClass("recovery_slot_release", err))
 	}
 }
 
-// recoveryEmailTokenRecord is the stored value of a recovery key.
+// recoveryRedisFailureClass names a Redis failure by cause, so a timeout and a
+// Redis error are told apart in logs that carry no error text.
+func recoveryRedisFailureClass(base string, err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return base + "_timeout"
+	case errors.Is(err, context.Canceled):
+		return base + "_cancelled"
+	default:
+		return base + "_redis"
+	}
+}
+
+// recoveryEmailTokenRecord is the stored value of a recovery key. Addr is the
+// address the key was emailed to; a key is refused once the account no longer
+// uses that address.
 type recoveryEmailTokenRecord struct {
 	UserID string `json:"user_id"`
 	SendID string `json:"send_id"`
+	Addr   string `json:"addr"`
 }
 
-// consumeRecoveryEmailToken redeems a recovery key once. A key that was never
-// issued, has expired or was already used returns redis.Nil.
-func (h *Handler) consumeRecoveryEmailToken(ctx context.Context, token string) (string, error) {
+// errMalformedRecoveryKeyRecord marks a stored key record that cannot be read.
+var errMalformedRecoveryKeyRecord = errors.New("malformed recovery key record")
+
+func decodeRecoveryEmailTokenRecord(raw []byte) (recoveryEmailTokenRecord, error) {
+	var record recoveryEmailTokenRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return record, fmt.Errorf("%w: %w", errMalformedRecoveryKeyRecord, err)
+	}
+	if record.UserID == "" || record.Addr == "" {
+		return record, errMalformedRecoveryKeyRecord
+	}
+	return record, nil
+}
+
+// peekRecoveryEmailToken reads a key's record without spending the key, so
+// checks that can fail for server reasons run before the key is used up. A key
+// that was never issued, has expired or was already used returns redis.Nil.
+func (h *Handler) peekRecoveryEmailToken(ctx context.Context, token string) (recoveryEmailTokenRecord, error) {
+	raw, err := h.redis.Get(ctx, recoveryEmailTokenKey(token)).Bytes()
+	if err != nil {
+		return recoveryEmailTokenRecord{}, err
+	}
+	return decodeRecoveryEmailTokenRecord(raw)
+}
+
+// consumeRecoveryEmailToken redeems a recovery key once and frees the account's
+// send slot. A key that was never issued, has expired or was already used
+// returns redis.Nil.
+func (h *Handler) consumeRecoveryEmailToken(ctx context.Context, token string) (recoveryEmailTokenRecord, error) {
 	raw, err := h.redis.GetDel(ctx, recoveryEmailTokenKey(token)).Bytes()
 	if err != nil {
-		return "", err
+		return recoveryEmailTokenRecord{}, err
 	}
-	var record recoveryEmailTokenRecord
-	if err := json.Unmarshal(raw, &record); err != nil || record.UserID == "" {
-		return "", fmt.Errorf("malformed recovery key record")
+	record, err := decodeRecoveryEmailTokenRecord(raw)
+	if err != nil {
+		return record, err
 	}
 	h.releaseRecoverySlot(ctx, record.UserID, record.SendID)
-	return record.UserID, nil
+	return record, nil
 }
