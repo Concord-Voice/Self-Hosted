@@ -10,11 +10,12 @@ administrator becomes active.
 ## Decision
 
 Add new migrations because 000197 may already be applied. Migration 000199
-adds a positive check that rejects future zero writes. Migration 000200
-validates existing rows without holding an exclusive lock during the scan, and
-fails if any administrator row is zero. The original nonnegative check remains
-as a redundant guard. The down migrations reverse the validation state and
-remove the new check.
+checks for existing nonpositive rows under a write-blocking lock and fails
+before adding the new check if it finds one. It then adds a positive check
+that rejects future zero writes. Migration 000200 validates existing rows
+without holding an exclusive lock during the validation scan. The original
+nonnegative check remains as a redundant guard. The down migrations reverse
+the validation state and remove the new check.
 
 No API, Redis format, or session-minting behavior changes. Middleware continues
 to require an active administrator and an exact generation match.

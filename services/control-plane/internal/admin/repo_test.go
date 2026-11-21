@@ -359,3 +359,25 @@ func TestMigration000197Down_RefusesAfterReset(t *testing.T) {
 	require.Error(t, err, "down must refuse after a reset revoked sessions")
 	assert.Contains(t, err.Error(), "cannot roll back 000197")
 }
+
+func TestMigration000199Up_RefusesExistingZero(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	created, err := admin.NewAdminRepo(db).CreatePending(ctx, uniqueAdminUsername("zero-guard"), "test-hash")
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, created.ID)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, "ALTER TABLE admin_users DROP CONSTRAINT admin_users_session_generation_positive")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, "UPDATE admin_users SET session_generation = 0 WHERE id = $1", created.ID)
+	require.NoError(t, err)
+
+	up, err := os.ReadFile("../../migrations/000199_add_positive_admin_session_generation_check.up.sql")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, string(up))
+	require.ErrorContains(t, err, "cannot install positive admin session generation check while a nonpositive row exists")
+}
