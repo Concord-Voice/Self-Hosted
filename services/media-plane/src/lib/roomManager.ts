@@ -4522,6 +4522,18 @@ export class RoomManager {
     }
   }
 
+  private releasePendingConsumeReservation(
+    participant: Participant,
+    key: string,
+    producerId: string
+  ): void {
+    const wasPendingDuplicate = participant.pendingDuplicateKeys.delete(key);
+    participant.pendingConsumeKeys.delete(key);
+    if (!wasPendingDuplicate && !participant.producerCopies.has(producerId)) {
+      this.promotePendingConsumerToPrimary(participant, producerId);
+    }
+  }
+
   private async consumeOwned(
     roomId: string,
     consumerUserId: string,
@@ -4647,11 +4659,7 @@ export class RoomManager {
         this.clearScreenLayerDemand(room, newConsumer.id);
       });
     } finally {
-      const wasPendingDuplicate = consumer.pendingDuplicateKeys.delete(key);
-      consumer.pendingConsumeKeys.delete(key);
-      if (!wasPendingDuplicate && !consumer.producerCopies.has(producerId)) {
-        this.promotePendingConsumerToPrimary(consumer, producerId);
-      }
+      this.releasePendingConsumeReservation(consumer, key, producerId);
     }
 
     // Per-consumer priority (#1542): audio > screenshare > webcam so the SFU
