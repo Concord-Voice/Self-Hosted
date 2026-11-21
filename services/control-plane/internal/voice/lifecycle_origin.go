@@ -3,6 +3,8 @@ package voice
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -107,4 +109,92 @@ func serverVoiceLeaseCutoff(ctx context.Context) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: receivedAt.Add(-presence.ActivityStateTTL), Valid: true}
+}
+
+// roomEmptyTombstoneWindow is how long a peer replica's room_empty tombstone
+// counts as the reason this replica observed an already-empty room. It covers
+// the activity lease plus delivery slack between the replicas (VULN-208).
+const roomEmptyTombstoneWindow = presence.ActivityStateTTL + 30*time.Second
+
+type roomEmptyTombstoneKey struct{}
+
+// withRoomEmptyTombstone marks a reconciliation as a voice.room_empty run by
+// replica, so each row it removes records the channel's tombstone in the same
+// transaction as the delete. Heartbeat omission never sets it.
+func withRoomEmptyTombstone(ctx context.Context, replica uuid.UUID) context.Context {
+	if replica == uuid.Nil {
+		return ctx
+	}
+	return context.WithValue(ctx, roomEmptyTombstoneKey{}, replica)
+}
+
+func roomEmptyTombstoneReplica(ctx context.Context) (uuid.UUID, bool) {
+	replica, ok := ctx.Value(roomEmptyTombstoneKey{}).(uuid.UUID)
+	return replica, ok && replica != uuid.Nil
+}
+
+// recordRoomEmptyTombstoneTx upserts the channel's tombstone after a
+// room_empty delete in tx, so it commits with that delete. Consecutive
+// removals by the same replica and boot within the window add to one count;
+// any other writer starts a new count.
+func recordRoomEmptyTombstoneTx(ctx context.Context, tx *sql.Tx, channelID uuid.UUID) error {
+	replica, marked := roomEmptyTombstoneReplica(ctx)
+	if !marked {
+		return nil
+	}
+	boot, known := lifecycleOrigin(ctx)
+	if !known {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO server_voice_room_terminals
+			(channel_id, media_boot_id, recorded_by, removed_count, recorded_at)
+		VALUES ($1, $2, $3, 1, clock_timestamp())
+		ON CONFLICT (channel_id) DO UPDATE SET
+			removed_count = CASE
+				WHEN server_voice_room_terminals.recorded_by = EXCLUDED.recorded_by
+				 AND server_voice_room_terminals.media_boot_id = EXCLUDED.media_boot_id
+				 AND server_voice_room_terminals.recorded_at >=
+				     clock_timestamp() - ($4::bigint * INTERVAL '1 millisecond')
+				THEN server_voice_room_terminals.removed_count + 1
+				ELSE 1
+			END,
+			media_boot_id = EXCLUDED.media_boot_id,
+			recorded_by = EXCLUDED.recorded_by,
+			recorded_at = EXCLUDED.recorded_at
+	`, channelID, boot, replica, roomEmptyTombstoneWindow.Milliseconds())
+	if err != nil {
+		return fmt.Errorf("record room_empty tombstone: %w", err)
+	}
+	return nil
+}
+
+// peerTombstoneRecent reports whether another control-plane replica recorded a
+// room_empty removal on channelID within roomEmptyTombstoneWindow of
+// receivedAt. A zero receivedAt measures the window against the database clock.
+func (s *NATSSubscriber) peerTombstoneRecent(
+	ctx context.Context,
+	channelID uuid.UUID,
+	receivedAt time.Time,
+) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("room_empty tombstone store unavailable")
+	}
+	if s.peerTombstoneReadContext != nil {
+		ctx = s.peerTombstoneReadContext(ctx)
+	}
+	reference := sql.NullTime{Time: receivedAt, Valid: !receivedAt.IsZero()}
+	var recent bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM server_voice_room_terminals
+			WHERE channel_id = $1
+			  AND recorded_by <> $2
+			  AND recorded_at >= COALESCE($3::timestamptz, clock_timestamp())
+			                     - ($4::bigint * INTERVAL '1 millisecond')
+		)
+	`, channelID, s.replicaID, reference, roomEmptyTombstoneWindow.Milliseconds()).Scan(&recent); err != nil {
+		return false, fmt.Errorf("read room_empty tombstone: %w", err)
+	}
+	return recent, nil
 }

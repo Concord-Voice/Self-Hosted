@@ -635,3 +635,16 @@ func LockVoiceParticipantUsersForTest(
 	}
 	return missing, errors.Is(err, errVoiceParticipantUserMissing), err
 }
+
+// ReplicaIDForTest returns the process ID this subscriber records in
+// server_voice_room_terminals.
+func (s *NATSSubscriber) ReplicaIDForTest() uuid.UUID { return s.replicaID }
+
+// RoomEmptyTombstoneWindowForTest is how long a peer tombstone counts.
+const RoomEmptyTombstoneWindowForTest = roomEmptyTombstoneWindow
+
+// SetPeerTombstoneReadContextForTest wraps the context the room_empty no-op
+// arm reads the peer tombstone with, so a test can make that one read fail.
+func (s *NATSSubscriber) SetPeerTombstoneReadContextForTest(wrap func(context.Context) context.Context) {
+	s.peerTombstoneReadContext = wrap
+}

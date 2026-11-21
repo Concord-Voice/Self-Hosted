@@ -51,11 +51,14 @@ type NATSSubscriber struct {
 	resolver *rbac.Resolver
 	// replicaID names this process in server_voice_room_terminals. Zero in a
 	// struct literal.
-	replicaID           uuid.UUID
-	erasureClearKey     []byte
-	opsCounters         *opsmetrics.Counters
-	lifecycleDispatchMu sync.Mutex
-	lifecycleDispatcher *voiceLifecycleDispatcher
+	replicaID uuid.UUID
+	// peerTombstoneReadContext, when set by a test, wraps the context of the
+	// room_empty no-op arm's tombstone read.
+	peerTombstoneReadContext func(context.Context) context.Context
+	erasureClearKey          []byte
+	opsCounters              *opsmetrics.Counters
+	lifecycleDispatchMu      sync.Mutex
+	lifecycleDispatcher      *voiceLifecycleDispatcher
 
 	serverVoiceCleanupOnce    sync.Once
 	serverVoiceCleanupReadyAt time.Time
@@ -7806,8 +7809,21 @@ func (s *NATSSubscriber) handleResolvedRoomEmpty(
 		return false
 	}
 	removedAny, databaseEmpty, reconcileErr := s.reconcileServerHeartbeat(
-		ctx, channelID, nil, eventAt, room,
+		withRoomEmptyTombstone(ctx, s.replicaID), channelID, nil, eventAt, room,
 	)
+	if databaseEmpty && !removedAny && reconcileErr == nil {
+		// VULN-208: nothing was removed here and no row of any boot remains.
+		// Only a peer replica's recent removal leaves this replica's clients
+		// holding the room; without one this is a determined no-op.
+		peerRemoved, readErr := s.peerTombstoneRecent(ctx, channelID, lifecycleReceivedAt(ctx))
+		if readErr == nil && !peerRemoved {
+			s.log.Info(logVoiceLifecycleApplied, "action", "noop_room_empty")
+			return false
+		}
+		if readErr != nil {
+			s.log.Error("Server voice room_empty tombstone read failed", "failure_class", "state_read")
+		}
+	}
 	if databaseEmpty {
 		if !removedAny {
 			s.disconnectAllRichPresenceClients()
@@ -9045,7 +9061,13 @@ func (s *NATSSubscriber) deleteStaleServerHeartbeatParticipant(
 					ctx, tx, channelID, participantID, eventAt,
 				)
 				foreign = keptForeign
-				return removed, deleteErr
+				if deleteErr != nil || !removed {
+					return removed, deleteErr
+				}
+				// A room_empty records its tombstone in the delete's own
+				// transaction, so a peer that observes the room empty after
+				// this commit also observes the tombstone (VULN-208).
+				return true, recordRoomEmptyTombstoneTx(ctx, tx, channelID)
 			},
 		)
 		return claimApplied, err
