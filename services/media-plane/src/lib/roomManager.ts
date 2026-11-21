@@ -4584,6 +4584,14 @@ export class RoomManager {
         newConsumer.close();
         throw new Error('Voice participant changed during consume');
       }
+      if (
+        consumer.recvTransports.get(recvTransport.id) !== recvTransport ||
+        recvTransport.closed ||
+        newConsumer.closed
+      ) {
+        if (!newConsumer.closed) newConsumer.close();
+        throw new Error('Receive transport changed during consume');
+      }
       consumer.consumers.set(newConsumer.id, newConsumer);
       consumer.consumersByKey.set(key, newConsumer.id);
     } finally {
