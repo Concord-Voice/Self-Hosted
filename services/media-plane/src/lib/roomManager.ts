@@ -4629,6 +4629,7 @@ export class RoomManager {
       consumer.consumers.set(newConsumer.id, newConsumer);
       consumer.consumersByKey.set(key, newConsumer.id);
       consumer.producerCopies.set(producerId, (consumer.producerCopies.get(producerId) ?? 0) + 1);
+      this.markPendingConsumersDuplicate(consumer, producerId);
       // Register cleanup before the awaits below so a close during priority or
       // layer setup also releases the per-producer copy reservation.
       newConsumer.on('transportclose', () => {
@@ -4646,8 +4647,11 @@ export class RoomManager {
         this.clearScreenLayerDemand(room, newConsumer.id);
       });
     } finally {
+      const wasPendingDuplicate = consumer.pendingDuplicateKeys.delete(key);
       consumer.pendingConsumeKeys.delete(key);
-      consumer.pendingDuplicateKeys.delete(key);
+      if (!wasPendingDuplicate && !consumer.producerCopies.has(producerId)) {
+        this.promotePendingConsumerToPrimary(consumer, producerId);
+      }
     }
 
     // Per-consumer priority (#1542): audio > screenshare > webcam so the SFU
@@ -6303,8 +6307,28 @@ export class RoomManager {
   private releaseConsumerEntry(participant: Participant, consumerId: string, producerId: string): void {
     if (!participant.consumers.delete(consumerId)) return;
     const copies = participant.producerCopies.get(producerId) ?? 0;
-    if (copies <= 1) participant.producerCopies.delete(producerId);
+    if (copies <= 1) {
+      participant.producerCopies.delete(producerId);
+      this.promotePendingConsumerToPrimary(participant, producerId);
+    }
     else participant.producerCopies.set(producerId, copies - 1);
+  }
+
+  /** A committed copy makes every still-pending copy of that producer a duplicate. */
+  private markPendingConsumersDuplicate(participant: Participant, producerId: string): void {
+    for (const transportId of participant.recvTransports.keys()) {
+      const key = consumerKey(producerId, transportId);
+      if (participant.pendingConsumeKeys.has(key)) participant.pendingDuplicateKeys.add(key);
+    }
+  }
+
+  /** Transfer the primary reservation when the last committed copy goes away. */
+  private promotePendingConsumerToPrimary(participant: Participant, producerId: string): void {
+    if (participant.producerCopies.has(producerId)) return;
+    for (const transportId of participant.recvTransports.keys()) {
+      const key = consumerKey(producerId, transportId);
+      if (participant.pendingDuplicateKeys.delete(key)) return;
+    }
   }
 
   /**

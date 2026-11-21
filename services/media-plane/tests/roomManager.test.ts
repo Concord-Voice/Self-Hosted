@@ -6073,6 +6073,85 @@ describe('RoomManager', () => {
       ).resolves.not.toBeNull();
     });
 
+    it('keeps an out-of-order pending primary in the duplicate budget', async () => {
+      const transports = [
+        await addRecvTransport(),
+        await addRecvTransport(),
+        await addRecvTransport(),
+        await addRecvTransport(),
+      ];
+      const participant = manager.getParticipant('room-1', 'u-2')!;
+      for (let i = 0; i < MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT - 1; i += 1) {
+        const seededProducerId = `seeded-producer-${i}`;
+        for (let copy = 0; copy < 2; copy += 1) {
+          const seeded = createMockConsumer({
+            id: `seeded-consumer-${i}-${copy}`,
+            producerId: seededProducerId,
+            appData: { producerId: seededProducerId },
+          });
+          participant.consumers.set(seeded.id, seeded as any);
+        }
+        participant.producerCopies.set(seededProducerId, 2);
+      }
+
+      const gateProducerId = 'gate-producer';
+      manager.getParticipant('room-1', 'u-1')!.producers.set(gateProducerId, {
+        producer: createMockProducer({ id: gateProducerId, kind: 'audio' }) as any,
+        source: 'mic',
+        kind: 'audio',
+        policed: false,
+        createdAtMs: 0,
+      });
+
+      let releaseFirst: (() => void) | undefined;
+      let releaseSecond: (() => void) | undefined;
+      transports[0].consume.mockImplementationOnce(
+        (options: any) =>
+          new Promise((resolve) => {
+            releaseFirst = () =>
+              resolve(
+                createMockConsumer({
+                  producerId: options.producerId,
+                  kind: 'audio',
+                  appData: options.appData,
+                })
+              );
+          })
+      );
+      transports[1].consume.mockImplementationOnce(
+        (options: any) =>
+          new Promise((resolve) => {
+            releaseSecond = () =>
+              resolve(
+                createMockConsumer({
+                  producerId: options.producerId,
+                  kind: 'audio',
+                  appData: options.appData,
+                })
+              );
+          })
+      );
+
+      const first = manager.consume('room-1', 'u-2', producerId, transports[0].id);
+      const second = manager.consume('room-1', 'u-2', producerId, transports[1].id);
+      expect(participant.pendingConsumeKeys.size).toBe(2);
+      expect(releaseFirst).toBeTypeOf('function');
+      expect(releaseSecond).toBeTypeOf('function');
+      releaseSecond!();
+      await expect(second).resolves.not.toBeNull();
+
+      await expect(
+        manager.consume('room-1', 'u-2', gateProducerId, transports[2].id)
+      ).resolves.not.toBeNull();
+      await expect(
+        manager.consume('room-1', 'u-2', gateProducerId, transports[3].id)
+      ).rejects.toThrow(`Duplicate consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`);
+      expect(transports[3].consume).not.toHaveBeenCalled();
+
+      releaseFirst!();
+      await expect(first).resolves.not.toBeNull();
+    });
+
     it('does not commit a consumer whose producer closed during consume', async () => {
       const transport = await addRecvTransport();
       const producerEntry = manager.getParticipant('room-1', 'u-1')!.producers.get(producerId)!;
