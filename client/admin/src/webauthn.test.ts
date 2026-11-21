@@ -372,6 +372,32 @@ describe("decodeCreationOptions", () => {
 });
 
 describe("credential encoding", () => {
+  it.each([
+    { raw: [], expected: "" },
+    { raw: [1], expected: "AQ" },
+    { raw: [1, 2], expected: "AQI" },
+    { raw: [1, 2, 3], expected: "AQID" },
+    { raw: [0xfb, 0xff], expected: "-_8" },
+  ])(
+    "strips Base64 padding from $raw.length-byte values",
+    ({ raw, expected }) => {
+      const assertion = encodeAssertion({
+        id: "credential",
+        rawId: buffer(...raw),
+        type: "public-key",
+        response: {
+          authenticatorData: buffer(4),
+          clientDataJSON: buffer(5),
+          signature: buffer(6),
+          userHandle: null,
+        },
+        getClientExtensionResults: () => ({}),
+      } as unknown as PublicKeyCredential);
+
+      expect(assertion.rawId).toBe(expected);
+    },
+  );
+
   it("encodes assertions with only standard JSON fields", () => {
     const assertion = encodeAssertion({
       id: "credential",

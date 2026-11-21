@@ -2,12 +2,16 @@ package oauth_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -53,15 +57,128 @@ func newDualProviderInitiateRig(t *testing.T) (*gin.Engine, *redis.Client, *reco
 
 const initiateRedirect = "http://127.0.0.1:65000/oauth/callback"
 
+var testSSOClientBinding = strings.Repeat("A", 43)
+
+func testSSOClientBindingDigest(t *testing.T) []byte {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(testSSOClientBinding)
+	require.NoError(t, err)
+	digest := sha256.Sum256(append([]byte("concord-sso-client-binding-v1\x00"), raw...))
+	return digest[:]
+}
+
 func getInitiate(r *gin.Engine, provider, challenge string) *httptest.ResponseRecorder {
+	return getInitiateWithBinding(r, provider, challenge, testSSOClientBinding)
+}
+
+func getInitiateWithBinding(r *gin.Engine, provider, challenge, binding string) *httptest.ResponseRecorder {
 	target := "/api/v1/auth/sso/" + provider + "?redirect_uri=" + url.QueryEscape(initiateRedirect)
 	if challenge != "" {
 		target += "&code_challenge=" + url.QueryEscape(challenge)
 	}
 	req := httptest.NewRequest(http.MethodGet, target, nil)
+	if binding != "" {
+		req.Header.Set("X-Concord-SSO-Client-Binding", binding)
+	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
+}
+
+func TestInitiateGlobalLimitRejectsBeforeStateAllocationAndSeparatesProviders(t *testing.T) {
+	r, rdb, putter := newDualProviderInitiateRig(t)
+	ctx := context.Background()
+	invalid := getInitiateWithBinding(r, "google", strings.Repeat("a", 43), "")
+	require.Equal(t, http.StatusBadRequest, invalid.Code)
+	noBudget, err := rdb.Exists(ctx, "ratelimit:sso:initiate:google").Result()
+	require.NoError(t, err)
+	require.Zero(t, noBudget, "invalid client binding must not spend the provider budget")
+	require.NoError(t, rdb.Set(ctx, "ratelimit:sso:initiate:apple", "600", time.Minute).Err())
+	blocked := getInitiate(r, "apple", strings.Repeat("a", 43))
+	require.Equal(t, http.StatusTooManyRequests, blocked.Code, blocked.Body.String())
+	require.Contains(t, blocked.Body.String(), "rate_limited")
+	keys, err := rdb.Keys(ctx, "sso_state:*").Result()
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	require.Empty(t, putter.calls)
+
+	allowed := getInitiate(r, "google", strings.Repeat("a", 43))
+	require.Equal(t, http.StatusOK, allowed.Code, allowed.Body.String())
+	count, err := rdb.Get(ctx, "ratelimit:sso:initiate:google").Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+}
+
+type rejectInitiateCounterHook struct{}
+
+func (rejectInitiateCounterHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (rejectInitiateCounterHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (rejectInitiateCounterHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "incr" && len(cmd.Args()) > 1 {
+			key, ok := cmd.Args()[1].(string)
+			if ok && strings.HasPrefix(key, "ratelimit:sso:initiate:") {
+				return errors.New("counter unavailable")
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func TestInitiateGlobalLimitFailsClosedOnRedisError(t *testing.T) {
+	r, rdb, putter := newDualProviderInitiateRig(t)
+	rdb.AddHook(rejectInitiateCounterHook{})
+	response := getInitiate(r, "apple", strings.Repeat("a", 43))
+	require.Equal(t, http.StatusServiceUnavailable, response.Code)
+	require.Contains(t, response.Body.String(), "redis_unavailable")
+	keys, err := rdb.Keys(context.Background(), "sso_state:*").Result()
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	require.Empty(t, putter.calls)
+}
+
+func TestInitiate_ClientBindingRequiredAndStoredAsDigest(t *testing.T) {
+	r, rdb, _ := newDualProviderInitiateRig(t)
+	for _, provider := range []string{"apple", "google"} {
+		t.Run(provider, func(t *testing.T) {
+			for name, binding := range map[string]string{
+				"missing": "", "short": strings.Repeat("A", 42),
+				"long": strings.Repeat("A", 44), "padded": testSSOClientBinding + "=",
+				"invalid": strings.Repeat("!", 43), "noncanonical": strings.Repeat("A", 42) + "B",
+			} {
+				t.Run(name, func(t *testing.T) {
+					w := getInitiateWithBinding(r, provider, strings.Repeat("a", 43), binding)
+					require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+					assert.Contains(t, w.Body.String(), "invalid_request")
+				})
+			}
+			t.Run("duplicate", func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/sso/"+provider+"?redirect_uri="+url.QueryEscape(initiateRedirect)+"&code_challenge="+strings.Repeat("a", 43), nil)
+				req.Header.Add("X-Concord-SSO-Client-Binding", testSSOClientBinding)
+				req.Header.Add("X-Concord-SSO-Client-Binding", testSSOClientBinding)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
+				require.Equal(t, http.StatusBadRequest, w.Code)
+			})
+			w := getInitiate(r, provider, strings.Repeat("a", 43))
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			var resp struct {
+				State string `json:"state"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			raw, err := rdb.Get(context.Background(), "sso_state:"+resp.State).Bytes()
+			require.NoError(t, err)
+			assert.NotContains(t, string(raw), testSSOClientBinding)
+			assert.NotContains(t, w.Body.String(), testSSOClientBinding)
+			var rec struct {
+				ClientBindingDigest []byte `json:"client_binding_digest"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &rec))
+			assert.Equal(t, testSSOClientBindingDigest(t), rec.ClientBindingDigest)
+		})
+	}
 }
 
 func TestInitiate_Apple_RequiresCodeChallenge(t *testing.T) {

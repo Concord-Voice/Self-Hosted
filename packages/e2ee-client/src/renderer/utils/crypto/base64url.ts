@@ -22,5 +22,9 @@ export function bufferToBase64url(buffer: ArrayBuffer): string {
   for (const byte of bytes) {
     binary += String.fromCodePoint(byte);
   }
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll(/=+$/g, '');
+  const base64 = btoa(binary).replaceAll('+', '-').replaceAll('/', '_');
+  // Linear trailing-'=' trim (a /=+$/ regex risks super-linear backtracking).
+  let end = base64.length;
+  while (end > 0 && base64.codePointAt(end - 1) === 0x3d) end--;
+  return base64.slice(0, end);
 }

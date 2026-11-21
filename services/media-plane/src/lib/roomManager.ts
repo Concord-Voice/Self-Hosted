@@ -313,16 +313,17 @@ export interface Participant {
   pendingProducerSources: Map<MediaSource, number>;
   /**
    * Consume dedupe index (#2032 / VULN-010): `consumerKey(producerId,
-   * recvTransportId)` -> consumerId. Bounded by the recv-transport cap times the
-   * room's distinct producers — there is deliberately no absolute numeric
-   * backstop, the bound is derived.
+   * recvTransportId)` -> consumerId. The participant-wide consumer and
+   * cross-transport duplicate ceilings below bound this index independently of
+   * the number of receive transports.
    */
   consumersByKey: Map<string, string>;
   /**
-   * Keys with a `consume()` in flight (#2032). Closes the window between the
-   * index read and the `await recvTransport.consume(...)` that commits it.
+   * Consume reservations in flight (#2032), keyed like `consumersByKey` with
+   * producerId as the value. Closes both the dedupe and quota windows before
+   * `await recvTransport.consume(...)` commits the consumer.
    */
-  pendingConsumeKeys: Set<string>;
+  pendingConsumeKeys: Map<string, string>;
   // ── Per-user media entitlement (#1300) ─────────────────────────────────
   /**
    * Subscription tier label — server-authoritative (#1300, never
@@ -675,6 +676,28 @@ const PARTICIPANT_PRODUCER_LIMITS: Partial<Record<MediaSource, number>> = {
  * once per newly created transport. The two are inseparable.
  */
 export const MAX_RECV_TRANSPORTS_PER_PARTICIPANT = 4;
+
+/**
+ * Cross-transport duplicate allowance. Each secondary receive transport may
+ * duplicate one producer for a PiP window, but a participant cannot clone every
+ * room producer onto every transport and multiply SFU egress fourfold.
+ */
+export const MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT =
+  MAX_RECV_TRANSPORTS_PER_PARTICIPANT - 1;
+
+/**
+ * Absolute participant consumer ceiling. A maximally populated channel can
+ * carry one mic per participant, every room-bounded camera and screen, one
+ * screen-audio producer per screen, and one PiP duplicate on each secondary
+ * receive transport. The cap therefore preserves every structurally legitimate
+ * primary consumer while bounding mediasoup consumer state independently of
+ * room producer count.
+ */
+export const MAX_CONSUMERS_PER_PARTICIPANT =
+  MAX_SERVER_VOICE_PARTICIPANTS +
+  ABSOLUTE_VIDEO_PUBLISHER_CEILING +
+  ABSOLUTE_SCREEN_PRODUCER_CEILING * 2 +
+  MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT;
 
 /**
  * Consume dedupe key.
@@ -2479,7 +2502,7 @@ export class RoomManager {
       producers: new Map(),
       consumers: new Map(),
       consumersByKey: new Map(),
-      pendingConsumeKeys: new Set(),
+      pendingConsumeKeys: new Map(),
       rtpCapabilities: rtpCapabilities ?? null,
       joinedAt: new Date(),
       serverMuted: false,
@@ -4580,10 +4603,7 @@ export class RoomManager {
       return describeConsumer(alreadyConsuming, producerId, producerUserId, producerEntry.source);
     }
 
-    if (consumer.pendingConsumeKeys.has(key)) {
-      throw new Error('consume_in_progress');
-    }
-    consumer.pendingConsumeKeys.add(key);
+    this.reserveConsumerSlot(consumer, key, producerId);
 
     // Create consumer on the specified (or default) recv transport
     let newConsumer: Consumer;
@@ -4605,6 +4625,14 @@ export class RoomManager {
       if (room.participants.get(consumerUserId) !== consumer || !this.voiceParticipantProductive(consumer)) {
         newConsumer.close();
         throw new Error('Voice participant changed during consume');
+      }
+      if (
+        consumer.recvTransports.get(recvTransport.id) !== recvTransport ||
+        recvTransport.closed ||
+        newConsumer.closed
+      ) {
+        if (!newConsumer.closed) newConsumer.close();
+        throw new Error('Receive transport changed during consume');
       }
       consumer.consumers.set(newConsumer.id, newConsumer);
       consumer.consumersByKey.set(key, newConsumer.id);
@@ -6222,6 +6250,54 @@ export class RoomManager {
 
     participant.consumersByKey.delete(key);
     return undefined;
+  }
+
+  /**
+   * Atomically reserve participant-wide consumer and duplicate-egress capacity.
+   * Committed state is derived from live consumers; only the one-await-wide
+   * pending delta is tracked explicitly and released by `consume`'s `finally`.
+   */
+  private reserveConsumerSlot(
+    participant: Participant,
+    key: string,
+    producerId: string
+  ): void {
+    if (participant.pendingConsumeKeys.has(key)) {
+      throw new Error('consume_in_progress');
+    }
+
+    let liveAndPending = 0;
+    const representedProducers = new Set<string>();
+
+    for (const [, existing] of participant.consumers) {
+      if (existing.closed) continue;
+      liveAndPending += 1;
+      const appData = existing.appData as { producerId?: unknown } | undefined;
+      if (typeof appData?.producerId !== 'string' || appData.producerId.length === 0) {
+        throw new Error('Consumer accounting state invalid');
+      }
+      representedProducers.add(appData.producerId);
+    }
+
+    for (const pendingProducerId of participant.pendingConsumeKeys.values()) {
+      liveAndPending += 1;
+      representedProducers.add(pendingProducerId);
+    }
+
+    const duplicates = liveAndPending - representedProducers.size;
+    if (liveAndPending >= MAX_CONSUMERS_PER_PARTICIPANT) {
+      throw new Error(`Consumer limit reached (max ${MAX_CONSUMERS_PER_PARTICIPANT})`);
+    }
+    if (
+      representedProducers.has(producerId) &&
+      duplicates >= MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT
+    ) {
+      throw new Error(
+        `Secondary consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
+      );
+    }
+
+    participant.pendingConsumeKeys.set(key, producerId);
   }
 
   /**
