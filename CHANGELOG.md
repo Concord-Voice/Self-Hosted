@@ -98,6 +98,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Fixed
 
+- **Messages:** Pinned messages in a DM now come with their attachments. The DM pin list returned each message without them, so a pinned picture, attached GIF or video showed as an empty pin in the app ([Desktop#14](https://github.com/Concord-Voice/Desktop/issues/14)). API: on `GET /api/v1/channels/{id}/pins`, a DM conversation's items now carry `attachments`, as a channel's items do.
 - **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
 - **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
 - **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.

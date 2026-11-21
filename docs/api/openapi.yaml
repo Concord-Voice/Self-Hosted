@@ -3696,7 +3696,9 @@ paths:
 
         newest pin first. For DM conversations the items carry `conversation_id` and `type` instead of
 
-        `channel_id`, and the top-level `conversation_id` is set.
+        `channel_id`, and the top-level `conversation_id` is set. Items of either kind carry
+
+        `attachments` when the message has files.
 
         Rate limit: 30 requests per minute.
 

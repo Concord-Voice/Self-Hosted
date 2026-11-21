@@ -35,7 +35,6 @@ import (
 	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -3835,22 +3834,7 @@ func (h *Handler) broadcastToDMParticipants(convID, excludeUserID string, msg we
 
 // loadDMAttachments batch-loads attachment summaries for a set of DM message IDs.
 func (h *Handler) loadDMAttachments(messageIDs []string) (map[string][]models.AttachmentSummary, error) {
-	if len(messageIDs) == 0 {
-		return nil, nil
-	}
-
-	rows, err := h.db.Query(`
-		SELECT ma.message_id, mf.id, mf.file_type, mf.mime_type, mf.file_size
-		FROM dm_message_attachments ma
-		INNER JOIN media_files mf ON ma.file_id = mf.id
-		WHERE ma.message_id = ANY($1::uuid[])
-		  AND mf.deleted_at IS NULL
-		ORDER BY ma.message_id, ma.position
-	`, pq.Array(messageIDs))
-	if err != nil {
-		return nil, err
-	}
-	return messagehandlers.ScanAttachmentSummaries(rows)
+	return messagehandlers.LoadDMAttachmentsForMessages(h.db, messageIDs)
 }
 
 // ---------------------------------------------------------------------------
