@@ -308,7 +308,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000197 | add_admin_session_generation | Initially adds a nonnegative durable generation to `admin_users` (tightened by 000199–000200); reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; every administrator starts at 1, so pre-migration sessions stop matching and any value above 1 records a revocation; down refuses once any generation passes 1. |
 | 000198 | add_session_revoke_allowance | Moves the rolling session-revocation allowance to a nullable users timestamp and binds simple-mode auth windows to a reset generation. Existing users start a conservative 24-hour window; new users start with no timestamp. Down refuses while any recorded window is active. |
 | 000199 | add_positive_admin_session_generation_check | Aborts under a bounded write-blocking lock if any existing admin generation is nonpositive, then adds a positive check for future writes. The original nonnegative check remains. |
-| 000200 | validate_positive_admin_session_generation | Validates the positive check against existing administrator rows without holding an exclusive lock across the scan. Existing zero rows stop migration for operator remediation. |
+| 000200 | validate_positive_admin_session_generation | Validates the positive check against existing administrator rows without holding an exclusive lock across the scan. Existing nonpositive rows are already rejected by 000199. |
 
 ### Session-revocation allowance cutover (migration 000198)
 
