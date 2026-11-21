@@ -4515,6 +4515,13 @@ export class RoomManager {
     return this.runOwnedMediaOperation(roomId, consumerUserId, () => this.consumeOwned(roomId, consumerUserId, producerId, transportId));
   }
 
+  private ensureProducerOpenDuringConsume(producer: Producer, consumer: Consumer): void {
+    if (producer.closed) {
+      consumer.close();
+      throw new Error('Producer closed during consume');
+    }
+  }
+
   private async consumeOwned(
     roomId: string,
     consumerUserId: string,
@@ -4618,10 +4625,7 @@ export class RoomManager {
         if (!newConsumer.closed) newConsumer.close();
         throw new Error('Receive transport changed during consume');
       }
-      if (producerEntry.producer.closed) {
-        newConsumer.close();
-        throw new Error('Producer closed during consume');
-      }
+      this.ensureProducerOpenDuringConsume(producerEntry.producer, newConsumer);
       consumer.consumers.set(newConsumer.id, newConsumer);
       consumer.consumersByKey.set(key, newConsumer.id);
       consumer.producerCopies.set(producerId, (consumer.producerCopies.get(producerId) ?? 0) + 1);
