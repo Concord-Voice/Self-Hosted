@@ -85,7 +85,7 @@ readers accept the versioned formats needed for a later storage migration.
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
 - **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
-- **Voice:** A participant can no longer multiply media consumers across receive transports to exhaust shared voice capacity ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
+- **Voice:** Frames Picture-in-Picture can now receive every active microphone and camera while participant consumer limits still block clone-everything egress exhaustion ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed
