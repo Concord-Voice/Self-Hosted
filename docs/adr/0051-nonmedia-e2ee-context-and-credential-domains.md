@@ -29,6 +29,8 @@ wrap = HKDF-Expand-SHA256(prk, ASCII("concord-wrap-key-v1\0"), 32)
 prefs = HKDF-Expand-SHA256(prk, ASCII("concord-prefs-key-v1\0"), 32)
 ```
 
+`credential_generation_u64be` is the eight-byte, big-endian, zero-extended encoding of the descriptor's exact integer in `1..9007199254740991`. The server advances the generation monotonically, refuses rollover at that bound, and never reuses a generation for a different credential. The shared corpus includes the maximum generation and its eight encoded bytes.
+
 `auth` is sent as unpadded base64url (43 ASCII characters) in a versioned proof field. The server stores its ordinary password verifier over that ASCII value. `wrap` and `prefs` are client-only key inputs. The authority realm UUID is the cryptographic realm identity; an API hostname is transport configuration and cannot substitute for it. Before deriving a new credential, the client verifies the descriptor realm against the selected profile's authenticated authority trust chain. First registration also requires that trusted realm bootstrap; an unpinned or unknown realm cannot activate this protocol.
 
 The credential descriptor is one canonical UTF-8 JSON array, with no whitespace, escapes, objects, or trailing bytes:
@@ -38,6 +40,8 @@ The credential descriptor is one canonical UTF-8 JSON array, with no whitespace,
 ```
 
 `realm-uuid` has the same lowercase 36-byte form as the authenticated profile realm. `subject-b64` is standard padded base64 of exactly 32 bytes (44 ASCII characters); `salt-b64` is standard padded base64 of exactly 16 bytes (24 ASCII characters). Decoding followed by re-encoding must reproduce each field byte for byte. `generation` is an unsigned decimal integer in `1..9007199254740991`, without leading zeroes. The complete descriptor is at most 256 bytes. A known split account receives its stored descriptor. Legacy and unknown identifiers receive deterministic synthetic descriptors from a dedicated, domain-separated server secret, with the same field shapes, allowed values, status, and rate-limit class. No pre-auth field reveals account state or its public UUID. The first login proof always uses `auth`. A failed proof gets an opaque continuation on the same response path for a wrong split proof, a legacy account, and an unknown account. The raw-password continuation succeeds only for a legacy verifier, under the normal MFA policy.
+
+Clients reject any descriptor whose Argon2id values differ from exactly `(65536 KiB, 3, 4)`; changing these values requires a new protocol discriminator. These values match the current client derivation constants, but security-owner approval of the new credential protocol remains an acceptance gate. The vector corpus includes a lower-parameter descriptor that every client rejects before KDF work.
 
 Every invalid proof before MFA, including unknown account, wrong split proof, and wrong legacy raw password, has the same status, response shape, error class, and attempt-budget charge. Unknown and split records take a fixed-cost synthetic verifier path during the raw continuation. A valid legacy password does not release legacy key material or an upgrade authorization until MFA succeeds. The implementation must test response and bounded timing equivalence across these cases; correct credentials necessarily proceed to the normal MFA state.
 
@@ -86,7 +90,7 @@ New readers explicitly dispatch by stored format. Legacy messages, whole-file at
 
 The shared vector corpus must contain exact canonical bytes, Argon2/HKDF outputs including invalid-Unicode rejection, AES-GCM AAD mutations including tampered attachment metadata, RSA label and key-purpose mismatches, descriptor uniformity, upgrade replay/race outcomes, and one altered-context case per bound field. The same corpus must pass in Go, shared TypeScript, Desktop, Swift, and Kotlin. Its generator and contents receive SHA-384 pins before this ADR is Accepted. Distributor and CAK signature vectors belong to the follow-on channel-distribution decision.
 
-**Acceptance requires:** freeze the exact `recovery_purpose`, `content_kind`, blob purpose, and attachment flag registries; every producer's expected-context provenance; and the shared byte vectors. A separate channel-distribution decision must freeze its proof and receipt format before that writer can activate. The Proposed layouts are not an implementation license until those reviews pass.
+**Acceptance requires:** security-owner sign-off on the pinned credential parameters; freeze the exact `recovery_purpose`, `content_kind`, blob purpose, and attachment flag registries; every producer's expected-context provenance; and the shared byte vectors. A separate channel-distribution decision must freeze its proof and receipt format before that writer can activate. The Proposed layouts are not an implementation license until those reviews pass.
 
 Writer activation, old-client exclusion, future encryption material, rollback, and legacy-reader retirement require a separate client-cutover decision and cross-client evidence. Protected recipient/root handles require the account-key authority work. The final social-recovery transcript waits for verified contacts and Recovery Circle share policy. Raw wrap-key persistence has a separate owner. This ADR does not decide those interfaces or enable a new writer.
 
