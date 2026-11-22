@@ -810,8 +810,7 @@ func TestHandleHeartbeat_PrivateCallRetriesDisconnectForReportedNonMember(t *tes
 			t.Logf("close NATS publisher: %v", err)
 		}
 	})
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
+	observer := natstest.Connect(t, natsTestURL())
 	t.Cleanup(func() {
 		if err := observer.Close(); err != nil {
 			t.Logf("close NATS observer: %v", err)

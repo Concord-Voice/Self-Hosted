@@ -18,10 +18,10 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
 	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
@@ -279,9 +279,7 @@ func TestRemoveMemberDeliveryFailureStillQueuesEnforcementAndBroadcasts(t *testi
 	if natsURL == "" {
 		natsURL = "nats://localhost:4222"
 	}
-	bus, err := natsclient.Connect(natsURL)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = bus.Close() })
+	bus := natstest.Connect(t, natsURL)
 
 	wsRedis := redistest.Client(t)
 	hub := websocket.NewHub(db, wsRedis)

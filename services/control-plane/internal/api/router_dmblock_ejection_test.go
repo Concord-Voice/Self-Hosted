@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,7 +213,9 @@ func TestPublishDMBlockVoiceEjectionRejectsUnsignedOrMismatchedAcknowledgement(t
 	}{
 		{name: "malformed", respond: func(map[string]interface{}) []byte { return []byte(`not-json`) }},
 		{name: "unsigned", respond: func(map[string]interface{}) []byte { return []byte(`{"version":2,"ok":true}`) }},
-		{name: "bad proof", respond: func(map[string]interface{}) []byte {
+		// Echoes none of the request, so it is rejected for the missing fields before
+		// the proof is read. The echoed-forgery tests cover the proof check itself.
+		{name: "zero proof and no echoed fields", respond: func(map[string]interface{}) []byte {
 			return []byte(`{"version":2,"ok":true,"proof":"0000000000000000000000000000000000000000000000000000000000000000"}`)
 		}},
 		{name: "wrong nonce", respond: func(request map[string]interface{}) []byte {
@@ -241,6 +244,119 @@ func TestPublishDMBlockVoiceEjectionRejectsUnsignedOrMismatchedAcknowledgement(t
 	}
 }
 
+// echoedACKForeignSecret signs a well-formed acknowledgement under a key the
+// control plane does not hold.
+const echoedACKForeignSecret = "secret-the-control-plane-does-not-hold" // #nosec G101 -- test-only key // pragma: allowlist secret -- deterministic test fixture, not a credential
+
+type echoedACKForgery struct {
+	name  string
+	reply func(t *testing.T, request map[string]interface{}) []byte
+}
+
+// forgedEchoedACKs builds the replies an anonymous subscriber on an ACK subject
+// can send. Every field the verifier compares travels in the request in
+// plaintext, so each reply is the genuine acknowledgement with only its proof
+// replaced: the proof check is the one thing that can refuse it. The negative
+// cases above omit those fields and are refused before the proof is read.
+func forgedEchoedACKs(sign func(t *testing.T, secret string, request map[string]interface{}) []byte) []echoedACKForgery {
+	withProof := func(t *testing.T, request map[string]interface{}, proof interface{}) []byte {
+		t.Helper()
+		var acknowledgement map[string]interface{}
+		require.NoError(t, json.Unmarshal(sign(t, dmBlockVoiceEjectionTestSecret, request), &acknowledgement))
+		acknowledgement["proof"] = proof
+		encoded, err := json.Marshal(acknowledgement)
+		require.NoError(t, err)
+		return encoded
+	}
+	return []echoedACKForgery{
+		{name: "replayed request proof", reply: func(t *testing.T, request map[string]interface{}) []byte {
+			return withProof(t, request, request["proof"])
+		}},
+		{name: "zero proof", reply: func(t *testing.T, request map[string]interface{}) []byte {
+			return withProof(t, request, strings.Repeat("0", 64))
+		}},
+		{name: "empty proof", reply: func(t *testing.T, request map[string]interface{}) []byte {
+			return withProof(t, request, "")
+		}},
+		{name: "proof under another secret", reply: func(t *testing.T, request map[string]interface{}) []byte {
+			return sign(t, echoedACKForeignSecret, request)
+		}},
+	}
+}
+
+func signedCredentialEpochVoiceEjectionACK(t *testing.T, secret string, request map[string]interface{}) []byte {
+	t.Helper()
+	acknowledgement := map[string]interface{}{
+		"version":                   1,
+		"userId":                    stringPayload(t, request, "userId"),
+		"credentialEpoch":           stringPayload(t, request, "credentialEpoch"),
+		"supersededCredentialEpoch": stringPayload(t, request, "supersededCredentialEpoch"),
+		"action":                    stringPayload(t, request, "action"),
+		"timestamp":                 stringPayload(t, request, "timestamp"),
+		"nonce":                     stringPayload(t, request, "nonce"),
+		"ok":                        true,
+	}
+	acknowledgement["proof"] = mediaproof.Sign(
+		mediaproof.DeriveKey(secret, credentialEpochVoiceEjectionACKProof),
+		"v1",
+		stringPayload(t, request, "timestamp"),
+		stringPayload(t, request, "userId"),
+		stringPayload(t, request, "credentialEpoch"),
+		stringPayload(t, request, "supersededCredentialEpoch"),
+		stringPayload(t, request, "action"),
+		stringPayload(t, request, "nonce"),
+		"true",
+	)
+	encoded, err := json.Marshal(acknowledgement)
+	require.NoError(t, err)
+	return encoded
+}
+
+func TestPublishDMBlockVoiceEjectionRejectsEchoedAcknowledgementWithForgedProof(t *testing.T) {
+	conversationID, userID := uuid.NewString(), uuid.New()
+	genuine := &dmBlockVoiceEjectionRequesterStub{respond: func(request map[string]interface{}) []byte {
+		return signedDMBlockVoiceEjectionACK(t, dmBlockVoiceEjectionTestSecret, request)
+	}}
+	require.NoError(t, publishDMBlockVoiceEjection(
+		context.Background(), genuine, dmBlockVoiceEjectionTestSecret, conversationID, userID,
+	), "control: the genuine echoed acknowledgement must be accepted, or the forgeries prove nothing")
+
+	for _, forgery := range forgedEchoedACKs(signedDMBlockVoiceEjectionACK) {
+		t.Run(forgery.name, func(t *testing.T) {
+			requester := &dmBlockVoiceEjectionRequesterStub{respond: func(request map[string]interface{}) []byte {
+				return forgery.reply(t, request)
+			}}
+			err := publishDMBlockVoiceEjection(
+				context.Background(), requester, dmBlockVoiceEjectionTestSecret, conversationID, userID,
+			)
+			require.ErrorContains(t, err, "DM block voice ejection acknowledgement rejected")
+		})
+	}
+}
+
+func TestPublishCredentialEpochVoiceEjectionRejectsEchoedAcknowledgementWithForgedProof(t *testing.T) {
+	userID := uuid.New()
+	newEpoch, oldEpoch := "abcdefabcdefabcdefabcdefabcdefab", "0123456789abcdef0123456789abcdef" // pragma: allowlist secret
+	genuine := &dmBlockVoiceEjectionRequesterStub{respond: func(request map[string]interface{}) []byte {
+		return signedCredentialEpochVoiceEjectionACK(t, dmBlockVoiceEjectionTestSecret, request)
+	}}
+	require.NoError(t, publishCredentialEpochVoiceEjection(
+		context.Background(), genuine, dmBlockVoiceEjectionTestSecret, userID, newEpoch, oldEpoch,
+	), "control: the genuine echoed acknowledgement must be accepted, or the forgeries prove nothing")
+
+	for _, forgery := range forgedEchoedACKs(signedCredentialEpochVoiceEjectionACK) {
+		t.Run(forgery.name, func(t *testing.T) {
+			requester := &dmBlockVoiceEjectionRequesterStub{respond: func(request map[string]interface{}) []byte {
+				return forgery.reply(t, request)
+			}}
+			err := publishCredentialEpochVoiceEjection(
+				context.Background(), requester, dmBlockVoiceEjectionTestSecret, userID, newEpoch, oldEpoch,
+			)
+			require.ErrorContains(t, err, "credential media ejection acknowledgement rejected")
+		})
+	}
+}
+
 func clonePayload(source map[string]interface{}) map[string]interface{} {
 	cloned := make(map[string]interface{}, len(source))
 	for key, value := range source {
@@ -264,23 +380,79 @@ func TestRedTeamUnauthenticatedNATSResponderCannotSpoofMediaTeardownACK(t *testi
 		natstest.Unavailable(t, "the raw connection failed")
 	}
 	t.Cleanup(attacker.Close)
-	received := make(chan struct{}, 1)
+
+	// The subscriber echoes every field of the request, which it reads in
+	// plaintext. It answers the control request with the genuine proof and the
+	// forged one with the request's own proof replayed, so the two replies
+	// differ only in the proof. It answers nothing else: other packages'
+	// ejection traffic can share this subject on the CI bus, and the
+	// bookkeeping never blocks, so that traffic cannot stall it.
+	userID := uuid.New()
+	controlChannel, forgedChannel := uuid.NewString(), uuid.NewString()
+	forgedSeen := make(chan struct{}, 1)
 	sub, err := attacker.Subscribe(dmBlockVoiceEjectionACKSubject, func(msg *rawnats.Msg) {
-		received <- struct{}{}
-		_ = msg.Respond([]byte(`{"version":2,"ok":true}`))
+		var request map[string]interface{}
+		if json.Unmarshal(msg.Data, &request) != nil {
+			return
+		}
+		proof := request["proof"]
+		switch request["channelId"] {
+		case controlChannel:
+			proof = genuineDMBlockVoiceEjectionACKProof(request)
+		case forgedChannel:
+			select {
+			case forgedSeen <- struct{}{}:
+			default:
+			}
+		default:
+			return
+		}
+		reply, marshalErr := json.Marshal(map[string]interface{}{
+			"version": request["version"], "channelId": request["channelId"], "userId": request["userId"],
+			"action": request["action"], "timestamp": request["timestamp"], "nonce": request["nonce"],
+			"ok": true, "proof": proof,
+		})
+		if marshalErr == nil {
+			_ = msg.Respond(reply)
+		}
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	require.NoError(t, attacker.Flush())
 
 	requester := natstest.Connect(t, url)
+	require.NoError(t, publishDMBlockVoiceEjection(
+		context.Background(), requester, dmBlockVoiceEjectionTestSecret, controlChannel, userID,
+	), "control: the subscriber's echoed reply with the genuine proof was not accepted over this bus, so the forged case proves nothing")
 	err = publishDMBlockVoiceEjection(
-		context.Background(), requester, dmBlockVoiceEjectionTestSecret, uuid.NewString(), uuid.New(),
+		context.Background(), requester, dmBlockVoiceEjectionTestSecret, forgedChannel, userID,
 	)
 	select {
-	case <-received:
-	case <-time.After(time.Second):
+	case <-forgedSeen:
+	case <-time.After(dmBlockVoiceEjectionRequestTimeout):
 		t.Fatal("attacker did not receive the teardown request")
 	}
-	require.Error(t, err, "an anonymous NATS subscriber forged a successful media teardown ACK")
+	// A timeout or any other failure does not match: the forged reply must
+	// reach the verifier and be refused there.
+	require.ErrorContains(t, err, "DM block voice ejection acknowledgement rejected",
+		"an anonymous NATS subscriber forged a media teardown ACK, or its reply never reached the proof check")
+}
+
+// genuineDMBlockVoiceEjectionACKProof runs on the NATS callback goroutine, where
+// require must not be called; a missing field yields a proof that fails.
+func genuineDMBlockVoiceEjectionACKProof(request map[string]interface{}) string {
+	field := func(name string) string {
+		value, _ := request[name].(string)
+		return value
+	}
+	return mediaproof.Sign(
+		mediaproof.DeriveKey(dmBlockVoiceEjectionTestSecret, dmBlockVoiceEjectionACKProof),
+		dmBlockVoiceEjectionProofVersion,
+		field("timestamp"),
+		field("channelId"),
+		field("userId"),
+		field("action"),
+		field("nonce"),
+		"true",
+	)
 }

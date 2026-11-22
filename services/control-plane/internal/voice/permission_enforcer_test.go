@@ -35,9 +35,7 @@ func setupEnforcerRig(t *testing.T) *enforcerTestRig {
 	t.Helper()
 	pubClient := natstest.Connect(t, natsTestURL())
 
-	obsClient, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = obsClient.Close() })
+	obsClient := natstest.Connect(t, natsTestURL())
 
 	ts := testhelpers.SetupTestServer(t)
 	resolver := rbac.NewResolver(ts.DB, rbac.NewPermissionCache(ts.Redis), logger.New("test"))
@@ -479,9 +477,7 @@ func TestPermissionEnforcer_RecheckServer_CoversAllVoiceChannels(t *testing.T) {
 // poison a healthy transactional recheck.
 func TestPermissionEnforcer_TransactionalResolverIgnoresClosedStandaloneDB(t *testing.T) {
 	r := setupEnforcerRig(t)
-	pubClient, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pubClient.Close() })
+	pubClient := natstest.Connect(t, natsTestURL())
 	owner := r.ts.CreateTestUser(t, "peowner5")
 	member := r.ts.CreateTestUser(t, "pemember5")
 	serverID := r.ts.CreateTestServer(t, owner.ID, "PermEnforce Broken")

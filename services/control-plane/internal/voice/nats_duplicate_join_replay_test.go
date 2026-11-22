@@ -41,9 +41,7 @@ func newDuplicateJoinFixture(t *testing.T) duplicateJoinFixture {
 
 	// Keep only this test's user, so a late disconnect from another test on the
 	// shared subject cannot land in the window. Never block the NATS callback.
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	observer := natstest.Connect(t, natsTestURL())
 	disconnects := make(chan map[string]interface{}, 4)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnectForTest, func(data []byte) {
 		var payload map[string]interface{}

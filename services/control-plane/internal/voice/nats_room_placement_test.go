@@ -12,7 +12,6 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -233,9 +232,7 @@ func TestRefreshOnlyJoinSpendsIntentAfterDatabaseRollback(t *testing.T) {
 		url = "nats://localhost:4222"
 	}
 	publisher := natstest.Connect(t, url)
-	observer, err := natsclient.Connect(url)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	observer := natstest.Connect(t, url)
 	disconnects := make(chan map[string]string, 1)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnect, func(data []byte) {
 		var payload map[string]string
@@ -327,9 +324,7 @@ func TestRefreshOnlyJoinRejectsMismatchedAdmissionAtExactSocket(t *testing.T) {
 		url = "nats://localhost:4222"
 	}
 	publisher := natstest.Connect(t, url)
-	observer, err := natsclient.Connect(url)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	observer := natstest.Connect(t, url)
 	disconnects := make(chan map[string]string, 1)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnect, func(data []byte) {
 		var payload map[string]string

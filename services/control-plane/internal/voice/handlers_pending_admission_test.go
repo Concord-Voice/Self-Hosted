@@ -26,7 +26,6 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	rawnats "github.com/nats-io/nats.go"
@@ -55,9 +54,7 @@ func TestActivatedAdmissionReleasesInitialFenceBeforePrepareAndRetainsReservatio
 	require.NoError(t, insertPendingAdmissionJoinFixture(db, owner, member, serverID, channelID, roleID))
 	admissionID, socketID := uuid.NewString(), "a2-socket"
 	require.NoError(t, db.QueryRow(`INSERT INTO voice_pending_admissions (channel_id,user_id,admission_id,socket_id,expires_at) VALUES ($1,$2,$3,$4,clock_timestamp()+INTERVAL '30 seconds') RETURNING admission_id`, channelID, member, admissionID, socketID).Scan(&admissionID))
-	control, err := natsclient.Connect(admissionNATSTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = control.Close() })
+	control := natstest.Connect(t, admissionNATSTestURL())
 	prepared := make(chan *rawnats.Msg, 1)
 	sub, err := bus.Subscribe(voiceAdmissionActivationSubject, func(msg *rawnats.Msg) { prepared <- msg })
 	require.NoError(t, err)
@@ -156,9 +153,7 @@ func exerciseActivatedAdmissionMutation(
 	admissionID, socketID := uuid.NewString(), "mutation-socket"
 	_, err = db.Exec(`INSERT INTO voice_pending_admissions (channel_id,user_id,admission_id,socket_id,expires_at) VALUES ($1,$2,$3,$4,clock_timestamp()+INTERVAL '30 seconds')`, channelID, member, admissionID, socketID)
 	require.NoError(t, err)
-	control, err := natsclient.Connect(admissionNATSTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = control.Close() })
+	control := natstest.Connect(t, admissionNATSTestURL())
 	prepared := make(chan *rawnats.Msg, 1)
 	sub, err := bus.Subscribe(voiceAdmissionActivationSubject, func(msg *rawnats.Msg) { prepared <- msg })
 	require.NoError(t, err)

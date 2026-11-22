@@ -37,9 +37,7 @@ func TestPublishForceDisconnect_PublishesPayload(t *testing.T) {
 	pubClient := natstest.Connect(t, natsTestURL())
 
 	// Observer client subscribes to capture the published message.
-	obsClient, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = obsClient.Close() })
+	obsClient := natstest.Connect(t, natsTestURL())
 
 	ts := testhelpers.SetupTestServer(t)
 	sub := voice.NewNATSSubscriber(ts.DB, logger.New("test"), ts.Hub, pubClient, ts.Redis, nil, nil)
@@ -83,9 +81,7 @@ func TestPublishForceDisconnect_NilNATSNoop(t *testing.T) {
 
 func TestVoiceJoinedPublishesCompleteRevisionedEnforcementSnapshot(t *testing.T) {
 	pubClient := natstest.Connect(t, natsTestURL())
-	obsClient, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = obsClient.Close() })
+	obsClient := natstest.Connect(t, natsTestURL())
 
 	t.Run("server", func(t *testing.T) {
 		ts := testhelpers.SetupTestServer(t)

@@ -14,7 +14,8 @@
 // for a message on a connection that never opened, and failed on its own
 // timeout about ten seconds later.
 //
-// This package is a leaf: the standard library, testing and pkg/nats only.
+// This package is a leaf: the standard library and pkg/nats only. It takes the
+// test as an interface, so it does not import testing either.
 // internal/testhelpers imports the packages whose tests need this, so anything
 // imported from internal/ here would make a cycle for one of them.
 package natstest
@@ -36,12 +37,19 @@ type TB interface {
 }
 
 // Connect returns a client that is connected to the NATS server at url, and
-// closes it when the test ends. When no server is reachable it calls
-// Unavailable, so a caller never holds a client that is still dialing.
+// closes it when the test ends. When the client is not connected it calls
+// Unavailable, so a caller never holds a client that is still dialing. Every
+// client a test opens comes from here, the second one in a test as much as the
+// first: a later dial gets the same nil error from an outage as the first does.
 //
 // The check is one read of the connection state, with no wait. Connect dials
-// before it returns: a server that is up is connected by then, and a server
-// that is down has already refused the dial.
+// once before it returns. A server that answers inside the client's connect
+// timeout is connected by then. Anything else leaves the client reconnecting:
+// nothing listening, a handshake the server refused, or a server too slow to
+// answer in time.
+//
+// A URL the client refuses is not an outage. It is a configuration fault, and
+// it fails the test everywhere: a skip would hide a mistyped NATS_URL.
 //
 // A test that must check the result of Close closes the client in its own
 // cleanup. That cleanup runs first, and the close here then does nothing.
@@ -50,13 +58,13 @@ func Connect(t TB, url string) *natsclient.Client {
 	client, err := natsclient.Connect(url)
 	if err != nil {
 		// The error can quote the URL, and a NATS URL can carry credentials.
-		Unavailable(t, "the NATS URL was refused as configuration")
+		t.Fatalf("the NATS client refused its configuration; check NATS_URL (the error is withheld: it can quote the URL)")
 		return nil
 	}
 	if !client.IsConnected() {
 		// Stop the reconnect loop. It would outlive the test otherwise.
 		_ = client.Close()
-		Unavailable(t, "no server answered at the NATS URL")
+		Unavailable(t, "not connected after the first dial")
 		return nil
 	}
 	t.Cleanup(func() { _ = client.Close() })
@@ -68,11 +76,21 @@ func Connect(t TB, url string) *natsclient.Client {
 // for these tests, so a skip there would report a broken service as a pass.
 //
 // reason is a fixed phrase. Do not pass a connect error: it can quote the URL.
+//
+// To run the strict mode by hand, set CI: `CI=1 go test ...`. Use it before
+// trusting a green local run of a test that enforces something over NATS.
 func Unavailable(t TB, reason string) {
 	t.Helper()
-	if os.Getenv("CI") != "" {
+	if mustRun() {
 		t.Fatalf("NATS unavailable in CI (%s); live-NATS tests must run here", reason)
 		return
 	}
 	t.Skipf("NATS unavailable (%s); skipping a live-NATS test", reason)
+}
+
+// mustRun reports whether a missing NATS server fails the test. CI is set by
+// the CI system. CI_PACKAGE_DB_ISOLATION is set by this repository's own Go
+// test step, so the decision does not rest on one variable the runner owns.
+func mustRun() bool {
+	return os.Getenv("CI") != "" || os.Getenv("CI_PACKAGE_DB_ISOLATION") == "1"
 }

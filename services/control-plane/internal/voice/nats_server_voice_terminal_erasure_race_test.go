@@ -16,7 +16,6 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	concordws "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -179,9 +178,7 @@ func TestServerVoiceMoveFencesTheRemovedChannelTerminalDelivery(t *testing.T) {
 
 func TestServerVoiceCrossServerMoveFencesTheRemovedChannelTerminalDelivery(t *testing.T) {
 	publisher := natstest.Connect(t, natsTestURL())
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	observer := natstest.Connect(t, natsTestURL())
 	disconnects := make(chan map[string]interface{}, 1)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnectForTest, func(data []byte) {
 		var payload map[string]interface{}

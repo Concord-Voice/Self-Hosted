@@ -19,7 +19,6 @@ import (
 	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -201,8 +200,7 @@ func TestServerMove_AmbiguousTemporaryGrantCommitSuppressesSignal(t *testing.T) 
 			t.Errorf("close NATS publisher: %v", closeErr)
 		}
 	})
-	observer, err := natsclient.Connect(commitEffectNATSURL())
-	require.NoError(t, err)
+	observer := natstest.Connect(t, commitEffectNATSURL())
 	t.Cleanup(func() {
 		if closeErr := observer.Close(); closeErr != nil {
 			t.Errorf("close NATS observer: %v", closeErr)
