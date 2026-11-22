@@ -1,16 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { selectCryptoScheme } from '@/renderer/workers/e2eeProtocol';
 
-const { mockDecryptFrame, mockEncryptFrame } = vi.hoisted(() => ({
+const {
+  mockDecryptFrame,
+  mockEncryptFrame,
+  mockInitFromKey,
+  mockSetKeyVersion,
+  mockAddDecryptKeyDirectV3,
+} = vi.hoisted(() => ({
   mockDecryptFrame: vi.fn(),
   mockEncryptFrame: vi.fn(),
+  mockInitFromKey: vi.fn(),
+  mockSetKeyVersion: vi.fn(),
+  mockAddDecryptKeyDirectV3: vi.fn(),
 }));
 
 vi.mock('@/renderer/services/e2ee/mediaEncryption', () => ({
-  MEDIA_E2EE_FRAME_CRYPTO_VERSION: 5,
+  MEDIA_E2EE_FRAME_CRYPTO_VERSION: 6,
   MediaEncryption: class {
-    initFromKey = vi.fn();
-    addDecryptKeyDirect = vi.fn();
+    initFromKey = mockInitFromKey;
+    setKeyVersion = mockSetKeyVersion;
+    addDecryptKeyDirectV3 = mockAddDecryptKeyDirectV3;
     rotateKeys = vi.fn().mockResolvedValue(undefined);
     catchUpToEpoch = vi.fn().mockResolvedValue(undefined);
     getCurrentKeyId = vi.fn().mockReturnValue(0);
@@ -53,6 +63,22 @@ describe('e2eeWorker keyframe recovery', () => {
       }),
     });
     await import('@/renderer/workers/e2eeWorker');
+  });
+
+  it('binds init version and installs decrypt keys by the complete tuple', () => {
+    const onmessage = (
+      self as unknown as { onmessage: ((event: { data: unknown }) => void) | null }
+    ).onmessage;
+    expect(onmessage).toBeTypeOf('function');
+    if (!onmessage) throw new Error('worker message handler missing');
+    const key = {} as CryptoKey;
+    onmessage({ data: { type: 'init', encryptKey: key, currentKeyId: 3, keyVersion: 7 } });
+    expect(mockInitFromKey).toHaveBeenCalledWith(key, 3);
+    expect(mockSetKeyVersion).toHaveBeenCalledWith(7);
+    onmessage({
+      data: { type: 'addDecryptKey', senderUserId: 'sender', keyVersion: 7, keyId: 3, key },
+    });
+    expect(mockAddDecryptKeyDirectV3).toHaveBeenCalledWith('sender', 7, 3, key);
   });
 
   it('passes h264 to the shared MediaEncryption encrypt implementation', async () => {
@@ -409,40 +435,29 @@ describe('e2eeWorker requestFrameKey retry policy (#1885)', () => {
   });
 
   it('caps the tracking map against a sender churning unique keys (DoS bound)', () => {
-    // Each unique (keyVersion,keyId) is a distinct tracked entry; far exceed the cap.
-    for (let i = 0; i < 600; i++) {
-      requestFrameKeyOnce('sender-1', i, 0); // unique keyVersion each call
-      vi.setSystemTime(i + 1); // distinct timestamps
+    // Seed at capacity: the independent sender/global emission budget would
+    // otherwise stop this fixture at eight entries before it tests eviction.
+    for (let i = 0; i < 512; i++) {
+      frameKeyRequests.set(`stale:${i}:0`, { lastAttempt: -400, attempts: 1 });
     }
-    expect(frameKeyRequests.size).toBeLessThanOrEqual(512); // FRAME_KEY_MAX_TRACKED
+    requestFrameKeyOnce('sender-1', 99, 0);
+    expect(frameKeyRequests.size).toBe(512);
+    expect(frameKeyRequests.has('stale:0:0')).toBe(false);
+    expect(frameKeyRequests.has('sender-1:99:0')).toBe(true);
   });
 
   it('LRU eviction keeps an actively-touched key while churn evicts stale ones (Gitar #1885)', () => {
     const keepAlive = 'sender-1:9999:0';
-    // Insert keep-alive key A first — under the old FIFO it would be evicted earliest.
-    requestFrameKeyOnce('sender-1', 9999, 0); // A, at t=0
-    let t = 1;
+    frameKeyRequests.set(keepAlive, { lastAttempt: -400, attempts: 1 });
     for (let i = 0; i < 510; i++) {
-      requestFrameKeyOnce('sender-1', i, 0); // churn unique keys (map → 511, under cap)
-      vi.setSystemTime(t++);
+      frameKeyRequests.set(`stale:${i}:0`, { lastAttempt: -400, attempts: 1 });
     }
-    expect(frameKeyRequests.has(keepAlive)).toBe(true);
-
-    // Re-touch A past the backoff (and within the reset window) so LRU moves it
-    // to the most-recent position — the move FIFO would not make.
-    vi.setSystemTime(1000);
+    // Re-touch A under the real request function, then force capacity eviction.
     requestFrameKeyOnce('sender-1', 9999, 0);
-
-    // Churn 200 more unique keys — each evicts the least-recently-touched entry.
-    t = 1001;
-    for (let i = 510; i < 710; i++) {
-      requestFrameKeyOnce('sender-1', i, 0);
-      vi.setSystemTime(t++);
-    }
-
-    // Under LRU the recently-touched A survives; under the retired FIFO (evict
-    // oldest-inserted) A would have been evicted. Size stays bounded either way.
+    requestFrameKeyOnce('sender-2', 1, 0);
+    requestFrameKeyOnce('sender-3', 1, 0);
     expect(frameKeyRequests.has(keepAlive)).toBe(true);
-    expect(frameKeyRequests.size).toBeLessThanOrEqual(512);
+    expect(frameKeyRequests.has('stale:0:0')).toBe(false);
+    expect(frameKeyRequests.size).toBe(512);
   });
 });

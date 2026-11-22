@@ -205,12 +205,16 @@ function av1Manifest(entries: Av1CanonicalEntry[]): Uint8Array<ArrayBuffer> {
   return concatBytes(parts);
 }
 
-function av1Aad(manifest: Uint8Array, ordinal: number): Uint8Array<ArrayBuffer> {
+function av1Aad(
+  manifestLength: number,
+  manifestDigest: Uint8Array,
+  ordinal: number
+): Uint8Array<ArrayBuffer> {
   return concatBytes([
     FRAME_AAD_DOMAIN,
     new Uint8Array([MEDIA_FRAME_VERSION, FRAME_SCHEMES.av1]),
-    uint32be(manifest.length),
-    manifest,
+    uint32be(manifestLength),
+    manifestDigest,
     uint16be(ordinal),
   ]);
 }
@@ -279,6 +283,7 @@ export class FrameKeyMissError extends Error {
 // ---------------------------------------------------------------------------
 
 export class MediaEncryption {
+  private destroyed = false;
   private currentKeyId = 0;
   // #1878: the channel-key (CSK) version bound to the encrypt key. Stamped into
   // every outgoing frame's trailer or codec mini-header so receivers select the exact key.
@@ -305,14 +310,28 @@ export class MediaEncryption {
     keyId: number,
     key: CryptoKey
   ): void {
+    if (this.destroyed) throw new Error('E2EE: media encryption destroyed');
     const now = Date.now();
+    if (keyVersion < this.currentKeyVersion) {
+      throw new Error('E2EE: cannot install a retired decrypt key version');
+    }
     for (const [id, entry] of this.decryptKeys) {
       if (entry.expires <= now) this.decryptKeys.delete(id);
     }
     const id = MediaEncryption.mapKey(senderUserId, keyVersion, keyId);
+    for (const [heldId, entry] of this.decryptKeys) {
+      const [heldSender, heldVersion, heldKeyId] = heldId.split(':');
+      if (heldSender !== senderUserId || Number(heldVersion) !== keyVersion) continue;
+      if (Number(heldKeyId) > keyId) {
+        throw new Error('E2EE: cannot reinstall a retired decrypt key epoch');
+      }
+      if (Number(heldKeyId) < keyId) entry.expires = Math.min(entry.expires, now + 10_000);
+    }
     this.ratchetKeyAttempts.delete(id);
     this.decryptKeys.delete(id);
-    this.decryptKeys.set(id, { key, expires: now + 3_600_000 });
+    // Active, authority-provisioned keys have no wall-clock cutoff. Only a
+    // newer version/epoch retires them; replayed old media cannot extend that.
+    this.decryptKeys.set(id, { key, expires: Number.POSITIVE_INFINITY });
     while (this.decryptKeys.size > MAX_DECRYPT_KEYS) {
       const oldest = this.decryptKeys.keys().next().value;
       if (oldest !== undefined) this.decryptKeys.delete(oldest);
@@ -329,12 +348,15 @@ export class MediaEncryption {
 
   /** Initialize encryption for a channel with the given CSK and local userId */
   async init(channelCSK: CryptoKey, localUserId: string): Promise<void> {
-    this.encryptKey = await deriveFrameKey(channelCSK, localUserId);
+    const key = await deriveFrameKey(channelCSK, localUserId);
+    if (this.destroyed) throw new Error('E2EE: media encryption destroyed');
+    this.encryptKey = key;
     this.currentKeyId = 0;
   }
 
   /** Initialize encryption with a pre-derived key (used by Worker) */
   initFromKey(key: CryptoKey, keyId: number): void {
+    if (this.destroyed) throw new Error('E2EE: media encryption destroyed');
     this.encryptKey = key;
     this.currentKeyId = keyId;
   }
@@ -346,6 +368,14 @@ export class MediaEncryption {
 
   /** Bind the encrypt key's channel-key version (the authoritative CSK version). */
   setKeyVersion(keyVersion: number): void {
+    if (keyVersion < this.currentKeyVersion) throw new Error('E2EE: key version downgrade');
+    if (keyVersion > this.currentKeyVersion) {
+      const retireAt = Date.now() + 10_000;
+      for (const [id, entry] of this.decryptKeys) {
+        const version = Number(id.split(':')[1]);
+        if (version < keyVersion) entry.expires = Math.min(entry.expires, retireAt);
+      }
+    }
     this.currentKeyVersion = keyVersion;
   }
 
@@ -457,7 +487,11 @@ export class MediaEncryption {
       const parts = id.split(':');
       if (parts.length !== 3) continue; // sender UUIDs have no colons
       const [senderUserId, ver, kid] = parts;
-      if (Number(kid) === oldKeyId) {
+      if (
+        Number(kid) === oldKeyId &&
+        Number(ver) >= this.currentKeyVersion &&
+        entry.expires > Date.now()
+      ) {
         toRatchet.push({ senderUserId, keyVersion: Number(ver), entry });
       }
     }
@@ -733,6 +767,9 @@ export class MediaEncryption {
       entry.mini = encodeMediaFrameMiniHeader({ iv, keyId, keyVersion, scheme: FRAME_SCHEMES.av1 });
     }
     const manifest = av1Manifest(entries);
+    // Hash the complete canonical clear structure once. Every protected OBU
+    // binds this digest, avoiding O(tile count × manifest size) GCM AAD work.
+    const manifestDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', manifest));
     const parts: Uint8Array[] = [];
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
@@ -741,7 +778,7 @@ export class MediaEncryption {
         const iv: Uint8Array<ArrayBuffer> = new Uint8Array(entry.iv);
         const ciphertext = new Uint8Array(
           await crypto.subtle.encrypt(
-            { name: 'AES-GCM', iv, additionalData: av1Aad(manifest, i) },
+            { name: 'AES-GCM', iv, additionalData: av1Aad(manifest.length, manifestDigest, i) },
             encryptKey,
             new Uint8Array(payload)
           )
@@ -786,6 +823,7 @@ export class MediaEncryption {
     const entries = MediaEncryption.av1Entries(data);
     const { keyVersion, keyId } = MediaEncryption.prepareAv1DecryptEntries(entries);
     const manifest = av1Manifest(entries);
+    const manifestDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', manifest));
     const candidate = await this.requireDecryptKey(senderUserId, keyVersion, keyId);
     const parts: Uint8Array[] = [];
     for (let i = 0; i < entries.length; i++) {
@@ -795,7 +833,7 @@ export class MediaEncryption {
         const iv: Uint8Array<ArrayBuffer> = new Uint8Array(entry.iv);
         payload = new Uint8Array(
           await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv, additionalData: av1Aad(manifest, i) },
+            { name: 'AES-GCM', iv, additionalData: av1Aad(manifest.length, manifestDigest, i) },
             candidate.key,
             new Uint8Array(entry.payload.subarray(MEDIA_FRAME_MINI_HEADER_SIZE))
           )
@@ -1089,6 +1127,7 @@ export class MediaEncryption {
 
   /** Clean up */
   destroy(): void {
+    this.destroyed = true;
     if (this.rotationTimer) {
       clearTimeout(this.rotationTimer);
       this.rotationTimer = null;

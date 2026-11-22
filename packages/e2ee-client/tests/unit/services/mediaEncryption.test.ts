@@ -525,6 +525,58 @@ describe('MediaEncryption', () => {
         vi.useRealTimers();
       }
     });
+
+    it('keeps an authority-current decrypt key usable after an hour', async () => {
+      const csk = await generateTestCSK();
+      const sender = new MediaEncryption();
+      const receiver = new MediaEncryption();
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(0);
+        await sender.init(csk, 'sender');
+        await receiver.init(csk, 'receiver');
+        sender.setKeyVersion(1);
+        receiver.setKeyVersion(1);
+        await receiver.addDecryptKeyAtVersion(csk, 'sender', 1, 0);
+        vi.advanceTimersByTime(3_660_000);
+        const frame = fakeAudioFrame(50);
+        const original = new Uint8Array(frame.data).slice();
+        await sender.encryptFrame(frame, 'opus');
+        await expect(receiver.decryptFrame(frame, 'sender', 'opus')).resolves.toBeUndefined();
+        expect(new Uint8Array(frame.data)).toEqual(original);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not extend an older key version by decrypting overlap media', async () => {
+      const csk = await generateTestCSK();
+      const sender = new MediaEncryption();
+      const receiver = new MediaEncryption();
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(0);
+        await sender.init(csk, 'sender');
+        await receiver.init(csk, 'receiver');
+        await receiver.addDecryptKeyAtVersion(csk, 'sender', 0, 0);
+        const first = fakeAudioFrame(50);
+        const second = fakeAudioFrame(50);
+        await sender.encryptFrame(first, 'opus');
+        await sender.encryptFrame(second, 'opus');
+        receiver.setKeyVersion(1);
+        vi.advanceTimersByTime(9_000);
+        await expect(receiver.decryptFrame(first, 'sender', 'opus')).resolves.toBeUndefined();
+        vi.advanceTimersByTime(2_000);
+        await expect(receiver.decryptFrame(second, 'sender', 'opus')).rejects.toBeInstanceOf(
+          FrameKeyMissError
+        );
+        await expect(receiver.addDecryptKeyAtVersion(csk, 'sender', 0, 0)).rejects.toThrow(
+          /retired decrypt key version/
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('Worker-path APIs (initFromKey / addDecryptKeyDirect / setCurrentKeyId)', () => {
@@ -777,6 +829,16 @@ describe('MediaEncryption', () => {
   });
 
   describe('destroy', () => {
+    it('does not let a pending decrypt-key derivation restore state after teardown', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'receiver');
+      const pending = enc.addDecryptKeyAtVersion(csk, 'sender', 1, 1);
+      enc.destroy();
+      await expect(pending).rejects.toThrow('media encryption destroyed');
+      expect((enc as unknown as { decryptKeys: Map<string, unknown> }).decryptKeys.size).toBe(0);
+    });
+
     it('clears state and prevents further encryption', async () => {
       const csk = await generateTestCSK();
       const enc = new MediaEncryption();
@@ -1288,10 +1350,19 @@ describe('AV1 per-OBU (v5, v4-compatible mini-header layout)', () => {
     const frame = buildAv1Frame(framePayload, tgPayload);
     const original = new Uint8Array(frame.data).slice(2); // v6 removes the leading empty TD
 
+    const digest = vi.spyOn(crypto.subtle, 'digest');
+    const encrypt = vi.spyOn(crypto.subtle, 'encrypt');
+    const decrypt = vi.spyOn(crypto.subtle, 'decrypt');
     await sender.encryptFrame(frame, 'av1');
     expect(new Uint8Array(frame.data)).not.toEqual(original); // structure changed (encrypted payloads)
     await receiver.decryptFrame(frame, 'sender-user-id', 'av1');
     expect(new Uint8Array(frame.data)).toEqual(original); // byte-exact restore
+    expect(digest).toHaveBeenCalledTimes(2); // one manifest hash on each side
+    const aadLengths = [...encrypt.mock.calls, ...decrypt.mock.calls].map(
+      ([algorithm]) => (algorithm as AesGcmParams).additionalData?.byteLength
+    );
+    expect(aadLengths).toEqual([66, 66, 66, 66]); // fixed size for each protected OBU
+    vi.restoreAllMocks();
   });
 
   it('per-OBU IV uniqueness: 2 encrypted OBUs in one frame get distinct IVs', async () => {
