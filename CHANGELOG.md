@@ -73,6 +73,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Security
 
+- **Encryption:** Reject imported RSA account public keys below 4096 bits before wrapping channel keys to them ([#379](https://github.com/Concord-Voice/Self-Hosted/pull/379)).
 - **Encryption keys:** DM key distribution now clears fulfilled pending requests inside its transaction and preserves a recipient's recovery request when their key is reset concurrently.
 - **Sessions:** The password-free revocation allowance is now committed atomically with session revocation. This change requires a coordinated control-plane cutover; existing accounts may need their password and enrolled MFA for up to 24 hours after migration.
 - **Encryption keys:** Channel and DM key distribution no longer takes a second database connection while it holds a lock, so many concurrent distributions can no longer stall every other request. Distribution and DM key rotation now give up after a 5-second lock wait or a 15-second statement and return 503 instead of hanging, and the pool closes connections left idle inside a transaction for 60 seconds (VULN-079).
@@ -99,6 +100,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Fixed
 
+- **Authentication:** Packaged Desktop clients can again sign in to an explicitly configured self-hosted server when Chromium marks the exact `app://concord` request as cross-site; other cross-site origins remain rejected.
 - **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
 - **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
 - **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
