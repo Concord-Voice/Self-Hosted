@@ -36,6 +36,7 @@ repository, and operators can set separate minimum app versions for iOS and
 Android. SSO account linking now requires current account policy and MFA,
 SSO initiation is bound to the Desktop flow that started it, and backup-code
 readers accept the versioned formats needed for a later storage migration.
+The media plane now admits encrypted media format v6 alongside earlier room versions, while keeping each active call on one version.
 
 **23 Total Changes** | 8 Added | 6 Changed | 7 Fixed | 2 Security
 
@@ -73,6 +74,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Security
 
+- **Voice:** Admit media-frame v6 for a coordinated desktop upgrade. The shared client encryption module now authenticates clear codec framing, refuses unknown or older frames, and bounds missing-key work; active rooms still require one exact format version.
 - **Authentication:** SSO initiation now scopes its fail-closed provider budget to the trusted client IP, so one caller cannot consume another caller's allowance. Allowed browser origins can send the required SSO client-binding header ([#382](https://github.com/Concord-Voice/Self-Hosted/pull/382)).
 - **Encryption:** Reject imported RSA account public keys below 4096 bits before wrapping channel keys to them ([#379](https://github.com/Concord-Voice/Self-Hosted/pull/379)).
 - **Encryption keys:** DM key distribution now clears fulfilled pending requests inside its transaction and preserves a recipient's recovery request when their key is reset concurrently.

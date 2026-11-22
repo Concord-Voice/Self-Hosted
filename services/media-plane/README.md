@@ -308,18 +308,18 @@ calls; older clients without renewal are disconnected when their token expires.
 socket.emit('join-room', {
   roomId: string,
   rtpCapabilities,
-  mediaFrameCryptoVersion: 5,
+  mediaFrameCryptoVersion: 6,
 });
 // room-joined participants include { userId, username, isDeafened, isTesting, ... }
 ```
 
-The media plane accepts versions 3, 4 and 5
-(`ACCEPTED_MEDIA_FRAME_CRYPTO_VERSIONS` in `src/lib/roomManager.ts:596`).
+The media plane accepts versions 3, 4, 5 and 6
+(`ACCEPTED_MEDIA_FRAME_CRYPTO_VERSIONS` in `src/lib/roomManager.ts`).
 Anything else — a missing value, or a legacy declaration such as `2` — is
 rejected at the admission gate. A room keeps one version for its lifetime, so a
 joiner that advertises a different one gets `CryptoVersionMismatchError`. The
-desktop client sends `5` (`MEDIA_E2EE_FRAME_CRYPTO_VERSION`,
-`client/desktop/src/renderer/services/e2ee/mediaEncryption.ts:84`).
+v6 Desktop clients advertise `6`; older clients remain confined to rooms
+running their exact advertised version during the migration window.
 
 **create-transport**
 

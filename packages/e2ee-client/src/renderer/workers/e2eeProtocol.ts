@@ -65,8 +65,7 @@ export type CodecFamily = 'opus' | 'vp8' | 'vp9' | 'av1' | 'h264';
 /**
  * Map an RTP mimeType (e.g. 'video/AV1', 'audio/opus') to a CodecFamily.
  * Case-insensitive. An unknown/missing mimeType returns undefined so the
- * dispatch falls through to whole-frame (the byte-transparent default) — an
- * unknown codec is NEVER assumed to be AV1.
+ * caller rejects an unknown codec before attempting encryption or decryption.
  */
 export function codecFamilyFromMimeType(mimeType: string | undefined): CodecFamily | undefined {
   switch ((mimeType ?? '').toLowerCase()) {
@@ -88,9 +87,21 @@ export function codecFamilyFromMimeType(mimeType: string | undefined): CodecFami
 /** The crypto scheme a codec family uses (single-sourced for both decrypt paths). */
 export function selectCryptoScheme(
   codec: CodecFamily | undefined
-): 'nal-aware' | 'per-obu' | 'whole-frame' {
-  if (codec === 'h264') return 'nal-aware';
-  return codec === 'av1' ? 'per-obu' : 'whole-frame';
+): 'nal-aware' | 'per-obu' | 'whole-frame' | undefined {
+  switch (codec) {
+    case 'h264':
+      return 'nal-aware';
+    case 'av1':
+      return 'per-obu';
+    case 'opus':
+    case 'vp8':
+    case 'vp9':
+      return 'whole-frame';
+    case undefined:
+      return undefined;
+    default:
+      return undefined;
+  }
 }
 
 /** Minimal shape of the mediasoup RTP parameters we read the codec from. */

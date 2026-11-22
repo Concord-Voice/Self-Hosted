@@ -21,13 +21,14 @@ vi.mock('@/renderer/services/e2ee/mediaEncryption', () => ({
 }));
 
 describe('e2eeWorker codec dispatch', () => {
-  it('selects H.264 nal-aware, AV1 per-OBU, and whole-frame for every other codec', () => {
+  it('selects known codec schemes and refuses absent or unknown codecs', () => {
     expect(selectCryptoScheme('h264')).toBe('nal-aware');
     expect(selectCryptoScheme('av1')).toBe('per-obu');
     expect(selectCryptoScheme('vp8')).toBe('whole-frame');
     expect(selectCryptoScheme('vp9')).toBe('whole-frame');
     expect(selectCryptoScheme('opus')).toBe('whole-frame');
-    expect(selectCryptoScheme(undefined)).toBe('whole-frame');
+    expect(selectCryptoScheme(undefined)).toBeUndefined();
+    expect(selectCryptoScheme('h265' as never)).toBeUndefined();
   });
 });
 
@@ -384,6 +385,27 @@ describe('e2eeWorker requestFrameKey retry policy (#1885)', () => {
     requestFrameKeyOnce('sender-1', 3, 0); // suppressed
     requestFrameKeyOnce('sender-1', 3, 0); // suppressed
     expect(countRequests()).toBe(1);
+  });
+
+  it('limits a churn of attacker-chosen key ids by authenticated sender, not key id', () => {
+    // A malicious SFU can vary keyVersion/keyId every frame. The request limiter
+    // must collapse that churn to one sender budget instead of sending one request
+    // per attacker-controlled tuple.
+    for (let i = 0; i < 30; i++) {
+      requestFrameKeyOnce('sender-1', i, i);
+      vi.setSystemTime((i + 1) * 400);
+    }
+    expect(countRequests()).toBeLessThanOrEqual(8);
+  });
+
+  it('caps aggregate key requests across many authenticated senders', () => {
+    for (let i = 0; i < 100; i++) {
+      requestFrameKeyOnce(`sender-${i}`, 1, 1);
+      vi.setSystemTime(i + 1);
+    }
+    // The v6 worker budget is global as well as per-sender, so a room-wide
+    // attacker cannot turn one malformed frame per participant into unbounded IPC.
+    expect(countRequests()).toBeLessThanOrEqual(64);
   });
 
   it('caps the tracking map against a sender churning unique keys (DoS bound)', () => {
