@@ -42,7 +42,7 @@ const RATCHET_INFO = new TextEncoder().encode('concord-e2ee-ratchet');
 // distinguish encrypted frames from unencrypted ones.
 const MAGIC_0 = 0xde;
 const MAGIC_1 = 0xad;
-export const MEDIA_E2EE_FRAME_CRYPTO_VERSION = MEDIA_FRAME_VERSION;
+export { MEDIA_FRAME_VERSION as MEDIA_E2EE_FRAME_CRYPTO_VERSION } from './mediaFrameMiniHeader';
 // v6 adds a per-frame authenticated scheme byte to the whole-frame trailer.
 const TRAILER_SIZE_V6 = 23;
 const FRAME_SCHEMES: Record<CodecFamily, number> = {
@@ -544,7 +544,7 @@ export class MediaEncryption {
     frame: RTCEncodedAudioFrame | RTCEncodedVideoFrame,
     codec?: CodecFamily
   ): Promise<void> {
-    if (!codec || !Object.prototype.hasOwnProperty.call(FRAME_SCHEMES, codec))
+    if (!codec || !Object.hasOwn(FRAME_SCHEMES, codec))
       throw new Error('E2EE: unsupported media codec');
     if (codec === 'av1') {
       await this.encryptAv1PerObu(frame);
@@ -651,45 +651,52 @@ export class MediaEncryption {
     return starts;
   }
 
+  private static av1Entry(
+    data: Uint8Array,
+    obu: ParsedObu,
+    start: number,
+    index: number
+  ): Av1CanonicalEntry | null {
+    if (obu.obuType === AV1_OBU_TEMPORAL_DELIMITER) {
+      if (
+        index === 0 &&
+        obu.payloadLen === 0 &&
+        obu.payloadOffset === 2 &&
+        data[0] === 0x12 &&
+        data[1] === 0x00
+      )
+        return null;
+      throw new Error('E2EE: AV1 unexpected temporal delimiter');
+    }
+    const encrypted = obu.obuType === AV1_OBU_FRAME || obu.obuType === AV1_OBU_TILE_GROUP;
+    if (
+      !encrypted &&
+      ![AV1_OBU_SEQUENCE_HEADER, AV1_OBU_FRAME_HEADER, AV1_OBU_PADDING].includes(obu.obuType)
+    )
+      throw new Error('E2EE: AV1 disallowed OBU type');
+    const first = data[start];
+    if ((first & 1) !== 0) throw new Error('E2EE: AV1 reserved header bit set');
+    if ((first & 2) === 0) throw new Error('E2EE: AV1 OBU size field required');
+    const extension = (first & 4) !== 0 ? data[start + 1] : undefined;
+    if (extension !== undefined && (extension & 7) !== 0) {
+      throw new Error('E2EE: AV1 reserved extension bits set');
+    }
+    const head =
+      extension === undefined
+        ? new Uint8Array([first | 2])
+        : new Uint8Array([first | 2, extension]);
+    const payload = data.subarray(obu.payloadOffset, obu.payloadOffset + obu.payloadLen);
+    return { type: obu.obuType, head, payload, plainLength: payload.length };
+  }
+
   private static av1Entries(data: Uint8Array): Av1CanonicalEntry[] {
     const obus = parseAv1Obus(data);
     if (obus === null) throw new Error('E2EE: AV1 parse failed — dropping frame');
     const starts = MediaEncryption.obuStarts(obus);
     const entries: Av1CanonicalEntry[] = [];
     for (let i = 0; i < obus.length; i++) {
-      const obu = obus[i];
-      const start = starts[i];
-      if (obu.obuType === AV1_OBU_TEMPORAL_DELIMITER) {
-        if (
-          i === 0 &&
-          obu.payloadLen === 0 &&
-          obu.payloadOffset === 2 &&
-          data[0] === 0x12 &&
-          data[1] === 0x00
-        )
-          continue;
-        throw new Error('E2EE: AV1 unexpected temporal delimiter');
-      }
-      const encrypted = obu.obuType === AV1_OBU_FRAME || obu.obuType === AV1_OBU_TILE_GROUP;
-      if (
-        !encrypted &&
-        ![AV1_OBU_SEQUENCE_HEADER, AV1_OBU_FRAME_HEADER, AV1_OBU_PADDING].includes(obu.obuType)
-      ) {
-        throw new Error('E2EE: AV1 disallowed OBU type');
-      }
-      const first = data[start];
-      if ((first & 1) !== 0) throw new Error('E2EE: AV1 reserved header bit set');
-      if ((first & 2) === 0) throw new Error('E2EE: AV1 OBU size field required');
-      const extension = (first & 4) !== 0 ? data[start + 1] : undefined;
-      if (extension !== undefined && (extension & 7) !== 0) {
-        throw new Error('E2EE: AV1 reserved extension bits set');
-      }
-      const head =
-        extension === undefined
-          ? new Uint8Array([first | 2])
-          : new Uint8Array([first | 2, extension]);
-      const payload = data.subarray(obu.payloadOffset, obu.payloadOffset + obu.payloadLen);
-      entries.push({ type: obu.obuType, head, payload, plainLength: payload.length });
+      const entry = MediaEncryption.av1Entry(data, obus[i], starts[i], i);
+      if (entry) entries.push(entry);
     }
     if (
       !entries.some((entry) => entry.type === AV1_OBU_FRAME || entry.type === AV1_OBU_TILE_GROUP)
@@ -777,31 +784,7 @@ export class MediaEncryption {
   ): Promise<void> {
     const data: Uint8Array<ArrayBuffer> = new Uint8Array(frame.data);
     const entries = MediaEncryption.av1Entries(data);
-    let keyVersion: number | undefined;
-    let keyId: number | undefined;
-    const seenIvs = new Set<string>();
-    for (const entry of entries) {
-      if (entry.type !== AV1_OBU_FRAME && entry.type !== AV1_OBU_TILE_GROUP) continue;
-      const mini = decodeMediaFrameMiniHeader(entry.payload);
-      if (!mini) throw new Error('E2EE: AV1 tile-data OBU missing v6 mini-header');
-      if (mini.scheme !== FRAME_SCHEMES.av1) throw new Error('E2EE: media codec scheme mismatch');
-      if (entry.payload.length < MEDIA_FRAME_MINI_HEADER_SIZE + 16) {
-        throw new Error('E2EE: AV1 OBU ciphertext too small');
-      }
-      if (keyVersion !== undefined && (mini.keyVersion !== keyVersion || mini.keyId !== keyId)) {
-        throw new Error('E2EE: AV1 tile-data key mismatch');
-      }
-      const ivKey = Array.from(mini.iv).join(',');
-      if (seenIvs.has(ivKey)) throw new Error('E2EE: AV1 repeated IV');
-      seenIvs.add(ivKey);
-      keyVersion = mini.keyVersion;
-      keyId = mini.keyId;
-      entry.mini = entry.payload.subarray(0, MEDIA_FRAME_MINI_HEADER_SIZE);
-      entry.iv = mini.iv;
-      entry.plainLength = entry.payload.length - MEDIA_FRAME_MINI_HEADER_SIZE - 16;
-    }
-    if (keyVersion === undefined || keyId === undefined)
-      throw new Error('E2EE: AV1 frame has no encrypted tile data');
+    const { keyVersion, keyId } = MediaEncryption.prepareAv1DecryptEntries(entries);
     const manifest = av1Manifest(entries);
     const candidate = await this.requireDecryptKey(senderUserId, keyVersion, keyId);
     const parts: Uint8Array[] = [];
@@ -822,6 +805,43 @@ export class MediaEncryption {
     }
     if (candidate.derived) this.rememberDecryptKey(senderUserId, keyVersion, keyId, candidate.key);
     frame.data = concatBytes(parts).buffer;
+  }
+
+  private static prepareAv1DecryptEntries(entries: Av1CanonicalEntry[]): {
+    keyVersion: number;
+    keyId: number;
+  } {
+    let keyVersion: number | undefined;
+    let keyId: number | undefined;
+    const seenIvs = new Set<string>();
+    for (const entry of entries) {
+      if (entry.type !== AV1_OBU_FRAME && entry.type !== AV1_OBU_TILE_GROUP) continue;
+      const mini = MediaEncryption.inspectAv1Ciphertext(entry);
+      if (keyVersion !== undefined && (mini.keyVersion !== keyVersion || mini.keyId !== keyId)) {
+        throw new Error('E2EE: AV1 tile-data key mismatch');
+      }
+      const ivKey = Array.from(mini.iv).join(',');
+      if (seenIvs.has(ivKey)) throw new Error('E2EE: AV1 repeated IV');
+      seenIvs.add(ivKey);
+      keyVersion = mini.keyVersion;
+      keyId = mini.keyId;
+      entry.mini = entry.payload.subarray(0, MEDIA_FRAME_MINI_HEADER_SIZE);
+      entry.iv = mini.iv;
+      entry.plainLength = entry.payload.length - MEDIA_FRAME_MINI_HEADER_SIZE - 16;
+    }
+    if (keyVersion === undefined || keyId === undefined)
+      throw new Error('E2EE: AV1 frame has no encrypted tile data');
+    return { keyVersion, keyId };
+  }
+
+  private static inspectAv1Ciphertext(entry: Av1CanonicalEntry) {
+    const mini = decodeMediaFrameMiniHeader(entry.payload);
+    if (!mini) throw new Error('E2EE: AV1 tile-data OBU missing v6 mini-header');
+    if (mini.scheme !== FRAME_SCHEMES.av1) throw new Error('E2EE: media codec scheme mismatch');
+    if (entry.payload.length < MEDIA_FRAME_MINI_HEADER_SIZE + 16) {
+      throw new Error('E2EE: AV1 OBU ciphertext too small');
+    }
+    return mini;
   }
 
   /**
@@ -928,7 +948,7 @@ export class MediaEncryption {
     senderUserId: string,
     codec?: CodecFamily
   ): Promise<void> {
-    if (!codec || !Object.prototype.hasOwnProperty.call(FRAME_SCHEMES, codec))
+    if (!codec || !Object.hasOwn(FRAME_SCHEMES, codec))
       throw new Error('E2EE: unsupported media codec');
     if (codec === 'av1') {
       await this.decryptAv1PerObu(frame, senderUserId);

@@ -264,9 +264,13 @@ function attemptRecovery(senderUserId: string, dropCount: number): void {
  * (sender, keyVersion, keyId) with a short backoff and a hard retry cap. Fail-
  * closed: while we wait, the frame is dropped (never enqueued as ciphertext).
  */
-export function requestFrameKeyOnce(senderUserId: string, keyVersion: number, keyId: number): void {
+function assessFrameKeyRequest(
+  senderUserId: string,
+  keyVersion: number,
+  keyId: number,
+  now: number
+) {
   const k = `${senderUserId}:${keyVersion}:${keyId}`;
-  const now = Date.now();
   let st = frameKeyRequests.get(k);
 
   // Idle-reset: a long gap since the last request means either a slow-published
@@ -290,8 +294,18 @@ export function requestFrameKeyOnce(senderUserId: string, keyVersion: number, ke
     globalBudget && now - globalBudget.windowStart < FRAME_KEY_RETRY_RESET_MS
       ? globalBudget.attempts
       : 0;
-  if (senderAttempts >= FRAME_KEY_BURST_CAP || globalAttempts >= FRAME_KEY_GLOBAL_BURST_CAP) return;
+  if (senderAttempts >= FRAME_KEY_BURST_CAP || globalAttempts >= FRAME_KEY_GLOBAL_BURST_CAP)
+    return null;
 
+  return { k, st, senderBudget, globalBudget, senderAttempts, globalAttempts };
+}
+
+function recordFrameKeyRequest(
+  senderUserId: string,
+  now: number,
+  assessed: NonNullable<ReturnType<typeof assessFrameKeyRequest>>
+): void {
+  const { k, st, senderBudget, globalBudget, senderAttempts, globalAttempts } = assessed;
   if (st) {
     frameKeyRequests.delete(k); // LRU touch only for an emitted request.
   } else if (frameKeyRequests.size >= FRAME_KEY_MAX_TRACKED) {
@@ -316,6 +330,13 @@ export function requestFrameKeyOnce(senderUserId: string, keyVersion: number, ke
     const oldest = frameKeyRequestBudgets.keys().next().value;
     if (oldest !== undefined) frameKeyRequestBudgets.delete(oldest);
   }
+}
+
+export function requestFrameKeyOnce(senderUserId: string, keyVersion: number, keyId: number): void {
+  const now = Date.now();
+  const assessed = assessFrameKeyRequest(senderUserId, keyVersion, keyId, now);
+  if (!assessed) return;
+  recordFrameKeyRequest(senderUserId, now, assessed);
   postToMain({ type: 'requestFrameKey', senderUserId, keyVersion, keyId });
 }
 
