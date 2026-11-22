@@ -60,6 +60,14 @@ const MAX_RATCHET_STEPS_PER_SENDER = 10;
 const MAX_RATCHET_STEPS_GLOBAL = 64;
 const MAX_RATCHET_WORK_TRACKED = 2048;
 const MAX_RATCHET_KEY_ATTEMPTS_TRACKED = 512;
+type DecryptKeyEntry = { key: CryptoKey; expires: number };
+type RotationSource = {
+  id: string;
+  senderUserId: string;
+  keyVersion: number;
+  entry: DecryptKeyEntry;
+};
+type PreparedRotationSource = RotationSource & { newKey: CryptoKey };
 // Minimum encrypted frame: 1 header byte + 16-byte GCM tag (empty plaintext) + trailer.
 const MIN_GCM_OVERHEAD = 17;
 
@@ -292,7 +300,7 @@ export class MediaEncryption {
   // every outgoing frame's trailer or codec mini-header so receivers select the exact key.
   private currentKeyVersion = 0;
   private encryptKey: CryptoKey | null = null;
-  private readonly decryptKeys: Map<string, { key: CryptoKey; expires: number }> = new Map();
+  private readonly decryptKeys: Map<string, DecryptKeyEntry> = new Map();
   private readonly ratchetWorkBySender = new Map<string, { windowStart: number; steps: number }>();
   private ratchetWorkGlobal = { windowStart: 0, steps: 0 };
   private readonly ratchetKeyAttempts = new Map<string, number>();
@@ -479,6 +487,84 @@ export class MediaEncryption {
     return false;
   }
 
+  private rotationStillCurrent(key: CryptoKey, keyId: number, version: number): boolean {
+    return (
+      this.encryptKey === key && this.currentKeyId === keyId && this.currentKeyVersion === version
+    );
+  }
+
+  private collectRotationSources(keyId: number, version: number): RotationSource[] {
+    const sources: RotationSource[] = [];
+    const now = Date.now();
+    for (const [id, entry] of this.decryptKeys) {
+      const parts = id.split(':');
+      if (parts.length !== 3) continue; // sender UUIDs have no colons
+      const [senderUserId, ver, kid] = parts;
+      if (Number(kid) === keyId && Number(ver) >= version && entry.expires > now) {
+        sources.push({ id, senderUserId, keyVersion: Number(ver), entry });
+      }
+    }
+    return sources;
+  }
+
+  private async prepareRotationSources(
+    sources: RotationSource[]
+  ): Promise<PreparedRotationSource[]> {
+    const prepared: PreparedRotationSource[] = [];
+    for (const source of sources) {
+      const newKey = await ratchetKey(source.entry.key);
+      this.assertActive();
+      prepared.push({ ...source, newKey });
+    }
+    return prepared;
+  }
+
+  private retireOlderDecryptEpochs(
+    senderUserId: string,
+    keyVersion: number,
+    newKeyId: number,
+    retireAt: number
+  ): void {
+    for (const [heldId, heldEntry] of this.decryptKeys) {
+      const [heldSender, heldVersion, heldEpoch] = heldId.split(':');
+      if (
+        heldSender === senderUserId &&
+        Number(heldVersion) === keyVersion &&
+        Number(heldEpoch) < newKeyId
+      ) {
+        heldEntry.expires = Math.min(heldEntry.expires, retireAt);
+      }
+    }
+  }
+
+  private installPreparedRotation(
+    source: PreparedRotationSource,
+    newKeyId: number,
+    now: number,
+    retireAt: number
+  ): void {
+    const { id, senderUserId, keyVersion, entry, newKey } = source;
+    if (this.decryptKeys.get(id) !== entry || entry.expires <= now) return;
+    const nextId = MediaEncryption.mapKey(senderUserId, keyVersion, newKeyId);
+    const heldNext = this.decryptKeys.get(nextId);
+    if (!heldNext || heldNext.expires <= now) {
+      // A frame may self-heal to a higher authenticated epoch while this
+      // preparation awaits. Preserve it and install the intermediate only
+      // for the original overlap window, so delayed frames still decrypt.
+      const higherHeld = this.hasDecryptEpochAtOrAbove(senderUserId, keyVersion, newKeyId + 1);
+      const expires = higherHeld ? Math.min(entry.expires, retireAt) : Number.POSITIVE_INFINITY;
+      this.retireOlderDecryptEpochs(senderUserId, keyVersion, newKeyId, retireAt);
+      this.ratchetKeyAttempts.delete(nextId);
+      this.decryptKeys.delete(nextId);
+      this.decryptKeys.set(nextId, { key: newKey, expires });
+      while (this.decryptKeys.size > MAX_DECRYPT_KEYS) {
+        const oldest = this.decryptKeys.keys().next().value;
+        if (oldest !== undefined) this.decryptKeys.delete(oldest);
+      }
+    }
+    entry.expires = Math.min(entry.expires, retireAt);
+  }
+
   private async rotateKeysOnce(): Promise<void> {
     if (!this.encryptKey) return;
 
@@ -487,77 +573,19 @@ export class MediaEncryption {
     const oldVersion = this.currentKeyVersion;
     const currentEncryptKey = this.encryptKey;
     const newEncryptKey = await ratchetKey(currentEncryptKey);
-    if (
-      this.encryptKey !== currentEncryptKey ||
-      this.currentKeyId !== oldKeyId ||
-      this.currentKeyVersion !== oldVersion
-    )
-      return;
+    if (!this.rotationStillCurrent(currentEncryptKey, oldKeyId, oldVersion)) return;
 
-    // Prepare every needed decrypt ratchet before publishing the encrypt epoch.
-    // A failed HKDF must not leave the local epoch advanced with partial keys.
-    const toRatchet: {
-      id: string;
-      senderUserId: string;
-      keyVersion: number;
-      entry: { key: CryptoKey; expires: number };
-    }[] = [];
-    for (const [id, entry] of this.decryptKeys) {
-      const parts = id.split(':');
-      if (parts.length !== 3) continue; // sender UUIDs have no colons
-      const [senderUserId, ver, kid] = parts;
-      if (
-        Number(kid) === oldKeyId &&
-        Number(ver) >= this.currentKeyVersion &&
-        entry.expires > Date.now()
-      ) {
-        toRatchet.push({ id, senderUserId, keyVersion: Number(ver), entry });
-      }
-    }
-    const prepared: ((typeof toRatchet)[number] & { newKey: CryptoKey })[] = [];
-    for (const source of toRatchet) {
-      const newKey = await ratchetKey(source.entry.key);
-      this.assertActive();
-      prepared.push({ ...source, newKey });
-    }
-    if (
-      this.encryptKey !== currentEncryptKey ||
-      this.currentKeyId !== oldKeyId ||
-      this.currentKeyVersion !== oldVersion
-    )
-      return;
+    // Prepare every decrypt ratchet before publishing the new encrypt epoch.
+    // A failed HKDF leaves the local epoch and decrypt cache unchanged.
+    const prepared = await this.prepareRotationSources(
+      this.collectRotationSources(oldKeyId, oldVersion)
+    );
+    if (!this.rotationStillCurrent(currentEncryptKey, oldKeyId, oldVersion)) return;
 
     const now = Date.now();
     const retireAt = now + 10_000;
-    for (const { id, senderUserId, keyVersion, entry, newKey } of prepared) {
-      if (this.decryptKeys.get(id) !== entry || entry.expires <= now) continue;
-      const nextId = MediaEncryption.mapKey(senderUserId, keyVersion, newKeyId);
-      const heldNext = this.decryptKeys.get(nextId);
-      if (!heldNext || heldNext.expires <= now) {
-        // A frame may self-heal to a higher authenticated epoch while this
-        // preparation awaits. Preserve it and install the intermediate only
-        // for the original overlap window, so delayed frames still decrypt.
-        const higherHeld = this.hasDecryptEpochAtOrAbove(senderUserId, keyVersion, newKeyId + 1);
-        const expires = higherHeld ? Math.min(entry.expires, retireAt) : Number.POSITIVE_INFINITY;
-        for (const [heldId, heldEntry] of this.decryptKeys) {
-          const [heldSender, heldVersion, heldEpoch] = heldId.split(':');
-          if (
-            heldSender === senderUserId &&
-            Number(heldVersion) === keyVersion &&
-            Number(heldEpoch) < newKeyId
-          ) {
-            heldEntry.expires = Math.min(heldEntry.expires, retireAt);
-          }
-        }
-        this.ratchetKeyAttempts.delete(nextId);
-        this.decryptKeys.delete(nextId);
-        this.decryptKeys.set(nextId, { key: newKey, expires });
-        while (this.decryptKeys.size > MAX_DECRYPT_KEYS) {
-          const oldest = this.decryptKeys.keys().next().value;
-          if (oldest !== undefined) this.decryptKeys.delete(oldest);
-        }
-      }
-      entry.expires = Math.min(entry.expires, retireAt);
+    for (const source of prepared) {
+      this.installPreparedRotation(source, newKeyId, now, retireAt);
     }
     this.currentKeyId = newKeyId;
     this.encryptKey = newEncryptKey;
