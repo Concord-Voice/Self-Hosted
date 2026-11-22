@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	neturl "net/url"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -43,7 +44,7 @@ func Connect(url string) (*Client, error) {
 			log.Printf("NATS disconnected: %v", err)
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
-			log.Printf("NATS reconnected to %s", nc.ConnectedUrl())
+			log.Printf("NATS reconnected to %s", connectedServer(nc.ConnectedUrl()))
 		}),
 		// Without this the client library sheds SILENTLY (#2854 B1). Each async
 		// subscription defaults to DefaultSubPendingMsgsLimit (500k) and
@@ -65,6 +66,17 @@ func Connect(url string) (*Client, error) {
 	}
 
 	return &Client{conn: nc}, nil
+}
+
+// connectedServer returns the host and port of a NATS server URL, for a log
+// line. The rest of the URL stays out of the log: it can carry a password, or a
+// token in the user position, which url.Redacted leaves in place (CWE-532).
+func connectedServer(rawURL string) string {
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return "the NATS server"
+	}
+	return parsed.Host
 }
 
 // Subscribe registers a handler for messages on the given subject.
