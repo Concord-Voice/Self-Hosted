@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	neturl "net/url"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -41,10 +42,12 @@ func Connect(url string) (*Client, error) {
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(nats.DefaultReconnectWait),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			log.Printf("NATS disconnected: %v", err)
+			// %q: nats.go builds a protocol parse error from the raw bytes it
+			// read, so the text is the server's to choose (CWE-117).
+			log.Printf("NATS disconnected: %q", errText(err))
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
-			log.Printf("NATS reconnected to %s", connectedServer(nc.ConnectedUrl()))
+			log.Printf("NATS reconnected to %q", connectedServer(nc.ConnectedUrl()))
 		}),
 		// Without this the client library sheds SILENTLY (#2854 B1). Each async
 		// subscription defaults to DefaultSubPendingMsgsLimit (500k) and
@@ -69,14 +72,20 @@ func Connect(url string) (*Client, error) {
 }
 
 // connectedServer returns the host and port of a NATS server URL, for a log
-// line. The rest of the URL stays out of the log: it can carry a password, or a
-// token in the user position, which url.Redacted leaves in place (CWE-532).
+// line. The rest of the URL stays out of the log. It can carry a password,
+// which url.Redacted masks, or a token in the user position, which
+// url.Redacted leaves in place (CWE-532).
 func connectedServer(rawURL string) string {
 	parsed, err := neturl.Parse(rawURL)
+	// The parse error is dropped on purpose: its text quotes the raw URL.
 	if err != nil || parsed.Host == "" {
 		return "the NATS server"
 	}
-	return parsed.Host
+	// Host is the decoded authority. Encode it again: a server chooses the host
+	// of every address it advertises to the client, an IPv6 zone may carry
+	// spaces, and the decoded value would let the server shape the line
+	// (CWE-117).
+	return strings.TrimPrefix((&neturl.URL{Host: parsed.Host}).String(), "//")
 }
 
 // Subscribe registers a handler for messages on the given subject.
