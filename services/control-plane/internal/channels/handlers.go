@@ -4649,7 +4649,7 @@ func (h *Handler) distributeDMKeys(ctx context.Context, actorID, tokenEpoch, con
 			}
 			return 0, fmt.Errorf("commit dm distribution tx: %w", err)
 		}
-		h.notifyDMKeyDistribution(conversationID, outcome.delivered, outcome.alreadyHeld)
+		h.notifyDMKeyDistribution(conversationID, outcome.delivered)
 		return len(outcome.delivered), nil
 	}
 	return 0, fmt.Errorf("retry dm distribution topology: %w", dmblock.ErrMembershipChanged)
@@ -4662,9 +4662,6 @@ type dmDistributionOutcome struct {
 	keyVersion      int
 	previousVersion int
 	delivered       []string
-	// alreadyHeld lists recipients that already held keyVersion; their
-	// pending requests are deleted after commit.
-	alreadyHeld []string
 }
 
 // dmDistributionBatch is one caller's distribution request: who is posting
@@ -4774,11 +4771,38 @@ func distributeDMKeysTx(ctx context.Context, tx *sql.Tx, batch dmDistributionBat
 		return dmDistributionOutcome{}, err
 	}
 	outcome.delivered = delivered
-	outcome.alreadyHeld = alreadyHeld
 	if err := recordDMSuccessorRevocationTx(ctx, tx, batch, previousVersion, keyVersion, stale); err != nil {
 		return dmDistributionOutcome{}, err
 	}
+	fulfilled := append(slices.Clone(delivered), alreadyHeld...)
+	if err := deleteFulfilledDMKeyRequestsTx(ctx, tx, conversationID, keyVersion, fulfilled); err != nil {
+		return dmDistributionOutcome{}, err
+	}
 	return outcome, nil
+}
+
+// Pending rows are per recipient rather than per epoch. Clear one only while
+// its recipient still holds the delivered epoch; the key-row lock serializes
+// cleanup with an account reset that removes that key.
+func deleteFulfilledDMKeyRequestsTx(ctx context.Context, tx *sql.Tx, conversationID string, keyVersion int, userIDs []string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM dm_pending_key_requests pending
+		WHERE pending.conversation_id = $1
+		  AND pending.user_id = ANY($2::uuid[])
+		  AND EXISTS (
+			SELECT 1 FROM dm_channel_keys key
+			WHERE key.conversation_id = pending.conversation_id
+			  AND key.user_id = pending.user_id
+			  AND key.key_version = $3
+			FOR SHARE
+		  )
+	`, conversationID, pq.Array(userIDs), keyVersion); err != nil {
+		return fmt.Errorf("clear fulfilled dm key requests: %w", err)
+	}
+	return nil
 }
 
 // applyDMKeyBatchTx writes each wrap in the batch and reports which recipients
@@ -5035,37 +5059,10 @@ func canonicalizeWrappedKeyMaps(wrappedKeys map[string]string, wrappedKeyVersion
 	return keys, versions, nil
 }
 
-// notifyDMKeyDistribution is the DM counterpart to notifyChannelKeyDistribution:
-// the post-commit half of a distribution, split out for the same reason its
-// sibling is. Keeping it inline left distributeDMKeys at exactly the S3776
-// cognitive-complexity threshold, so adding the error branch below — the one
-// thing this loop was missing — pushed it over.
-//
-// cleanup lists recipients that already held the epoch: their pending requests
-// are redundant and deleted too (VULN-207), but they get no key_delivered.
-func (h *Handler) notifyDMKeyDistribution(conversationID string, delivered, cleanup []string) {
-	for _, memberUserID := range cleanup {
-		h.deletePendingDMKeyRequest(conversationID, memberUserID)
-	}
+// notifyDMKeyDistribution sends delivery notifications only after commit.
+func (h *Handler) notifyDMKeyDistribution(conversationID string, delivered []string) {
 	for _, memberUserID := range delivered {
-		h.deletePendingDMKeyRequest(conversationID, memberUserID)
 		h.notifyKeyDelivered(conversationID, memberUserID)
-	}
-}
-
-// deletePendingDMKeyRequest is best-effort POST-commit cleanup. A failure must
-// be logged, not discarded: it is self-amplifying, because a pending row that
-// outlives its own fulfilment keeps the recipient in pendingKeyRequestsPage,
-// so every holder re-POSTs for them each sweep, against the per-conversation
-// budget.
-func (h *Handler) deletePendingDMKeyRequest(conversationID, memberUserID string) {
-	if _, err := h.db.Exec(
-		`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`,
-		conversationID, memberUserID,
-	); err != nil {
-		h.log.Warn("dm key distribution: pending cleanup failed",
-			"conversation_id", sanitizeID(conversationID),
-			"user_id", sanitizeID(memberUserID), "error", err)
 	}
 }
 
