@@ -1,5 +1,7 @@
 # Self-Hosted media consumer limits
 
+> Superseded by [the Frames PiP consumer-cap regression spec](2026-11-21-frames-pip-consumer-cap-regression.md). The limits below describe the pre-Frames-PiP design; do not use them as the current consumer-allocation contract.
+
 An authenticated participant can consume each room producer on up to four receive transports. Existing deduplication only rejects a repeated producer on the same transport, so one participant can multiply SFU consumer objects and egress. The vulnerable path is `RoomManager.consume`.
 
 ## Behavior
