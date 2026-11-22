@@ -74,6 +74,7 @@ readers accept the versioned formats needed for a later storage migration.
 ### Security
 
 - **Authentication:** SSO initiation now scopes its fail-closed provider budget to the trusted client IP, so one caller cannot consume another caller's allowance. Allowed browser origins can send the required SSO client-binding header.
+- **Encryption:** Reject imported RSA account public keys below 4096 bits before wrapping channel keys to them ([#379](https://github.com/Concord-Voice/Self-Hosted/pull/379)).
 - **Sessions:** The password-free revocation allowance is now committed atomically with session revocation. This change requires a coordinated control-plane cutover; existing accounts may need their password and enrolled MFA for up to 24 hours after migration.
 - **Encryption keys:** Channel and DM key distribution no longer takes a second database connection while it holds a lock, so many concurrent distributions can no longer stall every other request. Distribution and DM key rotation now give up after a 5-second lock wait or a 15-second statement and return 503 instead of hanging, and the pool closes connections left idle inside a transaction for 60 seconds (VULN-079).
 - **Encryption keys:** A key request for someone who already holds the current key is no longer stored, and such requests are cleared after a distribution. `GET /api/v1/e2ee/pending-keys` is now paged (`limit`, `cursor`, `next_cursor`; 100 per page by default, up to 200) and reads at most 1,000 rows per request. The cursor is opaque and sealed, so it reveals nothing about requests the caller cannot see. Older clients still get the first page (VULN-080, VULN-207).
@@ -99,6 +100,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Fixed
 
+- **Authentication:** Packaged Desktop clients can again sign in to an explicitly configured self-hosted server when Chromium marks the exact `app://concord` request as cross-site; other cross-site origins remain rejected.
 - **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
 - **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
 - **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
