@@ -112,6 +112,21 @@ describe('crypto utilities', () => {
       const imported = await importPublicKey(exported);
       expect(imported.algorithm.name).toBe('RSA-OAEP');
     });
+
+    it('rejects a server-supplied RSA key below the account minimum', async () => {
+      const weak = await crypto.subtle.generateKey(
+        {
+          name: 'RSA-OAEP',
+          modulusLength: 2048,
+          publicExponent: new Uint8Array([1, 0, 1]),
+          hash: 'SHA-256',
+        },
+        true,
+        ['encrypt', 'decrypt']
+      );
+      const exported = await exportPublicKey(weak.publicKey);
+      await expect(importPublicKey(exported)).rejects.toThrow('Invalid public key.');
+    });
   });
 
   describe('generateRegistrationKeys', () => {
