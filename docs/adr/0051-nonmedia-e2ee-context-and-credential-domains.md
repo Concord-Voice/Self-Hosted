@@ -75,7 +75,7 @@ The following field lists are positional. `realm`, `scope_id`, and account/objec
 | Tag | Fields after tag |
 |---|---|
 | `message-v1` | realm, scope, scope_id, message_id, sender_id, key_epoch, content_kind |
-| `blob-v1` | realm, account_id, purpose, schema_version |
+| `blob-v1` | realm, account_id, blob_purpose, schema_version |
 | `account-ek-wrap-v1` | realm, account_id, key_purpose, account_key_generation, credential_generation |
 | `recovery-wrap-v1` | realm, account_id, key_purpose, recovery_purpose, recovery_key_generation, account_key_generation |
 | `recovery-prefs-wrap-v1` | realm, account_id, key_purpose, recovery_purpose, recovery_key_generation, credential_generation |
@@ -84,7 +84,7 @@ The following field lists are positional. `realm`, `scope_id`, and account/objec
 
 For `attachment-v4`, `file_nonce_b64` decodes to exactly 16 bytes, `flags` is `0`, `chunk_size` is exactly `8388608`, `total_chunks` is an unsigned 32-bit wire field limited to `1..10000` by the existing multipart upload contract, and `chunk_index` is an unsigned 32-bit wire field in `0..total_chunks-1`. Readers reject out-of-range geometry before allocation or decryption. The binary header is exactly 28 bytes. Changing any of these wire constraints requires a new attachment tag and version.
 
-`key_purpose` is tag-scoped. `account-rsa-oaep4096-pss-sha256` is the only value for `account-ek-wrap-v1` and `recovery-wrap-v1`: the RSA account key pair may decrypt OAEP/SHA-256 account-key capsules and make its existing PSS/SHA-256 age claim. This does not designate the separate P-384 authority signing root. `preferences-aes256-gcm` is the only value for `recovery-prefs-wrap-v1`; it identifies the raw 32-byte AES-GCM preferences key derived for the named credential generation. A purpose valid for one tag is invalid for every other tag. Readers reject unknown or cross-tag purposes before unwrap, and the corpus mutates each applicable wrap.
+`key_purpose` is valid only in the listed tag-purpose pairs. `account-rsa-oaep4096-pss-sha256` is the only value for both `account-ek-wrap-v1` and `recovery-wrap-v1`: the RSA account key pair may decrypt OAEP/SHA-256 account-key capsules and make its existing PSS/SHA-256 age claim. This does not designate the separate P-384 authority signing root. `preferences-aes256-gcm` is the only value for `recovery-prefs-wrap-v1`; it identifies the raw 32-byte AES-GCM preferences key derived for the named credential generation. Readers reject every unlisted tag-purpose pair before unwrap, and the corpus mutates each applicable wrap.
 
 `account_key_generation` comes from protected account-key authority state and identifies the RSA account key being recovered. `credential_generation` is the exact generation from the authenticated `split-auth-wrap-v1` descriptor and identifies the preferences key derived from that credential. A legacy account without that authenticated split descriptor cannot emit `recovery-prefs-wrap-v1`; its existing preferences-key recovery ciphertext remains legacy-readable. `recovery_key_generation` is a monotonic per-account value reserved under authenticated step-up before client encryption and committed by compare-and-swap with the recovery-key row. The private-key and preferences-key wraps created by one enrollment or replacement carry the same generation. It is never inferred from ciphertext, cached client state, or a post-write database value. The current server-internal `user_recovery_keys.material_version` assignment is not this pre-encryption reservation contract; that contract must exist before either new recovery writer activates.
 
@@ -105,7 +105,7 @@ Expected context comes from authenticated or local sources, never from unauthent
 | `account_id` | Authenticated account identity from the protected session or account authority. |
 | `message_id` | On write, client allocation before encryption and idempotent server persistence. On read, the candidate persisted ID from the selected route's message record; the GCM tag must authenticate its equality before plaintext release. The record alone is not trusted. |
 | `sender_id`, `uploader_id` | On write, the authenticated local session. On read, the candidate server-derived author in the selected route's message record and, for uploads, the verified enclosing message and authenticated attachment reference. The GCM tag must authenticate the declared identity; caller-supplied identity or ciphertext metadata alone is not trusted. |
-| `key_epoch` | Current verified conversation-key state. |
+| `key_epoch` | On write, the current authorized epoch in verified conversation-key state. On read, the candidate historical message epoch must resolve to verified key state for that exact epoch and authenticate under its GCM tag; an attachment read inherits the epoch from its verified enclosing message. The current epoch is never substituted for a historical one. |
 | `content_kind`, `blob_purpose` | The closed local producer registry above. |
 | `schema_version` | The reader's locally expected version for the closed `blob_purpose` pair; never an unauthenticated server-selected schema. |
 | `key_purpose`, `recovery_purpose` | The closed tag-specific local registry and protected key or recovery handle. |
