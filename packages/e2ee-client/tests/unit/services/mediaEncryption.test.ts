@@ -829,6 +829,87 @@ describe('MediaEncryption', () => {
   });
 
   describe('destroy', () => {
+    it('drops a frame whose encryption finishes after teardown', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'sender');
+      const frame = fakeAudioFrame(40);
+      const original = frame.data;
+      const encrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+      let entered: () => void = () => {};
+      let release: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const spy = vi.spyOn(crypto.subtle, 'encrypt').mockImplementation(async (...args) => {
+        const ciphertext = await encrypt(...args);
+        entered();
+        await blocked;
+        return ciphertext;
+      });
+      try {
+        const pending = enc.encryptFrame(frame, 'opus');
+        await started;
+        enc.destroy();
+        release();
+        await expect(pending).rejects.toThrow('media encryption destroyed');
+        expect(frame.data).toBe(original);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it.each(['opus', 'h264', 'av1'] as const)(
+      'drops a %s frame whose decryption finishes after teardown',
+      async (codec) => {
+        const csk = await generateTestCSK();
+        const sender = new MediaEncryption();
+        const receiver = new MediaEncryption();
+        await sender.init(csk, 'sender');
+        await receiver.init(csk, 'receiver');
+        await receiver.addDecryptKey(csk, 'sender');
+        const frame =
+          codec === 'opus'
+            ? fakeAudioFrame(40)
+            : codec === 'h264'
+              ? buildH264AccessUnit()
+              : ({
+                  data: new Uint8Array([0x0a, 0x02, 0xaa, 0xbb, 0x32, 0x03, 1, 2, 3]).buffer,
+                  type: 'key',
+                } as unknown as RTCEncodedVideoFrame);
+        await sender.encryptFrame(frame, codec);
+        const encrypted = frame.data;
+        const decrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+        let entered: () => void = () => {};
+        let release: () => void = () => {};
+        const started = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const blocked = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const spy = vi.spyOn(crypto.subtle, 'decrypt').mockImplementation(async (...args) => {
+          const plaintext = await decrypt(...args);
+          entered();
+          await blocked;
+          return plaintext;
+        });
+        try {
+          const pending = receiver.decryptFrame(frame, 'sender', codec);
+          await started;
+          receiver.destroy();
+          release();
+          await expect(pending).rejects.toThrow('media encryption destroyed');
+          expect(frame.data).toBe(encrypted);
+        } finally {
+          spy.mockRestore();
+        }
+      }
+    );
+
     it('does not let a pending decrypt-key derivation restore state after teardown', async () => {
       const csk = await generateTestCSK();
       const enc = new MediaEncryption();
@@ -852,7 +933,7 @@ describe('MediaEncryption', () => {
 
       // Encrypt should fail after destroy
       const frame2 = fakeAudioFrame(40);
-      await expect(enc.encryptFrame(frame2, 'opus')).rejects.toThrow('no encrypt key');
+      await expect(enc.encryptFrame(frame2, 'opus')).rejects.toThrow('media encryption destroyed');
     });
 
     it('is idempotent', async () => {

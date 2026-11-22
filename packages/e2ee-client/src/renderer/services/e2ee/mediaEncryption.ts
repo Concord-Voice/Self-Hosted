@@ -284,6 +284,9 @@ export class FrameKeyMissError extends Error {
 
 export class MediaEncryption {
   private destroyed = false;
+  private assertActive(): void {
+    if (this.destroyed) throw new Error('E2EE: media encryption destroyed');
+  }
   private currentKeyId = 0;
   // #1878: the channel-key (CSK) version bound to the encrypt key. Stamped into
   // every outgoing frame's trailer or codec mini-header so receivers select the exact key.
@@ -578,6 +581,7 @@ export class MediaEncryption {
     frame: RTCEncodedAudioFrame | RTCEncodedVideoFrame,
     codec?: CodecFamily
   ): Promise<void> {
+    this.assertActive();
     if (!codec || !Object.hasOwn(FRAME_SCHEMES, codec))
       throw new Error('E2EE: unsupported media codec');
     if (codec === 'av1') {
@@ -638,6 +642,7 @@ export class MediaEncryption {
       encryptKey,
       payload
     );
+    this.assertActive();
     frame.data = concatBytes([header, new Uint8Array(ciphertext), trailer]).buffer;
   }
 
@@ -660,6 +665,7 @@ export class MediaEncryption {
     const ciphertext = new Uint8Array(
       await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, encryptKey, suffix)
     );
+    this.assertActive();
     const region = concatBytes([mini, ciphertext]);
     const stuffed = stuffH264Bytes(region, trailingZeroRun(clearPrefix));
     if (stuffed === null) throw new Error('E2EE: H.264 stuffing failed');
@@ -770,6 +776,7 @@ export class MediaEncryption {
     // Hash the complete canonical clear structure once. Every protected OBU
     // binds this digest, avoiding O(tile count × manifest size) GCM AAD work.
     const manifestDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', manifest));
+    this.assertActive();
     const parts: Uint8Array[] = [];
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
@@ -783,10 +790,12 @@ export class MediaEncryption {
             new Uint8Array(payload)
           )
         );
+        this.assertActive();
         payload = concatBytes([entry.mini, ciphertext]);
       }
       parts.push(entry.head, encodeLeb128(payload.length), payload);
     }
+    this.assertActive();
     frame.data = concatBytes(parts).buffer;
   }
 
@@ -824,7 +833,9 @@ export class MediaEncryption {
     const { keyVersion, keyId } = MediaEncryption.prepareAv1DecryptEntries(entries);
     const manifest = av1Manifest(entries);
     const manifestDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', manifest));
+    this.assertActive();
     const candidate = await this.requireDecryptKey(senderUserId, keyVersion, keyId);
+    this.assertActive();
     const parts: Uint8Array[] = [];
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
@@ -838,9 +849,11 @@ export class MediaEncryption {
             new Uint8Array(entry.payload.subarray(MEDIA_FRAME_MINI_HEADER_SIZE))
           )
         );
+        this.assertActive();
       }
       parts.push(entry.head, encodeLeb128(payload.length), payload);
     }
+    this.assertActive();
     if (candidate.derived) this.rememberDecryptKey(senderUserId, keyVersion, keyId, candidate.key);
     frame.data = concatBytes(parts).buffer;
   }
@@ -921,6 +934,7 @@ export class MediaEncryption {
     let currentKey = bestEntry.key;
     for (let i = bestKeyId; i < targetKeyId; i++) {
       currentKey = await ratchetKey(currentKey);
+      this.assertActive();
     }
     return currentKey;
   }
@@ -996,6 +1010,7 @@ export class MediaEncryption {
     senderUserId: string,
     codec?: CodecFamily
   ): Promise<void> {
+    this.assertActive();
     if (!codec || !Object.hasOwn(FRAME_SCHEMES, codec))
       throw new Error('E2EE: unsupported media codec');
     if (codec === 'av1') {
@@ -1033,6 +1048,7 @@ export class MediaEncryption {
     }
 
     const candidate = await this.requireDecryptKey(senderUserId, mini.keyVersion, mini.keyId);
+    this.assertActive();
     const iv: Uint8Array<ArrayBuffer> = new Uint8Array(mini.iv);
     const aad = concatBytes([
       FRAME_AAD_DOMAIN,
@@ -1047,6 +1063,7 @@ export class MediaEncryption {
         ciphertext
       )
     );
+    this.assertActive();
     if (candidate.derived)
       this.rememberDecryptKey(senderUserId, mini.keyVersion, mini.keyId, candidate.key);
     frame.data = concatBytes([clearPrefix, suffix]).buffer;
@@ -1110,12 +1127,14 @@ export class MediaEncryption {
     }
 
     const candidate = await this.requireDecryptKey(senderUserId, keyVersion, keyId);
+    this.assertActive();
     const aad = concatBytes([FRAME_AAD_DOMAIN, trailer, header]);
     const plaintext = await crypto.subtle.decrypt(
       { name: 'AES-GCM', iv, additionalData: aad },
       candidate.key,
       ciphertext
     );
+    this.assertActive();
     if (candidate.derived) this.rememberDecryptKey(senderUserId, keyVersion, keyId, candidate.key);
 
     // Reconstruct: [header][plaintext]
