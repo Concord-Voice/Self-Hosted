@@ -73,6 +73,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Security
 
+- **Encryption:** Reject imported RSA account public keys below 4096 bits before wrapping channel keys to them ([#379](https://github.com/Concord-Voice/Self-Hosted/pull/379)).
 - **Server:** The control plane and the ops agent no longer write the password or token from `NATS_URL` into their logs when they reconnect to NATS. The reconnect line now names only the server's host and port. A default install has no credentials in `NATS_URL` and was not affected. If yours had them, treat earlier control-plane and ops-agent logs as holding them, and rotate the credential.
 - **Server:** A NATS server can no longer write lines of its own into the control plane's log. The disconnect and reconnect lines now quote the text and the address that the server supplied.
 - **Sessions:** The password-free revocation allowance is now committed atomically with session revocation. This change requires a coordinated control-plane cutover; existing accounts may need their password and enrolled MFA for up to 24 hours after migration.
@@ -86,7 +87,7 @@ readers accept the versioned formats needed for a later storage migration.
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
 - **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
-- **Voice:** A participant can no longer multiply media consumers across receive transports to exhaust shared voice capacity ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
+- **Voice:** Frames Picture-in-Picture can now receive every active microphone and camera while participant consumer limits still block clone-everything egress exhaustion ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 
 ### Changed
@@ -100,6 +101,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Fixed
 
+- **Authentication:** Packaged Desktop clients can again sign in to an explicitly configured self-hosted server when Chromium marks the exact `app://concord` request as cross-site; other cross-site origins remain rejected.
 - **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
 - **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
 - **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
