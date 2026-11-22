@@ -98,6 +98,7 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Fixed
 
+- **Authentication:** Packaged Desktop clients can again sign in to an explicitly configured self-hosted server when Chromium marks the exact `app://concord` request as cross-site; other cross-site origins remain rejected.
 - **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
 - **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
 - **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
