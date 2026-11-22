@@ -3725,7 +3725,15 @@ paths:
                   pinned_messages:
                     type: array
                     items:
-                      $ref: '#/components/schemas/MessageWithUser'
+                      allOf:
+                      - $ref: '#/components/schemas/MessageWithUser'
+                      - type: object
+                        properties:
+                          attachments:
+                            type: array
+                            description: Present only when the message has file attachments
+                            items:
+                              $ref: '#/components/schemas/AttachmentSummary'
                   count:
                     type: integer
                   conversation_id:
@@ -23778,6 +23786,19 @@ components:
           avatar_url:
             type: string
             nullable: true
+    AttachmentSummary:
+      type: object
+      description: A file attached to a message. The file itself is fetched through the media endpoints.
+      properties:
+        id:
+          type: string
+          format: uuid
+        file_type:
+          type: string
+        mime_type:
+          type: string
+        file_size:
+          type: integer
     ServerMember:
       type: object
       properties:
@@ -24340,17 +24361,7 @@ components:
           type: array
           description: Present only when the message has file attachments
           items:
-            type: object
-            properties:
-              id:
-                type: string
-                format: uuid
-              file_type:
-                type: string
-              mime_type:
-                type: string
-              file_size:
-                type: integer
+            $ref: '#/components/schemas/AttachmentSummary'
         reactions:
           type: array
           description: Present only when the message has reactions

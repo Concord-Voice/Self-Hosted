@@ -30,8 +30,11 @@ func loadAttachmentsForMessages(db *sql.DB, messageIDs []string) (map[string][]m
 
 // LoadDMAttachmentsForMessages batch-loads attachment summaries for a set of DM
 // messages. Returns a map from message ID to its attachment summaries. Avoids
-// N+1 queries. It is the one DM attachment query: the DM message list in
-// internal/dm and the DM pin list in this package both read through it.
+// N+1 queries. It is the one loader of DM attachment summaries: the DM message
+// list in internal/dm and the DM pin list in this package both read through it.
+//
+// It performs no access check. A caller passes only message IDs that a query
+// gated on the viewer's participation has already returned.
 func LoadDMAttachmentsForMessages(db *sql.DB, messageIDs []string) (map[string][]models.AttachmentSummary, error) {
 	if len(messageIDs) == 0 {
 		return nil, nil
