@@ -771,6 +771,143 @@ describe('MediaEncryption', () => {
   });
 
   describe('catchUpToEpoch', () => {
+    it('keeps the decrypt-key map bounded during a full-cache rotation commit', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'receiver');
+      const key = await deriveFrameKey(csk, 'seed');
+      const keys = (
+        enc as unknown as {
+          decryptKeys: Map<string, { key: CryptoKey; expires: number }>;
+        }
+      ).decryptKeys;
+      for (let i = 0; i < 2044; i++) {
+        keys.set(`filler-${i}:0:99`, { key, expires: Number.POSITIVE_INFINITY });
+      }
+      for (let i = 0; i < 4; i++) {
+        keys.set(`sender-${i}:0:0`, { key, expires: Number.POSITIVE_INFINITY });
+      }
+      let peak = keys.size;
+      const originalSet = keys.set.bind(keys);
+      const spy = vi.spyOn(keys, 'set').mockImplementation((id, entry) => {
+        const result = originalSet(id, entry);
+        peak = Math.max(peak, keys.size);
+        return result;
+      });
+      try {
+        await enc.rotateKeys();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(enc.getCurrentKeyId()).toBe(1);
+      expect(peak).toBeLessThanOrEqual(2049);
+      expect(keys.size).toBeLessThanOrEqual(2048);
+    });
+
+    it('does not advance encrypt or decrypt state when a prepared ratchet fails', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'receiver');
+      await enc.addDecryptKey(csk, 'sender-a');
+      await enc.addDecryptKey(csk, 'sender-b');
+      const state = enc as unknown as {
+        encryptKey: CryptoKey | null;
+        decryptKeys: Map<string, { key: CryptoKey; expires: number }>;
+      };
+      const originalEncryptKey = state.encryptKey;
+      const originalEntries = [...state.decryptKeys].map(([id, entry]) => [
+        id,
+        entry.key,
+        entry.expires,
+      ]);
+      const derive = crypto.subtle.deriveKey.bind(crypto.subtle);
+      let calls = 0;
+      const spy = vi.spyOn(crypto.subtle, 'deriveKey').mockImplementation((...args) => {
+        calls++;
+        return calls === 3
+          ? Promise.reject(new Error('injected decrypt ratchet failure'))
+          : derive(...args);
+      });
+      try {
+        await expect(enc.rotateKeys()).rejects.toThrow('injected decrypt ratchet failure');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(enc.getCurrentKeyId()).toBe(0);
+      expect(state.encryptKey).toBe(originalEncryptKey);
+      expect([...state.decryptKeys].map(([id, entry]) => [id, entry.key, entry.expires])).toEqual(
+        originalEntries
+      );
+    });
+
+    it('skips a self-healed later sender epoch without extending the old overlap', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(0);
+        const csk = await generateTestCSK();
+        const ahead = new MediaEncryption();
+        const other = new MediaEncryption();
+        const receiver = new MediaEncryption();
+        await ahead.init(csk, 'ahead');
+        await other.init(csk, 'other');
+        await receiver.init(csk, 'receiver');
+        ahead.setKeyVersion(1);
+        other.setKeyVersion(1);
+        receiver.setKeyVersion(1);
+        await receiver.addDecryptKeyAtVersion(csk, 'ahead', 1, 0);
+        await receiver.addDecryptKeyAtVersion(csk, 'other', 1, 0);
+
+        const oldFrame = fakeAudioFrame(50);
+        await ahead.encryptFrame(oldFrame, 'opus');
+        let intermediateFrame: RTCEncodedAudioFrame | null = null;
+        for (let i = 0; i < 3; i++) {
+          await ahead.rotateKeys();
+          await other.rotateKeys();
+          if (i === 0) {
+            intermediateFrame = fakeAudioFrame(50);
+            await ahead.encryptFrame(intermediateFrame, 'opus');
+          }
+        }
+        const futureFrame = fakeAudioFrame(50);
+        await ahead.encryptFrame(futureFrame, 'opus');
+        await receiver.decryptFrame(futureFrame, 'ahead', 'opus');
+        const keys = (
+          receiver as unknown as {
+            decryptKeys: Map<string, { expires: number }>;
+          }
+        ).decryptKeys;
+        expect(keys.get('ahead:1:0')?.expires).toBe(10_000);
+
+        vi.advanceTimersByTime(5_000);
+        await receiver.catchUpToEpoch(3);
+        expect(receiver.getCurrentKeyId()).toBe(3);
+        expect(keys.get('ahead:1:0')?.expires).toBe(10_000);
+        expect(keys.get('ahead:1:1')?.expires).toBe(10_000);
+        if (!intermediateFrame) throw new Error('missing intermediate frame');
+        const intermediateWire = intermediateFrame.data.slice(0);
+        await expect(
+          receiver.decryptFrame(intermediateFrame, 'ahead', 'opus')
+        ).resolves.toBeUndefined();
+
+        const otherFrame = fakeAudioFrame(50);
+        await other.encryptFrame(otherFrame, 'opus');
+        await expect(receiver.decryptFrame(otherFrame, 'other', 'opus')).resolves.toBeUndefined();
+        const aheadFrame = fakeAudioFrame(50);
+        await ahead.encryptFrame(aheadFrame, 'opus');
+        await expect(receiver.decryptFrame(aheadFrame, 'ahead', 'opus')).resolves.toBeUndefined();
+
+        vi.advanceTimersByTime(6_000);
+        await expect(receiver.decryptFrame(oldFrame, 'ahead', 'opus')).rejects.toBeInstanceOf(
+          FrameKeyMissError
+        );
+        await expect(
+          receiver.decryptFrame({ data: intermediateWire } as RTCEncodedAudioFrame, 'ahead', 'opus')
+        ).rejects.toBeInstanceOf(FrameKeyMissError);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('catches up from epoch 0 to target', async () => {
       const csk = await generateTestCSK();
       const enc = new MediaEncryption();

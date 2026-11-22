@@ -18,8 +18,13 @@ const {
 vi.mock('@/renderer/services/e2ee/mediaEncryption', () => ({
   MEDIA_E2EE_FRAME_CRYPTO_VERSION: 6,
   MediaEncryption: class {
+    private keyVersion = 0;
     initFromKey = mockInitFromKey;
-    setKeyVersion = mockSetKeyVersion;
+    setKeyVersion = vi.fn((version: number) => {
+      this.keyVersion = version;
+      mockSetKeyVersion(version);
+    });
+    getKeyVersion = vi.fn(() => this.keyVersion);
     addDecryptKeyDirectV3 = mockAddDecryptKeyDirectV3;
     rotateKeys = vi.fn().mockResolvedValue(undefined);
     catchUpToEpoch = vi.fn().mockResolvedValue(undefined);
@@ -79,6 +84,49 @@ describe('e2eeWorker keyframe recovery', () => {
       data: { type: 'addDecryptKey', senderUserId: 'sender', keyVersion: 7, keyId: 3, key },
     });
     expect(mockAddDecryptKeyDirectV3).toHaveBeenCalledWith('sender', 7, 3, key);
+  });
+
+  it('advances decrypt-only authority and refuses stale or mismatched key installs', () => {
+    const onmessage = (
+      self as unknown as { onmessage: ((event: { data: unknown }) => void) | null }
+    ).onmessage;
+    if (!onmessage) throw new Error('worker message handler missing');
+    const key = {} as CryptoKey;
+    onmessage({ data: { type: 'setDecryptKeyVersion', keyVersion: 8 } });
+    expect(mockSetKeyVersion).toHaveBeenCalledWith(8);
+    onmessage({
+      data: {
+        type: 'installDecryptKey',
+        authoritativeKeyVersion: 7,
+        senderUserId: 'sender',
+        keyVersion: 7,
+        keyId: 2,
+        key,
+      },
+    });
+    expect(mockAddDecryptKeyDirectV3).not.toHaveBeenCalled();
+    onmessage({
+      data: {
+        type: 'installDecryptKey',
+        authoritativeKeyVersion: 8,
+        senderUserId: 'sender',
+        keyVersion: 8,
+        keyId: 2,
+        key,
+      },
+    });
+    expect(mockAddDecryptKeyDirectV3).toHaveBeenCalledWith('sender', 8, 2, key);
+    onmessage({
+      data: {
+        type: 'installDecryptKey',
+        authoritativeKeyVersion: 9,
+        senderUserId: 'sender',
+        keyVersion: 8,
+        keyId: 3,
+        key,
+      },
+    });
+    expect(mockAddDecryptKeyDirectV3).toHaveBeenCalledTimes(1);
   });
 
   it('passes h264 to the shared MediaEncryption encrypt implementation', async () => {

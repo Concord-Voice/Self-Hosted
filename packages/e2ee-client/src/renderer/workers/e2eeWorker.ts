@@ -112,6 +112,28 @@ self.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
       });
       break;
 
+    case 'setDecryptKeyVersion':
+      if (Number.isSafeInteger(msg.keyVersion) && msg.keyVersion > encryption.getKeyVersion()) {
+        encryption.setKeyVersion(msg.keyVersion);
+      }
+      break;
+
+    case 'installDecryptKey':
+      if (
+        !Number.isSafeInteger(msg.authoritativeKeyVersion) ||
+        msg.authoritativeKeyVersion <= 0 ||
+        msg.keyVersion !== msg.authoritativeKeyVersion ||
+        msg.authoritativeKeyVersion < encryption.getKeyVersion()
+      ) {
+        break;
+      }
+      if (msg.authoritativeKeyVersion > encryption.getKeyVersion()) {
+        encryption.setKeyVersion(msg.authoritativeKeyVersion);
+      }
+      encryption.addDecryptKeyDirectV3(msg.senderUserId, msg.keyVersion, msg.keyId, msg.key);
+      clearFrameKeyRequest(msg.senderUserId, msg.keyVersion, msg.keyId);
+      break;
+
     case 'rotateKeys':
       encryption
         .rotateKeys()

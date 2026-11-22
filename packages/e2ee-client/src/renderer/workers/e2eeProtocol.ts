@@ -19,6 +19,19 @@ export type E2EEWorkerMessage =
       keyId: number;
       key: CryptoKey;
     }
+  // PiP is decrypt-only: a main-window authority update must retire old CSK
+  // versions even when no new frame/key request arrives.
+  | { type: 'setDecryptKeyVersion'; keyVersion: number }
+  // The main window's authoritative version and its derived key are applied
+  // as one Worker message so a stale async response cannot reinstall old keys.
+  | {
+      type: 'installDecryptKey';
+      authoritativeKeyVersion: number;
+      senderUserId: string;
+      keyVersion: number;
+      keyId: number;
+      key: CryptoKey;
+    }
   | { type: 'rotateKeys' }
   | { type: 'catchUpToEpoch'; targetEpoch: number }
   // Transform-bypass probe: ask the worker how many frames have ENTERED the
@@ -97,8 +110,6 @@ export function selectCryptoScheme(
     case 'vp8':
     case 'vp9':
       return 'whole-frame';
-    case undefined:
-      return undefined;
     default:
       return undefined;
   }

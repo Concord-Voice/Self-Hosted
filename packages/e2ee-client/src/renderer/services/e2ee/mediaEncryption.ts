@@ -463,25 +463,41 @@ export class MediaEncryption {
     return run;
   }
 
+  private hasDecryptEpochAtOrAbove(
+    senderUserId: string,
+    keyVersion: number,
+    keyId: number
+  ): boolean {
+    const now = Date.now();
+    for (const [id, entry] of this.decryptKeys) {
+      if (entry.expires <= now) continue;
+      const [sender, version, epoch] = id.split(':');
+      if (sender === senderUserId && Number(version) === keyVersion && Number(epoch) >= keyId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private async rotateKeysOnce(): Promise<void> {
     if (!this.encryptKey) return;
 
     const oldKeyId = this.currentKeyId;
     const newKeyId = oldKeyId + 1;
+    const oldVersion = this.currentKeyVersion;
     const currentEncryptKey = this.encryptKey;
     const newEncryptKey = await ratchetKey(currentEncryptKey);
-    if (this.encryptKey !== currentEncryptKey || this.currentKeyId !== oldKeyId) return;
-    this.currentKeyId = newKeyId;
-    this.encryptKey = newEncryptKey;
+    if (
+      this.encryptKey !== currentEncryptKey ||
+      this.currentKeyId !== oldKeyId ||
+      this.currentKeyVersion !== oldVersion
+    )
+      return;
 
-    // Ratchet ALL decrypt keys at oldKeyId → newKeyId so receivers stay in
-    // sync with senders.  Without this, decrypt keys stay at keyId 0 while
-    // senders advance on every join/leave, causing "No decrypt key" errors
-    // once the gap exceeds the self-healing ratchet limit.
-    // #1878: the map key is now senderId:keyVersion:keyId (3-part). Match the
-    // keyId field by parsing, not endsWith(':oldKeyId') — and re-insert at the
-    // SAME keyVersion so each version's ratchet chain stays independent.
+    // Prepare every needed decrypt ratchet before publishing the encrypt epoch.
+    // A failed HKDF must not leave the local epoch advanced with partial keys.
     const toRatchet: {
+      id: string;
       senderUserId: string;
       keyVersion: number;
       entry: { key: CryptoKey; expires: number };
@@ -495,26 +511,66 @@ export class MediaEncryption {
         Number(ver) >= this.currentKeyVersion &&
         entry.expires > Date.now()
       ) {
-        toRatchet.push({ senderUserId, keyVersion: Number(ver), entry });
+        toRatchet.push({ id, senderUserId, keyVersion: Number(ver), entry });
       }
     }
-    for (const { senderUserId, keyVersion, entry } of toRatchet) {
-      const newKey = await ratchetKey(entry.key);
-      this.rememberDecryptKey(senderUserId, keyVersion, newKeyId, newKey);
-      // Keep the old keyId for a 10s overlap so in-flight frames from before the
-      // ratchet still decrypt. This is a delivery-overlap window, NOT a forward-
-      // secrecy boundary (intra-version FS is intentionally dropped — #1878
-      // Decision B; FS is enforced by CSK key_version rotation on membership
-      // change).
-      entry.expires = Date.now() + 10_000;
+    const prepared: ((typeof toRatchet)[number] & { newKey: CryptoKey })[] = [];
+    for (const source of toRatchet) {
+      const newKey = await ratchetKey(source.entry.key);
+      this.assertActive();
+      prepared.push({ ...source, newKey });
     }
+    if (
+      this.encryptKey !== currentEncryptKey ||
+      this.currentKeyId !== oldKeyId ||
+      this.currentKeyVersion !== oldVersion
+    )
+      return;
 
-    // Clean expired keys
     const now = Date.now();
+    const retireAt = now + 10_000;
+    for (const { id, senderUserId, keyVersion, entry, newKey } of prepared) {
+      if (this.decryptKeys.get(id) !== entry || entry.expires <= now) continue;
+      const nextId = MediaEncryption.mapKey(senderUserId, keyVersion, newKeyId);
+      const heldNext = this.decryptKeys.get(nextId);
+      if (!heldNext || heldNext.expires <= now) {
+        // A frame may self-heal to a higher authenticated epoch while this
+        // preparation awaits. Preserve it and install the intermediate only
+        // for the original overlap window, so delayed frames still decrypt.
+        const higherHeld = this.hasDecryptEpochAtOrAbove(senderUserId, keyVersion, newKeyId + 1);
+        const expires = higherHeld ? Math.min(entry.expires, retireAt) : Number.POSITIVE_INFINITY;
+        for (const [heldId, heldEntry] of this.decryptKeys) {
+          const [heldSender, heldVersion, heldEpoch] = heldId.split(':');
+          if (
+            heldSender === senderUserId &&
+            Number(heldVersion) === keyVersion &&
+            Number(heldEpoch) < newKeyId
+          ) {
+            heldEntry.expires = Math.min(heldEntry.expires, retireAt);
+          }
+        }
+        this.ratchetKeyAttempts.delete(nextId);
+        this.decryptKeys.delete(nextId);
+        this.decryptKeys.set(nextId, { key: newKey, expires });
+        while (this.decryptKeys.size > MAX_DECRYPT_KEYS) {
+          const oldest = this.decryptKeys.keys().next().value;
+          if (oldest !== undefined) this.decryptKeys.delete(oldest);
+        }
+      }
+      entry.expires = Math.min(entry.expires, retireAt);
+    }
+    this.currentKeyId = newKeyId;
+    this.encryptKey = newEncryptKey;
+
+    // Clean expired keys and enforce the bounded cache after the atomic update.
     for (const [id, entry] of this.decryptKeys) {
-      if (entry.expires < now) {
+      if (entry.expires <= now) {
         this.decryptKeys.delete(id);
       }
+    }
+    while (this.decryptKeys.size > MAX_DECRYPT_KEYS) {
+      const oldest = this.decryptKeys.keys().next().value;
+      if (oldest !== undefined) this.decryptKeys.delete(oldest);
     }
   }
 
