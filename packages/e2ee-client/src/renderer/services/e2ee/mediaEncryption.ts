@@ -898,7 +898,12 @@ export class MediaEncryption {
     const id = MediaEncryption.mapKey(senderUserId, keyVersion, keyId);
     const lastAttempt = this.ratchetKeyAttempts.get(id);
     if (lastAttempt !== undefined && now - lastAttempt < RATCHET_KEY_BACKOFF_MS) {
-      throw new Error('E2EE: ratchet work throttled');
+      throw new FrameKeyMissError(
+        senderUserId,
+        keyVersion,
+        keyId,
+        'E2EE: ratchet work throttled; request exact decrypt key'
+      );
     }
     const previousSender = this.ratchetWorkBySender.get(senderUserId);
     const senderSteps =
@@ -913,7 +918,12 @@ export class MediaEncryption {
       senderSteps + steps > MAX_RATCHET_STEPS_PER_SENDER ||
       globalSteps + steps > MAX_RATCHET_STEPS_GLOBAL
     ) {
-      throw new Error('E2EE: ratchet work budget exhausted');
+      throw new FrameKeyMissError(
+        senderUserId,
+        keyVersion,
+        keyId,
+        'E2EE: ratchet work budget exhausted; request exact decrypt key'
+      );
     }
     this.ratchetWorkBySender.delete(senderUserId);
     this.ratchetWorkBySender.set(senderUserId, {

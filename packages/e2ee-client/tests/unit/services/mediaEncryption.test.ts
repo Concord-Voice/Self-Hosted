@@ -449,9 +449,25 @@ describe('MediaEncryption', () => {
       vi.useFakeTimers();
       try {
         vi.setSystemTime(0);
-        for (let i = 0; i < 5; i++) {
+        const first = { data: forged.slice().buffer } as RTCEncodedAudioFrame;
+        await expect(receiver.decryptFrame(first, 'sender', 'opus')).rejects.not.toBeInstanceOf(
+          FrameKeyMissError
+        );
+        const throttledValid = { data: wire.slice().buffer } as RTCEncodedAudioFrame;
+        await expect(receiver.decryptFrame(throttledValid, 'sender', 'opus')).rejects.toMatchObject(
+          {
+            name: 'FrameKeyMissError',
+            senderUserId: 'sender',
+            keyVersion: 0,
+            keyId: 10,
+            message: expect.stringContaining('ratchet work throttled'),
+          }
+        );
+        for (let i = 0; i < 3; i++) {
           const frame = { data: forged.slice().buffer } as RTCEncodedAudioFrame;
-          await expect(receiver.decryptFrame(frame, 'sender', 'opus')).rejects.toThrow();
+          await expect(receiver.decryptFrame(frame, 'sender', 'opus')).rejects.toBeInstanceOf(
+            FrameKeyMissError
+          );
         }
         expect(derive).toHaveBeenCalledTimes(10);
         let provisioned = await deriveFrameKey(csk, 'sender');
@@ -482,7 +498,13 @@ describe('MediaEncryption', () => {
         const base = await deriveFrameKey(csk, 'sender');
         receiver.addDecryptKeyDirectV3('sender', 0, 0, base);
         await expect(internal.deriveRatchetedKey('sender', 0, 10)).resolves.toBeTruthy();
-        await expect(internal.deriveRatchetedKey('sender', 0, 9)).rejects.toThrow(/budget/);
+        await expect(internal.deriveRatchetedKey('sender', 0, 9)).rejects.toMatchObject({
+          name: 'FrameKeyMissError',
+          senderUserId: 'sender',
+          keyVersion: 0,
+          keyId: 9,
+          message: expect.stringContaining('budget'),
+        });
         vi.advanceTimersByTime(15_001);
         await expect(internal.deriveRatchetedKey('sender', 0, 10)).resolves.toBeTruthy();
         vi.advanceTimersByTime(15_001);
@@ -492,9 +514,13 @@ describe('MediaEncryption', () => {
           await expect(internal.deriveRatchetedKey(id, 0, 10)).resolves.toBeTruthy();
         }
         receiver.addDecryptKeyDirectV3('global-overflow', 0, 0, base);
-        await expect(internal.deriveRatchetedKey('global-overflow', 0, 10)).rejects.toThrow(
-          /budget/
-        );
+        await expect(internal.deriveRatchetedKey('global-overflow', 0, 10)).rejects.toMatchObject({
+          name: 'FrameKeyMissError',
+          senderUserId: 'global-overflow',
+          keyVersion: 0,
+          keyId: 10,
+          message: expect.stringContaining('budget'),
+        });
       } finally {
         vi.useRealTimers();
       }
