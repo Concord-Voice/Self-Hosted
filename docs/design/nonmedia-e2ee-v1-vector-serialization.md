@@ -91,12 +91,12 @@ In addition to those generated names, the following names and mappings are manda
 | `context/encode/<tag>/wrong-key-purpose` for `account-ek-wrap-v1`, `recovery-wrap-v1`, `recovery-prefs-wrap-v1` | `context` / `encode` | reject `validate/invalid_purpose` using another tag's purpose |
 | `aead/encrypt/<tag>/<length-case>` for every AEAD tag and `length-case` in `short-key`, `long-key`, `short-nonce`, `long-nonce` | `aead` / `encrypt` | reject `validate/invalid_field` before AEAD work; mutate only the 32-byte key or 12-byte nonce named by the case |
 | `aead/decrypt/<tag>/<length-case>` for every AEAD tag and `length-case` in `short-key`, `long-key` | `aead` / `decrypt` | reject `validate/invalid_field` before AEAD work |
-| `aead/decrypt/<tag>/<length-case>` for every AEAD tag and `length-case` in `short-nonce`, `long-nonce` | `aead` / `decrypt` | reject an envelope made with the named wrong nonce length; `short-nonce` uses empty plaintext and rejects at `parse/bad_envelope`, while `long-nonce` rejects at `authenticate/aead_failure` for text or `parse/bad_envelope` for v4 geometry; never pass a non-12-byte IV to AES-GCM |
+| `aead/decrypt/<tag>/<length-case>` for every AEAD tag and `length-case` in `short-nonce`, `long-nonce` | `aead` / `decrypt` | reject an envelope made with the named wrong nonce length; `short-nonce` uses empty plaintext and rejects at `parse/bad_envelope`, while `long-nonce` rejects at `authenticate/aead_failure` for text and v4: the extra bytes become ciphertext under the fixed nonce split, and a final attachment chunk may be shorter than its capacity; never pass a non-12-byte IV to AES-GCM |
 | `aead/decrypt/<tag>/wrong-format` for every AEAD tag above | `aead` / `decrypt` | reject `validate/invalid_format_context` before AEAD work |
 | `aead/decrypt/attachment-v4/tamper-header` | `aead` / `decrypt` | reject `authenticate/aead_failure` after changing one `fileNonce` byte in the authenticated v4 header; geometry stays valid |
 | `policy/descriptor-uniformity/<class>` for `split`, `legacy`, `unknown` | `policy` / `descriptor-uniformity` | accept with identical five outputs, fixed descriptor shape, and no direct fixture-UUID leakage |
 | `policy/legacy-continuation/<case>` for `eligible`, `forged-split`, `invalid-proof`, `existing-device-no-proof`, `stale-post-upgrade`, `wrong-account`, `wrong-realm`, `expired-proof`, `no-continuation`, `fresh-device-no-proof` | `policy` / `legacy-continuation` | accept with the exact input predicate and output pair below |
-| `policy/upgrade-outcome/<case>` for `fresh-authorization`, `replay`, `request-conflict`, `mfa-required`, `ambiguous-commit`, `expired-authorization`, `missing-authorization` | `policy` / `upgrade-outcome` | accept with the exact input predicate and output pair below |
+| `policy/upgrade-outcome/<case>` for `fresh-authorization`, `already-split`, `replay`, `request-conflict`, `mfa-required`, `ambiguous-commit`, `expired-authorization`, `missing-authorization` | `policy` / `upgrade-outcome` | accept with the exact input predicate and output pair below |
 
 For the legacy-continuation matrix, start with `device_state:"existing"`, `account_protocol:"legacy"`, `authority_proof:"verified"`, both matches true, `freshness:"current"`, `not_expired:true`, and `control_plane_continuation:true`. Each row changes only the listed predicate; the output pair is exact. `forged-split` deliberately retains a control-plane continuation, which cannot override the split account's protocol. `fresh-device-no-proof` has no independently authenticated proof or trusted cached state.
 
@@ -113,13 +113,14 @@ For the legacy-continuation matrix, start with `device_state:"existing"`, `accou
 | `no-continuation` | `control_plane_continuation:false` | `deny` / `no-continuation` |
 | `fresh-device-no-proof` | `device_state:"fresh"`, `authority_proof:"absent"` | `deny` / `missing-authority-proof` |
 
-For the upgrade-outcome matrix, start with `prior_state:"legacy"`, `authorization_state:"fresh"`, `request_match:true`, `mfa_complete:true`, and `commit_state:"none"`. The changed predicates and output pairs below are exact. `request_match` models the server-keyed request fingerprint; an ambiguous commit requires durable reconciliation before another attempt.
+For the upgrade-outcome matrix, start with `prior_state:"legacy"`, `authorization_state:"fresh"`, `request_match:true`, `mfa_complete:true`, and `commit_state:"none"`. `prior_state` is the credential protocol currently read for this decision, not a protocol value copied from the authorization. A matching durable completed retry is handled as idempotent even though the current state is now split; a fresh authorization cannot re-upgrade it. The changed predicates and output pairs below are exact. `request_match` models the server-keyed request fingerprint; an ambiguous commit requires durable reconciliation before another attempt.
 
 | Case | Changed predicate | `decision` / `reason` |
 |---|---|---|
 | `fresh-authorization` | none | `commit` / `fresh-authorization` |
-| `replay` | `authorization_state:"consumed"`, `commit_state:"committed"` | `idempotent` / `replay` |
-| `request-conflict` | `authorization_state:"consumed"`, `request_match:false`, `commit_state:"committed"` | `conflict` / `request-conflict` |
+| `already-split` | `prior_state:"split"` | `deny` / `not-legacy` |
+| `replay` | `prior_state:"split"`, `authorization_state:"consumed"`, `commit_state:"committed"` | `idempotent` / `replay` |
+| `request-conflict` | `prior_state:"split"`, `authorization_state:"consumed"`, `request_match:false`, `commit_state:"committed"` | `conflict` / `request-conflict` |
 | `mfa-required` | `mfa_complete:false` | `deny` / `mfa-required` |
 | `ambiguous-commit` | `commit_state:"ambiguous"` | `reconcile` / `ambiguous-commit` |
 | `expired-authorization` | `authorization_state:"expired"` | `deny` / `expired-authorization` |
