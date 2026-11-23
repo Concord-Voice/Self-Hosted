@@ -1374,7 +1374,7 @@ describe('user-wide revocation sweep (VULN-159)', () => {
   type FakeSocket = {
     emit: ReturnType<typeof vi.fn>;
     disconnect: ReturnType<typeof vi.fn>;
-    data: { userId: string };
+    data: { userId: string; roomId?: string; voiceEnforcementSession?: object };
   };
   const STALE_ID = 'socket-stale';
 
@@ -1605,6 +1605,38 @@ describe('user-wide revocation sweep (VULN-159)', () => {
     expect(replaced.disconnect).not.toHaveBeenCalled();
     expect(replacement.disconnect, 'swept a new Socket under a reused id').not.toHaveBeenCalled();
     expect(fresh.disconnect, 'swept a socket that joined after the capture').not.toHaveBeenCalled();
+  });
+
+  // regression for Codex review on PR #360
+  it('a captured socket that moves to another room or session is not swept', async () => {
+    const { rm, getParticipant } = makeRoomManager({ socketId: SOCKET_ID });
+    const exact = fakeSocket(USER_ID);
+    const moved = fakeSocket(USER_ID);
+    moved.data.roomId = CHANNEL_ID;
+    const rejoined = fakeSocket(USER_ID);
+    rejoined.data.roomId = CHANNEL_ID;
+    rejoined.data.voiceEnforcementSession = { generation: 1 };
+    const stale = fakeSocket(USER_ID);
+    const { io, members } = makeSweepIO({
+      [SOCKET_ID]: exact,
+      'socket-moved': moved,
+      'socket-rejoined': rejoined,
+      [STALE_ID]: stale,
+    });
+    vi.mocked(rm.awaitNativeTermination).mockImplementation(async () => {
+      // While the exact teardown awaits, one socket leaves for another room and
+      // one stays in the adapter set but starts a new enforcement session.
+      members.delete('socket-moved');
+      moved.data.roomId = 'ch-elsewhere';
+      rejoined.data.voiceEnforcementSession = { generation: 2 };
+      getParticipant.mockReturnValue(undefined);
+    });
+
+    await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, REVOKED);
+
+    expect(stale.disconnect).toHaveBeenCalledWith(true);
+    expect(moved.disconnect, 'swept a socket that moved to another room').not.toHaveBeenCalled();
+    expect(rejoined.disconnect, 'swept a socket with a new session').not.toHaveBeenCalled();
   });
 });
 
