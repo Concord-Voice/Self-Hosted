@@ -97,7 +97,8 @@ In addition to those generated names, the following names and mappings are manda
 | `policy/descriptor-uniformity/<class>` for `split`, `legacy`, `unknown` | `policy` / `descriptor-uniformity` | accept with identical five outputs, fixed descriptor shape, and no direct fixture-UUID leakage |
 | `policy/legacy-continuation/<case>` for `eligible`, `forged-split`, `invalid-proof`, `existing-device-no-proof`, `stale-post-upgrade`, `wrong-account`, `wrong-realm`, `expired-proof`, `no-continuation`, `fresh-device-no-proof`, `fresh-device-invalid-proof` | `policy` / `legacy-continuation` | accept with the exact input predicate and output pair below |
 | `policy/legacy-continuation/matrix/<device>/<protocol>/<proof>/<realm>/<account>/<freshness>/<expiry>/<continuation>` for the complete Cartesian product defined below | `policy` / `legacy-continuation` | accept with the exact input and output pair from the independent truth table below |
-| `policy/upgrade-outcome/<case>` for `fresh-authorization`, `already-split`, `replay`, `request-conflict`, `mfa-required`, `ambiguous-commit`, `expired-authorization`, `missing-authorization` | `policy` / `upgrade-outcome` | accept with the exact input predicate and output pair below |
+| `policy/upgrade-outcome/<case>` for `fresh-authorization`, `fresh-request-conflict`, `already-split`, `replay`, `request-conflict`, `mfa-required`, `ambiguous-commit`, `expired-authorization`, `missing-authorization` | `policy` / `upgrade-outcome` | accept with the exact input predicate and output pair below |
+| `policy/upgrade-outcome/matrix/<prior>/<authorization>/<match>/<mfa>/<commit>` for the complete Cartesian product defined below | `policy` / `upgrade-outcome` | accept with the exact input and output pair from the independent truth table below |
 
 For the legacy-continuation matrix, start with `device_state:"existing"`, `account_protocol:"legacy"`, `authority_proof:"verified"`, both matches true, `freshness:"current"`, `not_expired:true`, and `control_plane_continuation:true`. Each row changes only the listed predicate; the output pair is exact. `forged-split` deliberately retains a control-plane continuation, which cannot override the split account's protocol. `fresh-device-no-proof` has no independently authenticated proof or trusted cached state.
 
@@ -122,6 +123,7 @@ For the upgrade-outcome matrix, start with `prior_state:"legacy"`, `authorizatio
 | Case | Changed predicate | `decision` / `reason` |
 |---|---|---|
 | `fresh-authorization` | none | `commit` / `fresh-authorization` |
+| `fresh-request-conflict` | `request_match:false` | `conflict` / `request-conflict` |
 | `already-split` | `prior_state:"split"` | `deny` / `not-legacy` |
 | `replay` | `prior_state:"split"`, `authorization_state:"consumed"`, `commit_state:"committed"` | `idempotent` / `replay` |
 | `request-conflict` | `prior_state:"split"`, `authorization_state:"consumed"`, `request_match:false`, `commit_state:"committed"` | `conflict` / `request-conflict` |
@@ -129,6 +131,8 @@ For the upgrade-outcome matrix, start with `prior_state:"legacy"`, `authorizatio
 | `ambiguous-commit` | `commit_state:"ambiguous"` | `reconcile` / `ambiguous-commit` |
 | `expired-authorization` | `authorization_state:"expired"` | `deny` / `expired-authorization` |
 | `missing-authorization` | `authorization_state:"absent"` | `deny` / `missing-authorization` |
+
+The independent coverage test also requires all 96 combinations of `prior_state` (`legacy`, `split`), `authorization_state` (`fresh`, `consumed`, `expired`, `absent`), `request_match` (`true`, `false`), `mfa_complete` (`true`, `false`), and `commit_state` (`none`, `committed`, `ambiguous`). Matrix names use those exact enum strings and `t` or `f` for each boolean slot, in input-key order. The source test expands this Cartesian product independently of `gen.go`, requires one complete case per combination, and checks its exact output pair using these first-applicable rules: an ambiguous commit returns `reconcile/ambiguous-commit`; incomplete MFA returns `deny/mfa-required`; a durable committed result returns `idempotent/replay` only for a split account with a consumed authorization and matching request, `conflict/request-conflict` for that same state with a mismatched request, and `reconcile/ambiguous-commit` otherwise; with no commit, a split account returns `deny/not-legacy`, a consumed authorization returns `reconcile/ambiguous-commit`, an expired or absent authorization returns `deny/expired-authorization` or `deny/missing-authorization`, a fresh mismatched request returns `conflict/request-conflict`, and only the remaining fresh matching legacy request with completed MFA returns `commit/fresh-authorization`. No other input combination may commit or return an idempotent completion.
 
 ## Consumer contract
 
