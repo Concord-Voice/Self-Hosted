@@ -39,34 +39,17 @@ const RECOVERY_COOLDOWN_MS = 5000;
 // Per-sender recovery state
 const recoveryState = new Map<string, { lastAttempt: number; inProgress: boolean }>();
 
-// #1878: typed-miss on-demand key requests. A FrameKeyMissError means the
-// receiver has no key for the frame's exact (sender, keyVersion, keyId), so we
-// ask main to fetch + derive it. Dedup'd per key with a short backoff (the key
-// may not be published yet — pending-404), capped so a permanent 403 (not a
-// member) can't loop forever. The success case is handled by the existing
-// keyframe-on-recovery once the key arrives and a frame decrypts.
-// #1885: one consolidated tracking map keyed (sender:keyVersion:keyId) →
-// { lastAttempt, attempts }. Two correctness properties this shape must hold:
-//   (1) Gitar #3 — a legitimately slow-published key (pending-404 where the CSK
-//       re-wrap takes longer than the burst window, e.g. 0–2s+ under load) must
-//       NOT be permanently blacked. We retry in bursts (FRAME_KEY_BURST_CAP at
-//       FRAME_KEY_BACKOFF_MS), then PAUSE; after FRAME_KEY_RETRY_RESET_MS of idle
-//       the burst resets so requests resume — recovery latency is bounded to the
-//       reset window, never infinite. (A true permanent 403 just re-requests at
-//       the low ~1/reset-window rate; the main-thread rateLimitedUntil/429 path
-//       throttles server amplification.)
-//   (2) security-reviewer LOW — the map is globally size-capped so a misbehaving
-//       in-room sender stamping a unique (keyVersion,keyId) per frame cannot grow
-//       it unboundedly; at capacity we evict the least-recently-TOUCHED entry
-//       (LRU — touches re-insert at the end), so an actively-requested legit key
-//       is never the eviction victim during a churn attack (Gitar #1885).
-// Exported for unit testing of the retry policy (burst cap / idle reset / size
-// cap). Not consumed by the Worker runtime, which only uses the side effects.
+// Typed key misses request an exact key while dropping the frame. Per-key
+// backoff preserves slow-published recovery; sender and global emission budgets
+// bound attacker-chosen keyId churn before any frame authenticates.
 export const frameKeyRequests = new Map<string, { lastAttempt: number; attempts: number }>();
+export const frameKeyRequestBudgets = new Map<string, { windowStart: number; attempts: number }>();
 const FRAME_KEY_BACKOFF_MS = 350; // min gap between requests for the same key
 const FRAME_KEY_BURST_CAP = 8; // requests per burst before pausing
 const FRAME_KEY_RETRY_RESET_MS = 15_000; // idle gap after which a burst resets (slow-key recovery)
 const FRAME_KEY_MAX_TRACKED = 512; // global size cap (DoS bound)
+const FRAME_KEY_GLOBAL_BURST_CAP = 64;
+const FRAME_KEY_SENDER_BUDGET_MAX_TRACKED = 2048;
 
 // Transform-bypass probe (2026-08-21): frames ENTERING each decrypt pipeline,
 // keyed by probeId (the consumer id from E2EETransformOptions). Counts every
@@ -129,6 +112,28 @@ self.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
       });
       break;
 
+    case 'setDecryptKeyVersion':
+      if (Number.isSafeInteger(msg.keyVersion) && msg.keyVersion > encryption.getKeyVersion()) {
+        encryption.setKeyVersion(msg.keyVersion);
+      }
+      break;
+
+    case 'installDecryptKey':
+      if (
+        !Number.isSafeInteger(msg.authoritativeKeyVersion) ||
+        msg.authoritativeKeyVersion <= 0 ||
+        msg.keyVersion !== msg.authoritativeKeyVersion ||
+        msg.authoritativeKeyVersion < encryption.getKeyVersion()
+      ) {
+        break;
+      }
+      if (msg.authoritativeKeyVersion > encryption.getKeyVersion()) {
+        encryption.setKeyVersion(msg.authoritativeKeyVersion);
+      }
+      encryption.addDecryptKeyDirectV3(msg.senderUserId, msg.keyVersion, msg.keyId, msg.key);
+      clearFrameKeyRequest(msg.senderUserId, msg.keyVersion, msg.keyId);
+      break;
+
     case 'rotateKeys':
       encryption
         .rotateKeys()
@@ -167,6 +172,7 @@ self.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
       encryption.destroy();
       recoveryState.clear();
       frameKeyRequests.clear();
+      frameKeyRequestBudgets.clear();
       decryptEnteredCounts.clear();
       log('debug', 'E2EE Worker: destroyed');
       break;
@@ -280,9 +286,13 @@ function attemptRecovery(senderUserId: string, dropCount: number): void {
  * (sender, keyVersion, keyId) with a short backoff and a hard retry cap. Fail-
  * closed: while we wait, the frame is dropped (never enqueued as ciphertext).
  */
-export function requestFrameKeyOnce(senderUserId: string, keyVersion: number, keyId: number): void {
+function assessFrameKeyRequest(
+  senderUserId: string,
+  keyVersion: number,
+  keyId: number,
+  now: number
+) {
   const k = `${senderUserId}:${keyVersion}:${keyId}`;
-  const now = Date.now();
   let st = frameKeyRequests.get(k);
 
   // Idle-reset: a long gap since the last request means either a slow-published
@@ -294,11 +304,32 @@ export function requestFrameKeyOnce(senderUserId: string, keyVersion: number, ke
   if (st) {
     if (st.attempts >= FRAME_KEY_BURST_CAP) return; // burst exhausted — wait for the reset window
     if (now - st.lastAttempt < FRAME_KEY_BACKOFF_MS) return; // rate-limit within the burst
-    // LRU touch: delete so the re-set below moves this key to the most-recent
-    // (last) position. That keeps the size-cap eviction least-recently-TOUCHED
-    // rather than FIFO oldest-inserted, so an actively-requested legit key is
-    // never the eviction victim while a sender churns unique keys (Gitar #1885).
-    frameKeyRequests.delete(k);
+  }
+
+  const senderBudget = frameKeyRequestBudgets.get(senderUserId);
+  const globalBudget = frameKeyRequestBudgets.get('*');
+  const senderAttempts =
+    senderBudget && now - senderBudget.windowStart < FRAME_KEY_RETRY_RESET_MS
+      ? senderBudget.attempts
+      : 0;
+  const globalAttempts =
+    globalBudget && now - globalBudget.windowStart < FRAME_KEY_RETRY_RESET_MS
+      ? globalBudget.attempts
+      : 0;
+  if (senderAttempts >= FRAME_KEY_BURST_CAP || globalAttempts >= FRAME_KEY_GLOBAL_BURST_CAP)
+    return null;
+
+  return { k, st, senderBudget, globalBudget, senderAttempts, globalAttempts };
+}
+
+function recordFrameKeyRequest(
+  senderUserId: string,
+  now: number,
+  assessed: NonNullable<ReturnType<typeof assessFrameKeyRequest>>
+): void {
+  const { k, st, senderBudget, globalBudget, senderAttempts, globalAttempts } = assessed;
+  if (st) {
+    frameKeyRequests.delete(k); // LRU touch only for an emitted request.
   } else if (frameKeyRequests.size >= FRAME_KEY_MAX_TRACKED) {
     // Global size cap (DoS bound): evict the least-recently-touched entry (the
     // first key, since touches re-insert at the end) before adding the new one.
@@ -307,6 +338,27 @@ export function requestFrameKeyOnce(senderUserId: string, keyVersion: number, ke
   }
 
   frameKeyRequests.set(k, { lastAttempt: now, attempts: (st?.attempts ?? 0) + 1 });
+  frameKeyRequestBudgets.delete(senderUserId);
+  frameKeyRequestBudgets.set(senderUserId, {
+    windowStart: senderAttempts ? (senderBudget?.windowStart ?? now) : now,
+    attempts: senderAttempts + 1,
+  });
+  frameKeyRequestBudgets.delete('*');
+  frameKeyRequestBudgets.set('*', {
+    windowStart: globalAttempts ? (globalBudget?.windowStart ?? now) : now,
+    attempts: globalAttempts + 1,
+  });
+  while (frameKeyRequestBudgets.size > FRAME_KEY_SENDER_BUDGET_MAX_TRACKED + 1) {
+    const oldest = frameKeyRequestBudgets.keys().next().value;
+    if (oldest !== undefined) frameKeyRequestBudgets.delete(oldest);
+  }
+}
+
+export function requestFrameKeyOnce(senderUserId: string, keyVersion: number, keyId: number): void {
+  const now = Date.now();
+  const assessed = assessFrameKeyRequest(senderUserId, keyVersion, keyId, now);
+  if (!assessed) return;
+  recordFrameKeyRequest(senderUserId, now, assessed);
   postToMain({ type: 'requestFrameKey', senderUserId, keyVersion, keyId });
 }
 

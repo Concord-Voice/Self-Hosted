@@ -801,16 +801,17 @@ const DM_CALL_ID_TOMBSTONE_MS = 60_000;
 /**
  * AES-256-GCM media-frame format advertised by clients at join time.
  * v1 legacy AES-128; v2 keyed by ratchet keyId; v3 (#1878) stamped the channel-key
- * version; v4 (#1895) added AV1 per-OBU encryption; v5 adds H.264 NAL-aware
- * suffix encryption. Active rooms require an exact version match.
+ * version; v4 added AV1 per-OBU encryption; v5 added H.264 NAL-aware suffix
+ * encryption; v6 authenticates all clear decoder bytes. Active rooms require
+ * an exact version match.
  */
-export const SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION = 5;
+export const SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION = 6;
 
 /**
  * Explicitly accepted rollout versions. Incompatible versions may each seed a
  * room, but they never coexist in one active room.
  */
-const ACCEPTED_MEDIA_FRAME_CRYPTO_VERSIONS = new Set<number>([3, 4, 5]);
+const ACCEPTED_MEDIA_FRAME_CRYPTO_VERSIONS = new Set<number>([3, 4, 5, 6]);
 
 /**
  * Thrown when a participant advertises a different version than an active
