@@ -74,6 +74,7 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 
 ### Security
 
+- **Recovery:** Email account recovery can now send a single-use recovery key that cannot be guessed, so wrong attempts by others can no longer block the account owner's email recovery. A client asks for one with `format: "token"` on `/auth/recovery/begin` and submits it as `token` on `/auth/recovery/verify-code`. Each account has one live recovery email at a time, valid until the resend wait ends (15 minutes for the first three emails in a day, then 60 minutes); a key request replaces a live 6-digit code ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
 - **Voice:** When a second session of the same account joins a DM or a channel, the replaced session's socket is now disconnected, and a user-wide revocation also disconnects that account's other sockets still in the room, so neither keeps receiving room events. Each account may hold at most 4 voice connections on each media-plane node, 200 of each node's 1,000 connection slots are kept for users who hold none, and a connection that stays outside a room for 30 seconds is released. `set-deafen` now requires the caller to be in the room, one member can move a room's camera layering gate at most twice in 30 seconds, media-plane log lines bound every logged value, and `consume` ids and handshake usernames are validated before use.
 - **WebSocket:** Updated the control plane's `gorilla/websocket` dependency to the upstream fix for predictable client frame mask keys (GO-2026-6278).
 - **Voice:** Admit media-frame v6 for a coordinated desktop upgrade. The shared client encryption module now authenticates clear codec framing, refuses unknown or older frames, and bounds missing-key work; active rooms still require one exact format version ([#384](https://github.com/Concord-Voice/Self-Hosted/pull/384)).
@@ -102,6 +103,10 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 - **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
 - **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
 - **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
+
+### Deprecated
+
+- **Recovery:** The 6-digit email recovery code is deprecated. It still works for clients that do not ask for a recovery key, and operators can turn it off with `RECOVERY_LEGACY_CODE=false` once every client accepts recovery keys ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
 
 ### Fixed
 
