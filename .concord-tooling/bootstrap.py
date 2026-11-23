@@ -62,7 +62,73 @@ def git(root, *args):
     ).stdout.strip()
 
 
-def verify_cache_directory(path, info):
+def trusted_darwin_acl_principal(lib, entry):
+    import ctypes as c
+
+    qualifier = lib.acl_get_qualifier(entry)
+    if not qualifier:
+        raise ValueError("cannot read macOS cache ACL principal")
+    try:
+        principal = c.string_at(qualifier, 16)
+    finally:
+        lib.acl_free(c.c_void_p(qualifier))
+    for uid in (0, os.getuid()):
+        identifier = (c.c_ubyte * 16)()
+        if lib.mbr_uid_to_uuid(c.c_uint(uid), identifier):
+            raise ValueError("cannot identify the macOS cache owner")
+        if principal == bytes(identifier):
+            return True
+    return False
+
+
+def check_darwin_acl_entry(lib, entry, allowed):
+    import ctypes as c
+
+    tag = c.c_int()
+    if lib.acl_get_tag_type(entry, c.byref(tag)) or tag.value not in (1, 2):
+        raise ValueError("unrecognized macOS cache ACL entry")
+    if tag.value == 2:  # ACL_EXTENDED_DENY
+        return
+    rights = c.c_uint64()
+    if lib.acl_get_permset_mask_np(entry, c.byref(rights)):
+        raise ValueError("cannot read macOS cache ACL permissions")
+    if rights.value & ~allowed and not trusted_darwin_acl_principal(lib, entry):
+        raise ValueError("untrusted macOS cache ACL grant")
+
+
+def check_darwin_cache_acl(fd, *, private=False):
+    """Validate the Darwin extended ACL on the open directory, including inherited grants."""
+    if sys.platform != "darwin":
+        return
+    import ctypes as c
+    import errno
+
+    lib = c.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    lib.acl_get_fd.restype = lib.acl_get_qualifier.restype = c.c_void_p
+    acl = lib.acl_get_fd(fd)
+    if not acl:
+        # acl_get_fd reports ENOENT for an open directory with no extended ACL.
+        if c.get_errno() == errno.ENOENT:
+            return
+        raise OSError(c.get_errno(), "cannot read macOS cache ACL")
+
+    # Darwin sys/acl.h read, search, readattr, readextattr, readsecurity and synchronize.
+    # A private boundary also protects traversal and listing of its contents.
+    allowed = 0 if private else sum(1 << bit for bit in (1, 3, 7, 9, 11, 20))
+    entry = c.c_void_p()
+    index = 0  # ACL_FIRST_ENTRY
+    try:
+        while lib.acl_get_entry(c.c_void_p(acl), index, c.byref(entry)) == 0:
+            index = -1  # ACL_NEXT_ENTRY
+            check_darwin_acl_entry(lib, entry, allowed)
+        # Darwin documents EINVAL after the last entry of a valid ACL.
+        if c.get_errno() != errno.EINVAL:
+            raise OSError(c.get_errno(), "cannot finish reading macOS cache ACL")
+    finally:
+        lib.acl_free(c.c_void_p(acl))
+
+
+def verify_cache_directory(path, info, *, private):
     if stat.S_ISLNK(info.st_mode):
         raise ToolingError("symlink refused in cache location; set XDG_CACHE_HOME to its physical absolute path")
     if not stat.S_ISDIR(info.st_mode):
@@ -70,6 +136,14 @@ def verify_cache_directory(path, info):
     sticky_root = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
     if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not sticky_root):
         raise ToolingError(f"untrusted cache ancestor: {path}")
+    if sys.platform == "darwin":
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if not os.path.samestat(info, os.fstat(fd)):
+                raise ToolingError("cache directory changed during validation")
+            check_darwin_cache_acl(fd, private=private)
+        finally:
+            os.close(fd)
 
 
 def validate_cache_parents(cache, *, create=False):
@@ -83,7 +157,7 @@ def validate_cache_parents(cache, *, create=False):
                 return path.parent
             path.mkdir(mode=0o700, exist_ok=True)
             info = path.lstat()
-        verify_cache_directory(path, info)
+        verify_cache_directory(path, info, private=path in (cache.parent, cache))
     return cache
 
 
