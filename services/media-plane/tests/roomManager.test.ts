@@ -1527,7 +1527,7 @@ describe('RoomManager', () => {
     });
 
     it('seeds the room media-frame crypto version from the first participant', async () => {
-      expect(SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION).toBe(5);
+      expect(SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION).toBe(6);
       const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
         username: 'alice',
       });
@@ -1654,10 +1654,11 @@ describe('RoomManager', () => {
       );
     });
 
-    it('accepts the explicit v3, v4, and v5 rollout set', () => {
+    it('accepts the explicit v3, v4, v5, and v6 rollout set', () => {
       expect(parseMediaFrameCryptoVersion(3)).toBe(3);
       expect(parseMediaFrameCryptoVersion(4)).toBe(4);
       expect(parseMediaFrameCryptoVersion(5)).toBe(5);
+      expect(parseMediaFrameCryptoVersion(6)).toBe(6);
     });
 
     it('rejects v2 outside the explicit rollout set', () => {
@@ -1767,6 +1768,86 @@ describe('RoomManager', () => {
       expect(room.mediaFrameCryptoVersion).toBe(5);
       expect(room.participants.has('u2')).toBe(false);
       expect(room.e2eeEpoch).toBe(epochBefore);
+    });
+
+    it('admits v5 and v6 rooms but rejects their exact-version mismatches in both directions', async () => {
+      await manager.joinRoom(
+        'v5-room',
+        'v5-owner',
+        'v5-owner-socket',
+        { username: 'v5-owner' },
+        undefined,
+        {
+          mediaFrameCryptoVersion: 5,
+          deferChannelPromotion: true,
+        }
+      );
+      promoteChannelParticipant(manager, 'v5-room', 'v5-owner', 'v5-owner-socket', {
+        identity: { username: 'v5-owner' },
+        entitlement: { ...FREE_MEDIA_ENTITLEMENT },
+        serverMuted: false,
+        serverDeafened: false,
+      });
+      await manager.joinRoom(
+        'v5-room',
+        'v6-joiner',
+        'v6-joiner-socket',
+        { username: 'v6-joiner' },
+        undefined,
+        {
+          mediaFrameCryptoVersion: 6,
+          deferChannelPromotion: true,
+        }
+      );
+      expect(() =>
+        promoteChannelParticipant(manager, 'v5-room', 'v6-joiner', 'v6-joiner-socket', {
+          identity: { username: 'v6-joiner' },
+          entitlement: { ...FREE_MEDIA_ENTITLEMENT },
+          serverMuted: false,
+          serverDeafened: false,
+        })
+      ).toThrow(
+        expect.objectContaining({ code: 'crypto_version_mismatch', roomVersion: 5, joinVersion: 6 })
+      );
+
+      await manager.joinRoom(
+        'v6-room',
+        'v6-owner',
+        'v6-owner-socket',
+        { username: 'v6-owner' },
+        undefined,
+        {
+          mediaFrameCryptoVersion: 6,
+          deferChannelPromotion: true,
+        }
+      );
+      promoteChannelParticipant(manager, 'v6-room', 'v6-owner', 'v6-owner-socket', {
+        identity: { username: 'v6-owner' },
+        entitlement: { ...FREE_MEDIA_ENTITLEMENT },
+        serverMuted: false,
+        serverDeafened: false,
+      });
+      await manager.joinRoom(
+        'v6-room',
+        'v5-joiner',
+        'v5-joiner-socket',
+        { username: 'v5-joiner' },
+        undefined,
+        {
+          mediaFrameCryptoVersion: 5,
+          deferChannelPromotion: true,
+        }
+      );
+      expect(() =>
+        promoteChannelParticipant(manager, 'v6-room', 'v5-joiner', 'v5-joiner-socket', {
+          identity: { username: 'v5-joiner' },
+          entitlement: { ...FREE_MEDIA_ENTITLEMENT },
+          serverMuted: false,
+          serverDeafened: false,
+        })
+      ).toThrow(
+        expect.objectContaining({ code: 'crypto_version_mismatch', roomVersion: 6, joinVersion: 5 })
+      );
     });
   });
 
@@ -5799,19 +5880,30 @@ describe('RoomManager', () => {
       let leaving!: Promise<void>;
       let leaveSettled = false;
       let returnProducer!: (producer: typeof orphan) => void;
-      const nativeProduce = new Promise<typeof orphan>((resolve) => { returnProducer = resolve; });
+      const nativeProduce = new Promise<typeof orphan>((resolve) => {
+        returnProducer = resolve;
+      });
       const produceStarted = new Promise<void>((resolve) => {
         participant.sendTransport!.produce = vi.fn().mockImplementationOnce(() => {
           leaving = manager.leaveRoom('room-1', 'u-1');
-          void leaving.then(() => { leaveSettled = true; });
+          void leaving.then(() => {
+            leaveSettled = true;
+          });
           resolve();
           return nativeProduce;
         });
       });
       const producing = manager.produce(
-        'room-1', 'u-1', sendTransport.id, 'audio', createRtpParameters() as any, 'mic'
+        'room-1',
+        'u-1',
+        sendTransport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
       );
-      const refusal = expect(producing).rejects.toThrow(/Participant left during producer creation/);
+      const refusal = expect(producing).rejects.toThrow(
+        /Participant left during producer creation/
+      );
       await produceStarted;
       expect(manager.getParticipant('room-1', 'u-1')).toBeUndefined();
       expect(leaveSettled).toBe(false);
@@ -5923,9 +6015,9 @@ describe('RoomManager', () => {
       expect(new Set(consumers.map((consumer) => consumer!.id)).size).toBe(
         MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT
       );
-      await expect(
-        manager.consume('room-1', 'u-2', producerId, transports[3].id)
-      ).rejects.toThrow('Per-producer consumer limit reached');
+      await expect(manager.consume('room-1', 'u-2', producerId, transports[3].id)).rejects.toThrow(
+        'Per-producer consumer limit reached'
+      );
     });
 
     it('Frames PiP: copies every active mic and camera producer', async () => {
@@ -5940,7 +6032,10 @@ describe('RoomManager', () => {
 
       for (const id of activeProducerIds.slice(1)) {
         publisher.producers.set(id, {
-          producer: createMockProducer({ id, kind: id.startsWith('mic') ? 'audio' : 'video' }) as any,
+          producer: createMockProducer({
+            id,
+            kind: id.startsWith('mic') ? 'audio' : 'video',
+          }) as any,
           source: id.startsWith('mic') ? 'mic' : 'camera',
           kind: id.startsWith('mic') ? 'audio' : 'video',
           policed: false,
@@ -5966,9 +6061,9 @@ describe('RoomManager', () => {
       for (const transport of transports.slice(0, MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT)) {
         await manager.consume('room-1', 'u-2', producerId, transport.id);
       }
-      await expect(
-        manager.consume('room-1', 'u-2', producerId, transports[3].id)
-      ).rejects.toThrow('Per-producer consumer limit reached');
+      await expect(manager.consume('room-1', 'u-2', producerId, transports[3].id)).rejects.toThrow(
+        'Per-producer consumer limit reached'
+      );
       expect(transports[3].consume).not.toHaveBeenCalled();
     });
 
@@ -5995,16 +6090,11 @@ describe('RoomManager', () => {
               );
           })
       );
-      const finalAllowedCopy = manager.consume(
-        'room-1',
-        'u-2',
-        producerId,
-        transports[2].id
-      );
+      const finalAllowedCopy = manager.consume('room-1', 'u-2', producerId, transports[2].id);
 
-      await expect(
-        manager.consume('room-1', 'u-2', producerId, transports[3].id)
-      ).rejects.toThrow('Per-producer consumer limit reached');
+      await expect(manager.consume('room-1', 'u-2', producerId, transports[3].id)).rejects.toThrow(
+        'Per-producer consumer limit reached'
+      );
       expect(transports[3].consume).not.toHaveBeenCalled();
       releaseFirst!();
       await expect(finalAllowedCopy).resolves.not.toBeNull();
@@ -6057,14 +6147,15 @@ describe('RoomManager', () => {
         });
         participant.consumers.set(seeded.id, seeded as any);
       }
-      participant.producerCopies.set('seeded-producer', MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT + 1);
+      participant.producerCopies.set(
+        'seeded-producer',
+        MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT + 1
+      );
 
       await expect(
         manager.consume('room-1', 'u-2', producerId, transports[0].id)
       ).resolves.not.toBeNull();
-      await expect(
-        manager.consume('room-1', 'u-2', producerId, transports[1].id)
-      ).rejects.toThrow(
+      await expect(manager.consume('room-1', 'u-2', producerId, transports[1].id)).rejects.toThrow(
         `Duplicate consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
       );
       expect(transports[1].consume).not.toHaveBeenCalled();
@@ -6147,7 +6238,9 @@ describe('RoomManager', () => {
       ).resolves.not.toBeNull();
       await expect(
         manager.consume('room-1', 'u-2', gateProducerId, transports[3].id)
-      ).rejects.toThrow(`Duplicate consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`);
+      ).rejects.toThrow(
+        `Duplicate consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
+      );
       expect(transports[3].consume).not.toHaveBeenCalled();
 
       releaseFirst!();
