@@ -67,10 +67,9 @@ def verify_cache_directory(path, info):
         raise ToolingError("symlink refused in cache location; set XDG_CACHE_HOME to its physical absolute path")
     if not stat.S_ISDIR(info.st_mode):
         raise ToolingError(f"cache ancestor is not a directory: {path}")
-    if hasattr(os, "getuid"):
-        sticky_root = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
-        if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not sticky_root):
-            raise ToolingError(f"untrusted cache ancestor: {path}")
+    sticky_root = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+    if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not sticky_root):
+        raise ToolingError(f"untrusted cache ancestor: {path}")
 
 
 def validate_cache_parents(cache, *, create=False):
@@ -89,6 +88,8 @@ def validate_cache_parents(cache, *, create=False):
 
 
 def cache_root():
+    if os.name != "posix" or not callable(getattr(os, "getuid", None)):
+        raise ToolingError("Windows checkouts require WSL. Run this command in WSL with a cache in your Linux home directory.")
     base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     if not base.is_absolute() or ".." in base.parts:
         raise ToolingError("XDG_CACHE_HOME must be a normalized absolute path")
@@ -104,11 +105,10 @@ def cache_root():
     except subprocess.CalledProcessError:
         pass
     validate_cache_parents(cache, create=True)
-    if hasattr(os, "getuid"):
-        for path in (cache.parent, cache):
-            info = path.stat()
-            if info.st_uid != os.getuid() or info.st_mode & 0o077:
-                raise ToolingError("tooling cache must be private to its owner (mode 0700)")
+    for path in (cache.parent, cache):
+        info = path.stat()
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ToolingError("tooling cache must be private to its owner (mode 0700)")
     return cache
 
 

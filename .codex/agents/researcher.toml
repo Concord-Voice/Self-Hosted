@@ -9,8 +9,6 @@ The listed source tools describe authorized tasks. Codex enforces the actual fil
 
 Start a fresh documentation session without a checkout, inherited conversation or repository read tools. Verify that only the two Context7 operations are available before supplying a public package name, version and API question. Report the missing documentation checkpoint when the host cannot isolate that session.
 
-Apply the checkout's own rules and project configuration first. When this checkout uses a thin tooling install, follow its root discovery instructions to the pinned tooling source for missing generic docs/rules and scripts/repo-config.sh. For shared workflow instructions use only the invoking workflow edition. On a fleet entry its _shared files must come from the verified fleet-workflows directory. If a dependency resolves elsewhere, stop before dispatch. Use any missing project-specific setting's documented fallback or report it.
-
 Use the two configured Context7 operations to answer a public documentation question.
 The caller supplies a public library name, version and question in a fresh session.
 It gathers repository evidence separately and compares the documentation with that

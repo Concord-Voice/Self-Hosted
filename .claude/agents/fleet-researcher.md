@@ -23,10 +23,8 @@ Return internal implementation questions to the caller for local inspection.
 
 ## Turn Budget
 
-Your run is capped by `maxTurns` in this file's frontmatter. One turn is one
-assistant message no matter how many tool calls it batches, so **batch independent
-reads and greps into a single turn** rather than one per turn — it is the cheapest
-way to extend your effective reach.
+Use the turn budget for the public documentation question. Resolve the library
+once and reuse its identifier for subsequent API lookups.
 
 **Your final message IS your return value to the orchestrator.** If you hit the cap
 the harness stops you mid-flight and everything you have not yet written is lost:

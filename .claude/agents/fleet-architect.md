@@ -87,10 +87,11 @@ decisions.
 ## Constraints
 
 - **You do not implement.** No production code. Spec, plan, and design docs only.
-- **Read the current dependency contract.** Before designing against any
-  third-party API, the Context7 docs discipline applies
-  (`.claude/skills/_shared/context7-docs-discipline.md`). An in-repo call site is
-  not a substitute for the current contract.
+- **Verify third-party APIs with current Context7 documentation.** Use the
+   cited documentation returned by the isolated researcher. If a source is
+   missing, give the caller the public library name, version and API question
+   for a fresh documentation session. Leave work that depends on that source
+   pending until the caller supplies the citation. Keep repository evidence here.
 - **Never weaken a security invariant to simplify a design.** If an invariant makes
   the design hard, say the design is hard.
 
