@@ -38,7 +38,7 @@
   ".codex/agents/test-writer.toml": "f27ab63df2b1e00dbc14079b8b066ea9ce22616f32e3dd26544177fccf53d111",
   ".codex/agents/ui-designer.toml": "1fbaaedd414d08b3cba3aca1bea885e5c83d86a4187fa3d73ce35b70342e89c0",
   ".codex/agents/ux-designer.toml": "e1758df8ec9f1c23cca2bb3c11c66d1ebe8d852382ab13b83568585db05ede9a",
-  ".concord-tooling/bootstrap.py": "219d7ec8e31b6298ea16a242d07e5aca66207ad9a4ed32a48a0988d162cccf4e",
-  ".concord-tooling/sources.json": "9f4144208e0358704ad800a3df76df40c945c530ab18539f0723547f3c223dcc",
+  ".concord-tooling/bootstrap.py": "f04c091342aae6c50355225384d1947eafdb35a16fb53df1a7d4b356e6cb7cdd",
+  ".concord-tooling/sources.json": "bc75cd8b85aa975b67300dfdb7ca44f867cf2d06d12cd8d4fdb74a5db358c19f",
   ".github/agents/code-reviewer.agent.md": "1600aabfedbd3bf153620ef64c39c6bb971f0ee10f8c5cc079fc859695ceb2a8"
 }

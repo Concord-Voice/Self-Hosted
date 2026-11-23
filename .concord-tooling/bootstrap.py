@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -61,25 +62,48 @@ def git(root, *args):
     ).stdout.strip()
 
 
+def verify_cache_directory(path, info):
+    if stat.S_ISLNK(info.st_mode):
+        raise ToolingError("symlink refused in cache location; set XDG_CACHE_HOME to its physical absolute path")
+    if not stat.S_ISDIR(info.st_mode):
+        raise ToolingError(f"cache ancestor is not a directory: {path}")
+    if hasattr(os, "getuid"):
+        sticky_root = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+        if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not sticky_root):
+            raise ToolingError(f"untrusted cache ancestor: {path}")
+
+
+def validate_cache_parents(cache, *, create=False):
+    # Walk from the root. A verified ancestor cannot be replaced by another user.
+    # A root-owned sticky temp directory also protects its users' existing entries.
+    for path in (*reversed(cache.parents), cache):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if not create:
+                return path.parent
+            path.mkdir(mode=0o700, exist_ok=True)
+            info = path.lstat()
+        verify_cache_directory(path, info)
+    return cache
+
+
 def cache_root():
     base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    if not base.is_absolute():
-        raise ToolingError("XDG_CACHE_HOME must be an absolute path")
+    if not base.is_absolute() or ".." in base.parts:
+        raise ToolingError("XDG_CACHE_HOME must be a normalized absolute path")
     cache = base / "concord-voice" / "tooling"
-    if any(path.is_symlink() for path in (*cache.parents, cache)):
-        raise ToolingError("symlink refused in cache location; set XDG_CACHE_HOME to its physical absolute path")
+    ancestor = validate_cache_parents(cache)
     if inside(cache.resolve(), PROJECT.resolve()):
         raise ToolingError("tooling cache must be outside the checkout")
     if shutil.which("git") is None:
         raise ToolingError("Git is required to verify tooling checkouts")
-    ancestor = next(p for p in (cache, *cache.parents) if p.exists())
     try:
         git(ancestor, "rev-parse", "--git-dir")
         raise ToolingError("set XDG_CACHE_HOME to a private directory outside Git worktrees and Git directories")
     except subprocess.CalledProcessError:
         pass
-    for path in (base, cache.parent, cache):
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    validate_cache_parents(cache, create=True)
     if hasattr(os, "getuid"):
         for path in (cache.parent, cache):
             info = path.stat()
