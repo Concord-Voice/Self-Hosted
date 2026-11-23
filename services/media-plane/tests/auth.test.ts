@@ -147,6 +147,47 @@ describe('createAuthMiddleware', () => {
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Username required' }));
   });
 
+  // VULN-147: the handshake username is client text that reached the log
+  // unbounded. The bound runs before JWT verification, in its own branch.
+  it('rejects a 65-character username with Username too long before JWT verification', async () => {
+    const { logger } = await import('../src/lib/logger.js');
+    const verify = vi.spyOn(jwt, 'verify');
+    const emit = vi.fn();
+    const username = 'u'.repeat(65);
+    // A token that verifies, so only the username bound can refuse this socket.
+    const token = signToken({ user_id: TEST_USER_ID });
+    const socket = createMockSocket({ token, username });
+    const next = vi.fn();
+
+    createAuthMiddleware(emit)(socket as any, next);
+
+    expect(next).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: 'Username too long' })
+    );
+    expect(verify).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ outcome: 'denied' }));
+    expect(logger.warn).toHaveBeenCalledWith('Socket connection rejected: username too long', {
+      socketId: 'socket-123',
+    });
+    for (const call of vi.mocked(logger.warn).mock.calls) {
+      expect(JSON.stringify(call)).not.toContain(username);
+    }
+    expect(socket.data.username).toBeUndefined();
+    verify.mockRestore();
+  });
+
+  it('accepts a 64-character username', () => {
+    const username = 'u'.repeat(64);
+    const token = signToken({ user_id: TEST_USER_ID });
+    const socket = createMockSocket({ token, username });
+    const next = vi.fn();
+
+    middleware(socket as any, next);
+
+    expect(next).toHaveBeenCalledExactlyOnceWith();
+    expect(socket.data.username).toBe(username);
+  });
+
   it('populates socket.data on valid JWT', () => {
     const token = signToken({ user_id: TEST_USER_ID });
     const socket = createMockSocket({

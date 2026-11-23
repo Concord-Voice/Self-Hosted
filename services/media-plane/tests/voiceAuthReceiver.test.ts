@@ -63,7 +63,7 @@ let iterator: ReturnType<typeof vi.fn>;
 async function install(hooks = adapters(), localBoot = boot) {
   const roomManager = manager();
   const legacyHealth = vi.fn(async () => {});
-  const handler = createVoiceEnforcementSessionEjectionHandler(roomManager, { sockets: { sockets: new Map() } }, secret.toString(), localBoot, legacyHealth, hooks);
+  const handler = createVoiceEnforcementSessionEjectionHandler(roomManager, { sockets: { sockets: new Map(), adapter: { rooms: new Map() } } }, secret.toString(), localBoot, legacyHealth, hooks);
   await service.connect();
   expect(service.subscribeRequest(subject, handler, { required: true })).toBe(true);
   const options = transport.subscribe.mock.calls.at(-1)?.[1] as { callback: Callback };

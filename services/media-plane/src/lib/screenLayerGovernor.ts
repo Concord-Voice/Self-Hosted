@@ -1,10 +1,11 @@
-import type { StoredCameraLayerDemand } from './cameraLayerGovernor.js';
+import type { ViewerCameraLayerDemand } from './cameraLayerGovernor.js';
 
 /**
  * Screen layer demand carries BOTH the owning viewer's `userId` and the watched
- * screen producer's owner `sharerUserId`, on top of the source-agnostic
- * `StoredCameraLayerDemand` shape (consumer id, visibility, smallest-sufficient
- * spatial layer, pressure flag).
+ * screen producer's owner `sharerUserId`. The viewer half is the shared
+ * `ViewerCameraLayerDemand` shape (consumer id, owning viewer, visibility,
+ * smallest-sufficient spatial layer, pressure flag), which the camera gate
+ * counts the same way (VULN-158).
  *
  * The `userId` (viewer) is load-bearing for the gate: it must count DISTINCT
  * viewers, not consumer entries. A single participant can own multiple screen
@@ -23,8 +24,7 @@ import type { StoredCameraLayerDemand } from './cameraLayerGovernor.js';
  * per SHARER (not per producerId) so it is stable across the sharer's
  * reproduce (codec/layer swap), which mints a new producerId.
  */
-export interface StoredScreenLayerDemand extends StoredCameraLayerDemand {
-  userId: string;
+export interface StoredScreenLayerDemand extends ViewerCameraLayerDemand {
   sharerUserId: string;
 }
 

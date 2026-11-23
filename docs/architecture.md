@@ -61,6 +61,7 @@ Concord Voice is a distributed real-time communications platform with three serv
 
 - WebRTC SFU for voice and video (Opus codec, 7 quality tiers)
 - Socket.IO signaling for transport negotiation and validated `refresh-auth` token renewal
+- When a second session of the same account joins a channel or a DM, the media plane disconnects the replaced session's socket. A media socket that stays outside a room for 30 seconds is disconnected
 - `RoomManager` is authoritative for produce/consume/transport lifecycle
 - Frames are E2EE _above_ the SFU (see [Media E2EE](#media-e2ee-frame-encryption)). The SFU forwards opaque RTP
 - NATS integration for participant state events to control plane
