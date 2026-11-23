@@ -744,12 +744,9 @@ function disconnectCapturedSocket(
   socket.disconnect(true);
 }
 
-type SweepSocket = NonNullable<ReturnType<ForceDisconnectIO['sockets']['sockets']['get']>>;
 type SweepTarget = {
   socketId: string;
-  socket: SweepSocket;
-  roomId: unknown;
-  session: unknown;
+  socket: NonNullable<ReturnType<ForceDisconnectIO['sockets']['sockets']['get']>>;
 };
 
 /**
@@ -780,12 +777,7 @@ function captureSweepTargets(
     if (exactSocketIds.has(socketId)) continue;
     const socket = io.sockets.sockets.get(socketId);
     if (!socket || socket.data?.userId !== userId) continue;
-    targets.push({
-      socketId,
-      socket,
-      roomId: socket.data?.roomId,
-      session: socket.data?.voiceEnforcementSession,
-    });
+    targets.push({ socketId, socket });
   }
   return targets;
 }
@@ -803,17 +795,13 @@ function sweepStaleSockets(
   userId: string,
   targets: readonly SweepTarget[]
 ): void {
-  for (const { socketId, socket, roomId, session } of targets) {
+  for (const { socketId, socket } of targets) {
     if (io.sockets.sockets.get(socketId) !== socket) continue;
-    // A socket that left this room, or moved to another room or session during
-    // the teardown awaits, now belongs to a different call: leave it alone.
-    if (
-      !io.sockets.adapter.rooms.get(channelId)?.has(socketId) ||
-      socket.data?.roomId !== roomId ||
-      socket.data?.voiceEnforcementSession !== session
-    ) {
-      continue;
-    }
+    // A socket that left this room during the teardown awaits no longer
+    // receives its broadcasts and may now serve another call: leave it alone.
+    // Membership is the only skip signal: a socket still in the room keeps
+    // receiving its events whatever its session now says, so it is swept.
+    if (!io.sockets.adapter.rooms.get(channelId)?.has(socketId)) continue;
     if (
       roomManager.getParticipant(channelId, userId)?.socketId === socketId ||
       roomManager.getProvisionalParticipant(channelId, userId)?.socketId === socketId

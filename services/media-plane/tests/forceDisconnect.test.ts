@@ -1608,7 +1608,7 @@ describe('user-wide revocation sweep (VULN-159)', () => {
   });
 
   // regression for Codex review on PR #360
-  it('a captured socket that moves to another room or session is not swept', async () => {
+  it('a captured socket that leaves the room is not swept; one that stays is', async () => {
     const { rm, getParticipant } = makeRoomManager({ socketId: SOCKET_ID });
     const exact = fakeSocket(USER_ID);
     const moved = fakeSocket(USER_ID);
@@ -1625,7 +1625,8 @@ describe('user-wide revocation sweep (VULN-159)', () => {
     });
     vi.mocked(rm.awaitNativeTermination).mockImplementation(async () => {
       // While the exact teardown awaits, one socket leaves for another room and
-      // one stays in the adapter set but starts a new enforcement session.
+      // one stays in the adapter set but starts a new enforcement session. The
+      // one still in the room keeps receiving its broadcasts, so it is swept.
       members.delete('socket-moved');
       moved.data.roomId = 'ch-elsewhere';
       rejoined.data.voiceEnforcementSession = { generation: 2 };
@@ -1636,7 +1637,10 @@ describe('user-wide revocation sweep (VULN-159)', () => {
 
     expect(stale.disconnect).toHaveBeenCalledWith(true);
     expect(moved.disconnect, 'swept a socket that moved to another room').not.toHaveBeenCalled();
-    expect(rejoined.disconnect, 'swept a socket with a new session').not.toHaveBeenCalled();
+    expect(
+      rejoined.disconnect,
+      'left a socket in the revoked room because its session changed'
+    ).toHaveBeenCalledWith(true);
   });
 });
 
