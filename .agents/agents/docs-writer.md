@@ -90,15 +90,9 @@ Triggered by DRIFT-HOOK findings from docs-reviewer's Drift-Hook Scan section. C
 2. Extract `script`, `args` (default `[]`), `auto_apply` (default `false`) from the entry.
 3. Branch on `auto_apply`:
 
-   **`auto_apply: true`** — script is deterministic and idempotent. Capture the changed-file set before and after running it, then stage only the paths newly changed by that script:
-   ```bash
-   before="$(git status --porcelain)"
-   <script> <args...>
-   after="$(git status --porcelain)"
-   ```
-   If exit code is 0, compare the `before` and `after` snapshots, identify the files whose porcelain status was added or changed by the script run, then `git add <each-file>` for only those paths.
+   **`auto_apply: true`** — use an isolated, trusted checkout with a clean index and worktree and no concurrent writers. Check `git status --porcelain --untracked-files=all` before running the reviewed remediation command. If the check fails, shows any changes, or the configuration or script comes from an untrusted PR, defer the refresh and state why.
 
-   Do NOT rely on `git diff --name-only` — in a batch run where earlier modes have already staged changes (or if other unstaged edits exist in the working tree), `git diff --name-only` is either incomplete (misses files already in the index) or over-broad (includes unrelated edits), and will stage the wrong set of paths.
+   After a successful refresh inspect the changed paths and the complete diff. Stage only the expected documentation outputs, using `git add -- <path>` for each verified path. If any output falls outside the intended refresh, leave the changes for inspection and report the unexpected paths.
 
    Emit: `"Mode 5 Refresh applied: <hook_id> → <script> <args>"`.
 

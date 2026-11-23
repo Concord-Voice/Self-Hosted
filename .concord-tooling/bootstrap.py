@@ -47,7 +47,7 @@ def git_env():
 def git(root, *args):
     env = git_env()
     if args[0] == "fetch":
-        # Keep existing identity files, host aliases and credential helpers.
+        # Git may rewrite the HTTPS source to SSH through a configured insteadOf rule.
         ssh = env.get("GIT_SSH_COMMAND")
         if not ssh:
             config = subprocess.run(["git", "-C", str(root), "config", "--get", "core.sshCommand"],
@@ -67,13 +67,15 @@ def cache_root():
         raise ToolingError("XDG_CACHE_HOME must be an absolute path")
     cache = base / "concord-voice" / "tooling"
     if any(path.is_symlink() for path in (*cache.parents, cache)):
-        raise ToolingError("symlink refused in cache location; use its physical absolute path")
+        raise ToolingError("symlink refused in cache location; set XDG_CACHE_HOME to its physical absolute path")
     if inside(cache.resolve(), PROJECT.resolve()):
         raise ToolingError("tooling cache must be outside the checkout")
+    if shutil.which("git") is None:
+        raise ToolingError("Git is required to verify tooling checkouts")
     ancestor = next(p for p in (cache, *cache.parents) if p.exists())
     try:
         git(ancestor, "rev-parse", "--git-dir")
-        raise ToolingError("tooling cache must be outside Git worktrees and Git directories")
+        raise ToolingError("set XDG_CACHE_HOME to a private directory outside Git worktrees and Git directories")
     except subprocess.CalledProcessError:
         pass
     for path in (base, cache.parent, cache):
@@ -88,14 +90,14 @@ def cache_root():
 
 def verified_checkout(directory, revision):
     if directory.is_symlink() or (directory / ".git").is_symlink() or not (directory / ".git").is_dir():
-        raise ToolingError("invalid tooling cache entry; choose a fresh private cache directory")
+        raise ToolingError(f"invalid tooling cache entry at {directory}; choose a fresh private cache directory")
     try:
         head = git(directory, "rev-parse", "--verify", "HEAD")
         dirty = git(directory, "status", "--porcelain", "--untracked-files=all", "--ignored")
     except subprocess.CalledProcessError:
-        raise ToolingError("cannot verify cached tooling checkout") from None
+        raise ToolingError(f"cannot verify cached tooling checkout at {directory}; choose a fresh private cache directory") from None
     if head != revision or dirty:
-        raise ToolingError("cached tooling checkout changed; choose a fresh private cache directory")
+        raise ToolingError(f"cached tooling checkout changed at {directory}; choose a fresh private cache directory")
     return directory
 
 
@@ -121,6 +123,8 @@ def acquire(cache, repo, revision, offline):
                 "https://github.com/Concord-Voice/" + repo + ".git", revision)
         except subprocess.CalledProcessError:
             raise SourceUnavailable("pinned revision unavailable with current Git access") from None
+        # Keep cached scripts byte-identical to the reviewed commit on Windows as well.
+        git(staging, "config", "--local", "core.autocrlf", "false")
         git(staging, "checkout", "--quiet", "--detach", "FETCH_HEAD")
         verified_checkout(staging, revision)
         try:
@@ -275,11 +279,15 @@ def install_public(platform, public):
     installer = public / "install.sh"
     if installer.is_symlink() or not installer.is_file():
         raise ToolingError("pinned public native installer is missing")
+    expected_blob = git(public, "rev-parse", "HEAD:install.sh")
+    if git(public, "hash-object", "--no-filters", "--", "install.sh") != expected_blob:
+        raise ToolingError("public installer differs from the pinned Git blob; select a fresh private XDG_CACHE_HOME")
     # Older pins have no narrow profile mode. Never hand them an unknown flag.
-    if "--agents-only" not in installer.read_text():
+    if "--agents-only" not in installer.read_text(encoding="utf-8"):
         raise ToolingError("public pin lacks --agents-only support; update to a reviewed native installer")
     subprocess.run(["bash", "--", str(installer), native_platform, "--agents-only", "--project", str(PROJECT)],
-                   cwd=PROJECT, env=git_env(), check=True)
+                   cwd=PROJECT, env={k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR", "SystemRoot")
+                                     if k in os.environ}, stdin=subprocess.DEVNULL, check=True)
 
 
 CAPABILITY_CHECKS = {

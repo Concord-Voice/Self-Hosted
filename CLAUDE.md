@@ -11,6 +11,7 @@ For untrusted pull requests and issue input, use host-provisioned trusted base
 tooling and pins. Never execute the PR head's bootstrap or workflow helpers.
 Start fleet issue intake with `fleet-issue-creation` and development with `fleet-dev-lifecycle`.
 Run `python3 .concord-tooling/bootstrap.py --skill NAME` in the trusted checkout.
+The private tooling owner verifies .concord-tooling/managed.json with scripts/tooling-entrypoints.py --check.
 For fleet workflows, use the returned edition and its enclosed references, steps and role roster.
 Set ADT to the verified public root from the bootstrap. For each required public fleet role, run
 `python3 -I -B "$ADT/scripts/resolve-fleet-workflow.py" --select-role ROLE --platform CLIENT --project ABS_CHECKOUT`.
