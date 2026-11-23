@@ -319,11 +319,19 @@ export interface Participant {
    */
   consumersByKey: Map<string, string>;
   /**
-   * Consume reservations in flight (#2032), keyed like `consumersByKey` with
-   * producerId as the value. Closes both the dedupe and quota windows before
-   * `await recvTransport.consume(...)` commits the consumer.
+   * Keys with a `consume()` in flight (#2032). Closes both the dedupe and quota
+   * windows between the index read and the `await recvTransport.consume(...)`
+   * that commits it.
    */
-  pendingConsumeKeys: Map<string, string>;
+  pendingConsumeKeys: Set<string>;
+  /**
+   * Live consumer count per producerId. `consumers.size - producerCopies.size`
+   * is the participant's committed duplicate count, so the duplicate budget is
+   * checked in O(1). Updated wherever `consumers` gains or loses an entry.
+   */
+  producerCopies: Map<string, number>;
+  /** Subset of `pendingConsumeKeys` reserved as duplicates of a held producer. */
+  pendingDuplicateKeys: Set<string>;
   // ── Per-user media entitlement (#1300) ─────────────────────────────────
   /**
    * Subscription tier label — server-authoritative (#1300, never
@@ -678,20 +686,35 @@ const PARTICIPANT_PRODUCER_LIMITS: Partial<Record<MediaSource, number>> = {
 export const MAX_RECV_TRANSPORTS_PER_PARTICIPANT = 4;
 
 /**
- * Cross-transport duplicate allowance. Each secondary receive transport may
- * duplicate one producer for a PiP window, but a participant cannot clone every
- * room producer onto every transport and multiply SFU egress fourfold.
+ * Per-producer copy allowance. The Desktop main window holds one copy of each
+ * producer (audio and video on separate receive transports) and a live PiP
+ * window holds a second. The third covers a PiP transport whose best-effort
+ * close is still in flight when the window reopens. A fourth copy, the
+ * clone-every-producer-onto-every-transport shape, is refused.
+ */
+export const MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT =
+  MAX_RECV_TRANSPORTS_PER_PARTICIPANT - 1;
+
+/** Receive transports left for PiP windows after the main window's audio and video pair. */
+const PIP_RECV_TRANSPORTS_PER_PARTICIPANT = MAX_RECV_TRANSPORTS_PER_PARTICIPANT - 2;
+
+/**
+ * Participant-wide duplicate budget: consumers beyond the first of each
+ * producer. Desktop has one Frames PiP window (a singleton) that copies every
+ * mic and camera, and each other PiP transport is a screen PiP that copies one
+ * screen. The budget is that topology, so a participant cannot spend copies
+ * across every producer to multiply SFU egress.
  */
 export const MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT =
-  MAX_RECV_TRANSPORTS_PER_PARTICIPANT - 1;
+  MAX_SERVER_VOICE_PARTICIPANTS +
+  ABSOLUTE_VIDEO_PUBLISHER_CEILING +
+  (PIP_RECV_TRANSPORTS_PER_PARTICIPANT - 1);
 
 /**
  * Absolute participant consumer ceiling. A maximally populated channel can
  * carry one mic per participant, every room-bounded camera and screen, one
- * screen-audio producer per screen, and one PiP duplicate on each secondary
- * receive transport. The cap therefore preserves every structurally legitimate
- * primary consumer while bounding mediasoup consumer state independently of
- * room producer count.
+ * screen-audio producer per screen, and the duplicate budget. It bounds
+ * mediasoup consumer state independently of room producer count.
  */
 export const MAX_CONSUMERS_PER_PARTICIPANT =
   MAX_SERVER_VOICE_PARTICIPANTS +
@@ -2502,7 +2525,9 @@ export class RoomManager {
       producers: new Map(),
       consumers: new Map(),
       consumersByKey: new Map(),
-      pendingConsumeKeys: new Map(),
+      pendingConsumeKeys: new Set(),
+      producerCopies: new Map(),
+      pendingDuplicateKeys: new Set(),
       rtpCapabilities: rtpCapabilities ?? null,
       joinedAt: new Date(),
       serverMuted: false,
@@ -3058,6 +3083,7 @@ export class RoomManager {
       if (!consumer.closed) consumer.close();
     }
     participant.consumers.clear();
+    participant.producerCopies.clear();
     // Fourth consumer-removal convergence point (#2032): every consumer just
     // went away, so the whole dedupe index goes with them.
     participant.consumersByKey.clear();
@@ -4531,6 +4557,25 @@ export class RoomManager {
     return this.runOwnedMediaOperation(roomId, consumerUserId, () => this.consumeOwned(roomId, consumerUserId, producerId, transportId));
   }
 
+  private ensureProducerOpenDuringConsume(producer: Producer, consumer: Consumer): void {
+    if (producer.closed) {
+      consumer.close();
+      throw new Error('Producer closed during consume');
+    }
+  }
+
+  private releasePendingConsumeReservation(
+    participant: Participant,
+    key: string,
+    producerId: string
+  ): void {
+    const wasPendingDuplicate = participant.pendingDuplicateKeys.delete(key);
+    participant.pendingConsumeKeys.delete(key);
+    if (!wasPendingDuplicate && !participant.producerCopies.has(producerId)) {
+      this.promotePendingConsumerToPrimary(participant, producerId);
+    }
+  }
+
   private async consumeOwned(
     roomId: string,
     consumerUserId: string,
@@ -4634,10 +4679,31 @@ export class RoomManager {
         if (!newConsumer.closed) newConsumer.close();
         throw new Error('Receive transport changed during consume');
       }
+      this.ensureProducerOpenDuringConsume(producerEntry.producer, newConsumer);
       consumer.consumers.set(newConsumer.id, newConsumer);
       consumer.consumersByKey.set(key, newConsumer.id);
+      consumer.producerCopies.set(producerId, (consumer.producerCopies.get(producerId) ?? 0) + 1);
+      this.markPendingConsumersDuplicate(consumer, producerId);
+      // Register cleanup before the awaits below so a close during priority or
+      // layer setup also releases the per-producer copy reservation.
+      newConsumer.on('transportclose', () => {
+        this.releaseConsumerEntry(consumer, newConsumer.id, producerId);
+        consumer.consumersByKey.delete(key);
+        room.lastNPausedConsumers.delete(newConsumer.id);
+        this.clearCameraLayerDemand(room, newConsumer.id);
+        this.clearScreenLayerDemand(room, newConsumer.id);
+      });
+      newConsumer.on('producerclose', () => {
+        this.releaseConsumerEntry(consumer, newConsumer.id, producerId);
+        consumer.consumersByKey.delete(key);
+        room.lastNPausedConsumers.delete(newConsumer.id);
+        // The publisher closed its producer, so its owner caused this removal
+        // (Security#176), not the viewer whose demand it was.
+        this.clearCameraLayerDemand(room, newConsumer.id, producerUserId);
+        this.clearScreenLayerDemand(room, newConsumer.id);
+      });
     } finally {
-      consumer.pendingConsumeKeys.delete(key);
+      this.releasePendingConsumeReservation(consumer, key, producerId);
     }
 
     // Per-consumer priority (#1542): audio > screenshare > webcam so the SFU
@@ -4678,24 +4744,6 @@ export class RoomManager {
     ) {
       room.lastNPausedConsumers.add(newConsumer.id);
     }
-
-    // Clean up on close
-    newConsumer.on('transportclose', () => {
-      consumer.consumers.delete(newConsumer.id);
-      consumer.consumersByKey.delete(key);
-      room.lastNPausedConsumers.delete(newConsumer.id);
-      this.clearCameraLayerDemand(room, newConsumer.id);
-      this.clearScreenLayerDemand(room, newConsumer.id);
-    });
-    newConsumer.on('producerclose', () => {
-      consumer.consumers.delete(newConsumer.id);
-      consumer.consumersByKey.delete(key);
-      room.lastNPausedConsumers.delete(newConsumer.id);
-      // The publisher closed its producer, so its owner caused this removal
-      // (Security#176), not the viewer whose demand it was.
-      this.clearCameraLayerDemand(room, newConsumer.id, producerUserId);
-      this.clearScreenLayerDemand(room, newConsumer.id);
-    });
 
     logger.info('Consumer created with transport state', {
       consumerId: newConsumer.id,
@@ -4885,7 +4933,7 @@ export class RoomManager {
     if (!consumer) return false;
 
     if (!consumer.closed) consumer.close();
-    participant.consumers.delete(consumerId);
+    this.releaseConsumerEntry(participant, consumerId, consumer.producerId);
     // Explicit close does NOT fire the consumer's transportclose/producerclose
     // handlers, so clean up the last-N guard set here too (else the entry leaks).
     room.lastNPausedConsumers.delete(consumerId);
@@ -6253,9 +6301,10 @@ export class RoomManager {
   }
 
   /**
-   * Atomically reserve participant-wide consumer and duplicate-egress capacity.
-   * Committed state is derived from live consumers; only the one-await-wide
-   * pending delta is tracked explicitly and released by `consume`'s `finally`.
+   * Atomically reserve participant-wide, per-producer and duplicate capacity.
+   * Committed state is the live `consumers` map (every close path deletes from
+   * it); only the one-await-wide pending delta is tracked explicitly and
+   * released by `consume`'s `finally`. Every check is O(receive transports).
    */
   private reserveConsumerSlot(
     participant: Participant,
@@ -6266,38 +6315,72 @@ export class RoomManager {
       throw new Error('consume_in_progress');
     }
 
-    let liveAndPending = 0;
-    const representedProducers = new Set<string>();
-
-    for (const [, existing] of participant.consumers) {
-      if (existing.closed) continue;
-      liveAndPending += 1;
-      const appData = existing.appData as { producerId?: unknown } | undefined;
-      if (typeof appData?.producerId !== 'string' || appData.producerId.length === 0) {
-        throw new Error('Consumer accounting state invalid');
-      }
-      representedProducers.add(appData.producerId);
-    }
-
-    for (const pendingProducerId of participant.pendingConsumeKeys.values()) {
-      liveAndPending += 1;
-      representedProducers.add(pendingProducerId);
-    }
-
-    const duplicates = liveAndPending - representedProducers.size;
-    if (liveAndPending >= MAX_CONSUMERS_PER_PARTICIPANT) {
+    if (
+      participant.consumers.size + participant.pendingConsumeKeys.size >=
+      MAX_CONSUMERS_PER_PARTICIPANT
+    ) {
       throw new Error(`Consumer limit reached (max ${MAX_CONSUMERS_PER_PARTICIPANT})`);
     }
-    if (
-      representedProducers.has(producerId) &&
-      duplicates >= MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT
-    ) {
+
+    let copies = 0;
+    for (const transportId of participant.recvTransports.keys()) {
+      const copyKey = consumerKey(producerId, transportId);
+      if (
+        participant.pendingConsumeKeys.has(copyKey) ||
+        this.resolveExistingConsumer(participant, copyKey)
+      ) {
+        copies += 1;
+      }
+    }
+    if (copies >= MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT) {
       throw new Error(
-        `Secondary consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
+        `Per-producer consumer limit reached (max ${MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT})`
       );
     }
 
-    participant.pendingConsumeKeys.set(key, producerId);
+    const isDuplicate = copies > 0;
+    if (
+      isDuplicate &&
+      participant.consumers.size -
+        participant.producerCopies.size +
+        participant.pendingDuplicateKeys.size >=
+        MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT
+    ) {
+      throw new Error(
+        `Duplicate consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
+      );
+    }
+
+    participant.pendingConsumeKeys.add(key);
+    if (isDuplicate) participant.pendingDuplicateKeys.add(key);
+  }
+
+  /** Remove one committed consumer and its `producerCopies` count, once. */
+  private releaseConsumerEntry(participant: Participant, consumerId: string, producerId: string): void {
+    if (!participant.consumers.delete(consumerId)) return;
+    const copies = participant.producerCopies.get(producerId) ?? 0;
+    if (copies <= 1) {
+      participant.producerCopies.delete(producerId);
+      this.promotePendingConsumerToPrimary(participant, producerId);
+    }
+    else participant.producerCopies.set(producerId, copies - 1);
+  }
+
+  /** A committed copy makes every still-pending copy of that producer a duplicate. */
+  private markPendingConsumersDuplicate(participant: Participant, producerId: string): void {
+    for (const transportId of participant.recvTransports.keys()) {
+      const key = consumerKey(producerId, transportId);
+      if (participant.pendingConsumeKeys.has(key)) participant.pendingDuplicateKeys.add(key);
+    }
+  }
+
+  /** Transfer the primary reservation when the last committed copy goes away. */
+  private promotePendingConsumerToPrimary(participant: Participant, producerId: string): void {
+    if (participant.producerCopies.has(producerId)) return;
+    for (const transportId of participant.recvTransports.keys()) {
+      const key = consumerKey(producerId, transportId);
+      if (participant.pendingDuplicateKeys.delete(key)) return;
+    }
   }
 
   /**

@@ -840,12 +840,12 @@ Run focused server regressions from `services/control-plane` with an isolated
 `DATABASE_URL` and `REDIS_URL` (never the shared `concord` database):
 
 ```sh
-go test -p 1 ./internal/oauth ./internal/auth ./internal/mfa ./internal/middleware ./internal/api -run 'Test.*(SSOLink|CompletionKind|ClientBinding|JWKS|LoginCSRF|InitiateGlobalLimit|KeyMaterialLimit)' -count=1
+go test -p 1 ./internal/oauth ./internal/auth ./internal/mfa ./internal/middleware ./internal/api -run 'Test.*(SSOLink|CompletionKind|ClientBinding|JWKS|LoginCSRF|InitiatePerCallerLimit|KeyMaterialLimit)' -count=1
 go test -race -p 1 ./internal/oauth ./internal/auth ./internal/mfa -run 'Test.*(SSOLink|CompletionKind|JWKS)' -count=1
 ```
 
-SSO initiation keeps the per-IP 10/15-minute cap and adds a fail-closed
-600/minute budget per provider before state or Apple bridge allocation.
+SSO initiation keeps the per-IP 10/15-minute cap and a fail-closed
+600/minute budget per provider and trusted client IP before state or Apple bridge allocation.
 Password and SSO registration reject encoded wrapped keys above 43,692 characters
 or salts above 88 characters, and decoded values above 32 KiB or 64 bytes,
 respectively.
