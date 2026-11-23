@@ -31,6 +31,9 @@ The private catalog describes separately available capabilities and their runtim
 Source availability alone does not authorize execution or satisfy a required native dispatch.
 Use the trusted read-only Context7 MCP for third-party documentation when the workflow permits direct lookup.
 When a native researcher is required, verify its exact profile. A shell or package launcher cannot satisfy that boundary.
+If private policy requires a specialist review, use --private-catalog script:isolated-defensive-review
+to locate its approved adapter and consult docs/isolated-defensive-review.md at the verified private pin.
+Confirm the required role and isolation before staging evidence. Hold that review if unavailable.
 For untrusted PR review in Codex, run `python3 -I -B "$ADT/scripts/codex-isolated-review.py"
 --role code-reviewer --check` first, with ADT set to the verified public tooling root.
 A child of a write-capable parent, including a repository-defined reviewer, cannot supply

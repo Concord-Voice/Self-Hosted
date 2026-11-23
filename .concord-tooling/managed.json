@@ -36,6 +36,6 @@
   ".codex/agents/ui-designer.toml": "468ab410f65f3e9cc971c7e1f54945fc5056dadbca63ae7c88205bbb91f1ffef",
   ".codex/agents/ux-designer.toml": "f09d3f9081b57e5fb8909da9d2a4f9229461e69580cc2d0a9fbce3071a3bcd29",
   ".concord-tooling/bootstrap.py": "3e3db81cd083642a3cbc634fedb557db39c1ef06aebc0990310c7249949e96ad",
-  ".concord-tooling/sources.json": "b4707c3fbf999e6da335804c85128573e84da1660d5de33ee15137c0955b6869",
+  ".concord-tooling/sources.json": "8dde20872dffbc081a7858d20ad0d9db9b0665ea736668daf15ccfbebafd875d",
   ".github/agents/code-reviewer.agent.md": "28c34e8776b432a37e646e62eafb0e40fdabd75ac03af5269633f607aa98d8e0"
 }
