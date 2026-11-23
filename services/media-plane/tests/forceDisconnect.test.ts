@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHmac } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { Server } from 'socket.io';
+import WebSocket from 'ws';
 import './mocks/logger.js';
 
 vi.mock('../src/lib/voiceEnforcementSession.js', () => ({
@@ -90,7 +94,7 @@ function makeIO(...socketIds: string[]) {
     sockets.set(socketId, { emit, disconnect });
   }
   return {
-    io: { sockets: { sockets } } as unknown as ForceDisconnectIO,
+    io: { sockets: { sockets, adapter: { rooms: new Map() } } } as unknown as ForceDisconnectIO,
     emit,
     disconnect,
   };
@@ -159,7 +163,7 @@ describe('handleForceDisconnect (#487 P3)', () => {
     };
     const operation = handleForceDisconnect(
       roomManager as unknown as ForceDisconnectRoomManager,
-      { sockets: { sockets: new Map([[SOCKET_ID, socket]]) } } as unknown as ForceDisconnectIO,
+      { sockets: { sockets: new Map([[SOCKET_ID, socket]]), adapter: { rooms: new Map() } } } as unknown as ForceDisconnectIO,
       CHANNEL_ID,
       USER_ID,
       undefined,
@@ -377,6 +381,7 @@ describe('handleForceDisconnect (#487 P3)', () => {
           [SOCKET_ID, { emit: vi.fn(), disconnect: oldDisconnect }],
           [pendingSocketId, { emit: vi.fn(), disconnect: pendingDisconnect }],
         ]),
+        adapter: { rooms: new Map() },
       },
     } as unknown as ForceDisconnectIO;
 
@@ -422,7 +427,7 @@ describe('handleForceDisconnect (#487 P3)', () => {
       admitted = false;
     });
     const io = {
-      sockets: { sockets: new Map([[SOCKET_ID, { emit: vi.fn(), disconnect }]]) },
+      sockets: { sockets: new Map([[SOCKET_ID, { emit: vi.fn(), disconnect }]]), adapter: { rooms: new Map() } },
     } as unknown as ForceDisconnectIO;
     const emit = vi.fn();
 
@@ -767,7 +772,7 @@ describe('durable exact-session ejection', () => {
     };
     const disconnect = vi.fn();
     const io = {
-      sockets: { sockets: new Map([[SOCKET_ID, { emit: vi.fn(), disconnect, data: {} }]]) },
+      sockets: { sockets: new Map([[SOCKET_ID, { emit: vi.fn(), disconnect, data: {} }]]), adapter: { rooms: new Map() } },
     };
     const handler = createVoiceEnforcementSessionEjectionHandler(
       roomManager,
@@ -801,6 +806,7 @@ describe('durable exact-session ejection', () => {
     const io = {
       sockets: {
         sockets: new Map([[SOCKET_ID, { emit: vi.fn(), disconnect: vi.fn(), data: {} }]]),
+        adapter: { rooms: new Map() },
       },
     };
     const handler = createVoiceEnforcementSessionEjectionHandler(
@@ -849,6 +855,7 @@ describe('durable exact-session ejection', () => {
             },
           ],
         ]),
+        adapter: { rooms: new Map() },
       },
     };
     const handler = createVoiceEnforcementSessionEjectionHandler(
@@ -901,6 +908,7 @@ describe('durable exact-session ejection', () => {
           ],
           [successorSocketID, { emit: vi.fn(), disconnect: successorDisconnect, data: {} }],
         ]),
+        adapter: { rooms: new Map() },
       },
     };
     const handler = createVoiceEnforcementSessionEjectionHandler(
@@ -974,7 +982,7 @@ describe('durable exact-session ejection', () => {
     };
     const handler = createVoiceEnforcementSessionEjectionHandler(
       roomManager,
-      { sockets: { sockets: new Map() } },
+      { sockets: { sockets: new Map(), adapter: { rooms: new Map() } } },
       signingKey,
       ids.boot,
       async () => {
@@ -1004,7 +1012,7 @@ describe('durable exact-session ejection', () => {
     };
     const handler = createVoiceEnforcementSessionEjectionHandler(
       roomManager,
-      { sockets: { sockets: new Map() } },
+      { sockets: { sockets: new Map(), adapter: { rooms: new Map() } } },
       signingKey,
       ids.boot,
       () => {
@@ -1043,7 +1051,7 @@ describe('durable exact-session ejection', () => {
     };
     const handler = createVoiceEnforcementSessionEjectionHandler(
       roomManager,
-      { sockets: { sockets: new Map() } },
+      { sockets: { sockets: new Map(), adapter: { rooms: new Map() } } },
       signingKey,
       ids.boot,
       async () => {
@@ -1135,7 +1143,7 @@ describe('credential-epoch ejection', () => {
         removeProvisionalParticipantForEnforcement: removeProvisional,
         leaveRoomIfSocketOwned: leaveRoom,
       },
-      { sockets: { sockets } },
+      { sockets: { sockets, adapter: { rooms: new Map() } } },
       signingValue
     );
 
@@ -1174,7 +1182,7 @@ describe('credential-epoch ejection', () => {
     };
     const handler = createCredentialEpochEjectionAckHandler(
       roomManager,
-      { sockets: { sockets: new Map([['current-socket', currentSocket]]) } },
+      { sockets: { sockets: new Map([['current-socket', currentSocket]]), adapter: { rooms: new Map() } } },
       signingValue
     );
     let settled = false;
@@ -1229,7 +1237,7 @@ describe('credential-epoch ejection', () => {
         removeProvisionalParticipantForEnforcement: vi.fn().mockResolvedValue(true),
         leaveRoomIfSocketOwned: vi.fn().mockResolvedValue(true),
       },
-      { sockets: { sockets: new Map([['socket-pending', socket]]) } },
+      { sockets: { sockets: new Map([['socket-pending', socket]]), adapter: { rooms: new Map() } } },
       signingValue
     );
 
@@ -1260,7 +1268,7 @@ describe('credential-epoch ejection', () => {
         removeProvisionalParticipantForEnforcement: vi.fn(),
         leaveRoomIfSocketOwned: vi.fn(),
       },
-      { sockets: { sockets: new Map() } },
+      { sockets: { sockets: new Map(), adapter: { rooms: new Map() } } },
       signingValue
     );
 
@@ -1281,7 +1289,7 @@ describe('credential-epoch ejection', () => {
         removeProvisionalParticipantForEnforcement: vi.fn(),
         leaveRoomIfSocketOwned: vi.fn(),
       },
-      { sockets: { sockets } },
+      { sockets: { sockets, adapter: { rooms: new Map() } } },
       signingValue
     );
 
@@ -1328,7 +1336,7 @@ describe('credential-epoch ejection', () => {
         removeProvisionalParticipantForEnforcement: vi.fn().mockResolvedValue(true),
         leaveRoomIfSocketOwned: vi.fn().mockResolvedValue(true),
       },
-      { sockets: { sockets: new Map([['socket-pending', socket]]) } },
+      { sockets: { sockets: new Map([['socket-pending', socket]]), adapter: { rooms: new Map() } } },
       signingValue
     );
 
@@ -1348,7 +1356,7 @@ describe('credential-epoch ejection', () => {
         removeProvisionalParticipantForEnforcement: vi.fn(),
         leaveRoomIfSocketOwned: vi.fn(),
       },
-      { sockets: { sockets: new Map() } },
+      { sockets: { sockets: new Map(), adapter: { rooms: new Map() } } },
       signingValue
     );
 
@@ -1357,5 +1365,393 @@ describe('credential-epoch ejection', () => {
     ).resolves.toBeUndefined();
     await expect(handler(command({ proof: 'not-a-proof' }))).resolves.toBeUndefined();
     expect(getSessions).not.toHaveBeenCalled();
+  });
+});
+
+describe('user-wide revocation sweep (VULN-159)', () => {
+  // Regression for VULN-159: a stale same-account socket left in the room kept
+  // receiving room broadcasts after the account's access was revoked.
+  type FakeSocket = {
+    emit: ReturnType<typeof vi.fn>;
+    disconnect: ReturnType<typeof vi.fn>;
+    data: { userId: string; roomId?: string; voiceEnforcementSession?: object };
+  };
+  const STALE_ID = 'socket-stale';
+
+  function fakeSocket(userId: string): FakeSocket {
+    return { emit: vi.fn(), disconnect: vi.fn(), data: { userId } };
+  }
+
+  /** A fake server whose adapter puts `inRoom` in CHANNEL_ID and `outside` elsewhere. */
+  function makeSweepIO(inRoom: Record<string, FakeSocket>, outside: Record<string, FakeSocket> = {}) {
+    const sockets = new Map(Object.entries({ ...inRoom, ...outside }));
+    const members = new Set(Object.keys(inRoom));
+    const rooms = new Map([
+      [CHANNEL_ID, members],
+      ['ch-elsewhere', new Set(Object.keys(outside))],
+    ]);
+    return {
+      io: { sockets: { sockets, adapter: { rooms } } } as unknown as ForceDisconnectIO,
+      sockets,
+      members,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    ['access_revoked', REVOKED],
+    ['media_policy', POLICED],
+  ] as const)(
+    'a user-wide command disconnects a stale same-user socket in the room (%s)',
+    async (_reason, options) => {
+      const { rm } = makeRoomManager({ socketId: SOCKET_ID });
+      const exact = fakeSocket(USER_ID);
+      const stale = fakeSocket(USER_ID);
+      const { io } = makeSweepIO({ [SOCKET_ID]: exact, [STALE_ID]: stale });
+
+      await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, options);
+
+      expect(exact.emit).toHaveBeenCalledWith('force-disconnect', expect.anything());
+      // The exact socket is torn down once, by the exact path, not swept again.
+      expect(exact.disconnect).toHaveBeenCalledTimes(1);
+      expect(
+        stale.disconnect,
+        'stale same-user socket left connected in the room after a user-wide command'
+      ).toHaveBeenCalledWith(true);
+      // Silent, as displacement eviction is: the stale socket is not a participant.
+      expect(stale.emit).not.toHaveBeenCalled();
+    }
+  );
+
+  it("leaves other users' sockets untouched", async () => {
+    const { rm } = makeRoomManager({ socketId: SOCKET_ID });
+    const other = fakeSocket('u-2');
+    const stale = fakeSocket(USER_ID);
+    const elsewhere = fakeSocket(USER_ID);
+    const { io } = makeSweepIO(
+      { [SOCKET_ID]: fakeSocket(USER_ID), 'socket-other': other, [STALE_ID]: stale },
+      { 'socket-elsewhere': elsewhere }
+    );
+
+    await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, REVOKED);
+
+    expect(stale.disconnect).toHaveBeenCalledWith(true);
+    expect(other.disconnect).not.toHaveBeenCalled();
+    expect(other.emit).not.toHaveBeenCalled();
+    // The sweep is scoped to the revoked room, never to all of the user's sockets.
+    expect(elsewhere.disconnect).not.toHaveBeenCalled();
+    expect(elsewhere.emit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['access_revoked', { reason: 'access_revoked', socketId: SOCKET_ID, admissionId: 'adm-1' }],
+    [
+      'media_policy',
+      { reason: 'media_policy', retryAfterSec: 900, socketId: SOCKET_ID, admissionId: 'adm-1' },
+    ],
+  ] as const)('an exact-socket command does not sweep (%s)', async (_reason, options) => {
+    const { rm } = makeRoomManager({ socketId: SOCKET_ID, admissionId: 'adm-1' });
+    const exact = fakeSocket(USER_ID);
+    const stale = fakeSocket(USER_ID);
+    const { io } = makeSweepIO({ [SOCKET_ID]: exact, [STALE_ID]: stale });
+
+    await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, options);
+
+    expect(exact.disconnect).toHaveBeenCalledWith(true);
+    expect(stale.disconnect).not.toHaveBeenCalled();
+    expect(stale.emit).not.toHaveBeenCalled();
+  });
+
+  it('stats_unavailable does not sweep', async () => {
+    const { rm } = makeRoomManager({
+      socketId: SOCKET_ID,
+      sendTransport: { id: 'send-1' },
+      producers: new Map([['p-1', { producer: { closed: false } }]]),
+    });
+    const exact = fakeSocket(USER_ID);
+    const stale = fakeSocket(USER_ID);
+    const { io } = makeSweepIO({ [SOCKET_ID]: exact, [STALE_ID]: stale });
+
+    await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, {
+      reason: 'stats_unavailable',
+      sendTransportId: 'send-1',
+    });
+
+    expect(exact.disconnect).toHaveBeenCalledWith(true);
+    expect(stale.disconnect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['no call id', REVOKED],
+    ['a call id whose room is gone', { reason: 'access_revoked', callId: 'call-A' }],
+  ] as const)(
+    'sweeps when the user has no participant left (%s)',
+    async (_label, options) => {
+      const { rm } = makeRoomManager(undefined);
+      const stale = fakeSocket(USER_ID);
+      const { io } = makeSweepIO({ [STALE_ID]: stale });
+      let sweptBeforeTermination: boolean | undefined;
+      vi.mocked(rm.awaitNativeTermination).mockImplementation(async () => {
+        sweptBeforeTermination = stale.disconnect.mock.calls.length > 0;
+      });
+
+      await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, options);
+
+      expect(stale.disconnect, 'stale socket left connected on the already-left branch').toHaveBeenCalledWith(true);
+      expect(stale.emit).not.toHaveBeenCalled();
+      expect(sweptBeforeTermination).toBe(true);
+    }
+  );
+
+  it.each([
+    ['call-A', false],
+    ['call-B', true],
+  ] as const)(
+    'a callId mismatch on an existing room does not sweep (command %s, room call-B)',
+    async (callId, swept) => {
+      const { rm } = makeRoomManager({ socketId: SOCKET_ID }, undefined, 'call-B');
+      const stale = fakeSocket(USER_ID);
+      const { io } = makeSweepIO({ [SOCKET_ID]: fakeSocket(USER_ID), [STALE_ID]: stale });
+
+      await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, {
+        reason: 'access_revoked',
+        callId,
+      });
+
+      expect(stale.disconnect.mock.calls.length > 0).toBe(swept);
+    }
+  );
+
+  it('never overrides the exact path when it keeps its own socket', async () => {
+    const { rm, getParticipant } = makeRoomManager({ socketId: SOCKET_ID });
+    const exact = { ...fakeSocket(USER_ID), data: { userId: USER_ID, credentialEpoch: 'epoch-1' } };
+    const stale = fakeSocket(USER_ID);
+    const { io } = makeSweepIO({ [SOCKET_ID]: exact, [STALE_ID]: stale });
+    vi.mocked(rm.awaitNativeTermination).mockImplementation(async () => {
+      // The exact session is gone, and its socket advanced to a new credential
+      // epoch during the await, so the exact path deliberately keeps it.
+      getParticipant.mockReturnValue(undefined);
+      exact.data.credentialEpoch = 'epoch-2';
+    });
+
+    await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, REVOKED);
+
+    expect(stale.disconnect).toHaveBeenCalledWith(true);
+    expect(exact.disconnect, 'the sweep re-targeted the exact session socket').not.toHaveBeenCalled();
+  });
+
+  it('a throwing stale disconnect neither aborts the sweep nor the command', async () => {
+    const { rm } = makeRoomManager({ socketId: SOCKET_ID });
+    const throwing = fakeSocket(USER_ID);
+    throwing.disconnect.mockImplementation(() => {
+      throw new Error('listener failed');
+    });
+    const stale = fakeSocket(USER_ID);
+    const { io } = makeSweepIO({
+      [SOCKET_ID]: fakeSocket(USER_ID),
+      'socket-throwing': throwing,
+      [STALE_ID]: stale,
+    });
+
+    await expect(
+      handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, REVOKED)
+    ).resolves.toBeUndefined();
+
+    expect(stale.disconnect).toHaveBeenCalledWith(true);
+    expect(logger.error).toHaveBeenCalledWith('Failed to disconnect stale socket on revocation', {
+      channelId: CHANNEL_ID,
+      socketId: 'socket-throwing',
+    });
+  });
+
+  it('a successor that commits during the teardown awaits is not swept', async () => {
+    const { rm, getParticipant, getProvisionalParticipant } = makeRoomManager({
+      socketId: SOCKET_ID,
+    });
+    const exact = fakeSocket(USER_ID);
+    const nowParticipant = fakeSocket(USER_ID);
+    const nowProvisional = fakeSocket(USER_ID);
+    const replaced = fakeSocket(USER_ID);
+    const replacement = fakeSocket(USER_ID);
+    const fresh = fakeSocket(USER_ID);
+    const stale = fakeSocket(USER_ID);
+    const { io, sockets, members } = makeSweepIO({
+      [SOCKET_ID]: exact,
+      'socket-successor': nowParticipant,
+      'socket-pending': nowProvisional,
+      'socket-replaced': replaced,
+      [STALE_ID]: stale,
+    });
+    vi.mocked(rm.awaitNativeTermination).mockImplementation(async () => {
+      // While the exact teardown awaits, one captured socket becomes the
+      // participant, one the provisional candidate, one id is reused by a new
+      // Socket object, and a fresh socket joins.
+      getParticipant.mockReturnValue({ socketId: 'socket-successor' });
+      getProvisionalParticipant.mockReturnValue({ socketId: 'socket-pending' });
+      sockets.set('socket-replaced', replacement);
+      sockets.set('socket-fresh', fresh);
+      members.add('socket-fresh');
+    });
+
+    await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, REVOKED);
+
+    expect(exact.disconnect).toHaveBeenCalledWith(true);
+    expect(stale.disconnect).toHaveBeenCalledWith(true);
+    expect(nowParticipant.disconnect, 'swept the new participant').not.toHaveBeenCalled();
+    expect(nowProvisional.disconnect, 'swept the new provisional owner').not.toHaveBeenCalled();
+    expect(replaced.disconnect).not.toHaveBeenCalled();
+    expect(replacement.disconnect, 'swept a new Socket under a reused id').not.toHaveBeenCalled();
+    expect(fresh.disconnect, 'swept a socket that joined after the capture').not.toHaveBeenCalled();
+  });
+
+  // regression for Codex review on PR #360
+  it('a captured socket that leaves the room is not swept; one that stays is', async () => {
+    const { rm, getParticipant } = makeRoomManager({ socketId: SOCKET_ID });
+    const exact = fakeSocket(USER_ID);
+    const moved = fakeSocket(USER_ID);
+    moved.data.roomId = CHANNEL_ID;
+    const rejoined = fakeSocket(USER_ID);
+    rejoined.data.roomId = CHANNEL_ID;
+    rejoined.data.voiceEnforcementSession = { generation: 1 };
+    const stale = fakeSocket(USER_ID);
+    const { io, members } = makeSweepIO({
+      [SOCKET_ID]: exact,
+      'socket-moved': moved,
+      'socket-rejoined': rejoined,
+      [STALE_ID]: stale,
+    });
+    vi.mocked(rm.awaitNativeTermination).mockImplementation(async () => {
+      // While the exact teardown awaits, one socket leaves for another room and
+      // one stays in the adapter set but starts a new enforcement session. The
+      // one still in the room keeps receiving its broadcasts, so it is swept.
+      members.delete('socket-moved');
+      moved.data.roomId = 'ch-elsewhere';
+      rejoined.data.voiceEnforcementSession = { generation: 2 };
+      getParticipant.mockReturnValue(undefined);
+    });
+
+    await handleForceDisconnect(rm, io, CHANNEL_ID, USER_ID, undefined, REVOKED);
+
+    expect(stale.disconnect).toHaveBeenCalledWith(true);
+    expect(moved.disconnect, 'swept a socket that moved to another room').not.toHaveBeenCalled();
+    expect(
+      rejoined.disconnect,
+      'left a socket in the revoked room because its session changed'
+    ).toHaveBeenCalledWith(true);
+  });
+});
+
+describe('user-wide revocation over a loopback Socket.IO server (VULN-159)', () => {
+  /** Minimal Socket.IO v4 client over a raw Engine.IO WebSocket that records event names. */
+  class ProbeClient {
+    readonly events: string[] = [];
+    readonly closed: Promise<void>;
+    private readonly ws: WebSocket;
+    private readonly ready: Promise<string>;
+    private readonly waiters: Array<{ name: string; resolve: () => void }> = [];
+
+    constructor(url: string, userId: string) {
+      this.ws = new WebSocket(`${url}/socket.io/?EIO=4&transport=websocket&uid=${userId}`);
+      this.ready = new Promise((resolve, reject) => {
+        this.ws.on('error', reject);
+        this.ws.on('message', (raw) => {
+          const frame = raw.toString();
+          if (frame.startsWith('0')) this.ws.send('40');
+          else if (frame === '2') this.ws.send('3');
+          else if (frame.startsWith('40')) {
+            resolve((JSON.parse(frame.slice(2)) as { sid: string }).sid);
+          } else if (frame.startsWith('42')) {
+            const [name] = JSON.parse(frame.slice(2)) as [string];
+            this.events.push(name);
+            for (const waiter of this.waiters.filter((w) => w.name === name)) waiter.resolve();
+          }
+        });
+      });
+      this.closed = new Promise((resolve) => this.ws.on('close', () => resolve()));
+    }
+
+    open(): Promise<string> {
+      return this.ready;
+    }
+
+    received(name: string): Promise<void> {
+      if (this.events.includes(name)) return Promise.resolve();
+      return new Promise((resolve) => this.waiters.push({ name, resolve }));
+    }
+
+    close(): void {
+      this.ws.close();
+    }
+  }
+
+  function within<T>(promise: Promise<T>, label: string, ms = 2_000): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timed out: ${label}`)), ms)),
+    ]);
+  }
+
+  it('after revocation no socket of the account receives io.to(room) events', async () => {
+    const http = createServer();
+    const io = new Server(http, { transports: ['websocket'] });
+    io.use((socket, next) => {
+      socket.data.userId = String(socket.handshake.query.uid);
+      next();
+    });
+    io.on('connection', (socket) => {
+      void socket.join(CHANNEL_ID);
+    });
+    await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', () => resolve()));
+    const url = `ws://127.0.0.1:${(http.address() as AddressInfo).port}`;
+    const stale = new ProbeClient(url, USER_ID);
+    const current = new ProbeClient(url, USER_ID);
+    const bob = new ProbeClient(url, 'u-2');
+    try {
+      const [, currentId, bobId] = await within(
+        Promise.all([stale.open(), current.open(), bob.open()]),
+        'handshakes'
+      );
+      expect(io.sockets.adapter.rooms.get(CHANNEL_ID)?.size).toBe(3);
+
+      let owner: string | undefined = currentId;
+      const rm = {
+        getRoom: vi.fn().mockReturnValue(undefined),
+        getParticipant: vi.fn((_roomId: string, userId: string) =>
+          userId === USER_ID && owner ? { socketId: owner } : undefined
+        ),
+        getProvisionalParticipant: vi.fn().mockReturnValue(undefined),
+        leaveRoomIfSocketOwned: vi.fn(async (_roomId: string, _userId: string, socketId: string) => {
+          const owned = owner === socketId;
+          if (owned) owner = undefined;
+          return owned;
+        }),
+        removeProvisionalParticipantForEnforcement: vi.fn().mockResolvedValue(false),
+        awaitNativeTermination: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ForceDisconnectRoomManager;
+
+      await handleForceDisconnect(
+        rm,
+        io as unknown as ForceDisconnectIO,
+        CHANNEL_ID,
+        USER_ID,
+        undefined,
+        REVOKED
+      );
+      await within(current.closed, 'current socket closed');
+
+      io.to(CHANNEL_ID).emit('probe', { n: 1 });
+      await within(bob.received('probe'), 'bob receives the probe');
+      await within(Promise.race([stale.closed, stale.received('probe')]), 'stale settles');
+
+      expect(stale.events, 'a stale socket of the revoked account received a room event').not.toContain('probe');
+      expect(current.events).not.toContain('probe');
+      expect([...(io.sockets.adapter.rooms.get(CHANNEL_ID) ?? [])]).toEqual([bobId]);
+    } finally {
+      for (const client of [stale, current, bob]) client.close();
+      io.close();
+    }
   });
 });

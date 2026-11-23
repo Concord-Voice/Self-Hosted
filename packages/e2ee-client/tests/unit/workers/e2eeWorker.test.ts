@@ -1,16 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { selectCryptoScheme } from '@/renderer/workers/e2eeProtocol';
 
-const { mockDecryptFrame, mockEncryptFrame } = vi.hoisted(() => ({
+const {
+  mockDecryptFrame,
+  mockEncryptFrame,
+  mockInitFromKey,
+  mockSetKeyVersion,
+  mockAddDecryptKeyDirectV3,
+} = vi.hoisted(() => ({
   mockDecryptFrame: vi.fn(),
   mockEncryptFrame: vi.fn(),
+  mockInitFromKey: vi.fn(),
+  mockSetKeyVersion: vi.fn(),
+  mockAddDecryptKeyDirectV3: vi.fn(),
 }));
 
 vi.mock('@/renderer/services/e2ee/mediaEncryption', () => ({
-  MEDIA_E2EE_FRAME_CRYPTO_VERSION: 5,
+  MEDIA_E2EE_FRAME_CRYPTO_VERSION: 6,
   MediaEncryption: class {
-    initFromKey = vi.fn();
-    addDecryptKeyDirect = vi.fn();
+    private keyVersion = 0;
+    initFromKey = mockInitFromKey;
+    setKeyVersion = vi.fn((version: number) => {
+      this.keyVersion = version;
+      mockSetKeyVersion(version);
+    });
+    getKeyVersion = vi.fn(() => this.keyVersion);
+    addDecryptKeyDirectV3 = mockAddDecryptKeyDirectV3;
     rotateKeys = vi.fn().mockResolvedValue(undefined);
     catchUpToEpoch = vi.fn().mockResolvedValue(undefined);
     getCurrentKeyId = vi.fn().mockReturnValue(0);
@@ -21,13 +36,14 @@ vi.mock('@/renderer/services/e2ee/mediaEncryption', () => ({
 }));
 
 describe('e2eeWorker codec dispatch', () => {
-  it('selects H.264 nal-aware, AV1 per-OBU, and whole-frame for every other codec', () => {
+  it('selects known codec schemes and refuses absent or unknown codecs', () => {
     expect(selectCryptoScheme('h264')).toBe('nal-aware');
     expect(selectCryptoScheme('av1')).toBe('per-obu');
     expect(selectCryptoScheme('vp8')).toBe('whole-frame');
     expect(selectCryptoScheme('vp9')).toBe('whole-frame');
     expect(selectCryptoScheme('opus')).toBe('whole-frame');
-    expect(selectCryptoScheme(undefined)).toBe('whole-frame');
+    expect(selectCryptoScheme(undefined)).toBeUndefined();
+    expect(selectCryptoScheme('h265' as never)).toBeUndefined();
   });
 });
 
@@ -52,6 +68,65 @@ describe('e2eeWorker keyframe recovery', () => {
       }),
     });
     await import('@/renderer/workers/e2eeWorker');
+  });
+
+  it('binds init version and installs decrypt keys by the complete tuple', () => {
+    const onmessage = (
+      self as unknown as { onmessage: ((event: { data: unknown }) => void) | null }
+    ).onmessage;
+    expect(onmessage).toBeTypeOf('function');
+    if (!onmessage) throw new Error('worker message handler missing');
+    const key = {} as CryptoKey;
+    onmessage({ data: { type: 'init', encryptKey: key, currentKeyId: 3, keyVersion: 7 } });
+    expect(mockInitFromKey).toHaveBeenCalledWith(key, 3);
+    expect(mockSetKeyVersion).toHaveBeenCalledWith(7);
+    onmessage({
+      data: { type: 'addDecryptKey', senderUserId: 'sender', keyVersion: 7, keyId: 3, key },
+    });
+    expect(mockAddDecryptKeyDirectV3).toHaveBeenCalledWith('sender', 7, 3, key);
+  });
+
+  it('advances decrypt-only authority and refuses stale or mismatched key installs', () => {
+    const onmessage = (
+      self as unknown as { onmessage: ((event: { data: unknown }) => void) | null }
+    ).onmessage;
+    if (!onmessage) throw new Error('worker message handler missing');
+    const key = {} as CryptoKey;
+    onmessage({ data: { type: 'setDecryptKeyVersion', keyVersion: 8 } });
+    expect(mockSetKeyVersion).toHaveBeenCalledWith(8);
+    onmessage({
+      data: {
+        type: 'installDecryptKey',
+        authoritativeKeyVersion: 7,
+        senderUserId: 'sender',
+        keyVersion: 7,
+        keyId: 2,
+        key,
+      },
+    });
+    expect(mockAddDecryptKeyDirectV3).not.toHaveBeenCalled();
+    onmessage({
+      data: {
+        type: 'installDecryptKey',
+        authoritativeKeyVersion: 8,
+        senderUserId: 'sender',
+        keyVersion: 8,
+        keyId: 2,
+        key,
+      },
+    });
+    expect(mockAddDecryptKeyDirectV3).toHaveBeenCalledWith('sender', 8, 2, key);
+    onmessage({
+      data: {
+        type: 'installDecryptKey',
+        authoritativeKeyVersion: 9,
+        senderUserId: 'sender',
+        keyVersion: 8,
+        keyId: 3,
+        key,
+      },
+    });
+    expect(mockAddDecryptKeyDirectV3).toHaveBeenCalledTimes(1);
   });
 
   it('passes h264 to the shared MediaEncryption encrypt implementation', async () => {
@@ -386,41 +461,51 @@ describe('e2eeWorker requestFrameKey retry policy (#1885)', () => {
     expect(countRequests()).toBe(1);
   });
 
-  it('caps the tracking map against a sender churning unique keys (DoS bound)', () => {
-    // Each unique (keyVersion,keyId) is a distinct tracked entry; far exceed the cap.
-    for (let i = 0; i < 600; i++) {
-      requestFrameKeyOnce('sender-1', i, 0); // unique keyVersion each call
-      vi.setSystemTime(i + 1); // distinct timestamps
+  it('limits a churn of attacker-chosen key ids by authenticated sender, not key id', () => {
+    // A malicious SFU can vary keyVersion/keyId every frame. The request limiter
+    // must collapse that churn to one sender budget instead of sending one request
+    // per attacker-controlled tuple.
+    for (let i = 0; i < 30; i++) {
+      requestFrameKeyOnce('sender-1', i, i);
+      vi.setSystemTime((i + 1) * 400);
     }
-    expect(frameKeyRequests.size).toBeLessThanOrEqual(512); // FRAME_KEY_MAX_TRACKED
+    expect(countRequests()).toBeLessThanOrEqual(8);
+  });
+
+  it('caps aggregate key requests across many authenticated senders', () => {
+    for (let i = 0; i < 100; i++) {
+      requestFrameKeyOnce(`sender-${i}`, 1, 1);
+      vi.setSystemTime(i + 1);
+    }
+    // The v6 worker budget is global as well as per-sender, so a room-wide
+    // attacker cannot turn one malformed frame per participant into unbounded IPC.
+    expect(countRequests()).toBeLessThanOrEqual(64);
+  });
+
+  it('caps the tracking map against a sender churning unique keys (DoS bound)', () => {
+    // Seed at capacity: the independent sender/global emission budget would
+    // otherwise stop this fixture at eight entries before it tests eviction.
+    for (let i = 0; i < 512; i++) {
+      frameKeyRequests.set(`stale:${i}:0`, { lastAttempt: -400, attempts: 1 });
+    }
+    requestFrameKeyOnce('sender-1', 99, 0);
+    expect(frameKeyRequests.size).toBe(512);
+    expect(frameKeyRequests.has('stale:0:0')).toBe(false);
+    expect(frameKeyRequests.has('sender-1:99:0')).toBe(true);
   });
 
   it('LRU eviction keeps an actively-touched key while churn evicts stale ones (Gitar #1885)', () => {
     const keepAlive = 'sender-1:9999:0';
-    // Insert keep-alive key A first — under the old FIFO it would be evicted earliest.
-    requestFrameKeyOnce('sender-1', 9999, 0); // A, at t=0
-    let t = 1;
+    frameKeyRequests.set(keepAlive, { lastAttempt: -400, attempts: 1 });
     for (let i = 0; i < 510; i++) {
-      requestFrameKeyOnce('sender-1', i, 0); // churn unique keys (map → 511, under cap)
-      vi.setSystemTime(t++);
+      frameKeyRequests.set(`stale:${i}:0`, { lastAttempt: -400, attempts: 1 });
     }
-    expect(frameKeyRequests.has(keepAlive)).toBe(true);
-
-    // Re-touch A past the backoff (and within the reset window) so LRU moves it
-    // to the most-recent position — the move FIFO would not make.
-    vi.setSystemTime(1000);
+    // Re-touch A under the real request function, then force capacity eviction.
     requestFrameKeyOnce('sender-1', 9999, 0);
-
-    // Churn 200 more unique keys — each evicts the least-recently-touched entry.
-    t = 1001;
-    for (let i = 510; i < 710; i++) {
-      requestFrameKeyOnce('sender-1', i, 0);
-      vi.setSystemTime(t++);
-    }
-
-    // Under LRU the recently-touched A survives; under the retired FIFO (evict
-    // oldest-inserted) A would have been evicted. Size stays bounded either way.
+    requestFrameKeyOnce('sender-2', 1, 0);
+    requestFrameKeyOnce('sender-3', 1, 0);
     expect(frameKeyRequests.has(keepAlive)).toBe(true);
-    expect(frameKeyRequests.size).toBeLessThanOrEqual(512);
+    expect(frameKeyRequests.has('stale:0:0')).toBe(false);
+    expect(frameKeyRequests.size).toBe(512);
   });
 });

@@ -329,7 +329,7 @@ export async function exportPublicKey(publicKey: CryptoKey): Promise<string> {
  */
 export async function importPublicKey(base64Key: string): Promise<CryptoKey> {
   const keyData = base64ToArrayBuffer(base64Key);
-  return crypto.subtle.importKey(
+  const key = await crypto.subtle.importKey(
     'spki',
     keyData,
     {
@@ -339,6 +339,9 @@ export async function importPublicKey(base64Key: string): Promise<CryptoKey> {
     true,
     ['encrypt']
   );
+  if ((key.algorithm as RsaHashedKeyAlgorithm).modulusLength < RSA_KEY_SIZE)
+    throw new Error('Invalid public key.');
+  return key;
 }
 
 /**
