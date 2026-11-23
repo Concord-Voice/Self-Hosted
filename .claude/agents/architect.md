@@ -41,8 +41,8 @@ Report exactly these four things:
 2. **Governing rules** — which `.claude/rules/*.md` files apply, and the specific
    invariants in them this change could violate.
 3. **Reviewers that will fire at Phase 8** — consult
-   `.claude/skills/_shared/pr-review-agent-dispatch.md` and match its file-glob,
-   label, AND content-token triggers against the predicted diff. Content triggers
+   the invoking workflow edition’s `_shared/pr-review-agent-dispatch.md` and match its file-glob,
+   label, AND content-token triggers against the predicted diff. For a fleet invocation, require the verified fleet edition; if the host cannot bind this exact reference, report the missing coverage. Content triggers
    matter most: a change can trip `@e2ee-reviewer` from a file whose name matches
    no crypto glob. Name each reviewer and the trigger that fires it.
 4. **Count-bearing surfaces** — whether the change touches migrations, API routes,

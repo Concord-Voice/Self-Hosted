@@ -78,15 +78,17 @@ calls with zero behavior change. When unsure, fetch — it is cheap.
 
 ## How (Context7 MCP — repo-portable)
 
-Context7 is a project-configured MCP server (`.mcp.json`), so it works for any agent on
-this repo. The tools are usually **deferred** — load their schemas via `ToolSearch`
-first, or the direct call fails with `InputValidationError`:
+Find the configured Context7 MCP server or connector in the current session's tool
+catalog. Load deferred schemas using that client's tool discovery. The two required
+operations are `resolve-library-id` and `query-docs`; some clients use underscores
+and a provider prefix. Match both the provider and the operation and use the
+advertised input schema.
 
-```
-ToolSearch  query: "select:mcp__context7__resolve-library-id,mcp__context7__query-docs"
-mcp__context7__resolve-library-id  <library-name>      # e.g. "Electron", "Zustand"
-mcp__context7__query-docs          <library-id> "<the specific feature/API question>"
-```
+1. Resolve the dependency by its library name and the specific question.
+2. Pass the returned library ID and the question to the documentation query.
+3. If either operation is missing or fails, record which operation failed and
+   use the calling skill’s documented fallback. Keep that evidence distinct
+   from a successful Context7 lookup.
 
 - Resolve to the **pinned version** when the version list offers it (e.g.
   `/pmndrs/zustand/v5.0.12`) — match the project's `package.json` / `go.mod` pin.
@@ -110,7 +112,7 @@ Record what you fetched: add the resolved library-id + doc URL to the issue's
 | "I'll fetch the docs later, before I commit." | "Later" is the deferral that never fires under pressure. Fetch BEFORE you design / write the dependency code. |
 | "I already know this API." | The org rule is explicit: use Context7 *even when you think you know* — your training data may predate the pinned version. |
 | "The library isn't named in the issue." | The trigger is the file surface / API you touch, not the issue's wording. |
-| "Context7 tools aren't loaded." | Load them with one bulk `ToolSearch` (above). That is one call, not a reason to skip. |
+| "Context7 tools aren't loaded." | Discover the two Context7 operations in this client’s tool catalog and load their schemas. |
 
 ## Red flags — STOP and fetch
 

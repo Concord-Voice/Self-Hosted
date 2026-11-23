@@ -34,7 +34,7 @@ allowed-tools:
 ---
 
 <DISPATCH-GATE>
-When a phase says "Run `/skill-name`", you MUST invoke it via the Skill tool. Do NOT substitute with inline commands, manual agents, or partial implementations. The sub-skill owns the execution; the orchestrator owns the sequencing. This is not optional.
+Run each required named skill through the [nested skill contract](../_shared/nested-skills.md). The sub-skill owns its steps and checkpoints. Resume the current phase only after receiving its result. On Codex, apply the [independent reviewer requirement](../_shared/pr-review-agent-dispatch.md#codex-review-of-untrusted-prs) before a phase retrieves untrusted PR material for a specialist.
 </DISPATCH-GATE>
 
 # Dev Lifecycle
@@ -97,19 +97,9 @@ exists for — waiting without a human scheduler, designing before editing, look
 shipping. A harness that cannot do even the fallback records that fact where a reviewer can see
 it.
 
-**This table is not a completeness claim, and reading it as one is the mistake to avoid.** It
-covers the primitives the *waiting, planning and verification* steps introduce. The lifecycle's
-**dispatch backbone is Claude-native throughout** and is deliberately NOT enumerated here: the
-`Skill` tool the DISPATCH-GATE mandates, the `Agent` tool every `@agent` dispatch table assumes,
-the `Workflow` tool the D6 breadth rung routes to, the `Glob` tool phase detection requires, and
-the `/superpowers:*` plugin skills that ARE Phases 2, 3 and 4. None has a portable fallback,
-because none is a step you can degrade — they are the mechanism.
+For named skills, use the [nested skill contract](../_shared/nested-skills.md). Claude can invoke a skill through its Skill tool. A client with disk-activated skills can resolve the approved owner, load the full skill and its references, and execute its checkpoints. For a required specialist, check the host's actual role catalog, permissions and native dispatch operation before starting the phase.
 
-The honest consequence: **a mirrored surface can read this file for the contract, the ordering
-and the gates, but is not expected to execute the full lifecycle unaided.** Say so plainly if you
-are on one, rather than silently substituting a single agent for a specialist suite or skipping
-a phase whose skill you cannot load — the catalog's unknown-skill WARN is not permission for
-either.
+Check each remaining dependency at the phase that uses it. Phase detection needs file matching. A breadth workflow needs its specified orchestration capability. Plugin phases need the approved plugin's implementation and permissions. If a required capability is missing, record the phase and missing dependency, keep that phase pending, and hand it to an authorized host that provides it. Each client's workload assignment and the developer's approval checkpoints still apply.
 </PRIMITIVE-AVAILABILITY>
 
 Orchestrate the full development lifecycle for issue #$0.
@@ -1068,7 +1058,7 @@ will spawn follow-ups. A typo fix, a version bump, or a red-CI unblock does not 
 
 ## Phase 1: UNDERSTAND (auto-run)
 
-Run `/issue-brief $0` via the Skill tool. This gathers the complete issue context: title, body, all comments, labels, milestone, linked issues/PRs, subissues, and cross-references.
+Run `/issue-brief $0`. This gathers the complete issue context: title, body, all comments, labels, milestone, linked issues/PRs, subissues, and cross-references.
 
 Do NOT substitute with inline `gh issue view` commands — `/issue-brief` is the mandatory path for gathering issue context.
 
@@ -1076,7 +1066,7 @@ Display the brief, then run the parent-epic linkage check below (if the repo ena
 
 **Catalog Dispatch:** consult `## Phase 1: UNDERSTAND` in [`dispatchable-skills.md`](../_shared/dispatchable-skills.md). Always-dispatch: `/issue-brief`. Candidates: `/engineering:architecture`, `/operations:vendor-review` — evaluate triggers against the issue body.
 
-**Agent Dispatch:** consult `## Phase 1: UNDERSTAND` in [`lifecycle-agent-dispatch.md`](../_shared/lifecycle-agent-dispatch.md). Always: `@architect` (Mode 1 — blast-radius scout), dispatched via the Agent tool after `/issue-brief` returns. Its reviewer prediction feeds Phase 2's design, not just the log. Candidate: `@researcher` when a knowledge gap blocks scoping. Emit the `Dispatched agents (Phase 1): […]` visibility line.
+**Agent Dispatch:** consult `## Phase 1: UNDERSTAND` in [`lifecycle-agent-dispatch.md`](../_shared/lifecycle-agent-dispatch.md). Always: `@architect` (Mode 1 — blast-radius scout), dispatched with the active client’s agent tool after `/issue-brief` returns. Its reviewer prediction feeds Phase 2's design, not just the log. Candidate: `@researcher` when a knowledge gap blocks scoping. Emit the `Dispatched agents (Phase 1): […]` visibility line.
 
 For Codex, Phase 1 agents use their generated Codex agent profiles' model and effort pins, with
 the source `model:` and `effort:` pins named alongside them. The orchestrator's own model does not change an agent's pin; the repo's agent catalog, where one exists, records the active profile translation.
@@ -1324,7 +1314,7 @@ discards that reasoning and produces a second, competing document.
 
 If no spec exists (`SPEC_MATCHES` empty):
 0. **Honor the Design Dossier.** If the issue brief (`/issue-brief`) contains a `## Design Dossier` section, feed it to brainstorming as the design basis — do NOT re-run the design-class skills it already captured. If there is NO dossier (issue filed outside `/issue-creation`), run the catalog's "## Dynamic skill scoping (mandatory)" algorithm now and dispatch matched `design-class` skills *before* brainstorming; brainstorming then synthesizes their output.
-1. Invoke `/superpowers:brainstorming` via the Skill tool with the issue brief (and any dossier / design-class artifacts) as context.
+1. Invoke `/superpowers:brainstorming` with the issue brief (and any dossier / design-class artifacts) as context.
 2. **(Only when the repo enables a quality gate — `.quality_gate.enabled` is true.)** After brainstorming produces a spec, verify it includes a **mandatory acceptance criteria** section aligned with the repo's quality-gate definition (`.quality_gate.doc_path`, when set). If missing, add it before proceeding, filling thresholds from config:
 
    ```bash
@@ -1342,10 +1332,10 @@ If no spec exists (`SPEC_MATCHES` empty):
    | New code coverage | ≥ `COVERAGE_MIN`% |
 
    When `.quality_gate.enabled` is false or absent, skip this acceptance-criteria injection entirely.
-3. Invoke `/superpowers:writing-plans` via the Skill tool.
+3. Invoke `/superpowers:writing-plans`.
 
 If spec exists but no plan (`PLAN_MATCHES` empty):
-1. Invoke `/superpowers:writing-plans` via the Skill tool.
+1. Invoke `/superpowers:writing-plans`.
 
 If both exist, skip to Phase 3.
 
@@ -1367,7 +1357,7 @@ Execution is selected by the Phase 1.5 Implementation Approach:
 
 #### Task shape — construction or defect repair (evaluated FIRST, before D0)
 
-Before deciding inline-vs-subagent, decide what *shape* the task is. Construction tasks ("build the thing the spec describes") proceed to D0 below. **Defect-repair tasks — where the work is "find why this broken behavior happens and stop it" — dispatch `/reproduce-then-fix` via the Skill tool for that task**, which enforces the failing-test-first ordering and its own bounded hypothesis budget, then returns here.
+Before deciding inline-vs-subagent, decide what *shape* the task is. Construction tasks ("build the thing the spec describes") proceed to D0 below. **Defect-repair tasks — where the work is "find why this broken behavior happens and stop it" — dispatch `/reproduce-then-fix` for that task**, which enforces the failing-test-first ordering and its own bounded hypothesis budget, then returns here.
 
 A task is defect repair when it names an existing wrong behavior to eliminate rather than a new behavior to add. The issue carrying `type: bug` is a strong signal but not the test — a `type: bug` issue often contains construction tasks too (a missing guard, a new validation), and a `type: enhancement` issue can contain one genuine defect-repair task.
 
@@ -1440,7 +1430,7 @@ in dark mode, and a control that renders off-screen all pass every assertion in 
 whenever this branch touches a surface a user SEES — UI component source, any stylesheet, a
 theme definition — run the app and look at the change before the PR exists:
 
-1. Launch the app and drive it to the changed surface — `/run` via the Skill tool where that
+1. Launch the app and drive it to the changed surface — `/run` where that
    skill exists, otherwise the repo's own path. **When the repo has more than one UI package
    (e.g. a main client and an admin portal), each usually has its own launcher, and one does
    not cover the other.** Using the main client's dev script for an admin-only change captures
@@ -1566,12 +1556,12 @@ If yes: invoke `/commit-push-pr --draft` (or guide through git add, commit, push
 
 **Agent names in anything this lifecycle posts to GitHub** (PR body, PR and issue comments, review replies, issues it files) are written bare: `red-team`, `code-reviewer`, never `@red-team`. GitHub resolves an `@`-prefixed word as a user mention. The `@` prefix is local dispatch notation only — see `pr-review-agent-dispatch.md` § Agent names in GitHub posts.
 
-After the PR exists (regardless of which path created it), invoke `/pr-creation <PR>` via the Skill tool to sync PR metadata with the underlying issue. This is preapproved per the [`dispatchable-skills.md`](../_shared/dispatchable-skills.md) catalog — no extra gate even in `In-the-Loop` mode, since `/pr-creation` is metadata-only.
+After the PR exists (regardless of which path created it), invoke `/pr-creation <PR>` to sync PR metadata with the underlying issue. This is preapproved per the [`dispatchable-skills.md`](../_shared/dispatchable-skills.md) catalog — no extra gate even in `In-the-Loop` mode, since `/pr-creation` is metadata-only.
 
 ```bash
 # After gh pr create returns the PR number, capture it and invoke /pr-creation
 PR_NUMBER=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')
-# Then: invoke /pr-creation via the Skill tool with PR_NUMBER as $0
+# Then: invoke /pr-creation with PR_NUMBER as $0
 ```
 
 Verify `/pr-creation` reports clean (Phase 5 of `/pr-creation` is advisory only; WARN messages are non-blocking). Proceed to Phase 6.
@@ -1584,7 +1574,7 @@ If manual: print the commands and wait.
 
 **Catalog Dispatch:** consult `## Phase 6: CI MONITOR` in [`dispatchable-skills.md`](../_shared/dispatchable-skills.md). Always-dispatch: `/ci-status`. Candidates (on CI failure): `/engineering:debug`, `/superpowers:systematic-debugging`, `/reproduce-then-fix`.
 
-Run `/ci-status <PR>` via the Skill tool.
+Run `/ci-status <PR>`.
 
 - If pending: **`/ci-status` owns the wait — Phase 6 arms nothing.** It arms the blocking watch itself (see its "Waiting for pending checks"), and the harness re-invokes this session when that exits; Phase 6 then resumes by re-running `/ci-status <PR>` and reading its verdict. Two waiters on one PR would both fire when CI settles and both drive the lifecycle forward — duplicate ready-flips, duplicate review processing — so the watch mechanics, the exit-code semantics and the "no checks reported" cases all live in `/ci-status` and are deliberately not repeated here. The rule that matters is unchanged: **the wait is never handed back to the developer and never interval-polled**; it just belongs to exactly one owner.
 - If failing: show remediation suggestions. After fixes, loop back to Phase 5 (commit fixes).

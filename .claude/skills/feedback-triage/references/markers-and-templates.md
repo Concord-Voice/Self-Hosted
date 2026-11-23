@@ -37,7 +37,7 @@ last_synced: 2026-06-20
 | `schema` | marker version, for future migration | `1` |
 | `reports` | total user reports folded into this survivor (Σ of members) | `3` |
 | `consolidated` | comma-list of dupe issue numbers closed into this one | `18,27` |
-| `alpha` | the tracker issue, `owner/repo#N` form (empty until Phase 4) | `example-repo-private#1234` |
+| `alpha` | tracker issue as `repo#N`, or opaque `internal#N` when private repo names are withheld; never an `owner/` slug (legacy `owner/repo#N` / `#N` are still read); empty until Phase 4 | `example-repo-private#1234` |
 | `state` | `untriaged \| tracked \| in-progress \| fixed \| declined` | `tracked` |
 | `release` | release window string, or `future` | `v0.2.0-Beta` |
 | `fixed_in` | version the fix shipped in (only when `state: fixed`) | `v0.2.1` |
@@ -136,13 +136,24 @@ The marker's `release` field stores a stable internal token (`v0.2.0-Beta`, `v1.
 
 Apply `release_display` at **every** user-facing render of `release`: the Known Issues list entry (`known-issues.md`), the status-comment visible line (below), and the Phase-5 tracking note. The stored marker value stays the token; only the displayed text is normalized — so the no-op-on-unchanged-inbox invariant holds (the comparator is the stored token, which doesn't move). Founding incident: the first auto run rendered the raw `v0.2.0-Beta` token on the public list, which reads as an overdue patch.
 
+## Public tracker-ref display (`alpha_display`)
+
+The marker is an HTML comment on a **public** issue, and anyone can read a comment's raw body. So the marker is a public surface too: it never holds an `owner/` slug, and when private repository names are withheld it never holds the repo name either. Phase 6 resolves `repo#N` by basename and `internal#N` by the tracker issue's `Refs` back-reference, both against `$CANDIDATE_TRACKERS`.
+
+| disclosure policy | marker `alpha` (written) | public `alpha_display` |
+|---|---|---|
+| repo names shown | `repo#N` | `repo#N` |
+| private repos withheld | `internal#N` | `internal#N` |
+
+Legacy markers (`owner/repo#N`, `#N`) are still read. On the next marker write, rewrite them to the form above.
+
 ## Visible-line regeneration rule
 
-Always rebuild the visible line from the marker so they can't diverge (rendering `release` via `release_display` above):
+Always rebuild the visible line from the marker so they can't diverge (rendering `release` via `release_display` and `alpha` via `alpha_display` above):
 
 ```
 👥 **Reported by {reports} user(s)**
-  · 📌 Tracked as `{alpha}`                  (omit the whole clause if alpha empty)
+  · 📌 Tracked as `{alpha_display}`          (omit the whole clause if alpha empty)
   · 🗓️ Tracked for **{release_display}**     (e.g. "an upcoming Beta update"; "a future release" when release=future)
   · ✅ Fixed in **{fixed_in}**                (only when state=fixed)
 ```
@@ -152,4 +163,4 @@ Always rebuild the visible line from the marker so they can't diverge (rendering
 - **One managed comment per issue, ever.** Locate-then-edit; if the locate step errors, fail the issue (digest it) rather than risk a duplicate post.
 - **Marker and visible text are regenerated together** from field values — never hand-edit one side.
 - **Internal reporter IDs never leave the body.** The routine reports *counts*, never the opaque IDs, in any new text it writes (no new PII surface).
-- Backtick-fence the `alpha` ref (`` `example-repo-private#NNN` ``) so it doesn't render as a broken cross-repo autolink for anonymous viewers.
+- Backtick-fence `alpha_display` (`` `example-repo-private#NNN` `` or `` `internal#NNN` ``) so it doesn't render as a broken cross-repo autolink for anonymous viewers or leak private org slugs.

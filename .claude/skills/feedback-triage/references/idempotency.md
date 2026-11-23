@@ -22,9 +22,9 @@ When the two disagree, **durable state wins** and the marker is rewritten to mat
 | Count a member into a survivor | member # not already in survivor's `consolidated` list | member issue is open & lacks the consolidation sentinel |
 | Post consolidation comment + close dupe | dupe is open AND has no consolidation sentinel comment | — |
 | Seed 👍 on survivor | survivor has no 👍 from the running account | `gh api reactions` is per-account idempotent — re-adding is a safe 200, but check first to avoid log noise |
-| Create tracker tracking issue | marker `alpha` empty AND the tracker search **with literal-URL confirmation** (SKILL.md Phase 4) finds no back-ref | the confirmed search **is** the fallback — never create if a back-ref exists |
+| Create tracker tracking issue | marker `alpha` empty AND the cross-repo search across `$CANDIDATE_TRACKERS` **with literal-URL confirmation** (SKILL.md Phase 4) finds no back-ref | the confirmed search **is** the fallback — never create if a back-ref exists in any owning repo |
 | Post/refresh tracking note | derived `alpha`+`release` differ from marker's | — |
-| Post fix-shipped + close public | marker `state` ≠ `fixed` AND the tracker issue is closed-completed | public issue still open & lacks the fixed sentinel |
+| Post fix-shipped + close public | marker `state` ≠ `fixed` AND the resolved `alpha` issue (`owner/repo#N`) is closed-completed with fix shipped (and, when parent/epic, all child sub-issues are closed-completed or split out) | public issue still open & lacks the fixed sentinel |
 | Post in-progress note | marker `state` ≠ `in-progress` AND the tracker issue is in-progress | — |
 | Create + pin Known Issues issue | no open issue carries the `known-issues v1` sentinel | locate-by-sentinel is the guard — never create a second; if 3 pins are taken and none is ours, digest it |
 | Regenerate Known Issues body | freshly-built body differs from the live pinned-issue body | the live body **is** the comparison source — identical ⇒ no PATCH (no-op run touches nothing here either) |
@@ -48,7 +48,7 @@ Read the tracker issue's state, map to a target public state, act only on the ed
 ```
 
 - Transitions are **monotonic toward closure**; never reopen a public issue the routine closed (a human can). If a closed-fixed public issue's tracker twin reopens, surface it in the digest for human attention rather than auto-reopening.
-- "Tracker closed-completed" = closed with state_reason `completed` AND (a merged fix PR referencing it OR a shipped release tag/build containing the fix — NOT merely the issue's deadline milestone, which under the corrected model is a complete-by version, not proof the fix shipped). A bare manual close without those signals is treated as `in-progress`/ambiguous and digested, not auto-propagated to a public close.
+- "Tracker closed-completed" = closed with `state_reason` `completed` AND (a merged fix PR referencing it OR a shipped release tag/build containing the fix — NOT merely the issue's deadline milestone, which under the corrected model is a complete-by version, not proof the fix shipped). If the resolved `alpha` issue is a multi-repo `type: epic` (or has child sub-issues from `GET repos/{owner}/{repo}/issues/{n}/sub_issues`), verify **every** child sub-issue is also closed with `state_reason` `completed` (or explicitly split out / moved to its own public issue) before marking the public issue `fixed`; if any child remains open or was closed `not_planned`, treat the epic as `in-progress` and emit a `digest:` warning instead of closing the public issue. A bare manual close without those signals is treated as `in-progress`/ambiguous and digested, not auto-propagated to a public close.
 
 ## Ordering within a run (crash leaves a safe partial state)
 

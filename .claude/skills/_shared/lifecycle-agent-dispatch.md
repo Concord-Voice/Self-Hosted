@@ -1,5 +1,8 @@
 # Lifecycle Agent Dispatch — Phases 1–4
 
+On Codex, apply the [independent reviewer requirement](pr-review-agent-dispatch.md#codex-review-of-untrusted-prs) before collecting a diff for a reviewer in any phase. A researcher handling untrusted source material requires a separate read-only session limited to the approved documentation tools.
+
+
 > **Single source of truth** for agent dispatch in the *pre-review* half of the
 > lifecycle. Consumed by `/dev-lifecycle` Phases 1, 2, 3, and 4.
 >

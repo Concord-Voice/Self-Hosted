@@ -56,6 +56,7 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 | `agents.escalation_surfaces` | string[] | `[]` | reproduce-then-fix E2 only: extra surfaces (for example a concurrency fence) that count as escalation-worthy in its debugging loop; dev-lifecycle's E2 list is fixed in `_shared/lifecycle-agent-dispatch.md` |
 | `visual.launch[]` | array of `{match: [globs], dir, cmd, note?}` | `[]` → `/run` or the repo's documented path | dev-lifecycle Phase 4 visual verification: the launcher for each UI surface, picked by the changed files. |
 | `feedback_triage.public` / `.tracker` | string (`owner/repo`) | unset → Phase 0 stops | feedback-triage: public intake repo and private tracker |
+| `feedback_triage.routing` | object (`surface -> owner/repo`) | unset → all items route to `.tracker` | feedback-triage: optional surface-to-owning-repo map; multi-repo work puts parent epic in primary owner with sub-issues in sibling owners |
 | `feedback_triage.sentinel_prefix` | string | `feedback-triage` | feedback-triage: HTML-comment marker prefix (`<!-- {prefix}:status v1 -->`) |
 | `release.frontend_dir` / `.backend_dir` | string | `frontend` / `backend` | release-checklist |
 | `release.tag_prefix` | string | `v` | release-checklist, release-notes |
