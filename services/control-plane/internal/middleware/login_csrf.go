@@ -8,6 +8,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const desktopAppOrigin = "app://concord"
+
 // LoginCSRF guards the public POST routes that can establish a refresh cookie.
 func LoginCSRF(allowedOrigins []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -27,7 +29,7 @@ func loginCSRFRejection(r *http.Request, allowedOrigins []string) (int, string) 
 	if !hasJSONContentType(r) {
 		return http.StatusUnsupportedMediaType, "unsupported_media_type"
 	}
-	if hasCrossSiteFetch(r) {
+	if hasCrossSiteFetch(r) && !hasAllowedDesktopAppOrigin(r, allowedOrigins) {
 		return http.StatusForbidden, "cross_site_request"
 	}
 	if !hasAllowedLoginOrigin(r, allowedOrigins) {
@@ -52,6 +54,11 @@ func hasCrossSiteFetch(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+func hasAllowedDesktopAppOrigin(r *http.Request, allowedOrigins []string) bool {
+	origins := r.Header.Values("Origin")
+	return len(origins) == 1 && origins[0] == desktopAppOrigin && hasAllowedLoginOrigin(r, allowedOrigins)
 }
 
 func hasAllowedLoginOrigin(r *http.Request, allowedOrigins []string) bool {

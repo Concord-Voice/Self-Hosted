@@ -1,5 +1,8 @@
 # Hash-locked Semgrep install for .github/workflows/semgrep.yml (pip --no-deps --require-hashes).
-# The semgrep pin must equal SEMGREP_VERSION in that workflow; its install step fails otherwise.
+# Within one revision, the semgrep pin must equal SEMGREP_VERSION in that
+# revision's workflow. The write-scoped ordinary fallback gets both its lock
+# and expected engine version from the trusted event-base lock; the separate
+# read-only compatibility job tests the PR's proposed lock and version.
 #
 # OVERRIDES. semgrep pins vulnerable versions of some dependencies exactly, so this lock overrides
 # them and the workflow installs with --no-deps, which skips pip's constraint check:
@@ -8,16 +11,18 @@
 #     1.45.1+ fixes GHSA-mf5v-w3w3-f6cg and GHSA-xcq7-p3pf-p88h)
 #   mcp==1.30.0 (semgrep pins ==1.29.0; 1.30.0 fixes GHSA-5h93-6whr-6q8j, GHSA-84m7-p3x7-pcfv,
 #     GHSA-rwrf-2pqf-9j8j and GHSA-w4fh-qvv9-3v23)
-# The advisory semgrep run installs the PR's copy of this file and scans with it, so an override
-# that breaks semgrep fails there. The protected run installs main's copy, so a change reaches it
-# only after it merges. Drop an override once a semgrep release pins a fixed version itself.
+#   wcmatch==11.2 (semgrep requires ~=8.3; 11.2 fixes GHSA-53pm-wgxf-c6qf and needs Python >=3.11)
+# The read-only PR compatibility job installs the proposed lock and tests rule paths, CLI
+# exclusions and a bounded multi-star match. This is not exhaustive compatibility proof.
+# The protected run installs main's copy, so a change reaches it only after it merges and the
+# protected reusable workflow pin is updated. Drop an override once semgrep permits a fixed version.
 # Lines may only be comments, name==version [; marker] pins and --hash lines; the install step
 # refuses any other line in both runs.
 #
 # Regenerate (uv, from the repo root), then re-add this header:
 #   printf '%s\n' opentelemetry-api==1.45.2 opentelemetry-sdk==1.45.2 \
 #     opentelemetry-exporter-otlp-proto-http==1.45.2 opentelemetry-instrumentation-requests==0.66b2 \
-#     opentelemetry-instrumentation-threading==0.66b2 mcp==1.30.0 > /tmp/semgrep-overrides.txt
+#     opentelemetry-instrumentation-threading==0.66b2 mcp==1.30.0 wcmatch==11.2 > /tmp/semgrep-overrides.txt
 #   printf 'semgrep==<SEMGREP_VERSION>\n' | uv pip compile - --override /tmp/semgrep-overrides.txt \
 #     --generate-hashes --universal --python-version 3.12 --no-header --no-annotate \
 #     -o .github/semgrep/requirements.txt
@@ -941,9 +946,9 @@ urllib3==2.8.0 \
 uvicorn==0.54.0 ; sys_platform != 'emscripten' \
     --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf \
     --hash=sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620
-wcmatch==8.5.2 \
-    --hash=sha256:17d3ad3758f9d0b5b4dedc770b65420d4dac62e680229c287bf24c9db856a478 \
-    --hash=sha256:a70222b86dea82fb382dd87b73278c10756c138bd6f8f714e2183128887b9eb2
+wcmatch==11.2 \
+    --hash=sha256:1605bde546fbde4c063628c7d89eda486909fd4337e51d73a873987fbcb2554c \
+    --hash=sha256:952bab83c75c233836007a69550a3a8753cf06964c1eb3b84ff11ad5bff1c272
 wrapt==2.5.2 \
     --hash=sha256:01ace38a377198e0b981b027a46cbdb5502d0123bd39c1a0f60a83a5eab7698e \
     --hash=sha256:035cd71e2aadfc0ad366ab4785b49e62093370885ea4b527b61b308b7a92ff14 \

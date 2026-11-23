@@ -167,7 +167,7 @@ async function fixture(options: { retained?: boolean; receipt?: Receipt; recover
     FailureStateLogger, VoiceEnforcementHealth, voiceEnforcementLease: lease, voiceEnforcementNodeBootId: boot,
     voiceAuthConnections: connections, voiceEnforcementReleaseQueue: queue,
     snapshotVoiceEnforcementSessions, releaseVoiceEnforcementSessionsAfterClose,
-    io: { sockets: { sockets: new Map() } }, natsService: nats,
+    io: { sockets: { sockets: new Map(), adapter: { rooms: new Map() } } }, natsService: nats,
     mediasoupService: { isReady: () => true, close: async () => { events.push('native-await'); await native.promise; events.push('native-exited'); } },
     roomManager: { closeAll: async () => { events.push('rooms-closed'); } },
     voiceCommandOwner: { release: async () => { events.push('owner-await'); await owner.promise; events.push('owner-released'); } },
@@ -178,7 +178,8 @@ async function fixture(options: { retained?: boolean; receipt?: Receipt; recover
     stopObservingRequiredSubscriptions: () => {}, mediaPolicerTick: { stop: () => {} },
     opsMetricsPublisher: { stop: async () => {} }, redisService: { close: async () => { events.push('redis-closed'); } },
     securityEvents: { close: async () => true }, httpServer: { close: (done: () => void) => { events.push('http-closed'); done(); } },
-    epochSyncInterval: -1, roomHeartbeatInterval: -2, voiceEnforcementLeaseInterval: -3, voiceEnforcementHealthInterval: healthInterval,
+    epochSyncInterval: -1, roomHeartbeatInterval: -2, voiceEnforcementLeaseInterval: -3, voiceAuthIdleInterval: -4,
+    voiceEnforcementHealthInterval: healthInterval,
   });
   return { caller, connections, queue, retry, lease, events, requests, nats, exit, logger, timers, scheduled,
     recovery, native, renewal, owner, retirement, release,

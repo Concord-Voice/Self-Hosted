@@ -20,7 +20,9 @@
 
 Run the Concord Voice server on your own hardware.
 
-**Website:** [www.concordvoice.com](https://www.concordvoice.com) | **Wiki:** [Self-Hosted wiki](https://github.com/Concord-Voice/Self-Hosted/wiki) | **Security:** security@concordvoice.com
+**Website:** [www.concordvoice.com](https://www.concordvoice.com) | **Wiki:** [Self-Hosted wiki](https://github.com/Concord-Voice/Self-Hosted/wiki) | **Security:** security@concordvoice.com 
+
+[![sponsor](https://img.shields.io/badge/sponsor-Concord--Voice-pink?logo=github-sponsors)](https://github.com/sponsors/Concord-Voice)
 
 ---
 

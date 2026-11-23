@@ -1830,7 +1830,7 @@ paths:
         Redis stores only its digest. In-flight attempts created before this requirement must restart.
 
         redirect_uri must be an RFC 8252 loopback (http://127.0.0.1/oauth/callback). Rate limit: 10 requests
-        per 15 minutes per IP and 600 accepted requests per minute per provider.
+        per 15 minutes per IP and 600 accepted requests per minute per provider and trusted client IP.
 
         '
       operationId: ssoInitiate
@@ -1899,13 +1899,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '429':
-          description: Per-IP or provider-wide initiation budget exhausted (`rate_limited`).
+          description: Per-IP or per-caller provider initiation budget exhausted (`rate_limited`).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '503':
-          description: Provider-wide initiation budget could not be checked (`redis_unavailable`); no state was allocated.
+          description: Per-caller provider initiation budget could not be checked (`redis_unavailable`); no state was allocated.
           content:
             application/json:
               schema:

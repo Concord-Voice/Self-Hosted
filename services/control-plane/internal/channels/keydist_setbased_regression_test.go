@@ -175,6 +175,9 @@ func resetIdentityKeyTx(db *sql.DB, userID string) error {
 	if _, err := tx.Exec(`DELETE FROM channel_keys WHERE user_id = $1`, userID); err != nil {
 		return errors.Join(err, tx.Rollback())
 	}
+	if _, err := tx.Exec(`DELETE FROM dm_channel_keys WHERE user_id = $1`, userID); err != nil {
+		return errors.Join(err, tx.Rollback())
+	}
 	return tx.Commit()
 }
 
@@ -333,6 +336,75 @@ func resetDuringCleanup(t *testing.T, ts *testhelpers.TestServer) {
 		"precondition: the reset purged V's key")
 	assert.Equal(t, 1, pendingChannelRows(t, ts, channelID, v.ID),
 		"V was told pending after its reset, so its request must survive the cleanup")
+}
+
+// A DM key reset can commit after the distributor observes a fulfilled request.
+// The recipient's subsequent fetch must retain the pending row it reports.
+func TestDistribution_DMCleanupKeepsNeededPendingRequest(t *testing.T) {
+	ts := setupTS(t)
+	actor := ts.CreateTestUser(t, "dmcleanuprace-actor")
+	recipientUser := ts.CreateTestUser(t, "dmcleanuprace-recipient")
+	ts.CreateFriendship(t, actor.ID, recipientUser.ID, "accepted")
+	convID := ts.CreateDMConversation(t, actor.ID, recipientUser.ID)
+	ts.SeedDMKey(t, convID, actor.ID, 1)
+	ts.SeedDMKey(t, convID, recipientUser.ID, 1)
+	recipient := recipientUser.ID
+	seedPendingDMRequest(t, ts, convID, recipient)
+
+	lockTx, err := ts.DB.Begin()
+	require.NoError(t, err)
+	defer func() { _ = lockTx.Rollback() }()
+	_, err = lockTx.Exec(`SELECT 1 FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2 FOR UPDATE`, convID, recipient)
+	require.NoError(t, err)
+
+	var distW *httptest.ResponseRecorder
+	distDone, resetDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(distDone)
+		distW = distributePost(ts, actor.AccessToken, convID,
+			map[string]string{recipient: testhelpers.ValidCiphertext()}, nil)
+	}()
+	require.True(t, waitForLockWaiters(t, ts.DB, "%DELETE FROM dm_pending_key_requests%", 1, distDone),
+		"distribution never reached pending cleanup")
+
+	var resetErr error
+	go func() {
+		defer close(resetDone)
+		resetErr = resetIdentityKeyTx(ts.DB, recipient)
+	}()
+	waitDone := func(done <-chan struct{}, operation string) {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%s did not finish after pending-row lock released", operation)
+		}
+	}
+	fetch := func() *httptest.ResponseRecorder {
+		return ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(recipientUser.AccessToken))
+	}
+	var getW *httptest.ResponseRecorder
+	if waitForLockWaiters(t, ts.DB, "%DELETE FROM dm_channel_keys%", 1, resetDone) {
+		require.NoError(t, lockTx.Rollback())
+		waitDone(distDone, "distribution")
+		waitDone(resetDone, "key reset")
+		getW = fetch()
+	} else {
+		waitDone(resetDone, "key reset")
+		getW = fetch()
+		require.NoError(t, lockTx.Rollback())
+		waitDone(distDone, "distribution")
+	}
+
+	require.NoError(t, resetErr)
+	require.Equal(t, http.StatusOK, distW.Code, distW.Body.String())
+	require.Equal(t, http.StatusNotFound, getW.Code, getW.Body.String())
+	require.Contains(t, getW.Body.String(), `"pending":true`)
+	require.Zero(t, rowCount(t, ts,
+		`SELECT COUNT(*) FROM dm_channel_keys WHERE conversation_id = $1 AND user_id = $2`, convID, recipient),
+		"precondition: reset removed recipient's wrapped key")
+	assert.Equal(t, 1, pendingDMRows(t, ts, convID, recipient),
+		"recipient was told pending after reset, so its request must survive cleanup")
 }
 
 // rotationDuringCleanup: a distribution at epoch 1 finds V already holding the
