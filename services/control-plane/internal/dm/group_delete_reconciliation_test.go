@@ -18,14 +18,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // ---------------------------------------------------------------------------
@@ -915,12 +915,12 @@ func TestDMPackageGainsNoPresenceImport(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, imported := range pkg.Imports {
-		require.NotEqual(t, "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence",
+		require.NotEqual(t, "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence",
 			imported, "internal/dm must reach presence only through the rail")
 		require.False(t, strings.HasSuffix(imported, "/internal/presencehistory"),
 			"internal/dm must not import presencehistory")
 	}
 	require.Contains(t, pkg.Imports,
-		"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence",
+		"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence",
 		"the rail import is the seam this test bounds; without it the test is vacuous")
 }

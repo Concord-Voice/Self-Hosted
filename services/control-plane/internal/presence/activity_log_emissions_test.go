@@ -18,7 +18,7 @@ import (
 var bannedActivityLogImports = map[string]bool{
 	"log":      true,
 	"log/slog": true,
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger": true,
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger": true,
 }
 
 var bannedActivityLogMethods = map[string]bool{

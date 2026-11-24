@@ -35,8 +35,8 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/stripe/stripe-go/v87"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/billing"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/billing"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 const (

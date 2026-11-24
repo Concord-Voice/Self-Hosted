@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-const sourcePackage = "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/accountguard"
+const sourcePackage = "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/accountguard"
 
 // This is a narrow dormant-reference/transaction-owner ratchet, not decide's
 // purity checker or a whole-program SQL alias analysis.

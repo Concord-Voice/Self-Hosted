@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/ingressbudget"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/ingressbudget"
 )
 
 const (

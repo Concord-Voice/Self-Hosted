@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	controlwebsocket "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	controlwebsocket "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 )
 

@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/servers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/servers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
 // Regression for a PR #3464 review finding (pre-existing, in a function the PR

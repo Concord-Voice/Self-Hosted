@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/authoritydb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/authoritydb"
 )
 
 // The binary migrates from its embedded copy (B2-D1), through the shared

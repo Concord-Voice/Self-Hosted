@@ -23,9 +23,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/tlspin"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/store"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/tlspin"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 const testID = "6f1c2d4e-8a3b-4c5d-9e7f-0a1b2c3d4e5f"
