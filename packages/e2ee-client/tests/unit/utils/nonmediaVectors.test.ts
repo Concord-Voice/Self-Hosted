@@ -208,13 +208,13 @@ function splitEnvelope(format: string, bytes: Buffer): { nonce: Buffer; sealed: 
   return { nonce: payload.subarray(0, 12), sealed: payload.subarray(12) };
 }
 function open(key: Buffer, nonce: Buffer, sealed: Buffer, aad: Buffer): Buffer {
-  const decipher = createDecipheriv('aes-256-gcm', key, nonce);
+  const decipher = createDecipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 });
   decipher.setAAD(aad);
   decipher.setAuthTag(sealed.subarray(sealed.length - 16));
   return Buffer.concat([decipher.update(sealed.subarray(0, -16)), decipher.final()]);
 }
 function seal(key: Buffer, nonce: Buffer, plain: Buffer, aad: Buffer): Buffer {
-  const cipher = createCipheriv('aes-256-gcm', key, nonce);
+  const cipher = createCipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 });
   cipher.setAAD(aad);
   const encrypted = Buffer.concat([cipher.update(plain), cipher.final()]);
   return Buffer.concat([encrypted, cipher.getAuthTag()]);
