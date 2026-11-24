@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -312,18 +313,17 @@ func TestNoticeTransactions_ReadCommittedUnderRepeatableReadDefault(t *testing.T
 	rdb, rCleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(rCleanup)
 
-	var name string
-	require.NoError(t, db.QueryRow(`SELECT current_database()`).Scan(&name))
-	ident := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
-	_, err := db.Exec(`ALTER DATABASE ` + ident + ` SET default_transaction_isolation = 'repeatable read'`)
+	// The default is set only on this test's own connections, as a startup
+	// parameter, so nothing outlives the test, even a killed run.
+	cfg, err := pq.NewConfig(testdb.DatabaseURL())
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, err := db.Exec(`ALTER DATABASE ` + ident + ` RESET default_transaction_isolation`)
-		assert.NoError(t, err)
-	})
-	// Only connections opened after the ALTER take the new default.
-	rr, err := sql.Open("postgres", testdb.DatabaseURL())
+	if cfg.Runtime == nil {
+		cfg.Runtime = map[string]string{}
+	}
+	cfg.Runtime["default_transaction_isolation"] = "repeatable read"
+	connector, err := pq.NewConnectorConfig(cfg)
 	require.NoError(t, err)
+	rr := sql.OpenDB(connector)
 	t.Cleanup(func() { _ = rr.Close() })
 	var level string
 	require.NoError(t, rr.QueryRow(`SHOW default_transaction_isolation`).Scan(&level))
