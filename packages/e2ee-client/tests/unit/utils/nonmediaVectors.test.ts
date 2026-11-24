@@ -323,8 +323,7 @@ function classifyReject(v: V): string {
       if (
         wire[3] !== 0 ||
         wire.readUInt32BE(4) !== 8388608 ||
-        wire.readUInt32BE(8) !== Number(parsed.fields[9]) ||
-        wire.readUInt32BE(8) !== 1
+        wire.readUInt32BE(8) !== Number(parsed.fields[9])
       )
         return 'validate/invalid_field';
     }
