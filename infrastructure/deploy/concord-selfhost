@@ -162,6 +162,7 @@ verb_admin() {
       echo 'concord-selfhost: cannot list Host Agent authorizers; enrollment unchanged' >&2
       return 1
     }
+    local allow_missing=()
     if [[ -t 0 ]]; then
       local answer
       read -r -p "Type the username to confirm this is the account being reset: " answer
@@ -169,10 +170,12 @@ verb_admin() {
         echo 'concord-selfhost: not confirmed; enrollment unchanged' >&2
         return 1
       fi
+      # Only a confirmed operator may accept an admin the store never held.
+      allow_missing=(--allow-missing)
     fi
-    # The agent exits non-zero when that admin had no credential to revoke, so a
-    # wrong or unknown ID cannot silently pass here.
-    if ! "$agent_bin" authorizer revoke --admin-id "$admin_id"; then
+    # Without a terminal confirmation the agent exits non-zero when that admin
+    # had no credential to revoke, so a wrong or unknown ID cannot silently pass.
+    if ! "$agent_bin" authorizer revoke ${allow_missing[@]+"${allow_missing[@]}"} --admin-id "$admin_id"; then
       echo 'concord-selfhost: Host Agent revocation failed or revoked nothing; enrollment unchanged' >&2
       return 1
     fi

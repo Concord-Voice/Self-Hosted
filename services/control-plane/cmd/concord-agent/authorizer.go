@@ -226,6 +226,7 @@ func revokeAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 	fs := flag.NewFlagSet("revoke", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	adminID := fs.String("admin-id", "", "admin UUID to revoke")
+	allowMissing := fs.Bool("allow-missing", false, "exit 0 when the admin has no entry in the store (operator has confirmed the ID)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -251,8 +252,11 @@ func revokeAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 			_, err = fmt.Fprintf(stderr, "Admin %s was already revoked; nothing more to revoke\n", *adminID)
 			return err
 		}
-		// Never imported: the host holds no trust for this admin, so there is
-		// nothing to revoke and the caller must still be able to reset enrollment.
+		// A wrong ID must not look revoked. Only a caller whose operator has
+		// confirmed the account may accept an admin that was never imported.
+		if !*allowMissing {
+			return fmt.Errorf("no active authorizer credentials for admin %s; nothing was revoked", *adminID)
+		}
 		_, err = fmt.Fprintf(stderr, "Warning: admin %s has no Host Agent credentials; nothing to revoke\n", *adminID)
 		return err
 	}

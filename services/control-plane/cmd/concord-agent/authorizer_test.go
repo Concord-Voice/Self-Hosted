@@ -322,10 +322,19 @@ func TestAuthorizerImportPassesReinstateOnlyWhenAsked(t *testing.T) {
 	}
 }
 
-func TestAuthorizerRevokeOfNeverImportedAdminWarnsAndSucceeds(t *testing.T) {
+func TestAuthorizerRevokeOfNeverImportedAdminFailsWithoutAllowMissing(t *testing.T) {
 	store := &fakeAuthorizerStore{}
 	var stdout, stderr bytes.Buffer
 	code := runAuthorizerCLIWith("/authorizers.json", []string{"revoke", "--admin-id", "3e7138e5-6eb9-4a79-8133-5eab67b7f2b6"}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store})
+	if code != 1 || !strings.Contains(stderr.String(), "nothing was revoked") {
+		t.Fatalf("exit %d stderr %q", code, stderr.String())
+	}
+}
+
+func TestAuthorizerRevokeOfNeverImportedAdminWarnsAndSucceeds(t *testing.T) {
+	store := &fakeAuthorizerStore{}
+	var stdout, stderr bytes.Buffer
+	code := runAuthorizerCLIWith("/authorizers.json", []string{"revoke", "--allow-missing", "--admin-id", "3e7138e5-6eb9-4a79-8133-5eab67b7f2b6"}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store})
 	if code != 0 || !strings.Contains(stderr.String(), "nothing to revoke") || strings.Contains(stdout.String(), "Revoked") {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 	}
