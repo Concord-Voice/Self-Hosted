@@ -90,11 +90,18 @@ var errAuditWrite = errors.New("admin audit write failed")
 // WriteWith runs before (when not nil) and then inserts ev in ONE transaction,
 // so the rows before writes and the audit row commit together or not at all.
 // before gets the event and may fill it in from what it wrote (CreateAdmin
-// records the created admin's id); the detail is encoded after before
-// returns. An error from before is returned as is and writes no audit row; an
-// error in the audit step wraps errAuditWrite. before runs under the
-// connecting role; the audit INSERT then runs under the restricted role.
+// records the created admin's id). The detail is encoded before the
+// transaction opens, so a detail that cannot be encoded writes nothing, and
+// again after before returns. An error from before is returned as is and
+// writes no audit row; an error in the audit step wraps errAuditWrite.
+// before runs under the connecting role; the audit INSERT then runs under
+// the restricted role.
 func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sql.Tx, *AuditEvent) error) error {
+	detailJSON, err := a.marshalDetail(ctx, ev.Detail)
+	if err != nil {
+		return err
+	}
+
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		a.emitAuditWriteFailure(ctx)
@@ -107,16 +114,9 @@ func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sq
 		if err := before(tx, &ev); err != nil {
 			return err
 		}
-	}
-
-	var detailJSON []byte
-	if ev.Detail != nil {
-		b, err := json.Marshal(ev.Detail)
-		if err != nil {
-			a.emitAuditWriteFailure(ctx)
-			return fmt.Errorf("%w: marshal audit detail: %w", errAuditWrite, err)
+		if detailJSON, err = a.marshalDetail(ctx, ev.Detail); err != nil {
+			return err
 		}
-		detailJSON = b
 	}
 
 	// Adopt the restricted role for the rest of this transaction. SET ROLE
@@ -149,6 +149,19 @@ func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sq
 	}
 	a.emitAuditCommitted(ctx, ev.EventType, ev.Result)
 	return nil
+}
+
+// marshalDetail encodes an audit detail, nil for none.
+func (a *AuditLog) marshalDetail(ctx context.Context, detail map[string]any) ([]byte, error) {
+	if detail == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(detail)
+	if err != nil {
+		a.emitAuditWriteFailure(ctx)
+		return nil, fmt.Errorf("%w: marshal audit detail: %w", errAuditWrite, err)
+	}
+	return b, nil
 }
 
 func (a *AuditLog) emitAuditCommitted(ctx context.Context, eventType, result string) {

@@ -134,7 +134,7 @@ func TestValidateAdminUsername(t *testing.T) {
 	}
 	for _, bad := range []string{
 		"", "evil\x01", "\x01\x02", "tab\there", "line\nbreak", "del\x7f", "c1\u0085",
-		"zero​width", "bidi‮flip", " leading", "trailing ", " nbsp", "bad\xffutf8",
+		"zero\u200bwidth", "bidi\u202eflip", " leading", "trailing ", "\u00a0nbsp", "bad\xffutf8",
 	} {
 		assert.ErrorIs(t, admin.ValidateAdminUsername(bad), admin.ErrInvalidUsername, "%q", bad)
 	}
