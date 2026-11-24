@@ -74,31 +74,41 @@ func isAdminUsernameByte(b byte) bool {
 // whitespace character folds to.
 const skeletonSeparator = '-'
 
-// skeletonHomoglyphs maps the Cyrillic and Greek letters that are drawn like a
-// Latin letter to that letter. It holds both cases, because it runs before
-// case folding as well as after: Greek capital nu reads as N while its
-// lowercase reads as v, and Cyrillic capital ve reads as B while its lowercase
-// does not read as b.
+// skeletonHomoglyphs maps the letters drawn like a Latin letter to that
+// letter, and the symbols drawn like a separator to the separator. It holds
+// both cases, because it runs before NFKD normalization and before and after
+// case folding: Greek capital nu reads as N while its lowercase reads as v,
+// Cyrillic capital ve reads as B while its lowercase does not read as b, NFKD
+// turns the Greek lunate sigma symbol (U+03F2, drawn like c) into a final
+// sigma, and case folding turns its capital (U+03F9) into it.
 //
 // ponytail: a small curated table of the visually identical letters. The
 // upgrade path is the Unicode TR39 confusables data (skeleton()), which also
 // covers other scripts and symbols.
 var skeletonHomoglyphs = map[rune]rune{
-	// Cyrillic lowercase: a ie o er es u ha, byelorussian-ukrainian i, je,
-	// dze, komi de, shha, palochka, qa, we.
-	'\u0430': 'a', '\u0435': 'e', '\u043e': 'o', '\u0440': 'p', '\u0441': 'c', '\u0443': 'y', '\u0445': 'x',
-	'\u0456': 'i', '\u0458': 'j', '\u0455': 's', '\u0501': 'd', '\u04bb': 'h', '\u04cf': 'l', '\u051b': 'q', '\u051d': 'w',
+	// Cyrillic lowercase: a ie ka o er es u ha, straight u,
+	// byelorussian-ukrainian i, je, dze, komi de, shha, palochka, qa, we.
+	'\u0430': 'a', '\u0435': 'e', '\u043a': 'k', '\u043e': 'o', '\u0440': 'p', '\u0441': 'c', '\u0443': 'y',
+	'\u0445': 'x', '\u04af': 'y', '\u0456': 'i', '\u0458': 'j', '\u0455': 's', '\u0501': 'd', '\u04bb': 'h',
+	'\u04cf': 'l', '\u051b': 'q', '\u051d': 'w',
 	// Cyrillic uppercase: a ve ie ka em en o er es te u ha,
 	// byelorussian-ukrainian i, je, dze, palochka, qa, we.
 	'\u0410': 'a', '\u0412': 'b', '\u0415': 'e', '\u041a': 'k', '\u041c': 'm', '\u041d': 'h', '\u041e': 'o',
 	'\u0420': 'p', '\u0421': 'c', '\u0422': 't', '\u0423': 'y', '\u0425': 'x', '\u0406': 'i', '\u0408': 'j',
 	'\u0405': 's', '\u04c0': 'l', '\u051a': 'q', '\u051c': 'w',
-	// Greek lowercase: omicron alpha nu tau iota kappa rho.
+	// Greek lowercase: omicron alpha nu tau iota kappa rho upsilon, lunate
+	// sigma symbol.
 	'\u03bf': 'o', '\u03b1': 'a', '\u03bd': 'v', '\u03c4': 't', '\u03b9': 'i', '\u03ba': 'k', '\u03c1': 'p',
+	'\u03c5': 'u', '\u03f2': 'c',
 	// Greek uppercase: alpha beta epsilon zeta eta iota kappa mu nu omicron
-	// rho tau upsilon chi.
+	// rho tau upsilon chi, lunate sigma symbol.
 	'\u0391': 'a', '\u0392': 'b', '\u0395': 'e', '\u0396': 'z', '\u0397': 'h', '\u0399': 'i', '\u039a': 'k',
 	'\u039c': 'm', '\u039d': 'n', '\u039f': 'o', '\u03a1': 'p', '\u03a4': 't', '\u03a5': 'y', '\u03a7': 'x',
+	'\u03f9': 'c',
+	// Latin: dotless i, alpha, script g, dental click.
+	'\u0131': 'i', '\u0251': 'a', '\u0261': 'g', '\u01c0': 'l',
+	// Symbols drawn like a separator: minus sign, middle dot.
+	'\u2212': skeletonSeparator, '\u00b7': skeletonSeparator,
 }
 
 // skeletonRune is one step of UsernameSkeleton: it drops a combining mark
@@ -144,20 +154,25 @@ var skeletonPairs = strings.NewReplacer("m", "rn", "w", "vv", "d", "cl")
 //     jose, Alice and alice, and a fullwidth letter and its ASCII form match.
 //  2. Combining marks, format and control characters and default-ignorable
 //     code points are dropped, so bob followed by a zero-width space is bob.
-//  3. Whitespace, dash punctuation, '.' and '_' become one separator, runs of
-//     separators collapse to one and separators at either end are trimmed, so
-//     Ops Team, ops-team and ops__team match, and so do dave. and dave.
-//  4. The Cyrillic and Greek letters of skeletonHomoglyphs become their Latin
-//     letter, so alice spelled with a Cyrillic a (U+0430) reads as alice.
+//  3. Whitespace, dash punctuation, '.', '_', the minus sign and the middle
+//     dot become one separator, runs of separators collapse to one and
+//     separators at either end are trimmed, so Ops Team, ops-team and
+//     ops__team match, and so do dave and dave.
+//  4. The letters of skeletonHomoglyphs (Cyrillic, Greek and Latin letters
+//     drawn like another Latin letter) become that letter, so alice spelled
+//     with a Cyrillic a (U+0430) or a dotless i (U+0131) reads as alice. The
+//     table is applied before NFKD as well as after it, because NFKD turns
+//     some of its letters into letters that look different.
 //  5. 1, i, l and | fold to l and 0 and o to o (alice, aIice and a1ice match;
 //     so do ops0 and opso).
 //  6. m expands to rn, w to vv and d to cl (corn and com match, and so do kim
 //     and klm).
 //
 // Lookalikes outside these steps, such as letters of other scripts or
-// Cyrillic and Greek letters missing from the table, are not detected.
+// letters missing from the table, are not detected.
 func UsernameSkeleton(username string) string {
-	s := strings.Map(skeletonRune, norm.NFKD.String(username))
+	s := strings.Map(skeletonRune, username)
+	s = strings.Map(skeletonRune, norm.NFKD.String(s))
 	s = strings.Map(skeletonRune, norm.NFKD.String(cases.Fold().String(s)))
 	s = collapseSeparators(skeletonFolds.Replace(s))
 	return skeletonPairs.Replace(s)

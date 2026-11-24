@@ -48,14 +48,56 @@ var confusablePairs = [][2]string{
 	{"gina..h", "gina.h"},
 	// The pair rules reach one skeleton from either side.
 	{"wvhank", "vwhank"},
+	// Latin, Greek and Cyrillic letters and symbols outside the first table.
+	{"al\u0131ce", "alice"},           // dotless i
+	{"\u0251lice", "alice"},           // Latin alpha
+	{"\u0261ina", "gina"},             // script g
+	{"al\u01c0ce", "alice"},           // dental click
+	{"\u03f2arol", "carol"},           // Greek lunate sigma symbol
+	{"\u03f9arol", "carol"},           // its capital
+	{"\u03c5ma", "uma"},               // Greek upsilon
+	{"\u04afves", "yves"},             // Cyrillic straight u
+	{"\u043aim", "kim"},               // Cyrillic ka
+	{"\u041aim", "kim"},               // Cyrillic capital ka
+	{"ops\u2212team", "ops-team"},     // minus sign
+	{"first\u00b7last", "first-last"}, // middle dot
 }
 
 func TestUsernameSkeleton_FoldsLookalikes(t *testing.T) {
 	for _, p := range confusablePairs {
 		assert.Equal(t, admin.UsernameSkeleton(p[0]), admin.UsernameSkeleton(p[1]), "%q and %q", p[0], p[1])
 	}
-	for _, p := range [][2]string{{"alice", "bob"}, {"bob", "rob"}, {"ops1", "ops2"}, {"dan", "dam"}, {"walt", "wall"}} {
+	for _, p := range [][2]string{{"alice", "bob"}, {"bob", "rob"}, {"ops1", "ops2"}, {"dan", "dam"}, {"walt", "wall"},
+		{"uma", "yma"}, {"gina", "qina"}, {"ops-team", "opsteam"}, {"kim", "him"}, {"carol", "sarol"}} {
 		assert.NotEqual(t, admin.UsernameSkeleton(p[0]), admin.UsernameSkeleton(p[1]), "%q and %q", p[0], p[1])
+	}
+}
+
+// Names from pairs that are not linked, directly or through other pairs, must
+// not share a skeleton: a table entry that maps too widely would make one.
+func TestUsernameSkeleton_UnlinkedPairsDoNotCollide(t *testing.T) {
+	parent := map[string]string{}
+	var find func(string) string
+	find = func(s string) string {
+		if p, ok := parent[s]; ok && p != s {
+			root := find(p)
+			parent[s] = root
+			return root
+		}
+		parent[s] = s
+		return s
+	}
+	for _, p := range confusablePairs {
+		parent[find(p[0])] = find(p[1])
+	}
+	bySkeleton := map[string]string{}
+	for name := range parent {
+		skeleton := admin.UsernameSkeleton(name)
+		if other, ok := bySkeleton[skeleton]; ok {
+			assert.Equal(t, find(other), find(name), "%q and %q share skeleton %q but no pair links them", other, name, skeleton)
+			continue
+		}
+		bySkeleton[skeleton] = name
 	}
 }
 
