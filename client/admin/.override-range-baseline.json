@@ -5,19 +5,19 @@
       "consumer": "node_modules/@eslint/config-array",
       "dep": "minimatch",
       "range": "^10.2.4",
-      "resolved": "11.0.7"
+      "resolved": "11.0.8"
     },
     {
       "consumer": "node_modules/@typescript-eslint/typescript-estree",
       "dep": "minimatch",
       "range": "^10.2.2",
-      "resolved": "11.0.7"
+      "resolved": "11.0.8"
     },
     {
       "consumer": "node_modules/eslint",
       "dep": "minimatch",
       "range": "^10.2.6",
-      "resolved": "11.0.7"
+      "resolved": "11.0.8"
     }
   ]
 }
