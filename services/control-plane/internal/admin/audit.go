@@ -350,7 +350,15 @@ type SignInRecord struct {
 //   - When the admin has a login_success row written before this release
 //     (no detailNoticeSession), the window is the rows above its id plus
 //     those from ten seconds before it (the earlier rule).
-//   - Otherwise every added admin counts.
+//   - Otherwise (every sign-in so far went uncounted, such as a first sign-in
+//     that timed out on the lock) the window is the rows above the admin's
+//     own earliest evidence of existing: the row that created them
+//     (admin_created, or a bootstrap naming them) or their oldest
+//     login_success row, whichever id is lower. An admin added after the
+//     viewer was created has a higher id than that creation row, so it is
+//     still counted, while the admins that predate the viewer are not. With
+//     no creation row the oldest sign-in bounds the window, and the admins
+//     added before it are the ones a counted first sign-in shows as 0.
 //
 // So a notice that was counted but never shown (a client that disconnected,
 // a commit whose outcome the server never learned) is shown again, and the
@@ -419,6 +427,14 @@ var signInNoticeQuery = adminsAddedQueryMarker + `
 	   WHERE (l.event_type = 'admin_created' AND l.result = 'success')
 	      OR (l.event_type = 'bootstrap' AND l.result = 'success'
 	          AND ((l.detail IS NULL AND l.actor IS NOT NULL) OR l.detail->>'verb' = 'bootstrap'))
+	), origin AS (
+	  -- The viewer's own earliest evidence of existing: their creation row or
+	  -- their oldest sign-in, whichever is lower.
+	  SELECT LEAST(
+	           (SELECT MIN(id) FROM added WHERE created_id = $1::text),
+	           (SELECT MIN(id) FROM admin_audit_log
+	             WHERE admin_id = $1 AND event_type = 'login_success' AND result = 'success')
+	         ) AS id
 	), windowed AS (
 	  SELECT a.anonymous_counts,
 	         CASE WHEN a.created_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -427,10 +443,11 @@ var signInNoticeQuery = adminsAddedQueryMarker + `
 	    CROSS JOIN signed_in s
 	    CROSS JOIN floor f
 	    LEFT JOIN legacy p ON true
+	    CROSS JOIN origin o
 	   WHERE s.any AND a.created_id IS DISTINCT FROM $1::text
 	     AND CASE WHEN f.cursor IS NOT NULL THEN a.id > f.cursor
 	              WHEN p.id IS NOT NULL THEN a.id > p.id OR a.ts > p.ts - interval '10 seconds'
-	              ELSE true END
+	              ELSE a.id > o.id END
 	)
 	SELECT LEAST(
 	         (SELECT COUNT(DISTINCT u.id) FROM windowed w JOIN admin_users u ON u.id = w.id)

@@ -101,7 +101,10 @@ func TestAdminsAddedSinceLastSignIn_UnacknowledgedSignInEndsNoWindow(t *testing.
 
 	viewerID, _, _ := enrolledAdmin(t, db, rdb)
 	unread := map[string]any{"notice_session": "unread"}
-	// Only unread sign-ins: nothing was ever shown, so every creation counts.
+	// Only unread sign-ins: nothing was ever shown, so every creation after
+	// the viewer's own counts.
+	actingID, _, _ := enrolledAdmin(t, db, rdb)
+	createdRow(t, db, actingID, viewerID, "viewer", "11 hours 59 minutes")
 	insertAuditRow(t, db, nil, existingAdmin(t, db, "unread-first"), admin.EventAdminCreated, admin.AuditSuccess, "12 hours")
 	insertAuditRowJSON(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "12 hours 1 minute", unread)
 	n, err := admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
@@ -249,4 +252,41 @@ func TestWebAuthnLogin_NoticeReadFailure_NextSignInStillReports(t *testing.T) {
 	code, body, _ = signInAdmin(t, engine, username, va)
 	require.Equal(t, http.StatusOK, code, string(body))
 	assert.Equal(t, 1, decodeSignIn(t, body), "the creation the failed read could not show")
+}
+
+// A first sign-in that timed out on the notice lock records no count, so the
+// next sign-in has no floor and no legacy row. Its window opens above the
+// viewer's own creation row: the admins added after the viewer was created
+// are counted, and the ones before it are not. It counted every added admin
+// in the log before.
+func TestRecordSignIn_UncountedFirstSignIn_CountsFromViewerCreation(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+	audit := admin.NewAuditLog(db)
+
+	actingID, _, _ := enrolledAdmin(t, db, rdb)
+	before := uniqueAdminUsername("pre-viewer")
+	createdRow(t, db, actingID, pendingAdminNamed(t, db, before), before, "0 seconds")
+	viewerID, _, _ := enrolledAdmin(t, db, rdb)
+	createdRow(t, db, actingID, viewerID, "viewer", "0 seconds")
+	between := uniqueAdminUsername("between")
+	createdRow(t, db, actingID, pendingAdminNamed(t, db, between), between, "0 seconds")
+
+	// Another connection holds the notice lock past the 5 s lock timeout.
+	tx, err := db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.Exec(`SELECT pg_advisory_xact_lock($1)`, admin.SignInNoticeLockKeyForTest)
+	require.NoError(t, err)
+	first := recordSignIn(t.Context(), audit, viewerID, "uncounted-first")
+	require.NoError(t, first.err, "the sign-in is still recorded")
+	require.False(t, first.read, "the count timed out on the lock")
+	require.NoError(t, tx.Rollback())
+
+	after := uniqueAdminUsername("post")
+	createdRow(t, db, actingID, pendingAdminNamed(t, db, after), after, "0 seconds")
+	assert.Equal(t, 2, requireCounted(t, audit, viewerID),
+		"the admin added between the viewer's creation and the failed sign-in, and the one after it")
 }
