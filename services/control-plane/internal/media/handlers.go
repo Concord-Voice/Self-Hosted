@@ -517,8 +517,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	userID := c.GetString("user_id")
 	fileID := c.Param("file_id")
 
-	if _, err := uuid.Parse(fileID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+	if !validateMediaFileID(c, fileID) {
 		return
 	}
 
@@ -1062,6 +1061,14 @@ func lockMediaMembership(ctx context.Context, tx *sql.Tx, channelID, conversatio
 	return tx.QueryRowContext(ctx, `SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2 FOR KEY SHARE`, conversationID.String, userID).Scan(&member)
 }
 
+func validateMediaFileID(c *gin.Context, fileID string) bool {
+	if _, err := uuid.Parse(fileID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+		return false
+	}
+	return true
+}
+
 // DeleteMedia soft-deletes a media file and removes it from object storage.
 // DELETE /api/v1/media/:file_id
 // Only the uploader can delete their own Tier 2 (attachment) files while they
@@ -1072,8 +1079,7 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	userID := c.GetString("user_id")
 	fileID := c.Param("file_id")
 
-	if _, err := uuid.Parse(fileID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+	if !validateMediaFileID(c, fileID) {
 		return
 	}
 
