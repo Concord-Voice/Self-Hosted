@@ -10,9 +10,9 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
-// Migrations 000202 and 000203 index admin_audit_log for the admin sign-in
-// notice (AuditLog.AdminsAddedSinceLastSignIn). 000201 belongs to another
-// change; these files stand at 000202 and 000203.
+// Migrations 000203 and 000204 index admin_audit_log for the admin sign-in
+// notice (AuditLog.AdminsAddedSinceLastSignIn). 000201 and 000202 belong to
+// other changes; these files stand at 000203 and 000204.
 
 // migrationStatements returns the file's SQL statements, comments dropped.
 func migrationStatements(t *testing.T, path string) []string {
@@ -35,18 +35,18 @@ func migrationStatements(t *testing.T, path string) []string {
 // Each file holds exactly one CONCURRENTLY statement: golang-migrate sends a
 // file as one simple query, and PostgreSQL wraps a multi-statement query in a
 // transaction, where CONCURRENTLY cannot run.
-func TestMigration000202_000203_AreSingleConcurrentStatements(t *testing.T) {
+func TestMigration000203_000204_AreSingleConcurrentStatements(t *testing.T) {
 	cases := []struct {
 		file string
 		want string
 	}{
-		{"../../migrations/000202_admin_audit_login_success_index.up.sql",
+		{"../../migrations/000203_admin_audit_login_success_index.up.sql",
 			"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_admin_audit_login_success ON admin_audit_log (admin_id, ts DESC) WHERE event_type = 'login_success' AND result = 'success'"},
-		{"../../migrations/000202_admin_audit_login_success_index.down.sql",
+		{"../../migrations/000203_admin_audit_login_success_index.down.sql",
 			"DROP INDEX CONCURRENTLY IF EXISTS idx_admin_audit_login_success"},
-		{"../../migrations/000203_admin_audit_event_result_ts_index.up.sql",
+		{"../../migrations/000204_admin_audit_event_result_ts_index.up.sql",
 			"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_admin_audit_event_result_ts ON admin_audit_log (event_type, result, ts)"},
-		{"../../migrations/000203_admin_audit_event_result_ts_index.down.sql",
+		{"../../migrations/000204_admin_audit_event_result_ts_index.down.sql",
 			"DROP INDEX CONCURRENTLY IF EXISTS idx_admin_audit_event_result_ts"},
 	}
 	for _, tc := range cases {
@@ -58,7 +58,7 @@ func TestMigration000202_000203_AreSingleConcurrentStatements(t *testing.T) {
 
 // After the runner applies them, both indexes exist, are valid, and have the
 // pinned definitions, and the sign-in lookup uses the partial index.
-func TestMigration000202_000203_IndexesAreValidAndUsed(t *testing.T) {
+func TestMigration000203_000204_IndexesAreValidAndUsed(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(cleanup)
 

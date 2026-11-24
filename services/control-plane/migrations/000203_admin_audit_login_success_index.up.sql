@@ -1,4 +1,4 @@
--- 000202_admin_audit_login_success_index.up.sql
+-- 000203_admin_audit_login_success_index.up.sql
 -- Serves the inner query of AuditLog.AdminsAddedSinceLastSignIn: the newest
 -- successful sign-in of one admin. Without it that lookup walked
 -- idx_admin_audit_ts backwards and, on an admin's first sign-in (no matching
