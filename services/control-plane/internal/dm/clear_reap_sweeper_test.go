@@ -20,8 +20,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 const clearReapTestConversationID = "11111111-1111-1111-1111-111111111111"

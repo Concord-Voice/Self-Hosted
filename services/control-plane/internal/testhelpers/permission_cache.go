@@ -7,7 +7,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 )
 
 // SeedPermissionGenerations creates the user and server permission

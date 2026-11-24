@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/accountguard/decide"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/accountguard/decide"
 )
 
 var errRequestShape = errors.New("accountguard: invalid request component")

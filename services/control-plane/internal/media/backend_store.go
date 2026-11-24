@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/storage"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/storage"
 )
 
 // Per-object storage-backend resolution on the READ path (ADR-0038 / #2759).

@@ -42,8 +42,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // sfFaultHook fails one Redis command (or any of a "|"-separated set, so an

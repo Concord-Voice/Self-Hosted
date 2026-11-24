@@ -14,9 +14,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/tlspin"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/store"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/tlspin"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // backend is the store surface the HTTP layer drives.

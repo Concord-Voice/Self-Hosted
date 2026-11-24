@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 // Checkout session integration tests (#2033 PR-3, plan Tasks 4 and 5; spec

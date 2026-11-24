@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // TestImportRowTwentyTwoReimportedKeepsTheL1Exit pins B3-D18 (found by the

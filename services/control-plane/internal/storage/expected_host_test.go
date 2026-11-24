@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 // The destination check added with ADR-0038 / #2759.

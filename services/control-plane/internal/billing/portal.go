@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v87"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
 )
 
 // Customer Portal session (#2033 spec §8 Portal, plan Task 6).

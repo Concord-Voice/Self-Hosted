@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 func TestP384SignsP1363ThatTheContractVerifies(t *testing.T) {

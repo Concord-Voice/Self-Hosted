@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/mediaproof"
 )
 
 const zeroProof = "0000000000000000000000000000000000000000000000000000000000000000"

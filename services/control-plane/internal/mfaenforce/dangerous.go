@@ -9,7 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 )
 
 // The dangerous-action gates (#3454) compose the primitives in this file with

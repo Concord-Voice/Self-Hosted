@@ -11,7 +11,7 @@ import (
 
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/migrationrunner"
 )
 
 // MigrationFiles embeds the authority's migrations (B1-D1). A test pins it to

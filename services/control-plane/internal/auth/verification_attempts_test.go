@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
