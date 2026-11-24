@@ -31,7 +31,11 @@ function decodePayload(text: string): Uint8Array {
   try {
     const binary = atob(text);
     if (btoa(binary) !== text) throw new Error('noncanonical');
-    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return Uint8Array.from(binary, (char) => {
+      const codePoint = char.codePointAt(0);
+      if (codePoint === undefined) throw new Error(INVALID_ENVELOPE);
+      return codePoint;
+    });
   } catch {
     throw new Error(INVALID_ENVELOPE);
   }
