@@ -1620,7 +1620,11 @@ func (h *Handler) ServerMove(c *gin.Context) {
 		}
 		h.signalMove(serverID, targetID, decision.fromChannelID, req.TargetChannelID)
 		if !mod.self {
-			h.auditVoiceMove(c.Request.Context(), serverID, actorID, targetID, decision.fromChannelID, req.TargetChannelID, decision.crossed, false)
+			h.auditVoiceMove(c.Request.Context(), voiceMoveAudit{
+				serverID: serverID, actorID: actorID, targetID: targetID,
+				fromChannelID: decision.fromChannelID, toChannelID: req.TargetChannelID,
+				crossed: decision.crossed, temporaryGrant: false,
+			})
 		}
 		c.JSON(http.StatusOK, gin.H{"moved": true})
 		return
@@ -1644,7 +1648,11 @@ func (h *Handler) ServerMove(c *gin.Context) {
 		return
 	}
 	h.signalMove(serverID, targetID, decision.fromChannelID, req.TargetChannelID)
-	h.auditVoiceMove(c.Request.Context(), serverID, actorID, targetID, decision.fromChannelID, req.TargetChannelID, decision.crossed, granted)
+	h.auditVoiceMove(c.Request.Context(), voiceMoveAudit{
+		serverID: serverID, actorID: actorID, targetID: targetID,
+		fromChannelID: decision.fromChannelID, toChannelID: req.TargetChannelID,
+		crossed: decision.crossed, temporaryGrant: granted,
+	})
 	c.JSON(http.StatusOK, gin.H{"moved": true})
 }
 
@@ -1865,22 +1873,28 @@ func (h *Handler) signalMove(serverID, targetID, fromChannelID, targetChannelID 
 // recorded. crossed comes from the decision transaction (a failed hierarchy
 // check counts as crossed). Best-effort: a failed audit write is logged but
 // does NOT block the already-committed move. Self-moves never reach here.
-func (h *Handler) auditVoiceMove(ctx context.Context, serverID, actorID, targetID, fromChannelID, toChannelID string, crossed, temporaryGrant bool) {
-	if !crossed && !temporaryGrant {
+type voiceMoveAudit struct {
+	serverID, actorID, targetID string
+	fromChannelID, toChannelID  string
+	crossed, temporaryGrant     bool
+}
+
+func (h *Handler) auditVoiceMove(ctx context.Context, m voiceMoveAudit) {
+	if !m.crossed && !m.temporaryGrant {
 		return // ordinary move into a channel the target could already join
 	}
 	if h.audit == nil {
 		return
 	}
-	actor := actorID
-	target := targetID
-	if err := h.audit.Log(ctx, serverID, &actor, auditActionVoiceMoved, "member", &target, map[string]interface{}{
-		"from_channel_id":   fromChannelID,
-		"to_channel_id":     toChannelID,
-		"hierarchy_crossed": crossed,
-		"temporary_grant":   temporaryGrant,
+	actor := m.actorID
+	target := m.targetID
+	if err := h.audit.Log(ctx, m.serverID, &actor, auditActionVoiceMoved, "member", &target, map[string]interface{}{
+		"from_channel_id":   m.fromChannelID,
+		"to_channel_id":     m.toChannelID,
+		"hierarchy_crossed": m.crossed,
+		"temporary_grant":   m.temporaryGrant,
 	}); err != nil {
-		h.log.Error("move: audit log", "error", err, "server_id", serverID, "target_id", targetID)
+		h.log.Error("move: audit log", "error", err, "server_id", m.serverID, "target_id", m.targetID)
 	}
 }
 
