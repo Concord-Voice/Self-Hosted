@@ -39,7 +39,7 @@ Concord **never ships, vendors, or writes a software HEVC codec.**
 
 ### Codec admission table
 
-| Codec | Software implementation | Hardware via OS/GPU API | Licence gate | E2EE scheme (v5) | Status |
+| Codec | Software implementation | Hardware via OS/GPU API | Licence gate | E2EE scheme (v6) | Status |
 |---|---|---|---|---|---|
 | Opus | Yes — libopus (BSD); the only audio codec | n/a | none (RFC 6716 grants) | whole-frame | shipped |
 | VP8 / VP9 | Yes — libvpx (BSD); WebRTC MTI | where available | none | whole-frame | shipped |
@@ -145,7 +145,7 @@ note stops asserting two false premises.
 
 **Harder.** HEVC is not real until two children land, and they are sequenced: #3241 forks mediasoup
 with an H265 codec class behind a router flag, and #3242 designs the HEVC arm of media frame crypto
-v5. Until both merge, HEVC stays `selectable: false` on the client — which is **already its state
+v6. Until both merge, HEVC stays `selectable: false` on the client — which is **already its state
 today**, so this ADR records current behaviour rather than requesting a change.
 
 **Revisit when:** VVC desktop hardware encode ships · AV2 gets an RTP payload format and a
@@ -153,35 +153,21 @@ real-time encoder · the native audio path (#3243) lands and Concord controls an
 
 ## Security considerations
 
-**Media frame crypto v5 dispatches per codec, and an unrecognised codec is admitted to a scheme
-that was not designed for it rather than refused.** `.claude/rules/e2ee.md:404` routes VP9, VP8,
-Opus, **and unknown byte-transparent codecs** to whole-frame v5, and the dispatch is an
-if/if/fall-through rather than an exhaustive switch (`workers/e2eeProtocol.ts` —
-`codecFamilyFromMimeType` returns `undefined` for anything outside its five literals, and
-`selectCryptoScheme(undefined)` yields `whole-frame`). Nothing in the repository enforces "no
-scheme entry, therefore reject".
+**Media frame crypto v6 dispatches through a closed scheme registry.** Opus, VP8, VP9, AV1, and
+H.264 each have an authenticated scheme byte. A transform that cannot resolve an explicit scheme
+fails closed before encryption or decryption; it does not use the whole-frame arm as a fallback.
 
-**State the consequence precisely, because this document will be cited.** Whole-frame v5 encrypts
-the entire payload less a static short header, so an unscheme'd codec routed there leaks **no
-plaintext** — it is if anything more opaque than the H.264 arm, which leaves SPS/PPS in the clear
-by design. The failure is one of **framing and decode correctness**, not confidentiality: this is
-CWE-693 (protection-mechanism failure), not a cryptographic-disclosure finding.
-
-For HEVC that fall-through is **not benign.** HEVC is Annex-B/NAL, like H.264 — and the H.264 arm
-(`.claude/rules/e2ee.md:425-440`) exists precisely because whole-frame encryption of an Annex-B
-stream can synthesise a false `00 00 01` start code (hence its reversible emulation-prevention
-stuffing) and conceals the SPS/PPS that libwebrtc must parse. Admitting HEVC without its own
-scheme entry routes a NAL codec down the byte-transparent path that the H.264 work already
-demonstrated is wrong for it.
+For HEVC this remains load-bearing. HEVC is Annex-B/NAL like H.264, so it cannot safely use a
+byte-transparent scheme: it needs its own parser, authenticated clear-prefix definition, and
+decoder-safe ciphertext handling.
 
 **This ADR therefore imposes a forward requirement, and binds it to #3241 rather than #3242.**
-An admitted codec is not negotiable until it has its own v5 scheme entry — and the issue that
+An admitted codec is not negotiable until it has its own v6 scheme entry — and the issue that
 must honour that is the one which *arms* the hazard, not the one which closes it. **The router
 `mediaCodecs` list is the admission boundary for both directions.** #3241 must not merge an
-`video/H265` entry — **even flag-default-off** — before #3242 has registered the HEVC arm.
-#3242 owns writing that arm; the enforcement shape it should adopt is converting the
-`encryptFrame`/`decryptFrame` fall-through into an exhaustive switch with a `never` default, so
-the next codec cannot be added silently.
+`video/H265` entry — **even flag-default-off** — before #3242 has registered the HEVC arm. #3242
+must add its explicit codec scheme, authenticated framing contract, conformance vectors, and
+failure tests before that registration is enabled.
 
 **The margin today is ONE gate, not three — do not read the client resolver as a backstop.**
 Three restraints exist, and only one of them is load-bearing:
@@ -195,8 +181,8 @@ Three restraints exist, and only one of them is load-bearing:
   at `:240`, with `:291` returning false). **This governs the local send path only.** The decrypt
   path resolves the *sender's* codec from `consumer.rtpParameters`
   (`services/voice/voiceService.ts:8530`) and never consults the resolver — so once the router
-  admits H265, an honest receiver whole-frame-decrypts a peer's HEVC regardless of its own
-  setting. There is no receive-side gate.
+  admits H265, an honest receiver rejects it until a matching explicit v6 scheme exists. The
+  router admission boundary remains the gate that prevents a user-visible incompatibility.
 
 So #3241 alone is sufficient to arm this. That is why the requirement above binds #3241.
 
@@ -219,17 +205,14 @@ this ADR's References section links; it is not restated here. What follows is on
   (`client/desktop/native/concord-audiocap/rt/`); `napi/` is explicitly outside it. No rule yet
   covers a media-engine sidecar, which does not exist. A future one needs its own decision, not
   an assumed inheritance.
-- **One stale artefact contradicts this ADR's premise if read in isolation.**
-  `client/desktop/src/renderer/services/e2ee/mediaEncryption.ts:110` carries an `h265: 2` entry in
-  `UNENCRYPTED_BYTES`. It is dead — `getUnencryptedBytes` returns a static value and nothing reads
-  it — but a reader checking "does HEVC already have a v5 entry?" against the crypto module will
-  find one. #3242 should delete it alongside writing the real arm.
+- **HEVC still has no v6 scheme.** The v6 codec registry rejects an unresolved codec family. #3242
+  must add the HEVC scheme only with its format, vectors, and decode-path tests.
 
 ## Related
 
 - #2319 — Epic: native custom media engine (outbound screen sidecar)
 - #3241 — Spike: fork mediasoup with an H265 codec class behind a router flag — **gate 1 for HEVC**
-- #3242 — Design: HEVC arm of media frame crypto v5 — **gate 2 for HEVC**
+- #3242 — Design: HEVC arm of media frame crypto v6 — **gate 2 for HEVC**
 - #3243 — Design: full-pipeline native media engine phasing — libopus revisit trigger
 - #2320 / #2321 / #2322 — sibling de-risking children
 - #2209 — explicit codec preference during screen layering (current Chromium pipeline; not absorbed here)
@@ -238,7 +221,7 @@ this ADR's References section links; it is not restated here. What follows is on
 
 ## References
 
-**Internal** — `.claude/rules/e2ee.md` (in Desktop) § Media frame crypto v5 · `.claude/rules/domains/media-plane.md`
+**Internal** — `.claude/rules/e2ee.md` (in Desktop) § Media frame crypto v6 · `.claude/rules/domains/media-plane.md`
 § Profile-aware room codec floor · `.claude/rules/native-audio.md` (in Desktop) · `docs/legal/dependency-license-audit.md`
 · `.github/workflows/license-check.yml` · `docs/superpowers/specs/2026-07-15-native-custom-media-engine-design.md` §5
 

@@ -14,6 +14,10 @@ import tempfile
 
 PUBLIC = "Agentic-Dev-Tooling"
 PRIVATE = "Internal-Dev-Tooling"
+ARCHITECT_EVIDENCE = "scripts/architect_git_evidence.py"
+ARCHITECT_FILES = ("scripts/claude-architect.py", "scripts/architect_git_mcp.py",
+                   ARCHITECT_EVIDENCE, "scripts/render-agent-profiles.py",
+                   "plugins/core-lifecycle/agents/architect.md")
 PLATFORMS = ("claude", "codex", "copilot", "antigravity")
 FLEET_WORKFLOWS = dict.fromkeys((
     "ci-status", "dev-lifecycle", "enhanced-pr-review", "issue-brief", "issue-creation",
@@ -243,6 +247,23 @@ def skill_file(root, path):
     return path if path.is_file() else None
 
 
+def claude_architect(public, revision, *, optional=False):
+    """Resolve the launcher from reviewed, regular Git blobs without executing any component."""
+    if optional and not git(public, "ls-tree", revision, "--", ARCHITECT_FILES[0]):
+        # Older releases exposed the shared profile and renderer but neither the
+        # launcher nor its evidence service. General source discovery still works.
+        if not git(public, "ls-tree", revision, "--", *ARCHITECT_FILES[1:3]):
+            return None
+    for relative in ARCHITECT_FILES:
+        path = skill_file(public, public / relative)
+        entry = git(public, "ls-tree", revision, "--", relative).split()
+        if (path is None or len(entry) != 4 or entry[0] not in ("100644", "100755")
+                or entry[1] != "blob" or entry[3] != relative
+                or git(public, "hash-object", "--no-filters", "--", relative) != entry[2]):
+            raise ToolingError("restore the pinned Claude architect component: " + relative)
+    return public / ARCHITECT_FILES[0]
+
+
 def fleet_workflow(public, name):
     """Resolve the reviewed fleet edition from its public owner and verify its return path."""
     helper = skill_file(public, public / "scripts/resolve-fleet-workflow.py")
@@ -430,16 +451,7 @@ def private_catalog(private, revision, selector):
     return {"source": PRIVATE, "revision": revision, "capabilities": result}
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--offline", action="store_true", help="require a populated local cache")
-    parser.add_argument("--public-only", action="store_true", help="skip the authenticated private source")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--skill", metavar="NAME", help="print the canonical SKILL.md path")
-    mode.add_argument("--private-catalog", nargs="?", const="*", metavar="KIND:NAME",
-                      help="list approved private capability sources or inspect one (no activation)")
-    mode.add_argument("--install-public", choices=PLATFORMS, help="install public native workflow profiles")
-    args = parser.parse_args()
+def pinned_revisions():
     lock = DEPLOYED.parent / "sources.json"
     if DEPLOYED.is_symlink() or DEPLOYED.parent.is_symlink() or lock.is_symlink():
         raise ToolingError("symlink refused in consumer tooling path")
@@ -448,17 +460,38 @@ def main():
         isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}", v) for v in pins.values()
     ):
         raise ToolingError("invalid tooling lock; expected two full Git commit IDs")
+    return pins
+
+
+def private_source(args, cache, revision):
+    if args.public_only or args.install_public:
+        return None, "public-only"
+    try:
+        return acquire(cache, PRIVATE, revision, args.offline), "available"
+    except SourceUnavailable as error:
+        status = "private-unavailable: " + str(error)
+        print(status, file=sys.stderr)
+        return None, status
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--offline", action="store_true", help="require a populated local cache")
+    parser.add_argument("--public-only", action="store_true", help="skip the authenticated private source")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--skill", metavar="NAME", help="print the canonical SKILL.md path")
+    mode.add_argument("--claude-architect", action="store_true", help="resolve the launcher from the offline public pin")
+    mode.add_argument("--private-catalog", nargs="?", const="*", metavar="KIND:NAME",
+                      help="list approved private capability sources or inspect one (no activation)")
+    mode.add_argument("--install-public", choices=PLATFORMS, help="install public native workflow profiles")
+    args = parser.parse_args()
+    pins = pinned_revisions()
     cache = cache_root()
-    public = acquire(cache, PUBLIC, pins["public"], args.offline)
-    private = None
-    private_status = "public-only"
-    if not args.public_only and not args.install_public:
-        try:
-            private = acquire(cache, PRIVATE, pins["private"], args.offline)
-            private_status = "available"
-        except SourceUnavailable as error:
-            private_status = "private-unavailable: " + str(error)
-            print(private_status, file=sys.stderr)
+    public = acquire(cache, PUBLIC, pins["public"], args.offline or args.claude_architect)
+    if args.claude_architect:
+        print(claude_architect(public, pins["public"]))
+        return
+    private, private_status = private_source(args, cache, pins["private"])
     if args.private_catalog is not None:
         print(json.dumps(private_catalog(private, pins["private"], args.private_catalog), indent=2))
     elif args.skill:
@@ -466,8 +499,10 @@ def main():
     elif args.install_public:
         install_public(args.install_public, public)
     else:
+        launcher = claude_architect(public, pins["public"], optional=True)
         print(json.dumps({"public": str(public), "private": str(private) if private else None,
-                          "private_status": private_status}))
+                          "private_status": private_status, "claude_architect": str(launcher) if launcher else None,
+                          "architect_git_evidence": str(public / ARCHITECT_EVIDENCE) if launcher else None}))
 
 
 if __name__ == "__main__":

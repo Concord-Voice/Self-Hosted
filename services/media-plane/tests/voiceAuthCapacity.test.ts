@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import './mocks/logger.js';
-import { VoiceAuthConnections } from '../src/lib/voiceAuthConnection.js';
+import { CAPACITY, NEW_USER_RESERVE, PER_USER_CONNECTIONS, VoiceAuthConnections } from '../src/lib/voiceAuthConnection.js';
 import type { ConnectionHandle } from '../src/lib/voiceAuthConnection.js';
 import { createVoiceAuthReceiver } from '../src/lib/voiceAuthReceiver.js';
 import type { VoiceEnforcementSession } from '../src/lib/voiceEnforcementSession.js';
@@ -26,13 +26,15 @@ function deferred<T>() {
 async function settledTurn() { await new Promise<void>(resolve => setImmediate(resolve)); }
 
 interface Exchange { request: protocol.Request; signal: AbortSignal | null | undefined }
-function response(exchange: Exchange, unsigned = false): Response {
+// The control plane answers for the account that registered the generation.
+function response(exchange: Exchange, unsigned = false, accounts?: ReadonlyMap<string, string>): Response {
   const request = exchange.request;
   const register = request.connectionRegister();
   const room = request.roomRegister();
   const provisional = request.provisionalClose();
   const target = register ?? room;
-  const binding = target ? { userId: user, familyId: family, target: {
+  const accountId = (target && accounts?.get(target.connectionGeneration)) ?? user;
+  const binding = target ? { userId: accountId, familyId: family, target: {
     connectionGeneration: target.connectionGeneration, nodeBootId: target.nodeBootId,
     socketId: target.socketId, credentialEpoch: target.credentialEpoch,
   } } : undefined;
@@ -51,9 +53,12 @@ function response(exchange: Exchange, unsigned = false): Response {
 }
 // Distinct accounts, so filling the shared budget never trips the per-user cap.
 const filler = (index: number) => `${index.toString(16).padStart(8, '0')}-9999-4999-8999-999999999999`;
+// Accounts a case acts as, disjoint from the fillers.
+const account = (index: number) => `${index.toString(16).padStart(8, '0')}-8888-4888-8888-888888888888`;
 function fixture() {
   const calls: Exchange[] = [];
-  let answer: (exchange: Exchange) => Response | Promise<Response> = exchange => response(exchange);
+  const accounts = new Map<string, string>();
+  let answer: (exchange: Exchange) => Response | Promise<Response> = exchange => response(exchange, false, accounts);
   const boundary = vi.fn<typeof fetch>(async (input, init) => {
     const path = new URL(String(input)).pathname;
     const endpoint: protocol.Endpoint = path.endsWith('/auth-connections') ? 'connection_register'
@@ -76,16 +81,21 @@ function fixture() {
   const disconnects = new Map<string, ReturnType<typeof vi.fn>>();
   const reserve = (socketId: string, userId = user) => {
     const disconnect = vi.fn(); disconnects.set(socketId, disconnect);
-    return owners.reserve({ socketId, userId, credentialEpoch: epoch, token,
+    const handle = owners.reserve({ socketId, userId, credentialEpoch: epoch, token,
       tokenExpiresAt: clock + 60_000, disconnect });
+    accounts.set(owners.snapshot(handle).target.connectionGeneration, userId);
+    return handle;
   };
-  const session = (owner: ConnectionHandle, index: number): VoiceEnforcementSession => ({
+  const session = (owner: ConnectionHandle, index: number, userId = user): VoiceEnforcementSession => ({
     sessionGeneration: `${index.toString(16).padStart(8, '0')}-5555-4555-8555-555555555555`,
     connectionGeneration: owners.snapshot(owner).target.connectionGeneration,
-    nodeBootId: boot, roomId, roomKind: 'channel', userId: user, credentialEpoch: epoch,
+    nodeBootId: boot, roomId, roomKind: 'channel', userId, credentialEpoch: epoch,
     socketId: owners.snapshot(owner).target.socketId,
   });
-  return { owners, reserve, session, calls, boundary, disconnects,
+  // Distinct filler accounts, each holding one provisional connection.
+  const fill = (count: number, prefix = 'fill') => Array.from({ length: count },
+    (_, index) => reserve(`${prefix}-${index}`, filler(index)));
+  return { owners, reserve, session, fill, calls, boundary, disconnects, accounts,
     answer(handler: typeof answer) { answer = handler; } };
 }
 function command(f: ReturnType<typeof fixture>, owner: ConnectionHandle, nonce = 'ab') {
@@ -116,7 +126,8 @@ describe('shared retained connection and room capacity', () => {
     const idle = Array.from({ length: 499 }, (_, index) => f.reserve(`provisional-${index}`, filler(index)));
     const before = f.calls.length;
     expect(f.owners.retainedIdentityCount()).toBe(1000);
-    expect(() => f.reserve('overflow-connection')).toThrow();
+    // Probes hold nothing, so only the full budget can refuse them (not the reserve).
+    expect(() => f.reserve('overflow-connection', account(1))).toThrow();
     expect(() => f.owners.reserveRoom(parent, f.session(parent, 501), closeNative)).toThrow();
     expect(f.calls).toHaveLength(before);
     expect(closeNative).not.toHaveBeenCalled();
@@ -125,20 +136,20 @@ describe('shared retained connection and room capacity', () => {
     const terminal = f.owners.releaseRoom(retainedRoom);
     await closeStarted.promise;
     expect(f.owners.retainedIdentityCount()).toBe(1000);
-    expect(() => f.reserve('overflow-hung-native')).toThrow();
+    expect(() => f.reserve('overflow-hung-native', account(1))).toThrow();
     native.resolve();
     await settledTurn();
     expect(f.owners.retainedIdentityCount()).toBe(1000);
-    expect(() => f.reserve('overflow-unverified-release')).toThrow();
+    expect(() => f.reserve('overflow-unverified-release', account(1))).toThrow();
     expect(f.owners.releaseRoom(retainedRoom)).toBe(terminal);
     await settledTurn();
     unsigned = false;
     await f.owners.retryPending(); await terminal;
     expect(closeNative).toHaveBeenCalledOnce();
     expect(f.owners.retainedIdentityCount()).toBe(999);
-    const replacement = f.reserve('one-freed-slot');
+    const replacement = f.reserve('one-freed-slot', account(1));
     expect(f.owners.retainedIdentityCount()).toBe(1000);
-    expect(() => f.reserve('no-second-freed-slot')).toThrow();
+    expect(() => f.reserve('no-second-freed-slot', account(2))).toThrow();
     await f.owners.terminate(replacement);
     await Promise.all(idle.map(owner => f.owners.terminate(owner)));
     await f.owners.terminate(parent);
@@ -148,8 +159,12 @@ describe('shared retained connection and room capacity', () => {
   it('retains a lost registration and lost provisional-close receipt until an exact signed retry', async () => {
     const f = fixture();
     const lost = f.reserve('lost-register');
-    const parent = f.reserve('live-parent'); await f.owners.register(parent);
-    for (let index = 1; index <= 998; index++) f.owners.reserveRoom(parent, f.session(parent, index), async () => {});
+    // The parent is another account so the lost owner's successor holds nothing once
+    // the retry lands; rooms stay inside the general pool and fresh fillers take the rest.
+    const parent = f.reserve('live-parent', account(1)); await f.owners.register(parent);
+    for (let index = 1; index <= 798; index++)
+      f.owners.reserveRoom(parent, f.session(parent, index, account(1)), async () => {});
+    f.fill(200);
     let recovered = false;
     f.answer(exchange => {
       if (!recovered && (exchange.request.endpoint() === 'connection_register' ||
@@ -160,7 +175,7 @@ describe('shared retained connection and room capacity', () => {
     const terminal = f.owners.terminate(lost);
     await settledTurn();
     expect(f.owners.retainedIdentityCount()).toBe(1000);
-    expect(() => f.reserve('lost-receipt-overflow')).toThrow();
+    expect(() => f.reserve('lost-receipt-overflow', account(2))).toThrow();
     expect(f.owners.terminate(lost)).toBe(terminal);
     await settledTurn();
     recovered = true;
@@ -318,7 +333,9 @@ describe('shared lifecycle release accounting', () => {
   it('reserves legacy release liability in the same full budget before invoking native or remote effects', async () => {
     const f = fixture();
     const parent = f.reserve('legacy-budget-parent'); await f.owners.register(parent);
-    for (let index = 1; index <= 998; index++) f.owners.reserveRoom(parent, f.session(parent, index), async () => {});
+    // Rooms fill the general pool; fresh fillers take the reserve up to the legacy slot.
+    for (let index = 1; index <= 799; index++) f.owners.reserveRoom(parent, f.session(parent, index), async () => {});
+    f.fill(199);
     const legacy = { ...f.session(parent, 999), connectionGeneration: undefined };
     const release = deferred<void>();
     const effectStarted = deferred<void>();
@@ -333,12 +350,12 @@ describe('shared lifecycle release accounting', () => {
     await effectStarted.promise;
     expect(f.owners.releaseLegacyRoom({ ...legacy })).toBe(terminal);
     expect(f.owners.retainedIdentityCount()).toBe(1000);
-    expect(() => f.reserve('legacy-retrying-full')).toThrow();
+    expect(() => f.reserve('legacy-retrying-full', account(1))).toThrow();
     release.resolve(); await terminal;
     expect(f.owners.retainedIdentityCount()).toBe(999);
-    const next = f.reserve('legacy-one-slot');
-    expect(() => f.reserve('legacy-over-one-slot')).toThrow();
-    await f.owners.terminate(next); await f.owners.terminate(parent);
+    f.reserve('legacy-one-slot', account(1));
+    expect(() => f.reserve('legacy-over-one-slot', account(2))).toThrow();
+    await f.owners.terminateAll();
     expect(f.owners.retainedIdentityCount()).toBe(0);
   });
 });
@@ -452,5 +469,150 @@ describe('stalled termination readiness', () => {
     expect(owners.hasStalledTermination()).toBe(false);
     now += 1;
     expect(owners.hasStalledTermination()).toBe(true);
+  });
+});
+
+// VULN-146: a few accounts must not fill the node. Limits are spec literals (section 4.2),
+// so a relaxed constant fails these cases rather than moving with them.
+const GENERAL = /^Voice identity capacity exhausted$/;
+const PER_USER = /^Voice identity capacity exhausted for user$/;
+const noNative = async () => {};
+
+describe('per-user cap and new-user reserve', () => {
+  it('exports the per-node limits', () => {
+    expect([CAPACITY, PER_USER_CONNECTIONS, NEW_USER_RESERVE]).toEqual([1000, 4, 200]);
+  });
+
+  it("refuses a user's 5th connection with the per-user error", () => {
+    const f = fixture();
+    for (let index = 0; index < 4; index++) f.reserve(`per-user-${index}`);
+    expect(() => f.reserve('per-user-5th')).toThrow(PER_USER);
+    expect(f.owners.retainedIdentityCount()).toBe(4);
+    expect(() => f.reserve('other-account', account(1))).not.toThrow();
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('admits three rapid reconnects with a delayed release, refuses a fourth, admits it once one release lands', async () => {
+    const f = fixture();
+    const releases: Array<() => void> = [];
+    f.answer(exchange => {
+      if (exchange.request.endpoint() !== 'connection_release') return response(exchange);
+      const held = deferred<void>();
+      releases.push(() => held.resolve());
+      return held.promise.then(() => response(exchange));
+    });
+    let live = f.reserve('reconnect-0'); await f.owners.register(live);
+    const released: Promise<void>[] = [];
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      released.push(f.owners.terminate(live));
+      live = f.reserve(`reconnect-${attempt}`); await f.owners.register(live);
+    }
+    await settledTurn();
+    expect(releases).toHaveLength(3);
+    expect(f.owners.retainedIdentityCount()).toBe(4);
+    expect(() => f.reserve('reconnect-4')).toThrow(PER_USER);
+    releases[0](); await released[0]; await settledTurn();
+    expect(f.owners.retainedIdentityCount()).toBe(3);
+    const fourth = f.reserve('reconnect-4');
+    expect(() => f.owners.snapshot(fourth)).not.toThrow();
+    releases.slice(1).forEach(release => release());
+    await Promise.all(released);
+  });
+
+  it("at 800 retained refuses a user with identities and admits a zero-identity user and that user's first room", async () => {
+    const f = fixture();
+    f.reserve('holder', account(1));
+    f.fill(799);
+    expect(f.owners.retainedIdentityCount()).toBe(800);
+    expect(() => f.reserve('holder-second', account(1))).toThrow(GENERAL);
+    const fresh = f.reserve('fresh', account(2)); await f.owners.register(fresh);
+    expect(() => f.owners.reserveRoom(fresh, f.session(fresh, 1, account(2)), noNative)).not.toThrow();
+    expect(f.owners.retainedIdentityCount()).toBe(802);
+  });
+
+  it('at 800 refuses reserveRoom for a user holding a connection plus a room, or two connections', async () => {
+    const f = fixture();
+    const withRoom = f.reserve('with-room', account(1)); await f.owners.register(withRoom);
+    f.owners.reserveRoom(withRoom, f.session(withRoom, 1, account(1)), noNative);
+    const twoA = f.reserve('two-a', account(2)); await f.owners.register(twoA);
+    const twoB = f.reserve('two-b', account(2)); await f.owners.register(twoB);
+    const single = f.reserve('single', account(3)); await f.owners.register(single);
+    f.fill(795);
+    expect(f.owners.retainedIdentityCount()).toBe(800);
+    expect(() => f.owners.reserveRoom(withRoom, f.session(withRoom, 2, account(1)), noNative)).toThrow(GENERAL);
+    expect(() => f.owners.reserveRoom(twoA, f.session(twoA, 3, account(2)), noNative)).toThrow(GENERAL);
+    expect(() => f.owners.reserveRoom(twoB, f.session(twoB, 4, account(2)), noNative)).toThrow(GENERAL);
+    expect(f.owners.retainedIdentityCount()).toBe(800);
+    // Positive control: one connection and no room may use the reserve.
+    expect(() => f.owners.reserveRoom(single, f.session(single, 5, account(3)), noNative)).not.toThrow();
+    expect(f.owners.retainedIdentityCount()).toBe(801);
+  });
+
+  it('a user whose only identity is terminal and awaiting release is not reserve-eligible', async () => {
+    const f = fixture();
+    const close = deferred<void>();
+    f.answer(exchange => exchange.request.endpoint() === 'provisional_close'
+      ? close.promise.then(() => response(exchange)) : response(exchange));
+    const departing = f.reserve('departing', account(1));
+    const terminal = f.owners.terminate(departing);
+    await settledTurn();
+    f.fill(799);
+    expect(f.owners.retainedIdentityCount()).toBe(800);
+    expect(() => f.reserve('departing-reconnect', account(1))).toThrow(GENERAL);
+    expect(() => f.reserve('never-held', account(2))).not.toThrow();
+    close.resolve(); await terminal;
+    expect(() => f.reserve('departing-reconnect', account(1))).not.toThrow();
+  });
+
+  it('at 1000 refuses everyone', async () => {
+    const f = fixture();
+    const eligible = f.reserve('eligible', account(1)); await f.owners.register(eligible);
+    f.fill(999);
+    expect(f.owners.retainedIdentityCount()).toBe(1000);
+    const before = f.calls.length;
+    // Each refusal here is one the reserve would otherwise admit.
+    expect(() => f.reserve('zero-identity', account(2))).toThrow(GENERAL);
+    expect(() => f.owners.reserveRoom(eligible, f.session(eligible, 1, account(1)), noNative)).toThrow(GENERAL);
+    expect(f.owners.retainedIdentityCount()).toBe(1000);
+    expect(f.calls).toHaveLength(before);
+  });
+
+  it('leaves legacy room reservations unchanged', async () => {
+    const f = fixture();
+    const parent = f.reserve('legacy-parent'); await f.owners.register(parent);
+    f.fill(998);
+    expect(f.owners.retainedIdentityCount()).toBe(999);
+    const legacy = { ...f.session(parent, 1), connectionGeneration: undefined };
+    expect(f.owners.reserveLegacyRoom(legacy, noNative)).toBe(true);
+    expect(f.owners.retainedIdentityCount()).toBe(1000);
+    const overflow = { ...legacy, sessionGeneration: 'ffffffff-5555-4555-8555-555555555555' };
+    expect(() => f.owners.reserveLegacyRoom(overflow, noNative)).toThrow(GENERAL);
+  });
+
+  it('199 greedy accounts leave room for a fresh user to connect and join; 200 fill the node', async () => {
+    const f = fixture();
+    let room = 0;
+    const connectAndJoin = async (socketId: string, userId: string) => {
+      const handle = f.reserve(socketId, userId); await f.owners.register(handle);
+      f.owners.reserveRoom(handle, f.session(handle, ++room, userId), noNative);
+      return handle;
+    };
+    // 100 accounts at 4 connections and 4 rooms each fill the general pool.
+    for (let greedy = 0; greedy < 100; greedy++) {
+      for (let socket = 0; socket < 4; socket++) await connectAndJoin(`greedy-${greedy}-${socket}`, account(greedy));
+    }
+    expect(f.owners.retainedIdentityCount()).toBe(800);
+    // Past the general pool every further pair needs an account that held nothing.
+    let last: ConnectionHandle | undefined;
+    for (let pair = 100; pair < 199; pair++) last = await connectAndJoin(`pair-${pair}`, account(pair));
+    expect(f.owners.retainedIdentityCount()).toBe(998);
+    expect(() => f.reserve('greedy-more', account(0))).toThrow(PER_USER);
+    if (!last) throw new Error('No reserve pair');
+    expect(() => f.owners.reserveRoom(last, f.session(last, 5000, account(198)), noNative)).toThrow(GENERAL);
+    expect(() => f.reserve('pair-more', account(198))).toThrow(GENERAL);
+    // The 200th account still connects and joins, and then the node is full.
+    await connectAndJoin('fresh-user', account(199));
+    expect(f.owners.retainedIdentityCount()).toBe(1000);
+    expect(() => f.reserve('after-full', account(200))).toThrow(GENERAL);
   });
 });

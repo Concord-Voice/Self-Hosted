@@ -36,6 +36,7 @@ repository, and operators can set separate minimum app versions for iOS and
 Android. SSO account linking now requires current account policy and MFA,
 SSO initiation is bound to the Desktop flow that started it, and backup-code
 readers accept the versioned formats needed for a later storage migration.
+The media plane now admits encrypted media format v6 alongside earlier room versions, while keeping each active call on one version.
 
 **23 Total Changes** | 8 Added | 6 Changed | 7 Fixed | 2 Security
 
@@ -73,6 +74,10 @@ readers accept the versioned formats needed for a later storage migration.
 
 ### Security
 
+- **Recovery:** Email account recovery can now send a single-use recovery key that cannot be guessed, so wrong attempts by others can no longer block the account owner's email recovery. A client asks for one with `format: "token"` on `/auth/recovery/begin` and submits it as `token` on `/auth/recovery/verify-code`. Each account has one live recovery email at a time, valid until the resend wait ends (15 minutes for the first three emails in a day, then 60 minutes); a key request replaces a live 6-digit code ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
+- **Voice:** When a second session of the same account joins a DM or a channel, the replaced session's socket is now disconnected, and a user-wide revocation also disconnects that account's other sockets still in the room, so neither keeps receiving room events. Each account may hold at most 4 voice connections on each media-plane node, 200 of each node's 1,000 connection slots are kept for users who hold none, and a connection that stays outside a room for 30 seconds is released. `set-deafen` now requires the caller to be in the room, one member can move a room's camera layering gate at most twice in 30 seconds, media-plane log lines bound every logged value, and `consume` ids and handshake usernames are validated before use.
+- **WebSocket:** Updated the control plane's `gorilla/websocket` dependency to the upstream fix for predictable client frame mask keys (GO-2026-6278).
+- **Voice:** Admit media-frame v6 for a coordinated desktop upgrade. The shared client encryption module now authenticates clear codec framing, refuses unknown or older frames, and bounds missing-key work; active rooms still require one exact format version ([#384](https://github.com/Concord-Voice/Self-Hosted/pull/384)).
 - **Authentication:** SSO initiation now scopes its fail-closed provider budget to the trusted client IP, so one caller cannot consume another caller's allowance. Allowed browser origins can send the required SSO client-binding header ([#382](https://github.com/Concord-Voice/Self-Hosted/pull/382)).
 - **Encryption:** Reject imported RSA account public keys below 4096 bits before wrapping channel keys to them ([#379](https://github.com/Concord-Voice/Self-Hosted/pull/379)).
 - **Encryption keys:** DM key distribution now clears fulfilled pending requests inside its transaction and preserves a recipient's recovery request when their key is reset concurrently.
@@ -83,12 +88,14 @@ readers accept the versioned formats needed for a later storage migration.
 - **Media plane:** Updated `qs` to 6.17.1, which encodes keys when `stringify` runs with `allowEmptyArrays` (CVE-2026-110910) ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)).
 - **Development tooling:** Updated the root package and the Admin Console to patched `undici` 8.12.4 and `minimatch` 11.0.7 ([#330](https://github.com/Concord-Voice/Self-Hosted/pull/330)), and removed the second ESLint 8 copy that the root lint tooling installed ([#334](https://github.com/Concord-Voice/Self-Hosted/pull/334)).
 - **Admin Console:** Enrollment reset now invalidates earlier enrollment tokens, ceremonies, and console sessions. WebAuthn sign-in persists the credential counter before issuing a session and rejects a stale nonzero counter; a failed or raced finalization issues none ([#309](https://github.com/Concord-Voice/Self-Hosted/pull/309)).
+- **Admin Console:** The database now rejects zero administrator session generations, so legacy sessions that decode as zero cannot match stored administrator authority ([#371](https://github.com/Concord-Voice/Self-Hosted/pull/371)).
 - **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
 - **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
 - **Voice:** Frames Picture-in-Picture can now receive every active microphone and camera while participant consumer limits still block clone-everything egress exhaustion ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
+- **Voice:** Voice moderation now checks the moderator before it reveals anything about the target's voice state, and a refused caller gets the same answer whatever the target is doing. User-mute, user-deafen, disconnect and temporary-access revoke now honour channel denies of Mute Members, Deafen Members and Move Members, and a moderator can no longer act on someone in a channel the moderator cannot see. Moving a member now needs Move Members on both channels and the mover's own access to the destination, including Speak when the move gives temporary access, and every such move is audited. Server mute and server deafen stay server-wide. Several of these routes now answer 403 where they answered 400.
 
 ### Changed
 
@@ -98,6 +105,14 @@ readers accept the versioned formats needed for a later storage migration.
 - **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
 - **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
 - **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
+
+### Deprecated
+
+- **Recovery:** The 6-digit email recovery code is deprecated. It still works for clients that do not ask for a recovery key, and operators can turn it off with `RECOVERY_LEGACY_CODE=false` once every client accepts recovery keys ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
+
+### Removed
+
+- **Voice:** Removed the unused `POST /channels/{id}/voice/authorize-action` route. No client or service called it, and it now returns 404.
 
 ### Fixed
 
