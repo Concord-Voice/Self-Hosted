@@ -6920,7 +6920,7 @@ describe('RoomManager', () => {
         await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
       }
 
-      // regression for Security#176 red-team finding
+      // regression for the camera-arrival attribution finding
       it("charges a publisher's camera toggles to the publisher, never to its viewers", async () => {
         await setupRoom();
         // Viewers u-a and u-c watch u-1's camera p1 at a low layer.
@@ -6951,7 +6951,7 @@ describe('RoomManager', () => {
         expect(flipsOf('u-a')).toHaveLength(1);
       });
 
-      // regression for Security#176 red-team finding
+      // regression for the camera-arrival attribution finding
       it("defers the ON after a publisher's re-produce on the publisher's budget, not a viewer's", async () => {
         await setupRoom();
         const ca = await consumeCamera('u-a', 'ca1', 'p1');
@@ -6979,7 +6979,7 @@ describe('RoomManager', () => {
         expect(flipsOf('u-1')).toHaveLength(2);
       });
 
-      // regression for Security#176 red-team finding: the arrival rule must not
+      // regression for the camera-arrival attribution finding: the arrival rule must not
       // let a viewer spend a publisher's budget more than once per camera.
       it("charges a camera's arrival to its publisher once, then the viewer's changes to the viewer", async () => {
         await setupRoom();
@@ -6994,7 +6994,7 @@ describe('RoomManager', () => {
         expect(flipsOf('u-a')).toHaveLength(2);
       });
 
-      // regression for Security#176 red-team finding
+      // regression for the camera-arrival attribution finding
       it("counts a camera's own produce as its arrival, so no later demand charges the publisher again", async () => {
         // No camera yet, so u-a's low demand beside u-b's top demand cannot arm the gate.
         await addCameraConsumer('u-a', 'c-a');

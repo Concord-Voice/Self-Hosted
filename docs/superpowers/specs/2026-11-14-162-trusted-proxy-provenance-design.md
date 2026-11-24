@@ -502,4 +502,4 @@ counts.
 - comments next to every Compose writer/consumer
 
 The docs must distinguish source correctness, Self-Hosted release proof,
-Hosted mirror status, and live deployment proof.
+downstream mirror status, and live deployment proof.
