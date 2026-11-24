@@ -75,8 +75,7 @@ func RateLimitByIPFailClosedWithHandlers(
 	redis *redis.Client,
 	requests int,
 	window time.Duration,
-	exceededHandler gin.HandlerFunc,
-	backendErrorHandler gin.HandlerFunc,
+	exceededHandler, backendErrorHandler gin.HandlerFunc,
 ) gin.HandlerFunc {
 	config := RateLimitConfig{
 		Requests:            requests,
