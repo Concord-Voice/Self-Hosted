@@ -32,7 +32,7 @@ belongs in it, and write it if the section has none. Do not edit the
 
 ### Security
 
-- **Encryption:** Added a dormant canonical message-v1 create fingerprint codec and vectors. No message writer, replay classifier, or client behavior is enabled.
+- **Encryption:** Added a dormant canonical message-v1 create fingerprint codec and vectors. No message writer, replay classifier, or client behavior is enabled ([#404](https://github.com/Concord-Voice/Self-Hosted/pull/404)).
 - **Encryption:** Added a dormant, permanent global reservation namespace and verified online-baseline gate for future message-v1 identifiers. No message writer or client behavior is enabled.
 
 ## [0.4.0] - 2026-11-23
