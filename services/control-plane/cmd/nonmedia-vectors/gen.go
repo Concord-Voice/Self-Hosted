@@ -125,8 +125,13 @@ var cases []caseVector
 func accept(name, suite, operation, cite string, in, out ordered) {
 	cases = append(cases, caseVector{name: name, suite: suite, operation: operation, cite: cite, input: in, expect: obj(field("verdict", "accept"), field("outputs", out))})
 }
-func reject(name, suite, operation, cite string, in ordered, parent, kind, path, semantic, stage, reason string) {
-	cases = append(cases, caseVector{name: name, suite: suite, operation: operation, cite: cite, input: in, negativeOf: parent, mutation: obj(field("kind", kind), field("path", path), field("semantic_field", semantic)), expect: obj(field("verdict", "reject"), field("stage", stage), field("reason", reason))})
+
+type rejection struct {
+	parent, kind, path, semantic, stage, reason string
+}
+
+func reject(name, suite, operation, cite string, in ordered, r rejection) {
+	cases = append(cases, caseVector{name: name, suite: suite, operation: operation, cite: cite, input: in, negativeOf: r.parent, mutation: obj(field("kind", r.kind), field("path", r.path), field("semantic_field", r.semantic)), expect: obj(field("verdict", "reject"), field("stage", r.stage), field("reason", r.reason))})
 }
 func replace(o ordered, key string, value any) ordered {
 	n := append(ordered(nil), o...)
@@ -205,7 +210,7 @@ func credentialCases() {
 	cite := domainSeparationCitation
 	accept("credential/password-scalars/base", "credential", passwordScalars, cite, obj(field("utf16_units_hex", "007000e100730073")), obj(field("password_utf8_b64", b64([]byte("páss")))))
 	accept("credential/password-scalars/empty", "credential", passwordScalars, cite, obj(field("utf16_units_hex", "")), obj(field("password_utf8_b64", "")))
-	reject("credential/password-scalars/invalid-surrogate", "credential", passwordScalars, cite, obj(field("utf16_units_hex", "007000e100730073d800")), "credential/password-scalars/base", "insert", "/input/utf16_units_hex", "utf16_units_hex", "validate", "invalid_unicode")
+	reject("credential/password-scalars/invalid-surrogate", "credential", passwordScalars, cite, obj(field("utf16_units_hex", "007000e100730073d800")), rejection{"credential/password-scalars/base", "insert", "/input/utf16_units_hex", "utf16_units_hex", "validate", "invalid_unicode"})
 	subject, salt := fixed(32, 0x30), fixed(16, 0x50)
 	for _, g := range []struct {
 		name       string
@@ -223,22 +228,22 @@ func credentialCases() {
 		{"short-salt", "salt_b64", b64(salt[:15])},
 		{"invalid-password-utf8", "password_utf8_b64", b64([]byte{0xff})},
 	} {
-		reject("credential/derive/"+bad.name, "credential", "derive", cite, replace(deriveBase, bad.key, bad.value), "credential/derive/base", "replace", "/input/"+bad.key, bad.key, "validate", "invalid_field")
+		reject("credential/derive/"+bad.name, "credential", "derive", cite, replace(deriveBase, bad.key, bad.value), rejection{"credential/derive/base", "replace", "/input/" + bad.key, bad.key, "validate", "invalid_field"})
 	}
 	base := obj(field("authenticated_realm", realm), field("descriptor_b64", b64(descriptor(realm, subject, 1, salt, 65536, 3, 4))))
 	out := obj(field("realm", realm), field("subject_b64", b64(subject)), field("generation", 1), field("salt_b64", b64(salt)), field("m_kib", 65536), field("t", 3), field("p", 4))
 	accept(descriptorBase, "credential", "descriptor", cite, base, out)
-	reject("credential/descriptor/weak-parameters", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(descriptor(realm, subject, 1, salt, 32768, 3, 4))), descriptorBase, "replace", descriptorInputPath, "m_kib", "validate", "weak_parameters")
-	reject("credential/descriptor/wrong-realm", "credential", "descriptor", cite, replace(base, "authenticated_realm", otherRealm), descriptorBase, "replace", "/input/authenticated_realm", "authenticated_realm", "validate", "wrong_realm")
+	reject("credential/descriptor/weak-parameters", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(descriptor(realm, subject, 1, salt, 32768, 3, 4))), rejection{descriptorBase, "replace", descriptorInputPath, "m_kib", "validate", "weak_parameters"})
+	reject("credential/descriptor/wrong-realm", "credential", "descriptor", cite, replace(base, "authenticated_realm", otherRealm), rejection{descriptorBase, "replace", "/input/authenticated_realm", "authenticated_realm", "validate", "wrong_realm"})
 	withWhitespace := append([]byte(" "), descriptor(realm, subject, 1, salt, 65536, 3, 4)...)
-	reject("credential/descriptor/noncanonical-whitespace", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(withWhitespace)), descriptorBase, "insert", descriptorInputPath, "descriptor_b64", "parse", "malformed_descriptor")
+	reject("credential/descriptor/noncanonical-whitespace", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(withWhitespace)), rejection{descriptorBase, "insert", descriptorInputPath, "descriptor_b64", "parse", "malformed_descriptor"})
 	badSubject := jsonBytes([]any{splitAuthWrapV1, realm, "not-base64", 1, b64(salt), 65536, 3, 4})
-	reject("credential/descriptor/invalid-subject-base64", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(badSubject)), descriptorBase, "replace", descriptorInputPath, "subject_b64", "parse", "malformed_descriptor")
+	reject("credential/descriptor/invalid-subject-base64", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(badSubject)), rejection{descriptorBase, "replace", descriptorInputPath, "subject_b64", "parse", "malformed_descriptor"})
 	wrongProtocol := jsonBytes([]any{serverSelectedV2, realm, b64(subject), 1, b64(salt), 65536, 3, 4})
-	reject("credential/descriptor/wrong-discriminator", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(wrongProtocol)), descriptorBase, "replace", descriptorInputPath, "protocol", "parse", "malformed_descriptor")
-	reject("credential/descriptor/zero-generation", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(descriptor(realm, subject, 0, salt, 65536, 3, 4))), descriptorBase, "replace", descriptorInputPath, "generation", "parse", "malformed_descriptor")
+	reject("credential/descriptor/wrong-discriminator", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(wrongProtocol)), rejection{descriptorBase, "replace", descriptorInputPath, "protocol", "parse", "malformed_descriptor"})
+	reject("credential/descriptor/zero-generation", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(descriptor(realm, subject, 0, salt, 65536, 3, 4))), rejection{descriptorBase, "replace", descriptorInputPath, "generation", "parse", "malformed_descriptor"})
 	trailingField := jsonBytes([]any{splitAuthWrapV1, realm, b64(subject), 1, b64(salt), 65536, 3, 4, "extra"})
-	reject("credential/descriptor/trailing-field", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(trailingField)), descriptorBase, "insert", descriptorInputPath, "descriptor_b64", "parse", "malformed_descriptor")
+	reject("credential/descriptor/trailing-field", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(trailingField)), rejection{descriptorBase, "insert", descriptorInputPath, "descriptor_b64", "parse", "malformed_descriptor"})
 }
 
 type tagFixture struct {
@@ -327,7 +332,7 @@ func aeadCases(f tagFixture) {
 		if invalid {
 			stage, reason = "validate", "invalid_field"
 		}
-		reject(aeadDecryptPrefix+f.tag+"/alter-"+name, "aead", "decrypt", cite, replace(dec, "expected_context_b64", b64(altered)), decName, "replace", "/input/expected_context_b64", name, stage, reason)
+		reject(aeadDecryptPrefix+f.tag+"/alter-"+name, "aead", "decrypt", cite, replace(dec, "expected_context_b64", b64(altered)), rejection{decName, "replace", "/input/expected_context_b64", name, stage, reason})
 	}
 	for _, bad := range []struct {
 		name   string
@@ -336,12 +341,12 @@ func aeadCases(f tagFixture) {
 	}{{"short-key", 31, true}, {"long-key", 33, true}, {shortNonce, 8, false}, {"long-nonce", 16, false}} {
 		if bad.key {
 			k := fixed(bad.length, 0x10)
-			reject(aeadEncryptPrefix+f.tag+"/"+bad.name, "aead", "encrypt", cite, replace(enc, "key_b64", b64(k)), encName, "replace", "/input/key_b64", "key_b64", "validate", "invalid_field")
-			reject(aeadDecryptPrefix+f.tag+"/"+bad.name, "aead", "decrypt", cite, replace(dec, "key_b64", b64(k)), decName, "replace", "/input/key_b64", "key_b64", "validate", "invalid_field")
+			reject(aeadEncryptPrefix+f.tag+"/"+bad.name, "aead", "encrypt", cite, replace(enc, "key_b64", b64(k)), rejection{encName, "replace", "/input/key_b64", "key_b64", "validate", "invalid_field"})
+			reject(aeadDecryptPrefix+f.tag+"/"+bad.name, "aead", "decrypt", cite, replace(dec, "key_b64", b64(k)), rejection{decName, "replace", "/input/key_b64", "key_b64", "validate", "invalid_field"})
 			continue
 		}
 		n := fixed(bad.length, 0x40)
-		reject(aeadEncryptPrefix+f.tag+"/"+bad.name, "aead", "encrypt", cite, replace(enc, "nonce_b64", b64(n)), encName, "replace", "/input/nonce_b64", "nonce_b64", "validate", "invalid_field")
+		reject(aeadEncryptPrefix+f.tag+"/"+bad.name, "aead", "encrypt", cite, replace(enc, "nonce_b64", b64(n)), rejection{encName, "replace", "/input/nonce_b64", "nonce_b64", "validate", "invalid_field"})
 		p := plain
 		if bad.name == shortNonce {
 			p = nil
@@ -351,17 +356,17 @@ func aeadCases(f tagFixture) {
 		if bad.name == shortNonce {
 			stage, reason = "parse", "bad_envelope"
 		}
-		reject(aeadDecryptPrefix+f.tag+"/"+bad.name, "aead", "decrypt", cite, replace(dec, "envelope_b64", b64(badEnv)), decName, "replace", envelopeInputPath, "nonce_b64", stage, reason)
+		reject(aeadDecryptPrefix+f.tag+"/"+bad.name, "aead", "decrypt", cite, replace(dec, "envelope_b64", b64(badEnv)), rejection{decName, "replace", envelopeInputPath, "nonce_b64", stage, reason})
 	}
 	otherFormat := "m1"
 	if f.format == "m1" {
 		otherFormat = "b1"
 	}
-	reject(aeadDecryptPrefix+f.tag+"/wrong-format", "aead", "decrypt", cite, replace(dec, "format", otherFormat), decName, "replace", "/input/format", "format", "validate", "invalid_format_context")
+	reject(aeadDecryptPrefix+f.tag+"/wrong-format", "aead", "decrypt", cite, replace(dec, "format", otherFormat), rejection{decName, "replace", "/input/format", "format", "validate", "invalid_format_context"})
 	if f.tag == attachmentV4 {
 		bad := append([]byte(nil), env...)
 		bad[12] ^= 1
-		reject("aead/decrypt/attachment-v4/tamper-header", "aead", "decrypt", cite, replace(dec, "envelope_b64", b64(bad)), decName, "replace", envelopeInputPath, "file_nonce_b64", "authenticate", "aead_failure")
+		reject("aead/decrypt/attachment-v4/tamper-header", "aead", "decrypt", cite, replace(dec, "envelope_b64", b64(bad)), rejection{decName, "replace", envelopeInputPath, "file_nonce_b64", "authenticate", "aead_failure"})
 		for _, wireChange := range []struct {
 			name, semantic, stage, reason string
 			change                        func([]byte)
@@ -374,7 +379,7 @@ func aeadCases(f tagFixture) {
 		} {
 			changed := append([]byte(nil), env...)
 			wireChange.change(changed)
-			reject("aead/decrypt/attachment-v4/"+wireChange.name, "aead", "decrypt", cite, replace(dec, "envelope_b64", b64(changed)), decName, "replace", envelopeInputPath, wireChange.semantic, wireChange.stage, wireChange.reason)
+			reject("aead/decrypt/attachment-v4/"+wireChange.name, "aead", "decrypt", cite, replace(dec, "envelope_b64", b64(changed)), rejection{decName, "replace", envelopeInputPath, wireChange.semantic, wireChange.stage, wireChange.reason})
 		}
 	}
 }
@@ -383,7 +388,7 @@ func rsaCases(f tagFixture) {
 	base := "rsa-label/verify/" + f.tag + "/base"
 	label := context(f.tag, f.fields)
 	accept(rsaLabelDerivePrefix+f.tag+"/base", rsaLabelSuite, "derive", cite, obj(field("context_fields", f.fields)), obj(field("label_b64", b64(label))))
-	reject(rsaLabelDerivePrefix+f.tag+"/invalid-recipient-id", rsaLabelSuite, "derive", cite, obj(field("context_fields", alteredFields(f, 4, invalidUUID))), rsaLabelDerivePrefix+f.tag+"/base", "replace", "/input/context_fields/4", "recipient_id", "validate", "invalid_field")
+	reject(rsaLabelDerivePrefix+f.tag+"/invalid-recipient-id", rsaLabelSuite, "derive", cite, obj(field("context_fields", alteredFields(f, 4, invalidUUID))), rejection{rsaLabelDerivePrefix + f.tag + "/base", "replace", "/input/context_fields/4", "recipient_id", "validate", "invalid_field"})
 	input := obj(field("context_fields", f.fields), field("candidate_label_b64", b64(label)))
 	accept(base, rsaLabelSuite, "verify", cite, input, obj())
 	for i, name := range f.names {
@@ -392,7 +397,7 @@ func rsaCases(f tagFixture) {
 		if invalid {
 			stage, reason = "validate", "invalid_field"
 		}
-		reject("rsa-label/verify/"+f.tag+"/alter-"+name, rsaLabelSuite, "verify", cite, replace(input, "context_fields", alteredFields(f, i, alt)), base, "replace", fmt.Sprintf("/input/context_fields/%d", i), name, stage, reason)
+		reject("rsa-label/verify/"+f.tag+"/alter-"+name, rsaLabelSuite, "verify", cite, replace(input, "context_fields", alteredFields(f, i, alt)), rejection{base, "replace", fmt.Sprintf("/input/context_fields/%d", i), name, stage, reason})
 	}
 }
 func allContextCases() {
@@ -422,23 +427,23 @@ func allContextCases() {
 			wrong = accountKeyPurpose
 		}
 		bad := alteredFields(f, 2, wrong)
-		reject(contextEncodePrefix+tag+"/wrong-key-purpose", "context", "encode", contextCitation, contextInput(tag, bad), contextEncodePrefix+tag+"/base", "replace", "/input/context_fields/2", "key_purpose", "validate", "invalid_purpose")
+		reject(contextEncodePrefix+tag+"/wrong-key-purpose", "context", "encode", contextCitation, contextInput(tag, bad), rejection{contextEncodePrefix + tag + "/base", "replace", "/input/context_fields/2", "key_purpose", "validate", "invalid_purpose"})
 	}
 	cite := contextCitation
 	message := fixtures()[0]
-	reject("context/encode/message-v1/unknown-tag", "context", "encode", cite, contextInput(serverSelectedV2, message.fields), "context/encode/message-v1/base", "replace", "/input/tag", "tag", "validate", "unknown_tag")
-	reject("context/encode/message-v1/invalid-realm", "context", "encode", cite, contextInput(message.tag, alteredFields(message, 0, invalidUUID)), "context/encode/message-v1/base", "replace", "/input/context_fields/0", "realm", "validate", "invalid_field")
-	reject("context/parse/message-v1/unknown-tag", "context", "parse", cite, obj(field("context_b64", b64(context(serverSelectedV2, message.fields)))), messageParseBase, "replace", contextInputPath, "tag", "validate", "unknown_tag")
+	reject("context/encode/message-v1/unknown-tag", "context", "encode", cite, contextInput(serverSelectedV2, message.fields), rejection{"context/encode/message-v1/base", "replace", "/input/tag", "tag", "validate", "unknown_tag"})
+	reject("context/encode/message-v1/invalid-realm", "context", "encode", cite, contextInput(message.tag, alteredFields(message, 0, invalidUUID)), rejection{"context/encode/message-v1/base", "replace", "/input/context_fields/0", "realm", "validate", "invalid_field"})
+	reject("context/parse/message-v1/unknown-tag", "context", "parse", cite, obj(field("context_b64", b64(context(serverSelectedV2, message.fields)))), rejection{messageParseBase, "replace", contextInputPath, "tag", "validate", "unknown_tag"})
 	withWhitespace := bytes.Replace(context(message.tag, message.fields), []byte(","), []byte(", "), 1)
-	reject("context/parse/message-v1/noncanonical-whitespace", "context", "parse", cite, obj(field("context_b64", b64(withWhitespace))), messageParseBase, "insert", contextInputPath, "context_b64", "parse", "malformed_context")
-	reject("context/parse/message-v1/invalid-realm", "context", "parse", cite, contextParseInput(message.tag, alteredFields(message, 0, invalidUUID)), messageParseBase, "replace", contextInputPath, "realm", "validate", "invalid_field")
+	reject("context/parse/message-v1/noncanonical-whitespace", "context", "parse", cite, obj(field("context_b64", b64(withWhitespace))), rejection{messageParseBase, "insert", contextInputPath, "context_b64", "parse", "malformed_context"})
+	reject("context/parse/message-v1/invalid-realm", "context", "parse", cite, contextParseInput(message.tag, alteredFields(message, 0, invalidUUID)), rejection{messageParseBase, "replace", contextInputPath, "realm", "validate", "invalid_field"})
 	accountWrap := fixtures()[2]
-	reject("context/parse/account-ek-wrap-v1/wrong-key-purpose", "context", "parse", cite, contextParseInput(accountWrap.tag, alteredFields(accountWrap, 2, preferencesPurpose)), "context/parse/account-ek-wrap-v1/base", "replace", contextInputPath, "key_purpose", "validate", "invalid_purpose")
+	reject("context/parse/account-ek-wrap-v1/wrong-key-purpose", "context", "parse", cite, contextParseInput(accountWrap.tag, alteredFields(accountWrap, 2, preferencesPurpose)), rejection{"context/parse/account-ek-wrap-v1/base", "replace", contextInputPath, "key_purpose", "validate", "invalid_purpose"})
 	attachment := fixtures()[5]
-	reject("context/parse/attachment-v4/invalid-flags", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 7, 1)), attachmentParseBase, "replace", contextInputPath, "flags", "validate", "invalid_field")
-	reject("context/parse/attachment-v4/invalid-chunk-index", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 8, 2)), attachmentParseBase, "replace", contextInputPath, "chunk_index", "validate", "invalid_field")
-	reject("context/parse/attachment-v4/fractional-chunk-index", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 8, 0.5)), attachmentParseBase, "replace", contextInputPath, "chunk_index", "validate", "invalid_field")
-	reject("context/parse/attachment-v4/fractional-total-chunks", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 9, 0.5)), attachmentParseBase, "replace", contextInputPath, "total_chunks", "validate", "invalid_field")
+	reject("context/parse/attachment-v4/invalid-flags", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 7, 1)), rejection{attachmentParseBase, "replace", contextInputPath, "flags", "validate", "invalid_field"})
+	reject("context/parse/attachment-v4/invalid-chunk-index", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 8, 2)), rejection{attachmentParseBase, "replace", contextInputPath, "chunk_index", "validate", "invalid_field"})
+	reject("context/parse/attachment-v4/fractional-chunk-index", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 8, 0.5)), rejection{attachmentParseBase, "replace", contextInputPath, "chunk_index", "validate", "invalid_field"})
+	reject("context/parse/attachment-v4/fractional-total-chunks", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 9, 0.5)), rejection{attachmentParseBase, "replace", contextInputPath, "total_chunks", "validate", "invalid_field"})
 }
 
 func uniformityCases() {
@@ -451,8 +456,16 @@ func uniformityCases() {
 		accept("policy/descriptor-uniformity/"+class, "policy", "descriptor-uniformity", cite, in, out)
 	}
 }
-func legacyInput(device, protocol, proof string, realmMatch, accountMatch bool, freshness string, notExpired, continuation bool) ordered {
-	return obj(field("device_state", device), field("account_protocol", protocol), field("authority_proof", proof), field("realm_match", realmMatch), field("account_match", accountMatch), field("freshness", freshness), field("not_expired", notExpired), field("control_plane_continuation", continuation))
+
+type legacyDecisionInput struct {
+	device, protocol, proof  string
+	realmMatch, accountMatch bool
+	freshness                string
+	notExpired, continuation bool
+}
+
+func legacyInput(p legacyDecisionInput) ordered {
+	return obj(field("device_state", p.device), field("account_protocol", p.protocol), field("authority_proof", p.proof), field("realm_match", p.realmMatch), field("account_match", p.accountMatch), field("freshness", p.freshness), field("not_expired", p.notExpired), field("control_plane_continuation", p.continuation))
 }
 func generatedLegacyDecision(protocol, proof string, realmMatch, accountMatch bool, freshness string, notExpired, continuation bool) (string, string) {
 	switch {
@@ -513,7 +526,7 @@ func combinations(dimensions [][]any, visit func([]any)) {
 	walk(0)
 }
 func legacyCases() {
-	base := legacyInput("existing", "legacy", "verified", true, true, "current", true, true)
+	base := legacyInput(legacyDecisionInput{"existing", "legacy", "verified", true, true, "current", true, true})
 	for _, named := range []struct {
 		name    string
 		changes []entry
@@ -545,7 +558,7 @@ func legacyCases() {
 		freshness := v[5].(string)
 		notExpired, continuation := v[6].(bool), v[7].(bool)
 		name := fmt.Sprintf("policy/legacy-continuation/matrix/%s/%s/%s/%s/%s/%s/%s/%s", device, protocol, proof, slot(realmMatch), slot(accountMatch), freshness, slot(notExpired), slot(continuation))
-		addLegacy(name, legacyInput(device, protocol, proof, realmMatch, accountMatch, freshness, notExpired, continuation))
+		addLegacy(name, legacyInput(legacyDecisionInput{device, protocol, proof, realmMatch, accountMatch, freshness, notExpired, continuation}))
 	})
 }
 func upgradeInput(prior, authorization string, match, mfa bool, commit string) ordered {

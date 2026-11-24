@@ -9,7 +9,7 @@ const corpusBytes = readFileSync(
   new URL('../../../../../docs/design/nonmedia-e2ee-v1-vectors.json', import.meta.url)
 );
 const corpusPin =
-  'a7663dc8dbf17b8c9642641c70dd33063241b2825ecf38f4102a79815e4ce07b9c5d48ef734fb181378dce217eee6d77';
+  'bf003f83acfcc7afcca34b408a9960f4ffaaedcb3057aeba34b0878ffa6352b790ef7754f47ca0cd6fd7cf91087cf40d';
 const sha384 = (bytes: Uint8Array): string => createHash('sha384').update(bytes).digest('hex');
 if (sha384(corpusBytes) !== corpusPin)
   throw new Error('ADR-0051 corpus SHA-384 mismatch before parse');
