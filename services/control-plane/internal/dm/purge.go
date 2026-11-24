@@ -78,13 +78,19 @@ func (h *Handler) PurgeConversation(c *gin.Context) {
 	}
 
 	// Step-up BEFORE any mutation. Failure paths inside write their own response.
-	mfaVerified, ok := h.purgeConversationStepUp(purgeCtx, c, userID, req)
-	if !ok {
+	passed, mfaVerified := h.purgeConversationStepUp(purgeCtx, c, userID, req)
+	if !passed {
 		return
 	}
 
-	credentialEpoch := middleware.TokenCredentialEpoch(c)
-	plan, hide := buildDMPurgePlan(convID, userID, credentialEpoch, isGroup, isAdmin, rangeFrom, req.IncludePinned)
+	scope := dmPurgeScope{
+		userID:          userID,
+		convID:          convID,
+		credentialEpoch: middleware.TokenCredentialEpoch(c),
+		rng:             req.Range,
+		rangeFrom:       rangeFrom,
+	}
+	plan, hide := buildDMPurgePlan(scope, isGroup, isAdmin, req.IncludePinned)
 
 	res, err := h.purgeEngine.Run(purgeCtx, plan)
 	if err != nil {
@@ -93,7 +99,7 @@ func (h *Handler) PurgeConversation(c *gin.Context) {
 	}
 
 	if hide {
-		if res, ok = h.applyDMPurgeHide(purgeCtx, c, userID, convID, req.Range, rangeFrom, res, credentialEpoch); !ok {
+		if res, ok = h.applyDMPurgeHide(purgeCtx, c, scope, res); !ok {
 			return
 		}
 	}
@@ -140,32 +146,38 @@ func (h *Handler) resolveDMPurgeRole(ctx context.Context, c *gin.Context, convID
 }
 
 // purgeConversationStepUp runs the actor's purge step-up when their preference
-// requires it. ok is false when the step-up failed and wrote its own response.
-func (h *Handler) purgeConversationStepUp(ctx context.Context, c *gin.Context, userID string, req dmPurgeRequest) (mfaVerified, ok bool) {
+// requires it. It returns in verifyPurgeStepUpWithMFA's order: passed is false
+// when the step-up failed and wrote its own response, and mfaVerified reports
+// whether an MFA factor was verified. A preference that skips the step-up
+// passes with no MFA verified.
+func (h *Handler) purgeConversationStepUp(ctx context.Context, c *gin.Context, userID string, req dmPurgeRequest) (passed, mfaVerified bool) {
 	if !h.requireAuthBeforePurge(ctx, userID) {
-		return false, true
+		return true, false
 	}
-	passed, mfaVerified := h.verifyPurgeStepUpWithMFA(ctx, c, userID, req.CurrentPassword, req.MFACode)
-	return mfaVerified, passed
+	return h.verifyPurgeStepUpWithMFA(ctx, c, userID, req.CurrentPassword, req.MFACode)
+}
+
+// dmPurgeScope is what one PurgeConversation request purges, and on whose
+// authority: the actor, the conversation, the token's credential epoch both
+// guards recheck, and the requested range in its wire form (rng, echoed on
+// dm_purged) and parsed form (rangeFrom, nil for All Time). PurgeConversation
+// builds it once, after the step-up, and hands the same value to the plan and
+// to the hide that follows it.
+type dmPurgeScope struct {
+	userID, convID, credentialEpoch, rng string
+	rangeFrom                            *time.Time
 }
 
 // applyDMPurgeHide runs the post-delete receiver hide. On failure it has
 // already answered the partial purge and returns ok false.
-func (h *Handler) applyDMPurgeHide(
-	ctx context.Context,
-	c *gin.Context,
-	userID, convID, rng string,
-	rangeFrom *time.Time,
-	res purge.Result,
-	credentialEpoch string,
-) (purge.Result, bool) {
+func (h *Handler) applyDMPurgeHide(ctx context.Context, c *gin.Context, scope dmPurgeScope, res purge.Result) (purge.Result, bool) {
 	if h.afterDMPurgeDeleteHook != nil {
 		h.afterDMPurgeDeleteHook()
 	}
-	hidden, err := h.applyReceiverHide(ctx, userID, convID, rangeFrom, res, credentialEpoch)
+	hidden, err := h.applyReceiverHide(ctx, scope.userID, scope.convID, scope.rangeFrom, res, scope.credentialEpoch)
 	if err != nil {
-		h.log.Error("DM purge hide failed", "error", err, "conversation_id", convID, "deleted", res.DeletedCount)
-		h.failPartialPurge(c, convID, userID, rng, res.DeletedCount)
+		h.log.Error("DM purge hide failed", "error", err, "conversation_id", scope.convID, "deleted", res.DeletedCount)
+		h.failPartialPurge(c, scope.convID, scope.userID, scope.rng, res.DeletedCount)
 		return res, false
 	}
 	res.HiddenCount = hidden
@@ -174,12 +186,7 @@ func (h *Handler) applyDMPurgeHide(
 
 // buildDMPurgePlan builds the engine plan for the actor's role. hide reports
 // whether the other party's messages are hidden from the actor afterwards.
-func buildDMPurgePlan(
-	convID, userID, credentialEpoch string,
-	isGroup, isAdmin bool,
-	rangeFrom *time.Time,
-	includePinned bool,
-) (purge.Plan, bool) {
+func buildDMPurgePlan(scope dmPurgeScope, isGroup, isAdmin, includePinned bool) (purge.Plan, bool) {
 	ctxType := purge.ContextDM
 	if isGroup {
 		ctxType = purge.ContextGroup
@@ -189,31 +196,31 @@ func buildDMPurgePlan(
 	if isGroup && isAdmin {
 		author = nil // group admin: delete everyone's messages for both
 	} else {
-		self := userID
+		self := scope.userID
 		author = &self // delete own for both...
 		hide = true    // ...and hide the rest from the actor's view
 	}
 
 	plan := purge.Plan{
 		ContextType: ctxType,
-		ContextID:   convID,
-		ActorID:     userID,
+		ContextID:   scope.convID,
+		ActorID:     scope.userID,
 		Reason:      "manual",
-		RangeFrom:   rangeFrom,
+		RangeFrom:   scope.rangeFrom,
 		Deletes: []purge.DeleteSpec{{
 			MessagesTable:    "dm_messages",
 			ScopeColumn:      "conversation_id",
-			ScopeID:          convID,
+			ScopeID:          scope.convID,
 			AttachmentsTable: "dm_message_attachments",
 			Author:           author,
 		}},
 		// With a hide to follow, the audit row stays in_progress until
 		// applyReceiverHide completes it in the hide's own transaction.
 		Guard: func(guardCtx context.Context, tx *sql.Tx, _ purge.DeleteSpec) error {
-			if err := guardDMPurgeTx(guardCtx, tx, convID, userID, author); err != nil {
+			if err := guardDMPurgeTx(guardCtx, tx, scope.convID, scope.userID, author); err != nil {
 				return err
 			}
-			if err := credepoch.GuardFamilyTx(guardCtx, tx, userID, credentialEpoch); err != nil {
+			if err := credepoch.GuardFamilyTx(guardCtx, tx, scope.userID, scope.credentialEpoch); err != nil {
 				return fmt.Errorf("guard DM purge credential epoch: %w", err)
 			}
 			return nil

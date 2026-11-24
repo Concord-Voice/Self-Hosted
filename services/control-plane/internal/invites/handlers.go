@@ -455,15 +455,14 @@ func (h *Handler) JoinServer(c *gin.Context) {
 		PrincipalID: userID,
 	}
 
-	var server models.Server
-	var serverID string
+	var joined joinResult
 
 	// WithGatedTx acquires the sender gates BEFORE opening the transaction and
 	// owns both the rollback and — through Complete — the commit. This handler
 	// no longer calls tx.Commit(): doing so would yield sql.ErrTxDone.
 	err := presencehook.WithGatedTx(ctx, h.graphPresence, h.db, h.log, spec, func(tx *sql.Tx) error {
 		var txErr error
-		server, serverID, txErr = h.joinServerTx(ctx, tx, spec, req.Code, userID, server)
+		joined, txErr = h.joinServerTx(ctx, tx, spec, req.Code, userID)
 		return txErr
 	})
 
@@ -492,6 +491,7 @@ func (h *Handler) JoinServer(c *gin.Context) {
 		deliveryFailure = &failure
 	}
 
+	server, serverID := joined.server, joined.serverID
 	server.ServerTier = entitlements.ResolveServerTier(ctx, h.db, server.ID)
 
 	h.log.Info("User joined server", "user_id", userID, "server_id", serverID)
@@ -513,58 +513,68 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"server": server, "role": "member"})
 }
 
-// joinServerTx is JoinServer's WithGatedTx body. It returns the server and
-// server ID it has resolved so far on EVERY path, matching the closure it was
-// extracted from, which assigned those outer variables as it went: serverID
-// once the invite validated, server only after the post-insert fetch. `prior`
-// is the caller's current server value, returned unchanged until the fetch
-// replaces it.
+// joinResult is what joinServerTx resolved: the joined server as fetched inside
+// the transaction, and its ID.
+type joinResult struct {
+	server   models.Server
+	serverID string
+}
+
+// joinServerTx is JoinServer's WithGatedTx body.
+//
+// It returns a populated joinResult exactly when it reaches its final
+// statement, presencehook.Complete, whatever Complete returns. That includes
+// an error wrapping presencecapture.ErrPostCommitDelivery: the membership row
+// is committed by then, and JoinServer goes on to read both fields on that path
+// (the tier lookup, broadcastMemberJoined, createPendingKeyRequests and the
+// 200 body), so they must be set. Every earlier return carries the zero
+// joinResult. JoinServer reads neither field after one of those: a rejection
+// answers its own status, and any other error that is not a post-commit
+// delivery failure answers the classified error and returns. Only Complete
+// produces ErrPostCommitDelivery, so no earlier path can reach the fall-through.
 func (h *Handler) joinServerTx(
-	ctx context.Context, tx *sql.Tx, spec presencehook.Spec, code, userID string, prior models.Server,
-) (server models.Server, serverID string, err error) {
-	server = prior
+	ctx context.Context, tx *sql.Tx, spec presencehook.Spec, code, userID string,
+) (joinResult, error) {
 	if lockErr := rbac.LockAuthorityPrincipalsTx(ctx, tx, []string{userID}); lockErr != nil {
-		return server, serverID, fmt.Errorf("lock joining member: %w", lockErr)
+		return joinResult{}, fmt.Errorf("lock joining member: %w", lockErr)
 	}
 	invite, lookupErr := h.lookupInvite(tx, code)
 	if errors.Is(lookupErr, sql.ErrNoRows) {
-		return server, serverID, &joinRejection{status: http.StatusNotFound, msg: errMsgInvalidInviteCode}
+		return joinResult{}, &joinRejection{status: http.StatusNotFound, msg: errMsgInvalidInviteCode}
 	}
 	if lookupErr != nil {
-		return server, serverID, fmt.Errorf("query invite: %w", lookupErr)
+		return joinResult{}, fmt.Errorf("query invite: %w", lookupErr)
 	}
 
 	if status, msg := validateInvite(invite); status != 0 {
-		return server, serverID, &joinRejection{status: status, msg: msg}
+		return joinResult{}, &joinRejection{status: status, msg: msg}
 	}
 
 	if status, msg, checkErr := checkBanAndMembership(tx, invite.ServerID, userID); checkErr != nil {
-		return server, serverID, fmt.Errorf("check ban/membership: %w", checkErr)
+		return joinResult{}, fmt.Errorf("check ban/membership: %w", checkErr)
 	} else if status != 0 {
-		return server, serverID, &joinRejection{status: status, msg: msg}
+		return joinResult{}, &joinRejection{status: status, msg: msg}
 	}
-
-	serverID = invite.ServerID
 
 	// Capture strictly precedes the write, with nothing between them.
 	plan, captureErr := presencehook.Capture(ctx, h.graphPresence, tx, spec)
 	if captureErr != nil {
-		return server, serverID, fmt.Errorf("capture invite join presence: %w", captureErr)
+		return joinResult{}, fmt.Errorf("capture invite join presence: %w", captureErr)
 	}
 
 	if addErr := addMemberToServer(tx, invite.ServerID, userID, invite.ID); addErr != nil {
 		presencehook.Abandon(h.graphPresence, plan, presencecapture.CauseWriteFailed)
-		return server, serverID, fmt.Errorf("add member to server: %w", addErr)
+		return joinResult{}, fmt.Errorf("add member to server: %w", addErr)
 	}
 
-	fetched, fetchErr := h.fetchServer(tx, invite.ServerID)
+	server, fetchErr := h.fetchServer(tx, invite.ServerID)
 	if fetchErr != nil {
 		presencehook.Abandon(h.graphPresence, plan, presencecapture.CauseWriteFailed)
-		return server, serverID, fmt.Errorf("fetch server: %w", fetchErr)
+		return joinResult{}, fmt.Errorf("fetch server: %w", fetchErr)
 	}
-	server = fetched
 
-	return server, serverID, presencehook.Complete(ctx, h.graphPresence, tx, plan)
+	return joinResult{server: server, serverID: invite.ServerID},
+		presencehook.Complete(ctx, h.graphPresence, tx, plan)
 }
 
 // joinRejection carries a non-5xx outcome out of the hooked transaction. The
