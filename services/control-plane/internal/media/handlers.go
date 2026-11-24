@@ -524,6 +524,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 
 	// Fetch file metadata and verify access
 	var storageKey, mimeType, uploaderID string
+	var e2eeFormat *string
 	var fileSize int64
 	var channelID, conversationID *string
 	// NULLable: rows predating the client-attested epoch (#2832) carry none, and
@@ -534,11 +535,11 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	// closed — it is the value every pre-cutover object carries forever.
 	var storageBackend *string
 
-	query := `SELECT storage_key, mime_type, file_size, channel_id, conversation_id, key_version, storage_backend, uploader_id
+	query := `SELECT storage_key, mime_type, file_size, channel_id, conversation_id, key_version, storage_backend, uploader_id, e2ee_format
 	          FROM media_files
 	          WHERE id = $1 AND deleted_at IS NULL AND media_tier = 2`
 	err := h.db.QueryRow(query, fileID).
-		Scan(&storageKey, &mimeType, &fileSize, &channelID, &conversationID, &keyVersion, &storageBackend, &uploaderID)
+		Scan(&storageKey, &mimeType, &fileSize, &channelID, &conversationID, &keyVersion, &storageBackend, &uploaderID, &e2eeFormat)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
 		return
@@ -590,6 +591,21 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	// backfill and no change to AttachmentSummary.
 	if keyVersion != nil {
 		c.Header(middleware.FileKeyVersionHeader, strconv.Itoa(*keyVersion))
+	}
+	if e2eeFormat != nil {
+		c.Header(middleware.FileE2EEFormatHeader, *e2eeFormat)
+	}
+	// These are candidate fields for a later authenticated attachment-reference
+	// check. The DB's tier-2 XOR constraint supplies exactly one scope, but the
+	// reader must authenticate agreement with its enclosing message before using
+	// any of these values as AAD.
+	c.Header(middleware.FileUploaderIDHeader, uploaderID)
+	if channelID != nil {
+		c.Header(middleware.FileScopeHeader, "channel")
+		c.Header(middleware.FileScopeIDHeader, *channelID)
+	} else {
+		c.Header(middleware.FileScopeHeader, "dm")
+		c.Header(middleware.FileScopeIDHeader, *conversationID)
 	}
 	c.Header(headerCacheControl, "private, no-store")
 	c.Status(http.StatusOK)

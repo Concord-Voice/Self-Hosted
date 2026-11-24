@@ -105,18 +105,22 @@ type ChannelKey struct {
 
 // Message represents a chat message in a channel
 type Message struct {
-	ID               string     `json:"id" db:"id"`
-	ChannelID        string     `json:"channel_id" db:"channel_id"`
-	UserID           string     `json:"user_id" db:"user_id"`
-	Content          string     `json:"content" db:"content"`
-	KeyVersion       int        `json:"key_version" db:"key_version"`
-	EmbedsSuppressed bool       `json:"embeds_suppressed" db:"embeds_suppressed"`
-	GifSlug          *string    `json:"gif_slug,omitempty" db:"gif_slug"`
-	ReplyToID        *string    `json:"reply_to_id,omitempty" db:"reply_to_id"`
-	PinnedAt         *time.Time `json:"pinned_at,omitempty" db:"pinned_at"`
-	PinnedBy         *string    `json:"pinned_by,omitempty" db:"pinned_by"`
-	EditedAt         *time.Time `json:"edited_at,omitempty" db:"edited_at"`
-	ExpiresAt        *time.Time `json:"expires_at" db:"expires_at"`
+	ID         string `json:"id" db:"id"`
+	ChannelID  string `json:"channel_id" db:"channel_id"`
+	UserID     string `json:"user_id" db:"user_id"`
+	Content    string `json:"content" db:"content"`
+	KeyVersion int    `json:"key_version" db:"key_version"`
+	// E2EEFormat and RequestFingerprint are passive read metadata. S1 writers
+	// remain disabled; a nil format selects the legacy reader family.
+	E2EEFormat         *string    `json:"e2ee_format,omitempty" db:"e2ee_format"`
+	RequestFingerprint []byte     `json:"request_fingerprint,omitempty" db:"request_fingerprint"`
+	EmbedsSuppressed   bool       `json:"embeds_suppressed" db:"embeds_suppressed"`
+	GifSlug            *string    `json:"gif_slug,omitempty" db:"gif_slug"`
+	ReplyToID          *string    `json:"reply_to_id,omitempty" db:"reply_to_id"`
+	PinnedAt           *time.Time `json:"pinned_at,omitempty" db:"pinned_at"`
+	PinnedBy           *string    `json:"pinned_by,omitempty" db:"pinned_by"`
+	EditedAt           *time.Time `json:"edited_at,omitempty" db:"edited_at"`
+	ExpiresAt          *time.Time `json:"expires_at" db:"expires_at"`
 	// Type discriminates an ordinary message ('user') from a server-authored
 	// system row ('expiration_event'). Added by migration 000137; dm_messages
 	// has carried the equivalent since 000026.

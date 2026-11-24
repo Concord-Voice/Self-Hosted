@@ -32,6 +32,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/feedbackscreenshots"
 	invitecodes "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/invites"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
@@ -1547,8 +1548,8 @@ func TestDownloadAttachmentSuccess(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("ciphertext")), 10, mimeOctetStream))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id)
-		 VALUES ($1, $2, 'photo', 2, 'image/jpeg', 10, $3, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id, e2ee_format)
+		 VALUES ($1, $2, 'photo', 2, 'image/jpeg', 10, $3, 1, $4, 'attachment-v4')`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -1558,6 +1559,10 @@ func TestDownloadAttachmentSuccess(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, mimeOctetStream, w.Header().Get("Content-Type"))
 	assert.Equal(t, "image/jpeg", w.Header().Get("X-File-Mime-Type"))
+	assert.Equal(t, "attachment-v4", w.Header().Get(middleware.FileE2EEFormatHeader))
+	assert.Equal(t, owner, w.Header().Get(middleware.FileUploaderIDHeader))
+	assert.Equal(t, "channel", w.Header().Get(middleware.FileScopeHeader))
+	assert.Equal(t, channelID, w.Header().Get(middleware.FileScopeIDHeader))
 	assert.Equal(t, "ciphertext", w.Body.String())
 }
 

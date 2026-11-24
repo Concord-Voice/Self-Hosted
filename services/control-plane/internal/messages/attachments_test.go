@@ -65,6 +65,8 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 	// Create message and attach a file
 	msgID := insertChannelMessage(t, ts, channelID, user.ID, "check this out")
 	fileID := insertMediaFile(t, ts, user.ID, channelID, "photo", mimeImagePNG, 12345)
+	_, err := ts.DB.Exec(`UPDATE media_files SET e2ee_format = 'attachment-v4' WHERE id = $1`, fileID)
+	require.NoError(t, err)
 	insertMessageAttachment(t, ts, msgID, fileID, 0)
 
 	// GET messages
@@ -78,7 +80,7 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 			Attachments []models.AttachmentSummary `json:"attachments"`
 		} `json:"messages"`
 	}
-	err := json.Unmarshal(w.Body.Bytes(), &body)
+	err = json.Unmarshal(w.Body.Bytes(), &body)
 	require.NoError(t, err)
 
 	// Find our message
@@ -91,6 +93,13 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 			assert.Equal(t, "photo", msg.Attachments[0].FileType)
 			assert.Equal(t, mimeImagePNG, msg.Attachments[0].MimeType)
 			assert.Equal(t, int64(12345), msg.Attachments[0].FileSize)
+			assert.Equal(t, user.ID, msg.Attachments[0].UploaderID)
+			assert.Equal(t, 1, msg.Attachments[0].KeyVersion)
+			require.NotNil(t, msg.Attachments[0].ChannelID)
+			assert.Equal(t, channelID, *msg.Attachments[0].ChannelID)
+			assert.Nil(t, msg.Attachments[0].ConversationID)
+			require.NotNil(t, msg.Attachments[0].E2EEFormat)
+			assert.Equal(t, "attachment-v4", *msg.Attachments[0].E2EEFormat)
 			break
 		}
 	}
