@@ -392,26 +392,32 @@ func (h *Handler) pendingChannelViews(ctx context.Context, userID string, channe
 		return views
 	}
 	for serverID, serverTargets := range targets {
-		if h.resolver == nil {
-			for _, target := range serverTargets {
-				views[target.channelID] = true
-			}
-			continue
-		}
-		ids := make([]string, 0, len(serverTargets))
-		for _, target := range serverTargets {
-			ids = append(ids, target.channelID)
-		}
-		perms, permErr := h.resolver.ResolveEffectivePermissionsForChannelsFresh(ctx, serverID, user, ids)
-		if permErr != nil {
-			h.log.Warn("Failed to resolve pending key request channel permissions", "error", permErr)
-			continue
-		}
-		for _, target := range serverTargets {
-			views[target.channelID] = perms[target.channelID].Has(target.viewPerm)
-		}
+		h.setPendingServerViews(ctx, views, serverID, user, serverTargets)
 	}
 	return views
+}
+
+// setPendingServerViews records canView for one server's channels in views.
+// A resolve error leaves them hidden (fail closed).
+func (h *Handler) setPendingServerViews(ctx context.Context, views map[string]bool, serverID, user string, serverTargets []channelKeyTarget) {
+	if h.resolver == nil {
+		for _, target := range serverTargets {
+			views[target.channelID] = true
+		}
+		return
+	}
+	ids := make([]string, 0, len(serverTargets))
+	for _, target := range serverTargets {
+		ids = append(ids, target.channelID)
+	}
+	perms, permErr := h.resolver.ResolveEffectivePermissionsForChannelsFresh(ctx, serverID, user, ids)
+	if permErr != nil {
+		h.log.Warn("Failed to resolve pending key request channel permissions", "error", permErr)
+		return
+	}
+	for _, target := range serverTargets {
+		views[target.channelID] = perms[target.channelID].Has(target.viewPerm)
+	}
 }
 
 // readPendingChannelTargets is readChannelKeyTarget for many channels: each
