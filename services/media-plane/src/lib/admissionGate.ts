@@ -18,6 +18,8 @@ export const HANDSHAKE_BURST = 60;
 export const HANDSHAKE_WINDOW_MS = 10_000;
 /** Hard cap on tracked IPs — the store must not become the DoS it prevents. */
 export const MAX_TRACKED_IPS = 10_000;
+/** Minimum spacing of the "trusted proxy sent no client address" warning. */
+export const PROXY_FALLBACK_WARN_INTERVAL_MS = 60_000;
 
 export interface AdmissionRequest {
   headers: Record<string, string | string[] | undefined>;
@@ -268,9 +270,29 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
   }
 
   const counters = new Map<string, WindowCounters>();
+  let lastProxyFallbackWarnMs = -PROXY_FALLBACK_WARN_INTERVAL_MS;
+
+  const isOverBudget = (entry: WindowCounters, nowMs: number): boolean =>
+    nowMs - entry.windowStartMs < HANDSHAKE_WINDOW_MS * 2 &&
+    entry.previous + entry.current >= HANDSHAKE_BURST;
 
   const gate = ((req, callback) => {
     const ip = resolveClientIp(req, trustedProxies);
+
+    // A trusted proxy that forwards no usable client address collapses every
+    // client behind it into the proxy's own bucket. That fails closed, but a
+    // dropped header would then deny voice deployment-wide, so make it visible.
+    const peer = req.socket?.remoteAddress;
+    if (ip && ip === peer && peer && trustedProxies.has(peer)) {
+      const nowForWarn = now();
+      if (nowForWarn - lastProxyFallbackWarnMs >= PROXY_FALLBACK_WARN_INTERVAL_MS) {
+        lastProxyFallbackWarnMs = nowForWarn;
+        warn(
+          'Admission gate: a trusted proxy forwarded no usable client address, so its ' +
+            'requests share the proxy peer bucket. Check that the proxy sets X-Real-IP.'
+        );
+      }
+    }
 
     // A genuinely peerless request has no source identity and cannot enter an
     // admission budget.
@@ -294,11 +316,21 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
     let entry = counters.get(bucket);
 
     if (!entry) {
-      // Bounded store: evict the oldest insertion (Map preserves insertion
-      // order) rather than growing without limit under an IPv6-source flood.
+      // Bounded store: evict rather than growing without limit under an
+      // IPv6-source flood. Prefer the oldest bucket that is NOT over budget, so
+      // cycling through many buckets cannot evict (and so reset) a bucket that is
+      // currently being limited. Only when every tracked bucket is over budget
+      // does the oldest one go, which keeps the store bounded.
       if (counters.size >= MAX_TRACKED_IPS) {
-        const oldest = counters.keys().next();
-        if (!oldest.done) counters.delete(oldest.value);
+        let victim: string | undefined;
+        for (const [key, candidate] of counters) {
+          victim ??= key;
+          if (!isOverBudget(candidate, nowMs)) {
+            victim = key;
+            break;
+          }
+        }
+        if (victim !== undefined) counters.delete(victim);
       }
       entry = { windowStartMs: nowMs, current: 0, previous: 0 };
       counters.set(bucket, entry);

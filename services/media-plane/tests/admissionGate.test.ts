@@ -8,6 +8,7 @@ import {
   resolveClientIp,
   HANDSHAKE_BURST,
   MAX_TRACKED_IPS,
+  PROXY_FALLBACK_WARN_INTERVAL_MS,
   type AdmissionRequest,
 } from '../src/lib/admissionGate.js';
 
@@ -424,5 +425,52 @@ describe('createAdmissionGate', () => {
     }
     expect(gate.trackedCount()).toBeLessThanOrEqual(MAX_TRACKED_IPS);
     expect(cb).toHaveBeenLastCalledWith(null, true);
+  });
+
+  it('does not evict an over-budget bucket, so cycling buckets cannot reset it', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    const cb = vi.fn();
+    const limited = { 'x-real-ip': '198.51.100.9' };
+    // The limited bucket is the OLDEST insertion, the first eviction candidate.
+    for (let i = 0; i < HANDSHAKE_BURST + 1; i += 1) gate(req(limited), cb);
+    expect(cb).toHaveBeenLastCalledWith(null, false);
+
+    for (let i = 0; i < MAX_TRACKED_IPS + 500; i += 1) {
+      gate(req({ 'x-real-ip': `203.0.${Math.floor(i / 256)}.${i % 256}` }), vi.fn());
+    }
+
+    gate(req(limited), cb);
+    expect(cb).toHaveBeenLastCalledWith(null, false);
+  });
+
+  it('still bounds the store when every tracked bucket is over budget', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    for (let i = 0; i < MAX_TRACKED_IPS + 10; i += 1) {
+      const headers = { 'x-real-ip': `203.0.${Math.floor(i / 256)}.${i % 256}` };
+      for (let n = 0; n < HANDSHAKE_BURST; n += 1) gate(req(headers), vi.fn());
+    }
+    expect(gate.trackedCount()).toBeLessThanOrEqual(MAX_TRACKED_IPS);
+  });
+
+  it('warns, at most once a minute and without an address, when a trusted proxy forwards no client address', () => {
+    const clock = makeClock();
+    const warn = vi.fn();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'], warn });
+    gate(req({}), vi.fn());
+    gate(req({}), vi.fn());
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).not.toContain('10.0.0.9');
+    clock.advance(PROXY_FALLBACK_WARN_INTERVAL_MS);
+    gate(req({}), vi.fn());
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not warn when the proxy forwards a usable client address', () => {
+    const warn = vi.fn();
+    const gate = createAdmissionGate({ trustedProxies: ['10.0.0.9'], warn });
+    gate(req({ 'x-real-ip': '203.0.113.7' }), vi.fn());
+    expect(warn).not.toHaveBeenCalled();
   });
 });
