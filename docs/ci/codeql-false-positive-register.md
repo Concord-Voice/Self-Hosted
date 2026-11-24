@@ -195,8 +195,8 @@ Stances on CodeQL rules whose mismatch with this project's idioms is **structura
 | Field | Value |
 |---|---|
 | Alerts | 14 `go/log-injection` alerts (medium): #1070, #1154–#1157, #1160–#1161, #1185–#1187, #1201–#1204 |
-| Location | `pkg/logger/logger.go:50` (`Logger.With`, removed in [PR #3541](https://github.com/Concord-Voice/Concord-Voice-Alpha/pull/3541): callers now reach slog's own `With` through the embedded `*slog.Logger`, so the scoped query judges each caller's keys); `internal/auth/handlers.go:1328–1329, 1613, 1638`; `internal/messages/purge.go:105, 224, 313`; `internal/channels/handlers.go:1635` |
-| Dismissed | 2026-07-29, batch dismissal via code-scanning API ([PR #2525](https://github.com/Concord-Voice/Concord-Voice-Alpha/pull/2525), security-alert remediation) |
+| Location | `pkg/logger/logger.go:50` (`Logger.With`, removed in pre-split PR 3541: callers now reach slog's own `With` through the embedded `*slog.Logger`, so the scoped query judges each caller's keys); `internal/auth/handlers.go:1328–1329, 1613, 1638`; `internal/messages/purge.go:105, 224, 313`; `internal/channels/handlers.go:1635` |
+| Dismissed | 2026-07-29, batch dismissal via code-scanning API (pre-split PR 2525, security-alert remediation) |
 | Reason | `false positive` |
 | Justification | Each sink was confirmed to be a `pkg/logger` structured slog call, not unescaped stdlib `log.Printf`. `Logger.With` only stages attributes; the service's JSON/Text handlers escape control characters at render time, so a user-derived newline cannot create a second log record. `TestHandlersEscapeControlCharsInAttrValues` regression-tests that guarantee. |
 | Re-check | Reassess any raw/custom handler or `log.Printf` conversion; those sinks are not covered and must follow `.codex/rules/observability.md` §5. |

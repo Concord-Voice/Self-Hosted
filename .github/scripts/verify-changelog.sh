@@ -74,7 +74,7 @@ if [[ -z "${BASE_SHA:-}" ]]; then
   exit 1
 fi
 
-# The public-mirror helpers stay in Hosted. Keep the identical private-ref
+# The public-mirror helpers are not part of this repository. Keep the identical private-ref
 # pattern here so this guard can run from the Self-Hosted checkout.
 PMIRROR_PRIVATE_REF_REGEX='(\[internal\]|\.claude/|docs/(adr|superpowers|runbooks|reference|ci|competitive-analysis)/|infrastructure/(deploy|cloudflare|github)/|/CLAUDE\.md|CLAUDE\.md|/TODO\.md|TODO\.md|docs/policies/(update-cert-pinning-runbook|audit-log-retention)\.md)'
 
