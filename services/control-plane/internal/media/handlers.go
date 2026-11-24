@@ -1069,6 +1069,21 @@ func validateMediaFileID(c *gin.Context, fileID string) bool {
 	return true
 }
 
+func (h *Handler) lockMediaDeletionUploader(c *gin.Context, tx *sql.Tx, userID string) bool {
+	var uploader int
+	err := tx.QueryRowContext(c.Request.Context(), `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID).Scan(&uploader)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		return false
+	}
+	if err != nil {
+		h.log.Error("Failed to lock media uploader", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+		return false
+	}
+	return true
+}
+
 // DeleteMedia soft-deletes a media file and removes it from object storage.
 // DELETE /api/v1/media/:file_id
 // Only the uploader can delete their own Tier 2 (attachment) files while they
@@ -1096,15 +1111,7 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 		}
 	}()
 
-	var uploader int
-	err = tx.QueryRowContext(c.Request.Context(), `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID).Scan(&uploader)
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to lock media uploader", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+	if !h.lockMediaDeletionUploader(c, tx, userID) {
 		return
 	}
 	// DM retirement locks the conversation before cascading to participants and
