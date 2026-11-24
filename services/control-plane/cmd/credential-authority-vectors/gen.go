@@ -159,15 +159,25 @@ func buildVectors() ([]vector, error) {
 	}
 	badEnvelope := []byte(`["concord-account-authority",2,"credential-signed","legacy-credential-status","` + base64.StdEncoding.EncodeToString(publicationRaw) + `","` + base64.StdEncoding.EncodeToString(signature[:]) + `"]`)
 	nonCanonicalPublication := append([]byte(" "), publicationRaw...)
+	unknownProtocolPublication := bytes.Replace(publicationRaw, []byte(`"legacy"`), []byte(`"unknown"`), 1)
+	shortEpochDigestPublication := bytes.Replace(publicationRaw, []byte(b64(publication.CredentialEpochDigest[:])), []byte(b64(make([]byte, 47))), 1)
 	invalidLifetimeStatus := bytes.Replace(statusRaw, []byte("1700000300010"), []byte("1700000300009"), 1)
+	unknownProtocolStatus := bytes.Replace(statusRaw, []byte(`"legacy"`), []byte(`"split-pending"`), 1)
+	shortChallengeStatus := bytes.Replace(statusRaw, []byte(b64(challenge[:])), []byte(b64(challenge[:31])), 1)
+	shortSignatureEnvelope := bytes.Replace(envelopeRaw, []byte(b64(signature[:])), []byte(b64(signature[:95])), 1)
 	return []vector{
 		{Name: "publication/base", Suite: "publication", Operation: "decode", Input: map[string]any{"raw_b64": b64(publicationRaw)}, Expect: map[string]any{"verdict": "accept", "digest_b64": b64(publicationDigest[:])}},
-		{Name: "publication/reject-noncanonical-whitespace", Suite: "publication", Operation: "decode", Input: map[string]any{"raw_b64": b64(nonCanonicalPublication)}, Expect: map[string]any{"verdict": "reject", "reason": "non_canonical"}},
+		{Name: "publication/reject-noncanonical-whitespace", Suite: "publication", Operation: "decode", Input: map[string]any{"raw_b64": b64(nonCanonicalPublication)}, Expect: map[string]any{"verdict": "reject", "reason": "malformed"}},
+		{Name: "publication/reject-unknown-protocol", Suite: "publication", Operation: "decode", Input: map[string]any{"raw_b64": b64(unknownProtocolPublication)}, Expect: map[string]any{"verdict": "reject", "reason": "malformed"}},
+		{Name: "publication/reject-short-epoch-digest", Suite: "publication", Operation: "decode", Input: map[string]any{"raw_b64": b64(shortEpochDigestPublication)}, Expect: map[string]any{"verdict": "reject", "reason": "malformed"}},
 		{Name: "evidence/base", Suite: "evidence", Operation: "decode", Input: map[string]any{"raw_b64": b64(evidenceRaw)}, Expect: map[string]any{"verdict": "accept", "digest_b64": b64(evidenceDigest[:])}},
 		{Name: "status/base", Suite: "status", Operation: "decode", Input: map[string]any{"raw_b64": b64(statusRaw), "challenge_b64": b64(challenge[:])}, Expect: map[string]any{"verdict": "accept"}},
-		{Name: "status/reject-invalid-lifetime", Suite: "status", Operation: "decode", Input: map[string]any{"raw_b64": b64(invalidLifetimeStatus)}, Expect: map[string]any{"verdict": "reject", "reason": "invalid_lifetime"}},
+		{Name: "status/reject-invalid-lifetime", Suite: "status", Operation: "decode", Input: map[string]any{"raw_b64": b64(invalidLifetimeStatus)}, Expect: map[string]any{"verdict": "reject", "reason": "malformed"}},
+		{Name: "status/reject-unknown-protocol", Suite: "status", Operation: "decode", Input: map[string]any{"raw_b64": b64(unknownProtocolStatus)}, Expect: map[string]any{"verdict": "reject", "reason": "malformed"}},
+		{Name: "status/reject-short-challenge", Suite: "status", Operation: "decode", Input: map[string]any{"raw_b64": b64(shortChallengeStatus)}, Expect: map[string]any{"verdict": "reject", "reason": "malformed"}},
 		{Name: "envelope/publication-valid-p384", Suite: "envelope", Operation: "verify", Input: map[string]any{"raw_b64": b64(envelopeRaw), "point_b64": b64(point)}, Expect: map[string]any{"verdict": "accept"}},
-		{Name: "envelope/inner-type-mismatch", Suite: "envelope", Operation: "decode", Input: map[string]any{"raw_b64": b64(badEnvelope)}, Expect: map[string]any{"verdict": "reject", "reason": "type_mismatch"}},
+		{Name: "envelope/inner-type-mismatch", Suite: "envelope", Operation: "decode", Input: map[string]any{"raw_b64": b64(badEnvelope)}, Expect: map[string]any{"verdict": "reject", "reason": "malformed"}},
+		{Name: "envelope/reject-short-signature", Suite: "envelope", Operation: "decode", Input: map[string]any{"raw_b64": b64(shortSignatureEnvelope)}, Expect: map[string]any{"verdict": "reject", "reason": "malformed"}},
 	}, nil
 }
 

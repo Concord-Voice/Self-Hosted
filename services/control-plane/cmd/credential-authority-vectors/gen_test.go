@@ -71,12 +71,27 @@ func TestCorpusVectorsMatchCodec(t *testing.T) {
 			require.True(t, ok)
 			wire, err := base64.StdEncoding.Strict().DecodeString(encoded)
 			require.NoError(t, err)
-			var decodeErr error
+			var (
+				decodeErr error
+				digest    string
+			)
 			switch item.Suite {
 			case "publication":
-				_, decodeErr = credential.DecodePublication(wire)
+				publication, err := credential.DecodePublication(wire)
+				decodeErr = err
+				if decodeErr == nil {
+					publicationDigest, err := credential.PublicationDigest(publication)
+					require.NoError(t, err)
+					digest = base64.StdEncoding.EncodeToString(publicationDigest[:])
+				}
 			case "evidence":
-				_, decodeErr = credential.DecodeEvidenceCarrier(wire)
+				evidence, err := credential.DecodeEvidenceCarrier(wire)
+				decodeErr = err
+				if decodeErr == nil {
+					evidenceDigest, err := credential.EvidenceDigest(evidence)
+					require.NoError(t, err)
+					digest = base64.StdEncoding.EncodeToString(evidenceDigest[:])
+				}
 			case "status":
 				_, decodeErr = credential.DecodeLegacyStatus(wire)
 			case "envelope":
@@ -96,10 +111,17 @@ func TestCorpusVectorsMatchCodec(t *testing.T) {
 			require.True(t, ok)
 			if verdict == "accept" {
 				require.NoError(t, decodeErr)
+				if expectedDigest, present := item.Expect["digest_b64"]; present {
+					expected, ok := expectedDigest.(string)
+					require.True(t, ok)
+					require.Equal(t, expected, digest)
+				}
 				return
 			}
 			require.Equal(t, "reject", verdict)
 			require.Error(t, decodeErr)
+			require.ErrorIs(t, decodeErr, credential.ErrMalformed)
+			require.Equal(t, "malformed", item.Expect["reason"])
 		})
 	}
 }
@@ -138,5 +160,28 @@ func TestCorpusPinsAndClosedVectorShapes(t *testing.T) {
 		require.NotEmpty(t, vector.Operation)
 		require.NotEmpty(t, vector.Input)
 		require.NotEmpty(t, vector.Expect)
+		verdict, ok := vector.Expect["verdict"].(string)
+		require.True(t, ok)
+		switch verdict {
+		case "accept":
+			needsDigest := vector.Suite == "publication" || vector.Suite == "evidence"
+			if needsDigest {
+				require.Len(t, vector.Expect, 2)
+				expectedDigest, present := vector.Expect["digest_b64"]
+				require.True(t, present)
+				digestText, ok := expectedDigest.(string)
+				require.True(t, ok)
+				digest, err := base64.StdEncoding.Strict().DecodeString(digestText)
+				require.NoError(t, err)
+				require.Len(t, digest, 48)
+			} else {
+				require.Len(t, vector.Expect, 1)
+			}
+		case "reject":
+			require.Len(t, vector.Expect, 2)
+			require.Equal(t, "malformed", vector.Expect["reason"])
+		default:
+			t.Fatalf("unexpected verdict %q", verdict)
+		}
 	}
 }
