@@ -198,7 +198,10 @@ func TestRemoveDeleteCaptureFailsClosedForCancelledContext(t *testing.T) {
 	conn, err := db.Conn(context.Background())
 	require.NoError(t, err)
 	defer func() {
-		require.NoError(t, conn.Close())
+		closeErr := conn.Close()
+		if closeErr != nil && !errors.Is(closeErr, sql.ErrConnDone) {
+			t.Errorf("close canceled-context connection: %v", closeErr)
+		}
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
