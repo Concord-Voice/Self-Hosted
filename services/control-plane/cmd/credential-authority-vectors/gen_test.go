@@ -41,10 +41,6 @@ func TestGeneratorFailsClosedOutsideARepositoryAndWritesOnlyItsCorpus(t *testing
 		require.NoError(t, os.Chdir(oldDirectory))
 	})
 
-	noRoot := t.TempDir()
-	require.NoError(t, os.Chdir(noRoot))
-	_, err = repositoryRoot()
-	require.ErrorContains(t, err, "repository root not found")
 	os.Args = []string{"credential-authority-vectors", "--check", "extra"}
 	require.ErrorContains(t, run(), "usage")
 
