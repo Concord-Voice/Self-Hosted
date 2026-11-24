@@ -193,11 +193,12 @@ jobs:
           EMAIL="${SCAN_USER}@zap-ci.example.com"
           PASSWORD='ZapCi!Scan-stub-2026' # pragma: allowlist secret
           B64_STUB=$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 2>/dev/null | openssl pkey -pubout -outform DER | base64 | tr -d '\n')
+          KDF_SALT=$(openssl rand -base64 16 | tr -d '\n')
 
           REG_BODY=$(jq -n \
-            --arg u "$SCAN_USER" --arg e "$EMAIL" --arg p "$PASSWORD" --arg k "$B64_STUB" \
+            --arg u "$SCAN_USER" --arg e "$EMAIL" --arg p "$PASSWORD" --arg k "$B64_STUB" --arg s "$KDF_SALT" \
             '{username:$u, email:$e, password:$p, age_confirmation:true,
-              public_key:$k, wrapped_private_key:$k, key_derivation_salt:$k}')
+              public_key:$k, wrapped_private_key:$k, key_derivation_salt:$s}')
           REG=$(curl -fsS -X POST http://localhost:8080/api/v1/auth/register \
             -H 'Content-Type: application/json' -d "$REG_BODY")
           PENDING_ID=$(jq -re '.pending_id' <<<"$REG")

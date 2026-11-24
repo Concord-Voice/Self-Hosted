@@ -17,6 +17,7 @@ describe('mediaFrameMiniHeader', () => {
       iv: buildObuIv(),
       keyId: 0x00ab,
       keyVersion: 0xcdef,
+      scheme: 4,
     });
     expect(header).toHaveLength(22);
     expect(header.slice(0, 2)).toEqual(new Uint8Array([0xde, 0xad]));
@@ -26,13 +27,27 @@ describe('mediaFrameMiniHeader', () => {
     });
   });
 
+  it('stamps the v6 version and AV1 scheme in the two reserved bytes', () => {
+    const header = encodeMediaFrameMiniHeader({
+      iv: buildObuIv(),
+      keyId: 1,
+      keyVersion: 2,
+      scheme: 4,
+    });
+
+    // The 22-byte ABI is fixed. v6 consumes its two former reserved bytes so
+    // a receiver can reject a valid tag from the wrong codec branch before
+    // exposing a frame to its decoder.
+    expect(Array.from(header.slice(20, 22))).toEqual([6, 4]);
+  });
+
   it('mini-header is exactly 22 bytes', () => {
     expect(OBU_MINI_HEADER_SIZE).toBe(22);
   });
 
   it('round-trips magic / IV / keyId / keyVersion', () => {
     const iv = buildObuIv();
-    const mh = encodeObuMiniHeader({ iv, keyId: 0x00ab, keyVersion: 0xcdef });
+    const mh = encodeObuMiniHeader({ iv, keyId: 0x00ab, keyVersion: 0xcdef, scheme: 4 });
     expect(mh).toHaveLength(22);
     // magic leads
     expect(mh[0]).toBe(0xde);
@@ -46,8 +61,14 @@ describe('mediaFrameMiniHeader', () => {
   });
 
   it('decode rejects a buffer without leading magic (returns null)', () => {
-    const mh = encodeObuMiniHeader({ iv: buildObuIv(), keyId: 1, keyVersion: 1 });
+    const mh = encodeObuMiniHeader({ iv: buildObuIv(), keyId: 1, keyVersion: 1, scheme: 4 });
     mh[0] = 0x00; // corrupt magic
+    expect(decodeObuMiniHeader(mh)).toBeNull();
+  });
+
+  it('rejects a v5 mini-header before it can select a decrypt key', () => {
+    const mh = encodeObuMiniHeader({ iv: buildObuIv(), keyId: 1, keyVersion: 1, scheme: 4 });
+    mh[20] = 5;
     expect(decodeObuMiniHeader(mh)).toBeNull();
   });
 

@@ -22,6 +22,16 @@ export interface StoredCameraLayerDemand {
   pressureStepDown: boolean;
 }
 
+/**
+ * Stored demand plus the owning viewer's `userId` (VULN-158). The layering
+ * gates count DISTINCT viewers, not consumer entries: one participant can own
+ * many consumers of one producer, so counting entries let a single client
+ * force every publisher into layered egress.
+ */
+export interface ViewerCameraLayerDemand extends StoredCameraLayerDemand {
+  userId: string;
+}
+
 export type ParseDemandResult =
   | { ok: true; value: CameraLayerDemand }
   | { ok: false; error: 'invalid-consumer-id' | 'invalid-layer' | 'invalid-render-state' };
@@ -141,19 +151,61 @@ export function storedDemand(
 export function computeCameraLayeringGate(input: {
   codecKind: LayeredCodecKind;
   cameraProducerCount: number;
-  demands: StoredCameraLayerDemand[];
+  demands: ViewerCameraLayerDemand[];
   previouslyEnabled?: boolean;
 }): boolean {
   // Closing the last producer precedes asynchronous consumer-demand cleanup.
   // Stale demands must not arm an SVC gate while no camera can provide layers.
   if (input.cameraProducerCount === 0) return false;
   const visible = input.demands.filter((demand) => demand.visible);
-  const visibleThreshold = input.previouslyEnabled ? 1 : 2;
+  const distinctViewers = new Set(visible.map((demand) => demand.userId)).size;
+  const viewerThreshold = input.previouslyEnabled ? 1 : 2;
   const hasLayerBenefit =
-    visible.length >= visibleThreshold &&
+    distinctViewers >= viewerThreshold &&
     visible.some((demand) => demand.maxUsefulSpatialLayer < 2 || demand.pressureStepDown);
 
   if (!hasLayerBenefit) return false;
   if (input.codecKind === 'svc') return true;
   return input.cameraProducerCount >= (input.previouslyEnabled ? 2 : 3);
+}
+
+/**
+ * Per-member camera gate flip budget (VULN-158). `set-preferred-layers` allows
+ * a burst of 200 events, so the event budget does not bound how often one
+ * member can move the room gate, and every applied flip makes every camera
+ * publisher re-encode. A member may cause at most
+ * `CAMERA_GATE_MEMBER_FLIP_LIMIT` applied transitions per
+ * `CAMERA_GATE_MEMBER_FLIP_WINDOW_MS`; a further one is deferred, not refused.
+ */
+export const CAMERA_GATE_MEMBER_FLIP_LIMIT = 2;
+export const CAMERA_GATE_MEMBER_FLIP_WINDOW_MS = 30_000;
+
+function insideFlipWindow(time: number, now: number): boolean {
+  return now - time < CAMERA_GATE_MEMBER_FLIP_WINDOW_MS;
+}
+
+/**
+ * Milliseconds until the member may cause another applied transition: 0 while
+ * fewer than `CAMERA_GATE_MEMBER_FLIP_LIMIT` of its flips are inside the window,
+ * otherwise the time until enough of the oldest leave it.
+ */
+export function flipBudgetDelayMs(times: readonly number[] | undefined, now: number): number {
+  const recent = (times ?? []).filter((time) => insideFlipWindow(time, now));
+  if (recent.length < CAMERA_GATE_MEMBER_FLIP_LIMIT) return 0;
+  const blocking = recent[recent.length - CAMERA_GATE_MEMBER_FLIP_LIMIT];
+  return blocking + CAMERA_GATE_MEMBER_FLIP_WINDOW_MS - now;
+}
+
+/**
+ * Record an applied transition against `userId`, then prune every member's
+ * history to the window and drop empty entries, so the map is bounded by the
+ * members who flipped recently rather than by the room's lifetime.
+ */
+export function chargeFlip(flips: Map<string, number[]>, userId: string, now: number): void {
+  flips.set(userId, [...(flips.get(userId) ?? []), now]);
+  for (const [member, times] of flips) {
+    const recent = times.filter((time) => insideFlipWindow(time, now));
+    if (recent.length === 0) flips.delete(member);
+    else flips.set(member, recent);
+  }
 }

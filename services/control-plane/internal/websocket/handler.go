@@ -229,10 +229,24 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		closePending()
 		return
 	}
+	if !h.admitRegisteredClient(c, userID, client) {
+		return
+	}
+	// Start client's read and write pumps
+	client.admissionOwners.Add(2)
+	go client.writePump()
+	go client.readPump()
+}
+
+// admitRegisteredClient runs the post-registration rechecks, in order, on a
+// client the hub has accepted. It returns false after closing and unregistering
+// the client when any check refuses it. Call it only after the hub.register
+// send in HandleWebSocket has succeeded.
+func (h *Handler) admitRegisteredClient(c *gin.Context, userID uuid.UUID, client *Client) bool {
 	if client.tokenExpired() {
 		client.closeExpiredToken()
 		client.requestUnregister()
-		return
+		return false
 	}
 
 	// #2414 §C: close the register-vs-disconnect-sweep ordering race. registerClient
@@ -240,9 +254,9 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 	// goroutine, so a socket whose register is delivered AFTER a reset's disconnectUser
 	// is never swept, and survives until its access token expires (~15m).
 	//
-	// The unbuffered register channel above blocks until Run receives it, so by here
-	// Run has accepted this client and will finish registration before another
-	// disconnect sweep. That gives a total order in both directions:
+	// The unbuffered hub.register send in HandleWebSocket (before this helper is
+	// called) blocks until Run receives it, so by here Run has accepted this client
+	// and will finish registration before another disconnect sweep. That gives a total order in both directions:
 	//   - the reset committed before this check  => we read the new epoch and close;
 	//   - the reset commits after this check     => its disconnectUser send follows our
 	//                                               already-consumed register, so the
@@ -259,7 +273,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 			client.closeRevokedConnection()
 			client.cancelIngressLifecycle()
 			client.requestUnregister()
-			return
+			return false
 		}
 	}
 	if err := h.recheckTokenTheft(c, userID); err != nil {
@@ -268,12 +282,12 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		client.closeRevokedConnection()
 		client.cancelIngressLifecycle()
 		client.requestUnregister()
-		return
+		return false
 	}
 	if client.tokenExpired() {
 		client.closeExpiredToken()
 		client.requestUnregister()
-		return
+		return false
 	}
 
 	if err := h.recheckClientFamily(c.Request.Context(), client); err != nil || client.securityTerminal.Load() {
@@ -283,12 +297,9 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		}
 		client.cancelIngressLifecycle()
 		client.requestUnregister()
-		return
+		return false
 	}
-	// Start client's read and write pumps
-	client.admissionOwners.Add(2)
-	go client.writePump()
-	go client.readPump()
+	return true
 }
 
 // webSocketAuthFailure maps an authentication error to its HTTP status and
@@ -582,13 +593,46 @@ func (h *Handler) resolveAccessFamily(ctx context.Context, userID uuid.UUID, ses
 	return loginfamily.ResolveVerifiedAccess(ctx, h.db, loginfamily.AccessIdentity{UserID: userID, SID: sid, CredentialEpoch: epoch, AccessExpiresAt: expiry})
 }
 
-func (h *Handler) recheckClientFamily(ctx context.Context, client *Client) error {
-	grant, err := h.resolveAccessFamily(ctx, client.UserID, client.SessionID, client.CredEpoch, client.tokenDeadline())
+func (h *Handler) recheckClientFamily(ctx context.Context, client *Client) (retErr error) {
+	sid, err := uuid.Parse(client.SessionID)
+	if err != nil || sid == uuid.Nil {
+		return loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil)
+	}
+	ctx, cancel := context.WithTimeout(ctx, pendingRegistrationTimeout)
+	defer cancel()
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			retErr = loginfamily.NewError(loginfamily.ReasonSQLUnavailable, errors.Join(retErr, rollbackErr))
+		}
+	}()
+	barrier, err := loginfamily.AcquireWriterBarrierTx(ctx, tx)
 	if err != nil {
 		return err
 	}
-	if grant.FamilyID != client.FamilyID {
+	users, err := loginfamily.LockUsersTx(ctx, tx, barrier, []uuid.UUID{client.UserID}, loginfamily.UserShare)
+	if err != nil {
+		return err
+	}
+	user, err := users.ForUser(client.UserID)
+	if err != nil {
+		return err
+	}
+	identity := loginfamily.AccessIdentity{
+		UserID: client.UserID, SID: sid, CredentialEpoch: client.CredEpoch, AccessExpiresAt: client.tokenDeadline(),
+	}
+	family, err := loginfamily.GuardAfterUserLockTx(ctx, tx, user, identity, loginfamily.FamilyShare)
+	if err != nil {
+		return err
+	}
+	if family.Binding().FamilyID != client.FamilyID {
 		return loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil)
+	}
+	if err = tx.Commit(); err != nil {
+		return loginfamily.NewError(loginfamily.ReasonCommitUnknown, err)
 	}
 	return nil
 }

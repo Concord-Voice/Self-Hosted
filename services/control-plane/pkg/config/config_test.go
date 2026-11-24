@@ -336,6 +336,25 @@ func TestLoad_AllowedOriginsDefault_OmitsHostedSpaOrigin(t *testing.T) {
 	assert.Contains(t, cfg.AllowedOrigins, "http://localhost:3001")
 }
 
+// The default attestation prefix must match the immutable subject claims this
+// repository's OIDC tokens carry (use_immutable_subject is on), and only those.
+func TestLoad_AttestationOIDCSubjectPrefixDefault_IsImmutableSelfHosted(t *testing.T) {
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("ATTESTATION_OIDC_SUBJECT_PREFIX", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	prefix := cfg.OIDCSubjectPrefix
+	assert.Equal(t, "repo:Concord-Voice@264583090/Self-Hosted@1359565266:", prefix)
+	assert.True(t, strings.HasPrefix("repo:Concord-Voice@264583090/Self-Hosted@1359565266:ref:refs/heads/main", prefix))
+	for _, sub := range []string{
+		"repo:Concord-Voice/Self-Hosted:ref:refs/heads/main",                       // name form is not issued
+		"repo:Concord-Voice@264583090/Self-Hosted@1359565267:ref:refs/heads/main",  // another repository id
+		"repo:Concord-Voice@264583090/Self-Hosted@13595652660:ref:refs/heads/main", // id with a trailing digit
+	} {
+		assert.False(t, strings.HasPrefix(sub, prefix), sub)
+	}
+}
+
 func TestLoadTrustedProxyCIDRs(t *testing.T) {
 	// Pin ENVIRONMENT=development in every sub-test so Load() doesn't hit the
 	// production guards (and fatally exit on unrelated missing prod config)
@@ -1390,7 +1409,7 @@ func validAttestationConfig() *Config {
 		RequireClientAttestation: true,
 		OIDCIssuer:               "https://token.actions.githubusercontent.com",
 		OIDCAudience:             "https://api.concordvoice.chat",
-		OIDCSubjectPrefix:        "repo:Concord-Voice/Concord-Voice-Alpha:",
+		OIDCSubjectPrefix:        "repo:Concord-Voice@264583090/Self-Hosted@1359565266:",
 		OIDCSPAWorkflow:          "main-cd.yml",
 		OIDCSPARef:               "refs/heads/main",
 		OIDCBinaryWorkflow:       "build-desktop.yml",
@@ -1469,7 +1488,7 @@ func TestValidateAttestation_MissingSubjectPrefix(t *testing.T) {
 // guard — a prefix that cannot match any GitHub OIDC sub claim.
 func TestValidateAttestation_MalformedSubjectPrefix(t *testing.T) {
 	cfg := validAttestationConfig()
-	cfg.OIDCSubjectPrefix = "Concord-Voice/Concord-Voice-Alpha"
+	cfg.OIDCSubjectPrefix = "Concord-Voice/Self-Hosted"
 	err := cfg.validateAttestation()
 	require.ErrorContains(t, err, `must start with "repo:"`)
 }
@@ -1490,19 +1509,19 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 		{"bare scheme", "repo:", "matches every repository on GitHub"},
 		{"owner only", "repo:Concord-Voice", "matches a lookalike org anyone can register"},
 		{"owner with slash", "repo:Concord-Voice/", "matches any repo under the org"},
-		{"missing trailing colon", "repo:Concord-Voice/Concord-Voice-Alpha", "also matches ...-Alpha-Evil:"},
+		{"missing trailing colon", "repo:Concord-Voice/Self-Hosted", "also matches ...-Self-Hosted-Evil:"},
 		// The immutable owner@id/repo@id form must stay fully qualified.
 		{"id form bare org", "repo:Concord-Voice@264583090:", "matches every repo under the org"},
 		{"id form owner with slash", "repo:Concord-Voice@264583090/", "matches any repo under the org"},
-		{"id form missing trailing colon", "repo:Concord-Voice@264583090/Self-Hosted@1158152129", "also matches a repo id with more digits"},
+		{"id form missing trailing colon", "repo:Concord-Voice@264583090/Self-Hosted@1359565266", "also matches a repo id with more digits"},
 		{"id form repo without id", "repo:Concord-Voice@264583090/Self-Hosted:", "GitHub never emits a half-immutable subject"},
-		{"id form owner without id", "repo:Concord-Voice/Self-Hosted@1158152129:", "GitHub never emits a half-immutable subject"},
-		{"id form non-numeric owner id", "repo:Concord-Voice@abc/Self-Hosted@1158152129:", "ids are decimal"},
+		{"id form owner without id", "repo:Concord-Voice/Self-Hosted@1359565266:", "GitHub never emits a half-immutable subject"},
+		{"id form non-numeric owner id", "repo:Concord-Voice@abc/Self-Hosted@1359565266:", "ids are decimal"},
 		{"id form empty repo id", "repo:Concord-Voice@264583090/Self-Hosted@:", "ids are decimal"},
-		{"id form leading-zero id", "repo:Concord-Voice@0264583090/Self-Hosted@1158152129:", "GitHub ids have no leading zero"},
-		{"id form leading-zero repo id", "repo:Concord-Voice@264583090/Self-Hosted@01158152129:", "GitHub ids have no leading zero"},
+		{"id form leading-zero id", "repo:Concord-Voice@0264583090/Self-Hosted@1359565266:", "GitHub ids have no leading zero"},
+		{"id form leading-zero repo id", "repo:Concord-Voice@264583090/Self-Hosted@01359565266:", "GitHub ids have no leading zero"},
 		{"id form non-numeric repo id", "repo:Concord-Voice@264583090/Self-Hosted@abc:", "ids are decimal"},
-		{"id form not at start", "xrepo:Concord-Voice@264583090/Self-Hosted@1158152129:", "the shape is anchored"},
+		{"id form not at start", "xrepo:Concord-Voice@264583090/Self-Hosted@1359565266:", "the shape is anchored"},
 		{"name form not at start", "evil:repo:Concord-Voice/Self-Hosted:", "the shape is anchored"},
 	}
 	for _, tc := range cases {
@@ -1521,8 +1540,8 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 // own slug must both still pass.
 func TestValidateAttestation_AcceptsFullyQualifiedSubjectPrefix(t *testing.T) {
 	for _, prefix := range []string{
-		"repo:Concord-Voice@264583090/Self-Hosted@1158152129:",
-		"repo:Concord-Voice/Concord-Voice-Alpha:",
+		"repo:example-org@100/example-repo@200:",
+		"repo:Concord-Voice/Self-Hosted:",
 		"repo:some-operator/their.fork_name:",
 	} {
 		cfg := validAttestationConfig()
@@ -1940,4 +1959,36 @@ func TestOIDCSubjectPrefixShapeMatchesVerifier(t *testing.T) {
 	m := regexp.MustCompile("(?m)^var subjectPrefixShape = regexp\\.MustCompile\\(`([^`]*)`\\)$").FindSubmatch(src)
 	require.NotNil(t, m, "subjectPrefixShape declaration not found in oidc.go")
 	assert.Equal(t, oidcSubjectPrefixShape.String(), string(m[1]))
+}
+
+func TestRecoveryLegacyCodeDefaultsOn(t *testing.T) {
+	assert.False(t, Config{}.RecoveryLegacyCodeDisabled, "zero value keeps the legacy code")
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("RECOVERY_LEGACY_CODE", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.RecoveryLegacyCodeDisabled)
+
+	t.Setenv("RECOVERY_LEGACY_CODE", "false")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.RecoveryLegacyCodeDisabled)
+}
+
+// The switch takes any boolean spelling. A value that is not a boolean stops
+// startup, so an operator who writes "no" is not left with the code still on.
+func TestRecoveryLegacyCodeParsing(t *testing.T) {
+	for v, off := range map[string]bool{"": false, "true": false, "1": false, "TRUE": false, "false": true, "FALSE": true, "0": true, " false ": true} {
+		got, err := recoveryLegacyCodeDisabled(v)
+		require.NoError(t, err, v)
+		assert.Equal(t, off, got, v)
+	}
+	for _, v := range []string{"no", "off", "maybe"} {
+		_, err := recoveryLegacyCodeDisabled(v)
+		require.ErrorContains(t, err, "RECOVERY_LEGACY_CODE", v)
+	}
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("RECOVERY_LEGACY_CODE", "no")
+	_, err := Load()
+	require.ErrorContains(t, err, "RECOVERY_LEGACY_CODE")
 }

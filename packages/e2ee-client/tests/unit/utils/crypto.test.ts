@@ -43,14 +43,14 @@ describe('crypto utilities', () => {
       const base64 = arrayBufferToBase64(empty.buffer);
       expect(base64).toBe('');
       const back = new Uint8Array(base64ToArrayBuffer(base64));
-      expect(back.length).toBe(0);
+      expect(back).toHaveLength(0);
     });
   });
 
   describe('generateSalt', () => {
     it('returns 16 bytes', () => {
       const salt = generateSalt();
-      expect(salt.length).toBe(16);
+      expect(salt).toHaveLength(16);
     });
 
     it('returns different salts each time', () => {
@@ -111,6 +111,21 @@ describe('crypto utilities', () => {
 
       const imported = await importPublicKey(exported);
       expect(imported.algorithm.name).toBe('RSA-OAEP');
+    });
+
+    it('rejects a server-supplied RSA key below the account minimum', async () => {
+      const weak = await crypto.subtle.generateKey(
+        {
+          name: 'RSA-OAEP',
+          modulusLength: 2048,
+          publicExponent: new Uint8Array([1, 0, 1]),
+          hash: 'SHA-256',
+        },
+        true,
+        ['encrypt', 'decrypt']
+      );
+      const exported = await exportPublicKey(weak.publicKey);
+      await expect(importPublicKey(exported)).rejects.toThrow('Invalid public key.');
     });
   });
 
@@ -261,7 +276,7 @@ describe('crypto utilities', () => {
     it('parseRecoveryKey strips dashes and decodes to 32 bytes', () => {
       const key = generateRecoveryKey();
       const bytes = parseRecoveryKey(key);
-      expect(bytes.length).toBe(32);
+      expect(bytes).toHaveLength(32);
     });
 
     it('generates unique keys each time', () => {

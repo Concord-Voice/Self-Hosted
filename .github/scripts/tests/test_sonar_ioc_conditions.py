@@ -682,6 +682,216 @@ exit "$MOCK_SCAN_EXIT"
             self.assertNotEqual(protected.returncode, 0,
                                 "protected verdict cannot accept community engine failure or absent report")
 
+    def test_semgrep_install_reads_the_lock_from_the_trusted_base(self):
+        """#353: scanner jobs install a base lock, never the PR's; option lines are refused."""
+        root = CHECKER.parents[3]
+        workflow = yaml.load((root / ".github/workflows/semgrep.yml").read_text(), Loader=yaml.BaseLoader)
+        step = next(step for step in workflow["jobs"]["semgrep"]["steps"] if step.get("name") == "Install Semgrep")
+        self.assertEqual("${{ inputs.selected-merge-base-sha }}", step.get("env", {}).get("MERGE_BASE_SHA"))
+        self.assertEqual("${{ github.event.pull_request.base.sha }}", step.get("env", {}).get("PR_BASE_SHA"))
+        pin ="semgrep==1.0.0 \\\n    --hash=sha256:" + "a" * 64 + "\n"
+        base_lock = "# base\n" + pin + "cffi==2.1.1 ; platform_python_implementation != 'PyPy' \\\n    --hash=sha256:" + "b" * 64 + "\n"
+        pr_lock = "# pr\n" + pin + "evil==6.6.6 \\\n    --hash=sha256:" + "c" * 64 + "\n"
+        with tempfile.TemporaryDirectory(prefix="semgrep-install-contract-") as tmp:
+            work = Path(tmp)
+            repo = work / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid")):
+                git_revision(repo, "config", key, value)
+            (repo / ".github/semgrep").mkdir(parents=True)
+            target = repo / ".github/semgrep/requirements.txt"
+
+            def commit(text, message):
+                target.write_text(text)
+                git_revision(repo, "add", "-A")
+                git_revision(repo, "commit", "-qm", message)
+                return git_revision(repo, "rev-parse", "HEAD")
+
+            base = commit(base_lock, "base")
+            target.unlink()
+            target.symlink_to("../../other.txt")
+            (repo / "other.txt").write_text(base_lock)
+            git_revision(repo, "add", "-A")
+            git_revision(repo, "commit", "-qm", "link")
+            linked = git_revision(repo, "rev-parse", "HEAD")
+            target.unlink()
+            commit(pr_lock, "pr")  # the checkout: the PR's own lock
+            bindir = work / "bin"
+            bindir.mkdir()
+            capture = work / "installed.txt"
+            fake = bindir / "python3"  # stands in for pip: records the -r file and plants a semgrep
+            fake.write_text('#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -r ] && cp "$2" "$CAPTURE"; shift; done\n'
+                            'mkdir -p "$HOME/.local/bin"\nprintf "#!/bin/sh\\nexit 0\\n" > "$HOME/.local/bin/semgrep"\n'
+                            'chmod +x "$HOME/.local/bin/semgrep"\n')
+            fake.chmod(0o755)
+
+            def run(protected, merge_base, pr_base, version="1.0.0"):
+                capture.unlink(missing_ok=True)
+                temp = work / "runner"
+                temp.mkdir(exist_ok=True)
+                env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(work / "home"),
+                       "RUNNER_TEMP": str(temp), "GITHUB_PATH": str(work / "github-path"), "CAPTURE": str(capture),
+                       "SEMGREP_VERSION": version, "EXTERNAL_VERDICT": protected,
+                       "MERGE_BASE_SHA": merge_base, "PR_BASE_SHA": pr_base}
+                return subprocess.run(["bash", "-e", "-c", step["run"]], cwd=repo, env=env, text=True,
+                                      capture_output=True)
+
+            result = run("true", base, "")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(base_lock, capture.read_text(), "the protected run must install the base lock")
+            result = run("false", linked, base)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(base_lock, capture.read_text(),
+                             "the ordinary fallback must use the event base, not the PR lock or merge-base input")
+            for label, merge_base in (("empty", ""), ("not a SHA", "main"), ("unknown", "f" * 40),
+                                      ("symlinked lock", linked)):
+                with self.subTest(case=label):
+                    result = run("true", merge_base, base)
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("has no regular .github/semgrep/requirements.txt", result.stdout)
+                    self.assertFalse(capture.exists(), "nothing may be installed")
+            for label, pr_base in (("empty", ""), ("not a SHA", "main"), ("unknown", "f" * 40),
+                                   ("symlinked lock", linked)):
+                with self.subTest(case=f"ordinary {label} base"):
+                    result = run("false", base, pr_base)
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("has no regular .github/semgrep/requirements.txt", result.stdout)
+                    self.assertFalse(capture.exists(), "nothing may be installed")
+            for label, line in (("index URL", "--index-url https://example.invalid/simple"),
+                                ("find links", "-f https://example.invalid/wheels"), ("editable", "-e ."),
+                                ("URL requirement", "evil @ https://example.invalid/evil.whl \\"),
+                                ("option in a marker", "evil==1 ; os_name == 'x' --global-option=y \\"),
+                                ("name read as an option", "-r==x \\")):
+                with self.subTest(case=label):
+                    bad_event_base = commit(pr_lock + line + "\n", label)
+                    result = run("false", "", bad_event_base)
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("Only comments, name==version pins and --hash lines are allowed in "
+                                  ".github/semgrep/requirements.txt (the event base copy);", result.stdout)
+                    self.assertFalse(capture.exists(), "nothing may be installed")
+            # pip also ends a line at CR, FF, VT and Unicode separators; grep does not.
+            for label, line in (("carriage return", "ok==1 \\\r--index-url https://example.invalid/simple"),
+                                ("form feed", "ok==1 \\\f-e ."), ("line separator", "ok==1 \\\u2028-e ."),
+                                ("UTF-7 encoding comment", "# -*- coding: utf-7 -*-\n# x+AAo--r https://example.invalid/r.txt")):
+                with self.subTest(case=label):
+                    bad_event_base = commit(pr_lock + line + "\n", label)
+                    result = run("false", "", bad_event_base)
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("may hold printable ASCII lines only", result.stdout)
+                    self.assertFalse(capture.exists(), "nothing may be installed")
+            with self.subTest(case="option line in the protected base copy"):
+                bad_base = commit(base_lock + "--index-url https://example.invalid/simple\n", "bad base")
+                commit(pr_lock, "clean pr")
+                result = run("true", bad_base, "")
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("(the protected base copy)", result.stdout)
+                self.assertFalse(capture.exists(), "nothing may be installed")
+            with self.subTest(case="ordinary fallback uses trusted lock version"):
+                result = run("false", "", base, version="2.0.0")
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual(base_lock, capture.read_text(),
+                                 "the event-base lock, not the PR workflow version, selects the scanner")
+            with self.subTest(case="event-base lock has multiple semgrep pins"):
+                bad_event_base = commit(base_lock + pin, "duplicate semgrep pin")
+                result = run("false", "", bad_event_base)
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("must contain exactly one pinned semgrep version", result.stdout)
+                self.assertFalse(capture.exists(), "an ambiguous trusted version must not be installed")
+            with self.subTest(case="protected base pins another version than the PR"):
+                other = commit(pr_lock.replace("semgrep==1.0.0", "semgrep==0.9.0"), "older base")
+                commit(pr_lock, "pr again")
+                result = run("true", other, "")
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("this protected workflow expects semgrep==", result.stdout)
+                self.assertFalse(capture.exists(), "the protected run checks the pin of the copy it installs")
+            with self.subTest(case="event base lock is not a regular file"):
+                target.unlink()
+                target.mkdir()
+                (target / "unexpected.txt").write_text(base_lock)
+                git_revision(repo, "add", "-A")
+                git_revision(repo, "commit", "-qm", "event base lock is a directory")
+                bad_event_base = git_revision(repo, "rev-parse", "HEAD")
+                result = run("false", "", bad_event_base)
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("has no regular .github/semgrep/requirements.txt", result.stdout)
+                self.assertFalse(capture.exists(), "nothing may be installed")
+
+    def test_semgrep_job_does_not_restore_pr_writable_pip_cache(self):
+        """#353: write-scoped Semgrep installs must not restore a PR-writable pip cache."""
+        root = CHECKER.parents[3]
+        job = yaml.load((root / ".github/workflows/semgrep.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]["semgrep"]
+        self.assertEqual("1", job["env"].get("PYTHONSAFEPATH"))
+        self.assertEqual("", job["env"].get("PYTHONPATH"))
+        self.assertEqual("${{ inputs.external-verdict }}", job["env"].get("EXTERNAL_VERDICT"))
+        caches = [step for step in job["steps"] if "actions/cache" in step.get("uses", "")]
+        self.assertEqual(1, len(caches))
+        self.assertEqual("~/.semgrep", caches[0]["with"]["path"])
+        for step in caches:
+            with self.subTest(step=step["name"]):
+                self.assertTrue(step["if"].endswith("&& !inputs.external-verdict"), step["if"])
+        self.assertFalse(any("~/.cache/pip" in step.get("with", {}).get("path", "") for step in job["steps"]))
+
+    def test_protected_semgrep_uses_the_base_rules_and_ignore_files(self):
+        """#353: a PR's own .semgrep/ or .semgrepignore change cannot loosen the protected scan."""
+        root = CHECKER.parents[3]
+        steps = yaml.load((root / ".github/workflows/semgrep.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]["semgrep"]["steps"]
+        names = [step.get("name") for step in steps]
+        index = names.index("Use the protected base's rules and ignore files")
+        self.assertEqual("Confirm protected scan checkout", names[index - 1])
+        self.assertLess(index, names.index("Run Semgrep (custom rules)"))
+        step = steps[index]
+        self.assertEqual("inputs.external-verdict", step["if"])
+        self.assertEqual("${{ inputs.selected-merge-base-sha }}", step["env"]["MERGE_BASE_SHA"])
+        scope = ["--", ".semgrep", ":(glob)**/.semgrepignore"]
+        with tempfile.TemporaryDirectory(prefix="semgrep-base-rules-") as tmp:
+            repo = Path(tmp) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid")):
+                git_revision(repo, "config", key, value)
+
+            def write(path, text):
+                (repo / path).parent.mkdir(parents=True, exist_ok=True)
+                (repo / path).write_text(text)
+
+            def commit(message):
+                git_revision(repo, "add", "-A")
+                git_revision(repo, "commit", "-qm", message)
+                return git_revision(repo, "rev-parse", "HEAD")
+
+            write(".semgrep/rule.yml", "rules: [base]\n")
+            write(".semgrepignore", ".semgrep/tests/\n")
+            write("docs/.semgrepignore", "*.md\n")
+            write("app/main.py", "print(1)\n")
+            base = commit("base")
+            write(".semgrep/rule.yml", "rules: []\n")  # PR empties the rules
+            write(".semgrep/extra.yml", "rules: []\n")
+            write(".semgrepignore", "app/\n")  # PR hides its own code
+            (repo / "docs/.semgrepignore").unlink()
+            write("app/.semgrepignore", "*\n")  # nested ignore next to the code
+            write("app/main.py", "eval(input())\n")
+            pr = commit("pr")
+
+            def run(merge_base):
+                return subprocess.run(["bash", "-e", "-c", step["run"]], cwd=repo, text=True, capture_output=True,
+                                      env={**os.environ, "MERGE_BASE_SHA": merge_base})
+
+            for label, merge_base in (("empty", ""), ("not a SHA", "main"), ("unknown", "f" * 40)):
+                with self.subTest(case=label):
+                    result = run(merge_base)
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("is not available", result.stdout)
+                    self.assertEqual(pr, git_revision(repo, "rev-parse", "HEAD"))
+            result = run(base)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual("", git_revision(repo, "status", "--porcelain"), "the diff-aware scan needs a clean tree")
+            self.assertEqual(pr, git_revision(repo, "rev-parse", "HEAD^"))
+            self.assertEqual(0, subprocess.run(["git", "diff", "--quiet", base, "HEAD", *scope], cwd=repo).returncode)
+            self.assertFalse((repo / "app/.semgrepignore").exists(), "a PR-added ignore must not hide a file")
+            self.assertFalse((repo / ".semgrep/extra.yml").exists())
+            self.assertEqual(".semgrep/tests/\n", (repo / ".semgrepignore").read_text())
+            self.assertEqual("*.md\n", (repo / "docs/.semgrepignore").read_text())
+            self.assertEqual("eval(input())\n", (repo / "app/main.py").read_text(), "the PR's code is still scanned")
+
 
 class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
     """Exercise the actual Actions definitions that own the protected verdict."""
@@ -1001,6 +1211,252 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
                 mutant["jobs"]["static-guards"]["if"] = expression
                 with self.assertRaisesRegex(AssertionError, "status-function condition on IOC path"):
                     module.check_ioc_path_policies(mutant)
+
+
+def migration_lint_steps(workflow):
+    """Return the migration-lint steps of a checked-in workflow, keyed by step name."""
+    root = CHECKER.parents[3]
+    jobs = yaml.load((root / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)["jobs"]
+    steps = jobs["migration-lint"]["steps"]
+    return [step.get("name", "") for step in steps], {step["name"]: step for step in steps if "name" in step}
+
+
+class MigrationLintRevisionTests(unittest.TestCase):
+    """#265: the squawk config comes from the PR base commit, and the job refuses a non-merge checkout."""
+
+    WORKFLOWS = ("required-pr-build.yml", "pr-ci.yml")
+    VERIFY = "Verify the checkout is the PR merge commit"
+    INSTALL = "Install squawk"
+    AUTHORITY = "services/control-plane/internal/authority/store/migrations"
+
+    def commit(self, repo, text, message):
+        (repo / ".squawk.toml").write_text(text)
+        (repo / ".github").mkdir(exist_ok=True)
+        (repo / ".github/requirements-squawk.txt").write_text(text)
+        git_revision(repo, "add", "-A")
+        git_revision(repo, "commit", "-qm", message)
+        return git_revision(repo, "rev-parse", "HEAD")
+
+    def scratch(self, directory):
+        """An upstream with base B and PR head H, and a clone whose HEAD is the merge M of H into B."""
+        upstream = Path(directory) / "upstream"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(upstream)], check=True)
+        for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid"),
+                           ("uploadpack.allowAnySHA1InWant", "true")):
+            git_revision(upstream, "config", key, value)
+        base = self.commit(upstream, "base\n", "base")
+        git_revision(upstream, "checkout", "-qb", "pr")
+        self.commit(upstream, "pr-early\n", "pr early")
+        head = self.commit(upstream, "pr\n", "pr")
+        git_revision(upstream, "checkout", "-q", "main")
+        (upstream / "other.txt").write_text("main moved\n")
+        git_revision(upstream, "add", "other.txt")
+        git_revision(upstream, "commit", "-qm", "main moved")
+        git_revision(upstream, "merge", "-q", "--no-ff", "-X", "theirs", "-m", "merge", "pr")
+        merge = git_revision(upstream, "rev-parse", "HEAD")
+        git_revision(upstream, "checkout", "-q", "-b", "squash", head)
+        squash = head  # single parent: HEAD^1 is the PR author's previous commit
+        checkout = Path(directory) / "checkout"
+        subprocess.run(["git", "clone", "-q", "--no-local", upstream.as_uri(), str(checkout)], check=True)
+        return checkout, base, head, merge, squash
+
+    def run_step(self, workflow, name, cwd, temp, **env):
+        _, steps = migration_lint_steps(workflow)
+        bindir = Path(temp) / "bin"
+        bindir.mkdir(exist_ok=True)
+        fake = bindir / "python3"  # stands in for pip; the test checks what pip would be given
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        environment = {**os.environ, "RUNNER_TEMP": str(temp), "PATH": f"{bindir}:{os.environ['PATH']}", **env}
+        return subprocess.run(["bash", "-c", steps[name]["run"]], cwd=cwd, env=environment,
+                              capture_output=True, text=True)
+
+    def test_job_shape(self):
+        for workflow in self.WORKFLOWS:
+            with self.subTest(workflow=workflow):
+                order, steps = migration_lint_steps(workflow)
+                self.assertLess(order.index(self.VERIFY), order.index("Select changed up migrations"))
+                self.assertNotIn("if", steps[self.VERIFY])
+                self.assertEqual("${{ github.event.pull_request.head.sha }}", steps[self.VERIFY]["env"]["PR_HEAD_SHA"])
+                self.assertEqual("${{ github.event.pull_request.base.sha }}", steps[self.INSTALL]["env"]["BASE_SHA"])
+                for step in steps.values():
+                    self.assertNotIn("HEAD^1:", step.get("run", ""), "config must not be read from HEAD^1")
+
+    def test_verify_accepts_only_the_two_parent_merge_of_the_pr_head(self):
+        for workflow in self.WORKFLOWS:
+            with tempfile.TemporaryDirectory() as directory:
+                checkout, base, head, merge, squash = self.scratch(directory)
+                cases = {"merge commit": (merge, head, 0), "single-parent commit": (squash, head, 1),
+                         "merge of another head": (merge, base, 1), "missing head SHA": (merge, "", 1)}
+                for label, (commit, pr_head, expected) in cases.items():
+                    with self.subTest(workflow=workflow, case=label):
+                        git_revision(checkout, "checkout", "-q", "--detach", commit)
+                        result = self.run_step(workflow, self.VERIFY, checkout, directory, PR_HEAD_SHA=pr_head)
+                        self.assertEqual(expected, result.returncode, result.stdout + result.stderr)
+
+    def test_install_reads_config_from_the_base_sha_not_head_parent(self):
+        for workflow in self.WORKFLOWS:
+            with tempfile.TemporaryDirectory() as directory:
+                _, base, head, merge, squash = self.scratch(directory)
+                # HEAD is a single-parent PR commit: HEAD^1 is the PR's earlier commit, not the base.
+                # The clone is shallow, so the base commit can only arrive through the step's fetch.
+                checkout = Path(directory) / "shallow"
+                subprocess.run(["git", "clone", "-q", "--depth=1", "-b", "squash",
+                                (Path(directory) / "upstream").as_uri(), str(checkout)], check=True)
+                self.assertNotEqual(0, subprocess.run(["git", "-C", str(checkout), "cat-file", "-e", f"{base}^{{commit}}"],
+                                                      capture_output=True).returncode)
+                temp = Path(directory) / "runner"
+                temp.mkdir()
+                with self.subTest(workflow=workflow, case="base SHA"):
+                    result = self.run_step(workflow, self.INSTALL, checkout, temp, BASE_SHA=base)
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertEqual("base\n", (temp / "squawk.toml").read_text())
+                    self.assertEqual("base\n", (temp / "requirements-squawk.txt").read_text())
+                for label, value, fragment in (("empty", "", "is not a commit SHA"),
+                                               ("not a SHA", "main", "is not a commit SHA"),
+                                               ("unknown SHA", "f" * 40, None)):
+                    with self.subTest(workflow=workflow, case=label):
+                        result = self.run_step(workflow, self.INSTALL, checkout, temp, BASE_SHA=value)
+                        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                        if fragment:
+                            self.assertIn(fragment, result.stdout)
+
+    def merge_repo(self, directory, change):
+        """A repository whose HEAD merges a PR branch, changed by change(repo), into main."""
+        repo = Path(directory) / "select"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        git_revision(repo, "config", "user.name", "Test")
+        git_revision(repo, "config", "user.email", "test@example.invalid")
+        migrations = repo / "services/control-plane/migrations"
+        migrations.mkdir(parents=True)
+        (migrations / "000001_init.up.sql").write_text("CREATE TABLE t (id int);\n")
+        authority = repo / self.AUTHORITY
+        authority.mkdir(parents=True)
+        (authority / "000001_authority.up.sql").write_text("CREATE TABLE a (id int);\n")
+        git_revision(repo, "add", "-A")
+        git_revision(repo, "commit", "-qm", "base")
+        git_revision(repo, "checkout", "-qb", "pr")
+        change(repo, migrations)
+        git_revision(repo, "add", "-A")
+        git_revision(repo, "commit", "-qm", "pr")
+        git_revision(repo, "checkout", "-q", "main")
+        git_revision(repo, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+        return repo
+
+    def test_select_refuses_files_routed_around_the_lint(self):
+        def write(name, text="ALTER TABLE t DROP COLUMN id;\n"):
+            return lambda repo, migrations: (migrations / name).write_text(text)
+
+        def link_file(repo, migrations):
+            (migrations / "real.txt").write_text("ALTER TABLE t DROP COLUMN id;\n")
+            (migrations / "000002_x.up.sql").symlink_to("real.txt")
+
+        def link_directory(repo, migrations):
+            target = repo / "elsewhere"
+            migrations.rename(target)
+            (repo / "services/control-plane/migrations").symlink_to("../../elsewhere")
+
+        def submodule(repo, migrations):  # a nested repository, which git add -A stages as a gitlink
+            sub = migrations / "sub"
+            subprocess.run(["git", "init", "-q", str(sub)], check=True)
+            subprocess.run(["git", "-C", str(sub), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                            "commit", "-q", "--allow-empty", "-m", "sub"], check=True)
+
+        def executable(repo, migrations):
+            (migrations / "000002_drop.up.sql").write_text("ALTER TABLE t DROP COLUMN id;\n")
+            (migrations / "000002_drop.up.sql").chmod(0o755)
+
+        def authority(name):
+            return lambda repo, migrations: (repo / self.AUTHORITY / name).write_text("ALTER TABLE a DROP COLUMN id;\n")
+
+        bad_name = "Migration file name is not"
+        refused = {"other extension": (write("000002_x.up.psql"), bad_name),
+                   "glob name": (write("000002_[x].up.sql"), bad_name),
+                   "non-ASCII name": (write("000002_\u00e9.up.sql"), bad_name),
+                   "symlinked migration": (link_file, "regular files only"),
+                   "submodule": (submodule, "regular files only"),
+                   "symlinked directory": (link_directory, "is not a directory"),
+                   "authority other extension": (authority("000002_x.up.psql"), bad_name)}
+        for workflow in self.WORKFLOWS:
+            for label, (change, fragment) in refused.items():
+                with self.subTest(workflow=workflow, case=label), tempfile.TemporaryDirectory() as directory:
+                    repo = self.merge_repo(directory, change)
+                    output = Path(directory) / "output"
+                    result = self.run_step(workflow, "Select changed up migrations", repo, directory,
+                                           GITHUB_OUTPUT=str(output))
+                    self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                    self.assertIn(fragment, result.stdout)
+            for label, change, selected in (("new up migration", write("000002_drop.up.sql"),
+                                             "services/control-plane/migrations/000002_drop.up.sql\n"),
+                                            ("executable up migration", executable,
+                                             "services/control-plane/migrations/000002_drop.up.sql\n"),
+                                            ("authority up migration", authority("000002_drop.up.sql"),
+                                             f"{self.AUTHORITY}/000002_drop.up.sql\n"),
+                                            ("down migration only", write("000002_drop.down.sql"), "")):
+                with self.subTest(workflow=workflow, case=label), tempfile.TemporaryDirectory() as directory:
+                    repo = self.merge_repo(directory, change)
+                    output = Path(directory) / "output"
+                    result = self.run_step(workflow, "Select changed up migrations", repo, directory,
+                                           GITHUB_OUTPUT=str(output))
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertEqual(selected, (Path(directory) / "migrations.txt").read_text())
+                    self.assertIn(f"count={selected.count(chr(10))}", output.read_text())
+
+    def test_select_refuses_a_non_utf8_name_under_a_utf8_locale(self):
+        """Under C.UTF-8, "." skips a non-UTF-8 byte; the step's LC_ALL=C makes the name refused, not skipped."""
+        name = b"000002_\xff.up.sql"
+
+        def change(repo, migrations):
+            with open(os.path.join(os.fsencode(migrations), name), "wb") as fh:
+                fh.write(b"ALTER TABLE t DROP COLUMN id;\n")
+
+        for workflow in self.WORKFLOWS:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as directory:
+                try:
+                    repo = self.merge_repo(directory, change)
+                except OSError:
+                    self.skipTest("this filesystem refuses a non-UTF-8 file name (APFS); CI runs it on Linux")
+                result = self.run_step(workflow, "Select changed up migrations", repo, directory,
+                                       GITHUB_OUTPUT=str(Path(directory) / "output"), LANG="C.UTF-8", LC_ALL="")
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIn("Migration file name is not", result.stdout)
+
+    def test_lint_accepts_only_whole_line_rule_ignores(self):
+        statement = "ALTER TABLE t DROP COLUMN id;\n"
+        refused = "Only a whole-line"
+        cases = {
+            "no ignore": (statement, 0, None),
+            "whole-line rule ignore": ("-- reason\n-- squawk-ignore ban-drop-column\n" + statement, 0, None),
+            "two rules": ("  -- squawk-ignore ban-drop-column, adding-not-nullable-field\n" + statement, 0, None),
+            "trailing blanks": ("-- squawk-ignore ban-drop-column \t\n" + statement, 0, None),
+            "file-wide ignore": ("-- squawk-ignore-file\n" + statement, 1, refused),
+            "bare ignore": ("-- squawk-ignore\n" + statement, 1, refused),
+            "no space after dashes": ("--squawk-ignore ban-drop-column\n" + statement, 1, refused),
+            "block comment": ("/* squawk-ignore ban-drop-column */\n" + statement, 1, refused),
+            "trailing comment": ("ALTER TABLE t DROP COLUMN id; -- squawk-ignore ban-drop-column\n", 1, refused),
+            "NUL byte": ("\0-- squawk-ignore-file\n" + statement, 1, "is not NUL-free UTF-8 text"),
+            "invalid UTF-8": (b"\xff-- squawk-ignore-file\n" + statement.encode(), 1, "is not NUL-free UTF-8 text"),
+        }
+        for workflow in self.WORKFLOWS:
+            for label, (text, expected, fragment) in cases.items():
+                for count in (1, 2):  # grep prints no file name for a single file unless told to
+                    with self.subTest(workflow=workflow, case=label, files=count), \
+                            tempfile.TemporaryDirectory() as directory:
+                        temp = Path(directory)
+                        squawk = temp / "home/.local/bin/squawk"
+                        squawk.parent.mkdir(parents=True)
+                        squawk.write_text("#!/bin/sh\nexit 0\n")
+                        squawk.chmod(0o755)
+                        files = [temp / "000002_a.up.sql", temp / "000003_b.up.sql"][:count]
+                        files[0].write_bytes(text if isinstance(text, bytes) else text.encode())
+                        if count == 2:
+                            files[1].write_text(statement)
+                        (temp / "migrations.txt").write_text("".join(f"{f}\n" for f in files))
+                        result = self.run_step(workflow, "Lint changed migrations", temp, temp,
+                                               HOME=str(temp / "home"))
+                        self.assertEqual(expected, result.returncode, result.stdout + result.stderr)
+                        if fragment:
+                            self.assertIn(fragment, result.stdout)
 
 
 if __name__ == '__main__':

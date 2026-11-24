@@ -87,11 +87,16 @@ jobs:
       # Robust against shallow clones (paired with fetch-depth: 0 below)
       # and fork PRs.
       BASELINE_COMMIT: ${{ inputs.external-verdict && inputs.selected-merge-base-sha || github.event.pull_request.base.sha }}
-      # Single source of truth for the Semgrep version. The install step
-      # fails unless .github/semgrep/requirements.txt pins the same
-      # version, so a bump changes this line and that file together.
+      # Protected scan version and registry-cache key. The ordinary fallback
+      # derives its scanner version from the trusted event-base lock instead
+      # of comparing that lock with this PR-controlled value.
       SEMGREP_VERSION: '1.186.0'
       EXTERNAL_VERDICT: ${{ inputs.external-verdict }}
+      # Python runs in the PR checkout (pip, the report parsers): keep the
+      # working directory off sys.path so a PR-root pip/ or json.py cannot
+      # stand in for the real module.
+      PYTHONSAFEPATH: '1'
+      PYTHONPATH: ''
     steps:
       - name: Validate protected scan revision
         id: revision
@@ -164,8 +169,33 @@ jobs:
           EXPECTED_SHA: ${{ inputs.selected-merge-sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
+      # A PR must not loosen the scan that judges it: the protected run uses the
+      # proven merge parent's custom rules and every .semgrepignore at any depth,
+      # not the PR's. The result is committed locally so the diff-aware scan sees
+      # a clean tree; the SARIF uploads still name the selected merge SHA. The
+      # advisory run keeps the PR's rules, so a rule change is exercised first.
+      - name: Use the protected base's rules and ignore files
+        if: inputs.external-verdict
+        env:
+          MERGE_BASE_SHA: ${{ inputs.selected-merge-base-sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$MERGE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${MERGE_BASE_SHA}^{commit}"; then
+            echo "::error::The protected base commit ${MERGE_BASE_SHA:-none} is not available."
+            exit 1
+          fi
+          scope=(.semgrep ':(glob)**/.semgrepignore')
+          git rm -r -q --ignore-unmatch -- "${scope[@]}"
+          git checkout "$MERGE_BASE_SHA" -- "${scope[@]}"
+          git -c user.name=protected-scan -c user.email=protected-scan@invalid \
+            commit -q --allow-empty --no-verify -m "protected scan: base rules and ignore files"
+          git diff --quiet "$MERGE_BASE_SHA" HEAD -- "${scope[@]}"
+          test -z "$(git status --porcelain)"
+
       - name: Cache semgrep registry rules
-        if: inputs.run-custom || inputs.run-community || inputs.run-canary
+        # Not in the protected run: the key and the archive come from a cache
+        # scope the PR's own jobs can write.
+        if: (inputs.run-custom || inputs.run-community || inputs.run-canary) && !inputs.external-verdict
         # Caches the community-ruleset download (p/security-audit +
         # p/owasp-top-ten) under ~/.semgrep/. Custom rules live in-repo
         # at .semgrep/ and aren't cached, but their hash invalidates
@@ -177,39 +207,68 @@ jobs:
           restore-keys: |
             semgrep-${{ runner.os }}-${{ env.SEMGREP_VERSION }}-
 
-      - name: Capture Python version (pip cache key component)
-        if: inputs.run-custom || inputs.run-community || inputs.run-canary
-        # Without the interpreter version in the key, a runner-image
-        # Python bump would keep hitting the stale exact key forever
-        # (actions/cache never re-saves on exact-key hit) while the old
-        # cpXX wheels go unused — silent permanent re-download.
-        id: py
-        run: echo "version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')" >> "$GITHUB_OUTPUT"
-
-      - name: Cache pip wheels (semgrep install)
-        if: inputs.run-custom || inputs.run-community || inputs.run-canary
-        # The pip install below re-downloads the semgrep wheel set
-        # (~30 MB incl. deps) on every run. Caching pip's wheel cache
-        # keyed on the hash-locked requirements makes the install a local unpack.
-        # Stock actions/cache is deliberate: Blacksmith transparently
-        # intercepts it against the colocated cache (ADR-0016 §Decision 4
-        # verification note, #1438) — do NOT swap to the archived
-        # useblacksmith/cache fork.
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/pip
-          key: pip-semgrep-${{ runner.os }}-py${{ steps.py.outputs.version }}-${{ env.SEMGREP_VERSION }}-${{ hashFiles('.github/semgrep/requirements.txt') }}
-
+      # The protected run installs from the merge parent that "Validate protected
+      # scan revision" proved. The ordinary fallback installs from the PR event's
+      # base commit. Neither installs the PR's lock in this write-scoped job; the
+      # read-only compatibility job tests the candidate lock before it merges.
       - name: Install Semgrep
         if: inputs.run-custom || inputs.run-community || inputs.run-canary
+        env:
+          MERGE_BASE_SHA: ${{ inputs.selected-merge-base-sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if ! grep -qxF "semgrep==${SEMGREP_VERSION} \\" .github/semgrep/requirements.txt; then
-            echo "::error file=.github/semgrep/requirements.txt::.github/semgrep/requirements.txt does not pin semgrep==${SEMGREP_VERSION}. Set SEMGREP_VERSION in semgrep.yml and the file's semgrep pin to the same version (regenerate the file with the command in its header)."
+          set -euo pipefail
+          reqs=.github/semgrep/requirements.txt
+          lock_sha="$PR_BASE_SHA"
+          shown="$reqs (the event base copy)"
+          if [ "$EXTERNAL_VERDICT" = 'true' ]; then
+            lock_sha="$MERGE_BASE_SHA"
+            shown="$reqs (the protected base copy)"
+          fi
+          if [[ ! "$lock_sha" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${lock_sha}^{commit}" ||
+              [ "$(git ls-tree "$lock_sha" -- "$reqs" | cut -c1-6)" != 100644 ]; then
+            echo "::error::The trusted base commit ${lock_sha:-none} has no regular $reqs."
+            exit 1
+          fi
+          git show "$lock_sha:$reqs" > "$RUNNER_TEMP/semgrep-requirements.txt"
+          reqs="$RUNNER_TEMP/semgrep-requirements.txt"
+          # Comments, "name==version [; marker] \" pins and --hash lines only: no
+          # index, find-links, editable, include, URL or other option lines. A
+          # name starts with a letter or digit and a marker has no "-", so
+          # neither can carry an option. pip also splits lines on CR, FF, VT and
+          # Unicode separators, which grep does not, so printable ASCII only. pip
+          # also honours a "coding:" comment (UTF-7 can spell a newline in
+          # printable ASCII), so no encoding declaration either.
+          # grep exit 2 (unreadable file, bad pattern) stops the job too.
+          rc=0; LC_ALL=C grep -nE '[^ -~]|coding[:=]' "$reqs" || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::$shown may hold printable ASCII lines only, with no encoding declaration; the lines above are not, or it could not be read."
+            exit 1
+          fi
+          pin='[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9._+!-]+'
+          marker="( ; [A-Za-z0-9_.'\"! =<>()]+)?"
+          rc=0; grep -nEv "^(#.*|${pin}${marker} \\\\|    --hash=sha256:[0-9a-f]{64}( \\\\)?)?\$" "$reqs" || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::Only comments, name==version pins and --hash lines are allowed in $shown; the lines above are not."
+            exit 1
+          fi
+          semgrep_pin_count=$(grep -c '^semgrep==' "$reqs" || true)
+          lock_semgrep_version=$(sed -nE 's/^semgrep==([A-Za-z0-9._+!-]+) \\$/\1/p' "$reqs")
+          if [ "$semgrep_pin_count" -ne 1 ] || [ -z "$lock_semgrep_version" ]; then
+            echo "::error::$shown must contain exactly one pinned semgrep version."
+            exit 1
+          fi
+          expected_semgrep_version="$SEMGREP_VERSION"
+          if [ "$EXTERNAL_VERDICT" != 'true' ]; then
+            expected_semgrep_version="$lock_semgrep_version"
+          fi
+          if [ "$lock_semgrep_version" != "$expected_semgrep_version" ]; then
+            echo "::error::$shown pins semgrep==$lock_semgrep_version, but this protected workflow expects semgrep==$expected_semgrep_version."
             exit 1
           fi
           # --no-deps: the lock overrides some of semgrep's own exact pins to fixed
           # versions (see the file header), which pip's resolver would reject.
-          python3 -m pip install --user --quiet --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: -r .github/semgrep/requirements.txt
+          python3 -m pip install --user --quiet --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: -r "$reqs"
           # Fail fast on a broken set. `pip check` cannot be used: it always
           # reports the deliberate overrides. Importing the CLI is what breaks
           # when a bumped or missing package is incompatible.

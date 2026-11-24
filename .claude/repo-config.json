@@ -34,5 +34,52 @@
     "reviewer_bots": [
       "gitar-bot[bot]"
     ]
-  }
+  },
+  "bots": [
+    {
+      "match": "gitar",
+      "name": "Gitar",
+      "login": "gitar-bot[bot]",
+      "ci_check": "Gitar",
+      "blocking": true,
+      "offline": false,
+      "when": "always",
+      "ack_pattern": "(?s)\\A\\x{FEFF}?(?=(?>[ \\t\\x{A0}]*>[^\\r\\n\\x{2028}]*(?:(?>\\r\\n?|[\\n\\x{2028}])|\\z)|[ \\t\\x{A0}]*(?>\\r\\n?|[\\n\\x{2028}]))*?[ \\t\\x{A0}]*>[^\\r\\n\\x{2028}]*gitar)(?:(?=(?>(?:[ \\t\\x{A0}]*>[^\\r\\n\\x{2028}]*(?:(?>\\r\\n?|[\\n\\x{2028}])|\\z)|[ \\t\\x{A0}]*(?>\\r\\n?|[\\n\\x{2028}]))*)\\z).*(?<=[\\r\\n\\x{2028}])[ \\t\\x{A0}]*>[ \\t\\x{A0}*_]{0,6}(?:(?:on it[^\\r\\n\\x{2028}]{0,8})?running [^\\r\\n\\x{2028}]{0,40}review now|starting|review (?:started|queued))[^\\r\\n\\x{2028}]*\\s*\\z|(?>(?:[ \\t\\x{A0}]*>[^\\r\\n\\x{2028}]*(?:(?>\\r\\n?|[\\n\\x{2028}])|\\z)|[ \\t\\x{A0}]*(?>\\r\\n?|[\\n\\x{2028}]))*)(?!.*?(?<![^\\r\\n\\x{2028}])[ \\t\\x{A0}]*(?:<details[^>]*>[ \\t\\x{A0}]*)?<summary><b>(?:Code Review|Verification|Options)</b>)(?=\\s*.{0,900}\\z).*?(?<=[\\r\\n\\x{2028}])(?:[ \\t\\x{A0}*_]{0,6}(?:(?:on it[^\\r\\n\\x{2028}]{0,8})?running [^\\r\\n\\x{2028}]{0,40}review now|starting|review (?:started|queued))|(?![ \\t\\x{A0}]*>)[^\\r\\n\\x{2028}]*?(?:will (?:appear|show up|post)(?:[^\\r\\n\\x{2028}]|(?>\\r\\n?|[\\n\\x{2028}])(?![ \\t\\x{A0}]*>)){0,80}?dashboard\\s+comment|\\bi.m re[-\\x{2010}\\x{2011}]?(?:checking|reviewing)\\b)))",
+      "decline_pattern": "(?s)\\A\\x{FEFF}?(?>(?:[ \\t\\x{A0}]*>[^\\r\\n\\x{2028}]*(?:(?>\\r\\n?|[\\n\\x{2028}])|\\z)|[ \\t\\x{A0}]*(?>\\r\\n?|[\\n\\x{2028}]))*)(?!.*?(?<![^\\r\\n\\x{2028}])[ \\t\\x{A0}]*(?:<details[^>]*>[ \\t\\x{A0}]*)?<summary><b>(?:Code Review|Verification|Options)</b>).*?(?:sent several Gitar comments|wait about (?:[0-9]+|an?|one) (?:more )?minutes? and comment again)"
+    },
+    {
+      "match": "sonarqubecloud",
+      "name": "SonarCloud",
+      "login": "sonarqubecloud[bot]",
+      "ci_check": "SonarCloud Code Analysis",
+      "blocking": true,
+      "when": "always"
+    },
+    {
+      "name": "Semgrep SAST",
+      "login": "github-actions[bot]",
+      "marker": "<!-- semgrep-results -->",
+      "ci_check": "Protected scan enforcement / semgrep / Semgrep SAST",
+      "when": "always"
+    },
+    {
+      "match": "copilot",
+      "name": "Copilot Code Review",
+      "login": [
+        "copilot-pull-request-reviewer[bot]",
+        "Copilot"
+      ],
+      "when": "active",
+      "offline": true
+    },
+    {
+      "match": "chatgpt-codex-connector",
+      "name": "Codex",
+      "login": "chatgpt-codex-connector[bot]",
+      "when": "always",
+      "ack_pattern": "(?s)<!-- codex-pull-request-review-summary -->.*\\*\\*Running\\*\\*",
+      "head_verdict_pattern": "\\*\\*Completed\\*\\*[^|\\n]*\\|\\s*`([0-9a-f]{7,40})`",
+      "decline_pattern": "codex usage limit|usage limits? (have|has) been reached|reached your (codex )?usage limit|Codex Review: Something went wrong"
+    }
+  ]
 }

@@ -307,8 +307,10 @@ func (r *Reconciler) disconnect(recipients map[uuid.UUID]bool, cause string) {
 	// deadline-exceeded, so the global escalation returned instantly with a
 	// context error and merely logged, leaving recipients holding presence the
 	// committed graph no longer authorizes (PR #2738 review, Gitar).
+	// WithoutCancel drops the targeted call's (possibly expired) deadline and
+	// cancellation; the escalation is bounded only by its own dispatchTimeout.
 	escalationCtx, escalationCancel := context.WithTimeout(
-		context.Background(), dispatchTimeout)
+		context.WithoutCancel(ctx), dispatchTimeout)
 	defer escalationCancel()
 	if r.disconnector.DisconnectAllRichPresenceClients(escalationCtx) != nil && r.log != nil {
 		r.log.Error("graph presence global disconnect failed",
