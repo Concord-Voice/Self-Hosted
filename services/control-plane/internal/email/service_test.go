@@ -389,9 +389,13 @@ func TestSendAccountErasureConfirmationRejectsUnexpectedLink(t *testing.T) {
 	addr, _ := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
 	svc := newProdService(addr)
 
-	err := svc.SendAccountErasureConfirmation(testUserEmail, "https://example.test/not-an-erasure-link")
-
-	require.Error(t, err)
+	for _, link := range []string{
+		"https://example.test/not-an-erasure-link",
+		"javascript:alert(1)",
+		"concord://account-erasure/confirm/00000000-0000-0000-0000-000000000000/x\"onmouseover=\"alert(1)",
+	} {
+		require.Error(t, svc.SendAccountErasureConfirmation(testUserEmail, link), link)
+	}
 }
 
 // ── Sanitization Tests ──────────────────────────────────────────────────────
