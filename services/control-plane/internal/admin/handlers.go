@@ -47,6 +47,8 @@ const (
 	// msgConfusableUsername refuses a new admin username that reads like an
 	// existing one (UsernameSkeleton).
 	msgConfusableUsername = "username looks like an existing admin username"
+	// msgUsernameTaken refuses a new admin username an admin already has.
+	msgUsernameTaken = "username already exists"
 )
 
 // errInvalidAdminChallenge denotes an absent, expired or already consumed handle.
@@ -871,10 +873,14 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid username"})
 		return
 	}
-	// A name that looks like an existing admin's is refused here, before the
-	// step-up is spent; CreatePendingTx checks again under its lock.
+	// A taken name (409) or one that looks like an existing admin's (400) is
+	// refused here, before the step-up is spent; CreatePendingTx checks again
+	// under its lock.
 	switch err := h.repo.CheckUsernameAvailable(ctx, req.Username); {
-	case err == nil, errors.Is(err, ErrDuplicateUsername):
+	case err == nil:
+	case errors.Is(err, ErrDuplicateUsername):
+		c.JSON(http.StatusConflict, gin.H{"error": msgUsernameTaken})
+		return
 	case errors.Is(err, ErrConfusableUsername):
 		c.JSON(http.StatusBadRequest, gin.H{"error": msgConfusableUsername})
 		return
@@ -922,8 +928,9 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrDuplicateUsername):
+		// A name taken between the early check and the lock.
 		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_taken")
-		c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
+		c.JSON(http.StatusConflict, gin.H{"error": msgUsernameTaken})
 		return
 	case errors.Is(err, ErrConfusableUsername):
 		// A lookalike created between the early check and the lock.
