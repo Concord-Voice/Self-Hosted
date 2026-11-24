@@ -120,5 +120,7 @@ func textArray(t *testing.T, hashes []string) string {
 	t.Helper()
 	literal, err := pq.StringArray(hashes).Value()
 	require.NoError(t, err)
-	return literal.(string)
+	text, ok := literal.(string)
+	require.True(t, ok, "pq.StringArray.Value returned %T", literal)
+	return text
 }
