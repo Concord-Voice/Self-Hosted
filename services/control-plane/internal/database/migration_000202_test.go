@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,10 +22,22 @@ func TestMigration000202_ReservationNamespaceAndGuards(t *testing.T) {
 		WHERE table_schema = current_schema() AND table_name = 'message_id_reservations'`).Scan(&columnCount))
 	assert.Equal(t, 1, columnCount, "the reservation namespace must remain ID-only")
 
-	messageID, _, channelID, userID, conversationID := migration000202Fixture(t, db)
-	_, err := db.Exec(`
-		INSERT INTO dm_messages (id, conversation_id, user_id, content)
-		VALUES ($1, $2, $3, 'collision')`, messageID, conversationID, userID)
+	messageID, dmMessageID, channelID, userID, conversationID := migration000202Fixture(t, db)
+	_, err := db.Exec(`DELETE FROM message_id_reservations WHERE message_id = $1`, messageID)
+	migrationRequirePQError(t, err, "23000", "message_id_reservations_immutable")
+	_, err = db.Exec(`TRUNCATE message_id_reservations`)
+	migrationRequirePQError(t, err, "23000", "message_id_reservations_immutable")
+	_, err = testdb.ExecReplica(db, `DELETE FROM message_id_reservations WHERE message_id = $1`, messageID)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		INSERT INTO dm_messages (id, conversation_id, user_id, content, key_version)
+		VALUES ($1, $2, $3, 'collision', 1)`, messageID, conversationID, userID)
+	migrationRequirePQError(t, err, "23505", "message_id_reservations_pkey")
+	_, err = testdb.ExecReplica(db, `DELETE FROM message_id_reservations WHERE message_id = $1`, dmMessageID)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		INSERT INTO messages (id, channel_id, user_id, content, key_version)
+		VALUES ($1, $2, $3, 'collision', 1)`, dmMessageID, channelID, userID)
 	migrationRequirePQError(t, err, "23505", "message_id_reservations_pkey")
 
 	_, err = db.Exec(`UPDATE messages SET id = $1 WHERE id = $2`, uuid.New(), messageID)
@@ -64,6 +77,8 @@ func TestMigration000202_DownFailsClosedAndRoundTripsWhenUnused(t *testing.T) {
 		require.NoError(t, err)
 		defer migrationRollback(t, tx)
 		_, err = tx.Exec(`TRUNCATE messages, dm_messages CASCADE`)
+		require.NoError(t, err)
+		_, err = tx.Exec(`SET LOCAL session_replication_role = replica`)
 		require.NoError(t, err)
 		_, err = tx.Exec(`TRUNCATE message_id_reservations`)
 		require.NoError(t, err)

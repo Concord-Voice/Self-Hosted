@@ -1,6 +1,8 @@
 -- Reserve every channel and direct-message identifier in one permanent global
 -- namespace. The reservation table intentionally contains only the identifier:
 -- it must not become a second message ledger.
+SET LOCAL lock_timeout = '5s';
+
 CREATE TABLE message_id_reservations (
     message_id UUID PRIMARY KEY
 );
@@ -25,10 +27,63 @@ COMMENT ON COLUMN message_id_reservation_rollout.backfill_complete IS
 
 INSERT INTO message_id_reservation_rollout (singleton, backfill_complete) VALUES (TRUE, FALSE);
 
+CREATE FUNCTION protect_message_id_reservations() RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- The disposable PostgreSQL test harness resets tables under replica mode.
+    -- Application roles cannot set this superuser-only setting in production.
+    IF current_setting('session_replication_role') = 'replica' THEN
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION USING
+        ERRCODE = 'integrity_constraint_violation',
+        CONSTRAINT = 'message_id_reservations_immutable',
+        MESSAGE = 'message ID reservations are immutable';
+END;
+$$;
+
+CREATE FUNCTION reject_message_id_reservations_truncate() RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- See protect_message_id_reservations for the test-only replica exception.
+    IF current_setting('session_replication_role') = 'replica' THEN
+        RETURN NULL;
+    END IF;
+
+    RAISE EXCEPTION USING
+        ERRCODE = 'integrity_constraint_violation',
+        CONSTRAINT = 'message_id_reservations_immutable',
+        MESSAGE = 'message ID reservations are immutable';
+END;
+$$;
+
 CREATE FUNCTION reserve_message_id_on_insert() RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    -- During the online baseline, old IDs are not yet all in the reservation
+    -- table. Check the opposite source table so a new legacy write cannot
+    -- create a cross-table collision before its old row is scanned.
+    IF TG_TABLE_NAME = 'messages' THEN
+        PERFORM 1 FROM dm_messages WHERE id = NEW.id;
+    ELSIF TG_TABLE_NAME = 'dm_messages' THEN
+        PERFORM 1 FROM messages WHERE id = NEW.id;
+    ELSE
+        RAISE EXCEPTION 'message ID reservation trigger attached to unexpected table';
+    END IF;
+    IF FOUND THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'unique_violation',
+            CONSTRAINT = 'message_id_reservations_pkey',
+            MESSAGE = 'message id is already reserved';
+    END IF;
+
     INSERT INTO message_id_reservations (message_id)
     VALUES (NEW.id)
     ON CONFLICT (message_id) DO NOTHING;
@@ -100,6 +155,14 @@ CREATE TRIGGER message_id_reservations_before_insert
 BEFORE INSERT ON messages
 FOR EACH ROW EXECUTE FUNCTION reserve_message_id_on_insert();
 
+CREATE TRIGGER message_id_reservations_before_mutation
+BEFORE UPDATE OR DELETE ON message_id_reservations
+FOR EACH ROW EXECUTE FUNCTION protect_message_id_reservations();
+
+CREATE TRIGGER message_id_reservations_before_truncate
+BEFORE TRUNCATE ON message_id_reservations
+FOR EACH STATEMENT EXECUTE FUNCTION reject_message_id_reservations_truncate();
+
 CREATE TRIGGER message_id_reservations_before_delete
 BEFORE DELETE ON messages
 FOR EACH ROW EXECUTE FUNCTION reserve_message_id_on_delete();
@@ -136,3 +199,5 @@ ALTER TABLE dm_messages ENABLE ALWAYS TRIGGER message_id_reservations_before_ins
 ALTER TABLE dm_messages ENABLE ALWAYS TRIGGER message_id_reservations_before_delete;
 ALTER TABLE dm_messages ENABLE ALWAYS TRIGGER message_id_reservations_before_id_update;
 ALTER TABLE dm_messages ENABLE ALWAYS TRIGGER message_id_reservations_before_truncate;
+ALTER TABLE message_id_reservations ENABLE ALWAYS TRIGGER message_id_reservations_before_mutation;
+ALTER TABLE message_id_reservations ENABLE ALWAYS TRIGGER message_id_reservations_before_truncate;

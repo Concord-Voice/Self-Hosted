@@ -22,7 +22,9 @@ turn reservation state into an oracle.
 ## Operator procedure
 
 1. Apply migration 000202. It performs DDL only; it intentionally does not
-   scan existing message tables under an exclusive migration lock.
+   scan existing message tables under an exclusive migration lock. It has a
+   five-second DDL lock timeout: resolve the conflicting transaction and rerun
+   the migration if the timeout is reached.
 2. During a normal maintenance window, run `message-id-reservation-backfill`
    with the intended database URL and a bounded `--batch-size` (default 1,000).
    The command takes a dedicated advisory lock, first rejects any pre-existing

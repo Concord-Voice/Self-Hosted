@@ -24,6 +24,8 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER message_id_reservations_before_mutation ON message_id_reservations;
+DROP TRIGGER message_id_reservations_before_truncate ON message_id_reservations;
 DROP TRIGGER message_id_reservations_before_insert ON messages;
 DROP TRIGGER message_id_reservations_before_delete ON messages;
 DROP TRIGGER message_id_reservations_before_id_update ON messages;
@@ -37,6 +39,8 @@ DROP FUNCTION reserve_message_ids_on_truncate();
 DROP FUNCTION reject_message_id_update();
 DROP FUNCTION reserve_message_id_on_delete();
 DROP FUNCTION reserve_message_id_on_insert();
+DROP FUNCTION reject_message_id_reservations_truncate();
+DROP FUNCTION protect_message_id_reservations();
 
 DROP TABLE message_id_reservation_rollout;
 DROP TABLE message_id_reservations;

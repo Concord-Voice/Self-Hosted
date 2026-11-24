@@ -361,7 +361,7 @@ func truncateAllTablesOnce(db *sql.DB) error {
 	// This is the isolated disposable-test reset, after its source tables have
 	// been truncated under replica mode; reset the otherwise one-way baseline
 	// so separate test cases cannot inherit a completed rollout.
-	if _, err := db.Exec(`TRUNCATE message_id_reservations`); err != nil {
+	if _, err := ExecReplica(db, `TRUNCATE message_id_reservations`); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`
