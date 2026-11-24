@@ -6,7 +6,7 @@
 
 **Architecture:** Security#162 first authenticates the observed client address. One Go normalization helper then owns every control/admin Redis key, a matching media helper owns the handshake key, and nginx uses its documented binary `/64` map for request and connection zones. Public auth routes and post-admission auth-failure recording share one fixed fail-closed 503 contract.
 
-**Tech Stack:** Go 1.25, Gin, go-redis, Node 26, TypeScript, Socket.IO/Engine.IO, `ipaddr.js` 1.9.1, nginx, Vitest, testify.
+**Tech Stack:** Go 1.27.4, Gin, go-redis, Node 26, TypeScript, Socket.IO/Engine.IO, `ipaddr.js` 1.9.1, nginx, Vitest, testify.
 
 **Spec:** `docs/superpowers/specs/2026-11-14-163-ipv6-aggregation-budgets-design.md`
 

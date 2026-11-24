@@ -3491,9 +3491,9 @@ const (
 // cheaper password oracle than /login:
 //
 //   - AuthBanCheck, /login's per-IP auth-failure ban, which the handler feeds;
-//   - the per-IP limit /login has, but FAIL-CLOSED: a Redis outage that lets
-//     /login fall back on the email lockout must not leave this route open to
-//     unbounded Argon2 guesses from a live session;
+//   - the per-IP limit /login has, FAIL-CLOSED like /login: a Redis outage
+//     must not leave this route open to unbounded Argon2 guesses from a live
+//     session;
 //   - a fail-closed per-user limit, so a session cannot spread its guesses
 //     across addresses. /login has no session to key one on.
 //
