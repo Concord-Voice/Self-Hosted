@@ -243,6 +243,13 @@ type Config struct {
 	TURNSecretFile string // Managed runtime key snapshot; mutually exclusive with TURNSecret
 	TURNRealm      string // TURN realm (e.g. "concordvoice.chat")
 
+	// RecoveryLegacyCodeDisabled stops issuing and accepting the 6-digit email
+	// recovery code (RECOVERY_LEGACY_CODE=false; any other value keeps it).
+	// The zero value keeps it, so a hand-built Config never strands old
+	// clients. Disabling it locks out the owner of every account whose client
+	// cannot accept a recovery key.
+	RecoveryLegacyCodeDisabled bool
+
 	// Client config (#155 Tier 2 + Tier 3)
 	ClientMinVersion string // Minimum desktop client version allowed (e.g. "0.1.3"); empty = no enforcement
 	// Minimum mobile versions, selected by the X-Concord-Client-Platform header
@@ -387,7 +394,7 @@ type Config struct {
 	AppAttestAllowDevelopment bool     // Accept development-environment keys; refused in production
 	OIDCIssuer                string   // GitHub Actions OIDC issuer (typically token.actions.githubusercontent.com)
 	OIDCAudience              string   // Expected OIDC audience claim
-	OIDCSubjectPrefix         string   // Required OIDC sub prefix (e.g. "repo:Concord-Voice/Concord-Voice-Alpha:")
+	OIDCSubjectPrefix         string   // Required OIDC sub prefix (e.g. "repo:Concord-Voice@264583090/Self-Hosted@1359565266:")
 	// Per-axis OIDC binding (W1, #677 reconciliation). The SPA publish path
 	// and binary publish path are issued from DIFFERENT GitHub Actions
 	// workflows (main-cd.yml vs build-desktop.yml). Each axis is bound to
@@ -448,6 +455,21 @@ type Config struct {
 	// FLAGGED for review: replace with a real platform-admin role + portal
 	// (deferred follow-on epic, spec §10). #nosec G117 -- config field name.
 	RedemptionAdminToken string // #nosec G117 -- config field name, secret loaded from env
+}
+
+// recoveryLegacyCodeDisabled reads RECOVERY_LEGACY_CODE. Unset keeps the
+// 6-digit code on. A value that is not a boolean is an error, so a typo cannot
+// leave the code on while the operator believes it is off.
+func recoveryLegacyCodeDisabled(raw string) (bool, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return false, nil
+	}
+	on, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("RECOVERY_LEGACY_CODE=%q is not true or false", v)
+	}
+	return !on, nil
 }
 
 // Load reads configuration from environment variables
@@ -604,7 +626,7 @@ func Load() (*Config, error) {
 		AppAttestAllowDevelopment: getEnv("APP_ATTEST_ALLOW_DEVELOPMENT", "false") == "true",
 		OIDCIssuer:                getEnv("ATTESTATION_OIDC_ISSUER", "https://token.actions.githubusercontent.com"),
 		OIDCAudience:              getEnv("ATTESTATION_OIDC_AUDIENCE", ""),
-		OIDCSubjectPrefix:         getEnv("ATTESTATION_OIDC_SUBJECT_PREFIX", "repo:Concord-Voice/Concord-Voice-Alpha:"),
+		OIDCSubjectPrefix:         getEnv("ATTESTATION_OIDC_SUBJECT_PREFIX", "repo:Concord-Voice@264583090/Self-Hosted@1359565266:"),
 		OIDCSPAWorkflow:           getEnv("ATTESTATION_OIDC_SPA_WORKFLOW", "main-cd.yml"),
 		OIDCSPARef:                getEnv("ATTESTATION_OIDC_SPA_REF", "refs/heads/main"),
 		// CAUTION (#2021 B3): the binary axis is dormant — nothing POSTs
@@ -621,6 +643,9 @@ func Load() (*Config, error) {
 		// axis on job_workflow_ref, which carries the CALLED workflow.
 		OIDCBinaryWorkflow: getEnv("ATTESTATION_OIDC_BINARY_WORKFLOW", "build-desktop.yml"),
 		OIDCBinaryRef:      getEnv("ATTESTATION_OIDC_BINARY_REF", "refs/heads/main"),
+	}
+	if cfg.RecoveryLegacyCodeDisabled, err = recoveryLegacyCodeDisabled(os.Getenv("RECOVERY_LEGACY_CODE")); err != nil {
+		return nil, err
 	}
 
 	if err := loadActivityHistoryConfig(cfg); err != nil {
@@ -881,33 +906,14 @@ func loadCloudflareKVBridgeConfig(cfg *Config) error {
 // validate checks for dangerous configuration in production environments.
 // Returns an error if required secrets are missing or still set to dev defaults.
 func (c *Config) validate() error {
-	if c.TURNSecretFile != "" {
-		if !filepath.IsAbs(c.TURNSecretFile) || c.TURNSecret != "" {
-			return fmt.Errorf("TURN_SECRET_FILE must be absolute and cannot be combined with TURN_SECRET")
-		}
-		if strings.TrimSpace(c.TURNServerHost) == "" {
-			return fmt.Errorf("TURN_SECRET_FILE requires TURN_SERVER_HOST")
-		}
+	if err := c.validateTURNSecretFile(); err != nil {
+		return err
 	}
-	if c.RedisCredentialMode != "" && c.RedisCredentialMode != "legacy" && c.RedisCredentialMode != "managed" {
-		return fmt.Errorf("REDIS_CREDENTIAL_MODE must be legacy or managed")
+	if err := c.validateRedisCredentialMode(); err != nil {
+		return err
 	}
-	if c.RedisCredentialMode == "managed" {
-		if err := c.validateManagedRedis(); err != nil {
-			return err
-		}
-	}
-	for _, floor := range []struct{ name, value string }{
-		{"CLIENT_MIN_VERSION", c.ClientMinVersion},
-		{"CLIENT_MIN_VERSION_IOS", c.ClientMinVersionIOS},
-		{"CLIENT_MIN_VERSION_ANDROID", c.ClientMinVersionAndroid},
-	} {
-		if floor.value == "" {
-			continue
-		}
-		if _, err := clientversion.Parse(floor.value); err != nil {
-			return fmt.Errorf("%s must be a stable X.Y.Z version: %w", floor.name, err)
-		}
+	if err := c.validateClientMinVersions(); err != nil {
+		return err
 	}
 	// Ordered before validateActivityHistory for the same reason as in
 	// loadActivityHistoryConfig (#2178): the unconditional constraint is the
@@ -942,6 +948,50 @@ func (c *Config) validate() error {
 		return fmt.Errorf("CONCORD_ENV=test is forbidden unless ENVIRONMENT is development or test (got %q); it would relax auth rate limits and leak verification codes", c.Environment)
 	}
 	return c.validateProduction()
+}
+
+// validateTURNSecretFile checks the managed TURN key source, when one is set.
+func (c *Config) validateTURNSecretFile() error {
+	if c.TURNSecretFile == "" {
+		return nil
+	}
+	if !filepath.IsAbs(c.TURNSecretFile) || c.TURNSecret != "" {
+		return fmt.Errorf("TURN_SECRET_FILE must be absolute and cannot be combined with TURN_SECRET")
+	}
+	if strings.TrimSpace(c.TURNServerHost) == "" {
+		return fmt.Errorf("TURN_SECRET_FILE requires TURN_SERVER_HOST")
+	}
+	return nil
+}
+
+// validateRedisCredentialMode checks REDIS_CREDENTIAL_MODE and, in managed
+// mode, the managed Redis settings.
+func (c *Config) validateRedisCredentialMode() error {
+	if c.RedisCredentialMode != "" && c.RedisCredentialMode != "legacy" && c.RedisCredentialMode != "managed" {
+		return fmt.Errorf("REDIS_CREDENTIAL_MODE must be legacy or managed")
+	}
+	if c.RedisCredentialMode == "managed" {
+		return c.validateManagedRedis()
+	}
+	return nil
+}
+
+// validateClientMinVersions checks each configured client version floor, in
+// the order desktop, iOS, Android.
+func (c *Config) validateClientMinVersions() error {
+	for _, floor := range []struct{ name, value string }{
+		{"CLIENT_MIN_VERSION", c.ClientMinVersion},
+		{"CLIENT_MIN_VERSION_IOS", c.ClientMinVersionIOS},
+		{"CLIENT_MIN_VERSION_ANDROID", c.ClientMinVersionAndroid},
+	} {
+		if floor.value == "" {
+			continue
+		}
+		if _, err := clientversion.Parse(floor.value); err != nil {
+			return fmt.Errorf("%s must be a stable X.Y.Z version: %w", floor.name, err)
+		}
+	}
+	return nil
 }
 
 func (c *Config) validateManagedRedis() error {

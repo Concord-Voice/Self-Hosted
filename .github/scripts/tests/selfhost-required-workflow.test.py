@@ -37,4 +37,18 @@ assert re.fullmatch(
 config = yaml.safe_load((root / ".github/codeql/codeql-config.yml").read_text())
 assert config["queries"][0]["uses"] == "./.github/codeql/queries/go/LogInjectionUnstructured.ql"
 assert ".github/codeql/**" in (root / "CODEOWNERS").read_text()
+codeowners = [line.split() for line in (root / "CODEOWNERS").read_text().splitlines()
+              if line.strip() and not line.lstrip().startswith("#")]
+assert ["/scripts/ci/", "@Concord-Voice/security"] in codeowners
+assert all(owners == ["@Concord-Voice/security"] for pattern, *owners in codeowners
+           if pattern.lstrip("/").startswith("scripts/ci")), "a later rule re-owns scripts/ci"
+# CODEOWNERS matches case-sensitively, so a case variant of an owned path gets no owner, and on a
+# case-insensitive checkout it lands on top of the reviewed file. Refuse any case collision.
+import subprocess
+tracked = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True).stdout.decode().split("\0")
+folded = {}
+for path in filter(None, tracked):
+    folded.setdefault(path.casefold(), []).append(path)
+collisions = [paths for paths in folded.values() if len(paths) > 1]
+assert not collisions, f"case-colliding tracked paths: {collisions}"
 print("Self-Hosted protected workflow checks passed")

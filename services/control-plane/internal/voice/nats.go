@@ -209,8 +209,7 @@ func (s *NATSSubscriber) withServerVoiceTerminalTransaction(
 	serverID string,
 	channelID, userID uuid.UUID,
 	respectGrace bool,
-	requalify func(context.Context, *sql.Tx) (bool, error),
-	deleteParticipant func(context.Context, *sql.Tx) (bool, error),
+	requalify, deleteParticipant func(context.Context, *sql.Tx) (bool, error),
 ) (result serverVoiceTerminalResult, returnErr error) {
 	preflightTemporary, preflightPermanent, err := s.preflightServerVoiceTerminalGrant(
 		ctx, channelID, userID, respectGrace,
@@ -1482,8 +1481,7 @@ func buildPrivateVoiceOldScopeRevision(
 	conversationID uuid.UUID,
 	participantIDs []uuid.UUID,
 	callID uuid.UUID,
-	recheckViewers map[uuid.UUID]bool,
-	seenParticipants map[uuid.UUID]bool,
+	recheckViewers, seenParticipants map[uuid.UUID]bool,
 ) (privateVoiceOldScopeRevision, []uuid.UUID, error) {
 	if conversationID == uuid.Nil || callID == uuid.Nil {
 		return privateVoiceOldScopeRevision{}, nil, errors.New(
@@ -7694,8 +7692,7 @@ func (s *NATSSubscriber) runDMHeartbeatBulkRefresh(
 			mutation: func(
 				mutationCtx context.Context,
 				tx *sql.Tx,
-				accepted []uuid.UUID,
-				removed []uuid.UUID,
+				accepted, removed []uuid.UUID,
 			) (applied bool, returnErr error) {
 				result.removedParticipantIDs = append(
 					result.removedParticipantIDs[:0], removed...,

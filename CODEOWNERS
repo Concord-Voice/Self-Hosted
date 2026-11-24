@@ -12,6 +12,12 @@ docker-compose.authority.yml                        @Concord-Voice/security
 docker-compose.byo-s3.yml                           @Concord-Voice/security
 infrastructure/**                                   @Concord-Voice/security
 /scripts/security/**                                 @Concord-Voice/security
+/scripts/ci/                                        @Concord-Voice/security
+/scripts/sonar/                                     @Concord-Voice/security
+/.github/requirements-*.txt                         @Concord-Voice/security
+/.github/dependency-pin-exceptions.json             @Concord-Voice/security
+/scripts/tests/test-publish-minio-engine-pins.py    @Concord-Voice/security
+/scripts/tests/test-runner-docker-engine.py         @Concord-Voice/security
 scripts/security/check-ioc-refresh-pr.sh            @Concord-Voice/security
 **/crypto*                                          @Concord-Voice/security
 **/e2ee*                                            @Concord-Voice/security
