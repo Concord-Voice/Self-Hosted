@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"flag"
+	"os"
 	"testing"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
@@ -59,6 +62,114 @@ func TestReservationBackfillRejectsPreexistingCrossTableCollision(t *testing.T) 
 	require.NoError(t, db.QueryRow(`
 		SELECT backfill_complete FROM message_id_reservation_rollout WHERE singleton = TRUE`).Scan(&complete))
 	assert.False(t, complete, "collision leaves the activation gate closed")
+}
+
+func TestReservationBackfillRevalidatesCompletedBaseline(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	insertReservationFixture(t, db, uuid.New(), uuid.New())
+	backfill := &reservationBackfill{db: db, batchSize: 1}
+	require.NoError(t, backfill.run(context.Background()))
+	require.NoError(t, backfill.run(context.Background()))
+}
+
+func TestReservationBackfillRejectsIncompleteOrMissingState(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	backfill := &reservationBackfill{db: db, batchSize: 1}
+	messageID, _ := insertReservationFixture(t, db, uuid.New(), uuid.New())
+	_, err := testdb.ExecReplica(db, `DELETE FROM message_id_reservations WHERE message_id = $1`, messageID)
+	require.NoError(t, err)
+	require.ErrorContains(t, backfill.verifyBaseline(context.Background(), db), "anti-join is incomplete")
+
+	_, err = db.Exec(`DELETE FROM message_id_reservation_rollout WHERE singleton = TRUE`)
+	require.NoError(t, err)
+	err = backfill.run(context.Background())
+	require.ErrorContains(t, err, "rollout state is missing")
+
+	_, _, err = reserveBatch(context.Background(), db, "unknown", nil, 1)
+	require.ErrorContains(t, err, "unsupported message ID backfill table")
+}
+
+func TestReservationBackfillFailsClosedWhenCompletedBaselineIsIncomplete(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	messageID, _ := insertReservationFixture(t, db, uuid.New(), uuid.New())
+	_, err := testdb.ExecReplica(db, `DELETE FROM message_id_reservations WHERE message_id = $1`, messageID)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE message_id_reservation_rollout SET backfill_complete = TRUE WHERE singleton = TRUE`)
+	require.NoError(t, err)
+
+	err = (&reservationBackfill{db: db, batchSize: 1}).run(context.Background())
+	require.ErrorContains(t, err, "anti-join is incomplete")
+}
+
+func TestReservationBackfillDatabaseErrorsFailClosed(t *testing.T) {
+	closedDB, err := sql.Open("postgres", testdb.DatabaseURL())
+	require.NoError(t, err)
+	require.NoError(t, closedDB.Close())
+
+	backfill := &reservationBackfill{db: closedDB, batchSize: 1}
+	ctx := context.Background()
+	_, err = backfill.backfillComplete(ctx, closedDB)
+	require.ErrorContains(t, err, "read message ID reservation rollout state")
+	require.ErrorContains(t, backfill.verifyBaseline(ctx, closedDB), "check message ID cross-table collisions")
+	require.ErrorContains(t, backfill.verifyNoCrossTableCollision(ctx, closedDB), "check message ID cross-table collisions")
+	_, _, err = reserveBatch(ctx, closedDB, "messages", nil, 1)
+	require.ErrorContains(t, err, "reserve messages batch")
+	require.ErrorContains(t, backfill.backfillTable(ctx, closedDB, "messages"), "reserve messages batch")
+
+	openDB, err := sql.Open("postgres", testdb.DatabaseURL())
+	require.NoError(t, err)
+	conn, err := openDB.Conn(ctx)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	require.ErrorContains(t, backfill.removeDeleteCapture(ctx, conn), "begin delete-capture cleanup transaction")
+	require.NoError(t, openDB.Close())
+}
+
+func TestDropDeleteCaptureExecutesBothStatementsAndStopsOnFailure(t *testing.T) {
+	ctx := context.Background()
+	success := &execContextStub{}
+	require.NoError(t, dropDeleteCapture(ctx, success))
+	require.Len(t, success.statements, 2)
+
+	failure := &execContextStub{failAt: 2}
+	require.ErrorContains(t, dropDeleteCapture(ctx, failure), "remove temporary message ID delete capture")
+	require.Len(t, failure.statements, 2)
+}
+
+func TestMainVerifiesCompletedBaseline(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	require.NoError(t, (&reservationBackfill{db: db, batchSize: 1}).run(context.Background()))
+	t.Setenv("DATABASE_URL", testdb.DatabaseURL())
+	originalArgs, originalFlags := os.Args, flag.CommandLine
+	os.Args = []string{originalArgs[0]}
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		flag.CommandLine = originalFlags
+	})
+
+	main()
+}
+
+type execContextStub struct {
+	statements []string
+	failAt     int
+}
+
+func (s *execContextStub) ExecContext(_ context.Context, statement string, _ ...any) (sql.Result, error) {
+	s.statements = append(s.statements, statement)
+	if s.failAt == len(s.statements) {
+		return nil, errors.New("injected exec failure")
+	}
+	return driver.RowsAffected(0), nil
 }
 
 func insertReservationFixture(t *testing.T, db *sql.DB, messageID, dmMessageID uuid.UUID) (uuid.UUID, uuid.UUID) {

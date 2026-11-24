@@ -13,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	// Register the PostgreSQL driver used by sql.Open.
 	_ "github.com/lib/pq"
 )
 
