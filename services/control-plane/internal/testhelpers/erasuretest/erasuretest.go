@@ -18,10 +18,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
 )
 
 // fixturePassword is the proof every enrolled user presents.

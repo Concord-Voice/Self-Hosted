@@ -13,9 +13,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 )
 
 // The delete-rate soft-lock (#3455, design spec §2.4–§2.9 as amended by D-1).

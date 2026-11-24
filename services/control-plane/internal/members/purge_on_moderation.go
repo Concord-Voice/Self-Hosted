@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/messages"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/messages"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 )
 
 const (

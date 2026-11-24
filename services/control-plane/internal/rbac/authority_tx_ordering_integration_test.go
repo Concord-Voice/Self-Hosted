@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq" // registers the PostgreSQL driver used by this fixture
 	"github.com/stretchr/testify/assert"

@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/health"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/health"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )

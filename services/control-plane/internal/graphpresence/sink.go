@@ -3,7 +3,7 @@ package graphpresence
 import (
 	"sync"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // dispatchQueueDepth matches voicepresence's bound. Dispatch is sequential by

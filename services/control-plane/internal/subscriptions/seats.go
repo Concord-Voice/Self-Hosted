@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
 )
 
 // Wing seats on GET /subscriptions/me (#2033 spec §8, PR-5). Read-only: the

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voiceauthprotocol"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voiceauthprotocol"
 	"github.com/google/uuid"
 )
 

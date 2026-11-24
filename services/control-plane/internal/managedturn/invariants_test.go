@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedturn"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedturn"
 )
 
 // These cases cover the refusals the implementation adds on top of the plan's

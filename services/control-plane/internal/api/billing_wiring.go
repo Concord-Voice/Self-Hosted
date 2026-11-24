@@ -4,13 +4,13 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/billing"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/subscriptions"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/billing"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/subscriptions"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // Stripe billing wiring (#2033 PR-2). Billing is dormant by default: with no

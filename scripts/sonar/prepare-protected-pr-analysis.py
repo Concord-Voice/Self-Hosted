@@ -23,10 +23,8 @@ REPO = "Concord-Voice/Self-Hosted"
 API = f"https://api.github.com/repos/{REPO}"
 ROOT = Path(__file__).resolve().parents[2]
 GIT_REMOTE = f"https://github.com/{REPO}.git"
-# Accepted control-plane module path prefixes. The second is the pre-rename
-# module path; drop it once services/control-plane/go.mod on main no longer
-# declares it (the module rename PR, #340, does that).
-GO_MODULE_PREFIXES = (f"github.com/{REPO}/", "github.com/Concord-Voice/Concord-Voice-Alpha/")
+# Accepted control-plane module path prefix (services/control-plane/go.mod).
+GO_MODULE_PREFIXES = (f"github.com/{REPO}/",)
 GO_COVERAGE_HEADER = re.compile(r"mode: (set|count|atomic)")
 GO_COVERAGE_RECORD = re.compile(r"([^:\s]+)(:\d+\.\d+,\d+\.\d+ \d+ \d+)")
 GIT_ENV = {k: v for k, v in os.environ.items()
