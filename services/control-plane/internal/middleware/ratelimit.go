@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
@@ -75,8 +75,7 @@ func RateLimitByIPFailClosedWithHandlers(
 	redis *redis.Client,
 	requests int,
 	window time.Duration,
-	exceededHandler gin.HandlerFunc,
-	backendErrorHandler gin.HandlerFunc,
+	exceededHandler, backendErrorHandler gin.HandlerFunc,
 ) gin.HandlerFunc {
 	config := RateLimitConfig{
 		Requests:            requests,

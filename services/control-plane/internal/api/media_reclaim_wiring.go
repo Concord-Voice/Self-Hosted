@@ -3,8 +3,8 @@ package api
 import (
 	"context"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
 )
 
 // newDurableErasedMediaReclaimer wakes Tier-1 retry processing and enqueues
@@ -13,7 +13,7 @@ func newDurableErasedMediaReclaimer(
 	wake func(),
 	enqueue func([]media.BlobRef),
 ) users.ErasedMediaReclaimer {
-	return func(_ context.Context, _ []media.BlobRef, tier2 []media.BlobRef) {
+	return func(_ context.Context, _, tier2 []media.BlobRef) {
 		if wake != nil {
 			wake()
 		}

@@ -9,7 +9,7 @@ import (
 	"log"
 	"sort"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
@@ -441,7 +441,7 @@ func (h *Hub) completeClientPresenceBootstrap(
 		client,
 		func(publish func([]byte) error) error {
 			return h.finalizeClientActivitySnapshot(
-				ctx, client.UserID, seed, base, activity, publish, client.setPresenceSnapshotCoverage,
+				ctx, client, seed, base, activity, publish,
 			)
 		},
 		func() error { return h.sendCustomTextSnapshot(ctx, client) },
@@ -450,20 +450,22 @@ func (h *Hub) completeClientPresenceBootstrap(
 
 func (h *Hub) finalizeClientActivitySnapshot(
 	ctx context.Context,
-	viewerID uuid.UUID,
+	client *Client,
 	seed presenceSnapshotSeed,
 	base map[uuid.UUID]string,
 	activity presence.ActivitySnapshot,
 	publish func([]byte) error,
-	coverage func(omitted, covered map[uuid.UUID]struct{}),
 ) error {
 	publishActivity := func(finalized presence.ActivitySnapshot) error {
-		return h.publishClientPresenceSnapshot(ctx, seed, base, finalized, publish, coverage)
+		return h.publishClientPresenceSnapshot(
+			ctx, seed, base, finalized, publish,
+			client.setPresenceSnapshotCoverage, client.setRichPresenceSnapshot,
+		)
 	}
 	if h.activitySnapshotFinalize == nil {
 		return publishActivity(activity)
 	}
-	return h.activitySnapshotFinalize(ctx, viewerID, activity, publishActivity)
+	return h.activitySnapshotFinalize(ctx, client.UserID, activity, publishActivity)
 }
 
 func (h *Hub) publishClientPresenceSnapshot(
@@ -480,6 +482,7 @@ func (h *Hub) publishClientPresenceSnapshot(
 	// subtracted from them, so coverage is carried positively as the published
 	// set instead — bounded by the cap, and allocated only on a hub above it.
 	coverage func(omitted, covered map[uuid.UUID]struct{}),
+	richPresenceCoverage func(map[richPresenceDeliveryKey]struct{}),
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -496,6 +499,16 @@ func (h *Hub) publishClientPresenceSnapshot(
 	if err != nil {
 		return err
 	}
+	var clientActivity map[richPresenceDeliveryKey]struct{}
+	for senderID, entries := range activity {
+		for category := range entries {
+			if clientActivity == nil {
+				clientActivity = make(map[richPresenceDeliveryKey]struct{})
+			}
+			clientActivity[richPresenceDeliveryKey{senderID: senderID, category: category}] = struct{}{}
+		}
+	}
+	richPresenceCoverage(clientActivity)
 	// Before publish, so it is in place for the live frames flushed after it.
 	setPresenceSnapshotCoverage(seed, refreshedBase, coverage)
 	return publish(snapshot)
@@ -678,6 +691,9 @@ func (h *Hub) completeClientBootstrap(client *Client, snapshot []byte) bool {
 		client.bootstrapActive = false
 		client.bootstrapReplay = nil
 		client.bootstrapLive = nil
+		client.bootstrapRichPresenceSnapshot = nil
+		client.bootstrapRichPresenceSnapshotSet = false
+		client.bootstrapRichPresenceLive = nil
 		client.bootstrapMu.Unlock()
 		client.sendMu.Unlock()
 		return false
@@ -707,9 +723,13 @@ func (h *Hub) completeClientBootstrap(client *Client, snapshot []byte) bool {
 			return h.failClientBootstrapFlushLocked(client)
 		}
 	}
+	client.applyBootstrapRichPresenceLocked()
 	client.bootstrapActive = false
 	client.bootstrapReplay = nil
 	client.bootstrapLive = nil
+	client.bootstrapRichPresenceSnapshot = nil
+	client.bootstrapRichPresenceSnapshotSet = false
+	client.bootstrapRichPresenceLive = nil
 	client.bootstrapMu.Unlock()
 	client.sendMu.Unlock()
 	return true
@@ -762,6 +782,9 @@ func (h *Hub) clientBootstrapCanPrepare(client *Client) bool {
 		client.bootstrapActive = false
 		client.bootstrapReplay = nil
 		client.bootstrapLive = nil
+		client.bootstrapRichPresenceSnapshot = nil
+		client.bootstrapRichPresenceSnapshotSet = false
+		client.bootstrapRichPresenceLive = nil
 		client.bootstrapMu.Unlock()
 		return false
 	}
@@ -790,6 +813,9 @@ func (h *Hub) failClientBootstrapFlushLocked(client *Client) bool {
 	client.bootstrapFailed = true
 	client.bootstrapReplay = nil
 	client.bootstrapLive = nil
+	client.bootstrapRichPresenceSnapshot = nil
+	client.bootstrapRichPresenceSnapshotSet = false
+	client.bootstrapRichPresenceLive = nil
 	client.bootstrapMu.Unlock()
 	client.sendMu.Unlock()
 	if err := h.disconnectPrivacyCriticalClient(client); err != nil {

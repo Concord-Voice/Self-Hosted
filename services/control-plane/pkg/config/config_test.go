@@ -1960,3 +1960,35 @@ func TestOIDCSubjectPrefixShapeMatchesVerifier(t *testing.T) {
 	require.NotNil(t, m, "subjectPrefixShape declaration not found in oidc.go")
 	assert.Equal(t, oidcSubjectPrefixShape.String(), string(m[1]))
 }
+
+func TestRecoveryLegacyCodeDefaultsOn(t *testing.T) {
+	assert.False(t, Config{}.RecoveryLegacyCodeDisabled, "zero value keeps the legacy code")
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("RECOVERY_LEGACY_CODE", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.RecoveryLegacyCodeDisabled)
+
+	t.Setenv("RECOVERY_LEGACY_CODE", "false")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.RecoveryLegacyCodeDisabled)
+}
+
+// The switch takes any boolean spelling. A value that is not a boolean stops
+// startup, so an operator who writes "no" is not left with the code still on.
+func TestRecoveryLegacyCodeParsing(t *testing.T) {
+	for v, off := range map[string]bool{"": false, "true": false, "1": false, "TRUE": false, "false": true, "FALSE": true, "0": true, " false ": true} {
+		got, err := recoveryLegacyCodeDisabled(v)
+		require.NoError(t, err, v)
+		assert.Equal(t, off, got, v)
+	}
+	for _, v := range []string{"no", "off", "maybe"} {
+		_, err := recoveryLegacyCodeDisabled(v)
+		require.ErrorContains(t, err, "RECOVERY_LEGACY_CODE", v)
+	}
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("RECOVERY_LEGACY_CODE", "no")
+	_, err := Load()
+	require.ErrorContains(t, err, "RECOVERY_LEGACY_CODE")
+}

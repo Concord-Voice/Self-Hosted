@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
 	"github.com/google/uuid"
 )
 
@@ -244,8 +244,7 @@ func loadLiveDMCallParticipants(
 func insertCompletedCallEvent(
 	ctx context.Context,
 	db *sql.DB,
-	convID uuid.UUID,
-	messageID uuid.UUID,
+	convID, messageID uuid.UUID,
 	payload CallEventPayload,
 	replaceExisting bool,
 ) (respawned []uuid.UUID, err error) {

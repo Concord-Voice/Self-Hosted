@@ -15,14 +15,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/devicerecovery"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/email"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/devicerecovery"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/email"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -453,7 +453,7 @@ func acceptTOTPStep(ctx context.Context, store codeVerificationStore, userID str
 	return true, "totp", nil
 }
 
-func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID string, code string) (bool, error) {
+func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID, code string) (bool, error) {
 	var hashes []string
 	var used []bool
 	if err := store.QueryRowContext(ctx,
@@ -471,13 +471,11 @@ func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID 
 		return false, nil
 	}
 
-	updatedUsed := append([]bool(nil), used...)
-	updatedUsed[idx] = true
 	result, err := store.ExecContext(ctx,
-		// Match the hashes read above too: a regeneration resets every used flag,
-		// so the flags alone cannot tell a revoked set from the current one.
-		`UPDATE user_mfa_totp SET backup_codes_used = $1, updated_at = NOW() WHERE user_id = $2 AND backup_codes_used = $3 AND backup_codes_hash = $4`,
-		pq.Array(updatedUsed), userID, pq.Array(used), pq.Array(hashes),
+		// Fence the matched set and factor state while allowing other codes in the
+		// same set to be claimed concurrently.
+		`UPDATE user_mfa_totp SET backup_codes_used[$2] = TRUE, updated_at = NOW() WHERE user_id = $1 AND enabled AND confirmed AND backup_codes_hash = $3 AND backup_codes_used[$2] = FALSE`,
+		userID, idx+1, pq.Array(hashes),
 	)
 	if err != nil {
 		return false, fmt.Errorf("consume backup code: %w", err)
@@ -584,7 +582,7 @@ func (h *Handler) GenerateUpgradeChallenge(_ context.Context, userID, refreshSes
 // BeginWebAuthnLogin starts a WebAuthn assertion ceremony for login.
 // Stores session data in Redis keyed by the challenge JTI.
 // Returns credential request options for the client, or nil if user has no WebAuthn credentials.
-func (h *Handler) BeginWebAuthnLogin(ctx context.Context, userID string, jti string) (interface{}, error) {
+func (h *Handler) BeginWebAuthnLogin(ctx context.Context, userID, jti string) (interface{}, error) {
 	user, err := h.buildWebAuthnUser(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("build webauthn user: %w", err)
@@ -3276,7 +3274,7 @@ func (h *Handler) generateAndStoreEmailSmsCodes(ctx context.Context, userID stri
 	return codes, nil
 }
 
-func (h *Handler) sendEmailSmsSetupEmail(c *gin.Context, userID string, userEmail string, codes map[string]string) bool {
+func (h *Handler) sendEmailSmsSetupEmail(c *gin.Context, userID, userEmail string, codes map[string]string) bool {
 	code, ok := codes["email"]
 	if !ok {
 		return true

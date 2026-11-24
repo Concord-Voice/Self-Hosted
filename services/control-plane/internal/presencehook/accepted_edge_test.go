@@ -10,7 +10,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehook"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehook"
 )
 
 // capturingQuerier records the SQL and arguments AcceptedEdgeExists issues,

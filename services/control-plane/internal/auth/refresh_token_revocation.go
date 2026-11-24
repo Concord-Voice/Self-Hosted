@@ -6,8 +6,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
 	"github.com/google/uuid"
 )
 
@@ -21,6 +21,9 @@ type RevokeAllRefreshTokensOptions struct {
 	ExcludeAccessExpiresAt  time.Time
 	ExpectedCredentialEpoch string
 	EnforceCredentialEpoch  bool
+	ResetRevokeAllowance    bool
+	// CaptureLocalFamilies runs under the user lock immediately before commit.
+	CaptureLocalFamilies func(context.Context, *sql.Tx, loginfamily.Targets) error
 }
 
 // RevokeAllRefreshTokens commits a fixed family frontier. Counts describe changed
@@ -58,6 +61,19 @@ func RevokeAllRefreshTokens(ctx context.Context, db *sql.DB, userID string, opti
 	result, err = loginfamily.RevokeFamiliesTx(ctx, tx, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeUser, Reason: loginfamily.ReasonExplicitRevoke})
 	if err != nil {
 		return loginfamily.RevocationResult{}, err
+	}
+	if options.ResetRevokeAllowance {
+		var updated int
+		err = tx.QueryRowContext(ctx, `UPDATE users SET last_session_revoke_at=NULL,
+ session_revoke_auth_gen=session_revoke_auth_gen+1 WHERE id=$1 RETURNING 1`, userID).Scan(&updated)
+		if err != nil {
+			return loginfamily.RevocationResult{}, loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+		}
+	}
+	if options.CaptureLocalFamilies != nil {
+		if err = options.CaptureLocalFamilies(ctx, tx, targets); err != nil {
+			return loginfamily.RevocationResult{}, err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		// The revocation may be durable: keep only the owner locators, so the
@@ -133,6 +149,12 @@ func preservedFamilyIdentityTx(ctx context.Context, tx *sql.Tx, userID string, o
 // RevokeRefreshSession terminalizes an owned SID's entire logical login, even
 // when the selected refresh row has rotated, expired, or already been purged.
 func RevokeRefreshSession(ctx context.Context, db *sql.DB, userID, sessionID, expectedEpoch string) (result loginfamily.RevocationResult, err error) {
+	return RevokeRefreshSessionWithPolicy(ctx, db, userID, sessionID, expectedEpoch, nil)
+}
+
+// RevokeRefreshSessionWithPolicy runs policy under the same user lock and
+// transaction as family revocation. Any policy write commits only with it.
+func RevokeRefreshSessionWithPolicy(ctx context.Context, db *sql.DB, userID, sessionID, expectedEpoch string, policy func(context.Context, *sql.Tx) error) (result loginfamily.RevocationResult, err error) {
 	sid, parseErr := uuid.Parse(sessionID)
 	if parseErr != nil || sid == uuid.Nil {
 		return result, loginfamily.NewError(loginfamily.ReasonTargetUnknown, nil)
@@ -154,6 +176,11 @@ func RevokeRefreshSession(ctx context.Context, db *sql.DB, userID, sessionID, ex
 	if err = matchRevocationEpochTx(ctx, tx, userID, RevokeAllRefreshTokensOptions{ExpectedCredentialEpoch: expectedEpoch, EnforceCredentialEpoch: true}); err != nil {
 		return result, err
 	}
+	if policy != nil {
+		if err = policy(ctx, tx); err != nil {
+			return result, err
+		}
+	}
 	targets, err := loginfamily.ResolveTargetSIDTx(ctx, tx, user, sid)
 	if err != nil {
 		return result, err
@@ -168,4 +195,34 @@ func RevokeRefreshSession(ctx context.Context, db *sql.DB, userID, sessionID, ex
 		return loginfamily.RevocationResult{Owners: result.Owners}, loginfamily.NewError(loginfamily.ReasonCommitUnknown, err)
 	}
 	return result, nil
+}
+
+// UpdateSessionRevocationMode changes the mode and resets its allowance while
+// revalidating the requesting family under the same user lock.
+func UpdateSessionRevocationMode(ctx context.Context, db *sql.DB, userID, mode, expectedEpoch string) (err error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, loginfamily.NewError(loginfamily.ReasonSQLUnavailable, rollbackErr))
+		}
+	}()
+	if _, err = lockMintUserTx(ctx, tx, userID); err != nil {
+		return err
+	}
+	if err = matchRevocationEpochTx(ctx, tx, userID, RevokeAllRefreshTokensOptions{ExpectedCredentialEpoch: expectedEpoch, EnforceCredentialEpoch: true}); err != nil {
+		return err
+	}
+	var updated int
+	err = tx.QueryRowContext(ctx, `UPDATE users SET revocation_mode=$1, last_session_revoke_at=NULL,
+ session_revoke_auth_gen=session_revoke_auth_gen+1 WHERE id=$2 RETURNING 1`, mode, userID).Scan(&updated)
+	if err != nil {
+		return loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return loginfamily.NewError(loginfamily.ReasonCommitUnknown, err)
+	}
+	return nil
 }

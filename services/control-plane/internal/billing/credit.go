@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v87"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/redemption"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/redemption"
 )
 
 // Code credit (#2033 spec §0 D1): a premium code redeemed on a live, renewing

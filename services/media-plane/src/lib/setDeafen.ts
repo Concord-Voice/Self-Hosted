@@ -3,10 +3,12 @@ import type { RoomManager } from './roomManager.js';
 /** Minimal RoomManager surface needed to record a self-deafen state change. */
 export interface SetDeafenRoomManager {
   setParticipantDeafen: RoomManager['setParticipantDeafen'];
+  getParticipant: RoomManager['getParticipant'];
 }
 
 /** Minimal Socket.IO surface needed to broadcast the change to the rest of the room. */
 export interface SetDeafenSocket {
+  id: string;
   to: (room: string) => { emit: (event: string, ...args: unknown[]) => void };
 }
 
@@ -22,7 +24,9 @@ export type SetDeafenResult = { success: true } | { error: string };
  * Socket.IO server, following the `handleForceDisconnect` pattern.
  *
  * Idempotent and validates the wire payload: a non-boolean `isDeafened` or a
- * socket not yet in a room is rejected without mutating state.
+ * socket not yet in a room is rejected without mutating state. A `roomId` on
+ * the socket is not admission (VULN-160): only the participant's current
+ * socket may record the flag or broadcast it, mirroring `handleSetTestingStatus`.
  */
 export function handleSetDeafen(
   roomManager: SetDeafenRoomManager,
@@ -33,6 +37,9 @@ export function handleSetDeafen(
 ): SetDeafenResult {
   if (!roomId) return { error: 'Not in a room' };
   if (typeof isDeafened !== 'boolean') return { error: 'invalid_payload' };
+  if (roomManager.getParticipant(roomId, userId)?.socketId !== socket.id) {
+    return { error: 'Not in a room' };
+  }
 
   roomManager.setParticipantDeafen(roomId, userId, isDeafened);
   socket.to(roomId).emit('participant-deafen-changed', { userId, isDeafened });

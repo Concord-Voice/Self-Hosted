@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/database"
 )
 
 const (
@@ -586,8 +586,7 @@ func clearAdminCtlOwner(
 	ctx context.Context,
 	tx *sql.Tx,
 	ownerID uuid.UUID,
-	settingsPresent bool,
-	forceOff bool,
+	settingsPresent, forceOff bool,
 ) (adminCtlOwnerResult, error) {
 	var result adminCtlOwnerResult
 	if settingsPresent {

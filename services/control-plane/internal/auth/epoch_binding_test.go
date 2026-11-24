@@ -16,14 +16,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // #2418: every session mint is bound to the epoch it was AUTHORIZED under, not
@@ -337,6 +337,121 @@ func TestRevokeAllRefreshTokens_WithoutExclusionPreservesOtherUsersAndRevokedRow
 	at, owner := terminalState(t, rig, revokedFamily)
 	assert.Equal(t, beforeAt, at)
 	assert.Equal(t, beforeOwner, owner)
+}
+
+func TestRevokeAllRefreshTokens_ResetsAllowanceAndCapturesFamilies(t *testing.T) {
+	rig := newFamilyTestRig(t)
+	_, family, _ := terminalMint(t, rig)
+	_, err := rig.db.Exec(`UPDATE users SET last_session_revoke_at=NOW(), session_revoke_auth_gen=6 WHERE id=$1`, rig.user)
+	require.NoError(t, err)
+
+	captured := false
+	result, err := RevokeAllRefreshTokens(context.Background(), rig.db, rig.user, RevokeAllRefreshTokensOptions{
+		ResetRevokeAllowance: true,
+		CaptureLocalFamilies: func(ctx context.Context, tx *sql.Tx, targets loginfamily.Targets) error {
+			families, err := loginfamily.CapturedFamilySubsetTx(ctx, tx, targets, []uuid.UUID{uuid.MustParse(family)})
+			require.NoError(t, err)
+			assert.Equal(t, []uuid.UUID{uuid.MustParse(family)}, families)
+			captured = true
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, captured)
+	assert.EqualValues(t, 1, result.NewlyTerminalFamilies)
+
+	var lastRevoke sql.NullTime
+	var generation int64
+	require.NoError(t, rig.db.QueryRow(`SELECT last_session_revoke_at,session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).Scan(&lastRevoke, &generation))
+	assert.False(t, lastRevoke.Valid)
+	assert.EqualValues(t, 7, generation)
+}
+
+func TestRevokeAllRefreshTokens_CaptureFailureRollsBackRevocationAndAllowance(t *testing.T) {
+	rig := newFamilyTestRig(t)
+	_, family, sid := terminalMint(t, rig)
+	_, err := rig.db.Exec(`UPDATE users SET last_session_revoke_at=NOW(), session_revoke_auth_gen=6 WHERE id=$1`, rig.user)
+	require.NoError(t, err)
+	captureErr := errors.New("local snapshot failed")
+
+	result, err := RevokeAllRefreshTokens(context.Background(), rig.db, rig.user, RevokeAllRefreshTokensOptions{
+		ResetRevokeAllowance: true,
+		CaptureLocalFamilies: func(context.Context, *sql.Tx, loginfamily.Targets) error {
+			return captureErr
+		},
+	})
+	require.ErrorIs(t, err, captureErr)
+	assert.Equal(t, loginfamily.RevocationResult{}, result)
+	at, _ := terminalState(t, rig, family)
+	assert.False(t, at.Valid)
+
+	var revoked sql.NullTime
+	require.NoError(t, rig.db.QueryRow(`SELECT revoked_at FROM refresh_tokens WHERE id=$1`, sid).Scan(&revoked))
+	assert.False(t, revoked.Valid)
+	var lastRevoke sql.NullTime
+	var generation int64
+	require.NoError(t, rig.db.QueryRow(`SELECT last_session_revoke_at,session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).Scan(&lastRevoke, &generation))
+	assert.True(t, lastRevoke.Valid)
+	assert.EqualValues(t, 6, generation)
+}
+
+func TestUpdateSessionRevocationModeRevalidatesFamilyAndResetsAllowance(t *testing.T) {
+	rig := newFamilyTestRig(t)
+	pair, family, _ := terminalMint(t, rig)
+	claims, err := ValidateAccessToken(pair.Access, familyTestSecret)
+	require.NoError(t, err)
+	_, err = rig.db.Exec(`UPDATE users SET last_session_revoke_at=NOW(), session_revoke_auth_gen=6 WHERE id=$1`, rig.user)
+	require.NoError(t, err)
+
+	err = UpdateSessionRevocationMode(actorContext(t, pair.Access), rig.db, rig.user, "restricted", claims.CredentialEpoch)
+	require.NoError(t, err)
+
+	var mode string
+	var lastRevoke sql.NullTime
+	var generation int64
+	require.NoError(t, rig.db.QueryRow(`SELECT revocation_mode,last_session_revoke_at,session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).
+		Scan(&mode, &lastRevoke, &generation))
+	assert.Equal(t, "restricted", mode)
+	assert.False(t, lastRevoke.Valid)
+	assert.EqualValues(t, 7, generation)
+
+	grant, err := loginfamily.ResolveVerifiedAccess(context.Background(), rig.db, loginfamily.AccessIdentity{
+		UserID: uuid.MustParse(rig.user), SID: uuid.MustParse(claims.SessionID),
+		CredentialEpoch: claims.CredentialEpoch, AccessExpiresAt: claims.ExpiresAt.Time,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, family, grant.FamilyID.String())
+}
+
+func TestUpdateSessionRevocationModeRejectsSupersededCredentialEpoch(t *testing.T) {
+	rig := newFamilyTestRig(t)
+	pair, _, _ := terminalMint(t, rig)
+	_, err := rig.db.Exec(`UPDATE users SET revocation_mode='secure', last_session_revoke_at=NOW(), session_revoke_auth_gen=6 WHERE id=$1`, rig.user)
+	require.NoError(t, err)
+	before := epochFixtureSnapshot(t, rig.db)
+
+	err = UpdateSessionRevocationMode(actorContext(t, pair.Access), rig.db, rig.user, "restricted", "stale-credential-epoch")
+	require.ErrorIs(t, err, credepoch.ErrEpochMismatch)
+	assert.Equal(t, before, epochFixtureSnapshot(t, rig.db), "a stale step-up authorization must not change revocation policy")
+}
+
+func TestUpdateSessionRevocationModeRejectsUnknownUser(t *testing.T) {
+	rig := newFamilyTestRig(t)
+	err := UpdateSessionRevocationMode(context.Background(), rig.db, uuid.NewString(), "restricted", "")
+	require.Error(t, err)
+}
+
+func TestUpdateSessionRevocationModeReportsUnavailableDatabase(t *testing.T) {
+	db, err := sql.Open("postgres", "host=127.0.0.1 port=1 user=test dbname=missing sslmode=disable connect_timeout=1")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, db.Close())
+	})
+
+	err = UpdateSessionRevocationMode(context.Background(), db, uuid.NewString(), "restricted", "")
+	var familyErr *loginfamily.Error
+	require.ErrorAs(t, err, &familyErr)
+	assert.Equal(t, loginfamily.ReasonSQLUnavailable, familyErr.Reason())
 }
 
 func TestRevokeAllRefreshTokens_RejectsSupersededCredentialEpoch(t *testing.T) {

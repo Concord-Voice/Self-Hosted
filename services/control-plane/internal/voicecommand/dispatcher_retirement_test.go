@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/stmthook"
 )
 
 func retirementDispatcher(t *testing.T, allocated, published int64, ack uint64) (*sql.DB, *Dispatcher, *capacityBroker, *outboxReports) {

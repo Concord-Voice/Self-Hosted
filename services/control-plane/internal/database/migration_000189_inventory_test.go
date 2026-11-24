@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,6 +83,8 @@ var agInventory = map[string]map[string]agColumn{
 		"header_image_url":           {Class: agNonMaterial, Change: `'https://example.test/h.png'`},
 		"color_scheme":               {Class: agNonMaterial, Change: `'ocean'`},
 		"revocation_mode":            {Class: agNonMaterial, Change: `'fast'`}, // varchar(10)
+		"last_session_revoke_at":     {Class: agNonMaterial, Change: `now()`},
+		"session_revoke_auth_gen":    {Class: agNonMaterial, Change: `1`},
 		"mfa_enabled":                {Class: agNonMaterial, Change: `TRUE`},
 		"mfa_methods":                {Class: agNonMaterial, Change: `ARRAY['totp']`}, // spec §6.5: mirror, not material
 		"recovery_only_methods":      {Class: agNonMaterial, Change: `ARRAY['totp']`},

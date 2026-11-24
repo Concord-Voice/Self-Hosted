@@ -18,7 +18,7 @@ import (
 	natssdk "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voicecommand"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voicecommand"
 )
 
 // Voice command resource names are shared with the authoritative media process.

@@ -17,11 +17,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	protocol "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voiceauthprotocol"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	protocol "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voiceauthprotocol"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/mediaproof"
 )
 
 // initializeServiceJoinRollout selects the disposable fixture's initial active
@@ -174,4 +174,32 @@ func TestVoiceJoinRateLimitCountsVerifiedServiceHopsAsLogicalJoins(t *testing.T)
 		eleventh := ts.DoRequest(http.MethodPost, path, nil, forgedHeaders)
 		assert.Equal(t, http.StatusTooManyRequests, eleventh.Code)
 	})
+}
+
+// TestRouter_AuthorizeVoiceActionRouteRemoved pins the removal of the unused
+// POST /channels/:id/voice/authorize-action route. The request carries valid
+// auth, a voice channel the caller owns and a well-formed body, so any answer
+// other than 404 means the route is registered again. The participants read
+// on the same channel is the positive control: it proves the fixture reaches
+// the channel voice routes, so the 404 comes from the missing route.
+func TestRouter_AuthorizeVoiceActionRouteRemoved(t *testing.T) {
+	const removedPath = "/api/v1/channels/:id/voice/authorize-action"
+	ts := testhelpers.SetupTestServer(t)
+	owner := ts.CreateTestUser(t, "authz_action_removed_owner")
+	target := ts.CreateTestUser(t, "authz_action_removed_target")
+	serverID := ts.CreateTestServer(t, owner.ID, "authorize action removed")
+	ts.AddMemberToServer(t, serverID, target.ID, "member")
+	channelID := ts.CreateVoiceChannel(t, serverID, "authorize-action-removed")
+	headers := testhelpers.AuthHeaders(owner.AccessToken)
+
+	control := ts.DoRequest(http.MethodGet, "/api/v1/channels/"+channelID+"/voice/participants", nil, headers)
+	require.Equal(t, http.StatusOK, control.Code, "positive control body: %s", control.Body.String())
+
+	w := ts.DoRequest(http.MethodPost, "/api/v1/channels/"+channelID+"/voice/authorize-action",
+		map[string]interface{}{"action": "mute", "target_user_id": target.ID}, headers)
+	assert.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+
+	for _, route := range ts.Router.Routes() {
+		assert.NotEqual(t, removedPath, route.Path, "%s %s must stay unregistered", route.Method, route.Path)
+	}
 }

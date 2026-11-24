@@ -66,10 +66,14 @@ import {
   CAMERA_GATE_OFF_DEBOUNCE_MS,
   FREE_MEDIA_ENTITLEMENT,
   MAX_RECV_TRANSPORTS_PER_PARTICIPANT,
+  MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT,
+  MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT,
+  MAX_CONSUMERS_PER_PARTICIPANT,
   KEYFRAME_REQUEST_DELAY_MS,
   MAX_SERVER_VOICE_PARTICIPANTS,
 } from '../src/lib/roomManager.js';
 import type { Room, Participant, RoomEvent, MediaSource } from '../src/lib/roomManager.js';
+import { CAMERA_GATE_MEMBER_FLIP_WINDOW_MS } from '../src/lib/cameraLayerGovernor.js';
 import {
   handleForceDisconnect,
   type ForceDisconnectIO,
@@ -1207,6 +1211,7 @@ describe('RoomManager', () => {
         const io = {
           sockets: {
             sockets: new Map([['sock-new', { emit, disconnect }]]),
+            adapter: { rooms: new Map() },
           },
         } as unknown as ForceDisconnectIO;
 
@@ -1522,7 +1527,7 @@ describe('RoomManager', () => {
     });
 
     it('seeds the room media-frame crypto version from the first participant', async () => {
-      expect(SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION).toBe(5);
+      expect(SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION).toBe(6);
       const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
         username: 'alice',
       });
@@ -1649,10 +1654,11 @@ describe('RoomManager', () => {
       );
     });
 
-    it('accepts the explicit v3, v4, and v5 rollout set', () => {
+    it('accepts the explicit v3, v4, v5, and v6 rollout set', () => {
       expect(parseMediaFrameCryptoVersion(3)).toBe(3);
       expect(parseMediaFrameCryptoVersion(4)).toBe(4);
       expect(parseMediaFrameCryptoVersion(5)).toBe(5);
+      expect(parseMediaFrameCryptoVersion(6)).toBe(6);
     });
 
     it('rejects v2 outside the explicit rollout set', () => {
@@ -1762,6 +1768,86 @@ describe('RoomManager', () => {
       expect(room.mediaFrameCryptoVersion).toBe(5);
       expect(room.participants.has('u2')).toBe(false);
       expect(room.e2eeEpoch).toBe(epochBefore);
+    });
+
+    it('admits v5 and v6 rooms but rejects their exact-version mismatches in both directions', async () => {
+      await manager.joinRoom(
+        'v5-room',
+        'v5-owner',
+        'v5-owner-socket',
+        { username: 'v5-owner' },
+        undefined,
+        {
+          mediaFrameCryptoVersion: 5,
+          deferChannelPromotion: true,
+        }
+      );
+      promoteChannelParticipant(manager, 'v5-room', 'v5-owner', 'v5-owner-socket', {
+        identity: { username: 'v5-owner' },
+        entitlement: { ...FREE_MEDIA_ENTITLEMENT },
+        serverMuted: false,
+        serverDeafened: false,
+      });
+      await manager.joinRoom(
+        'v5-room',
+        'v6-joiner',
+        'v6-joiner-socket',
+        { username: 'v6-joiner' },
+        undefined,
+        {
+          mediaFrameCryptoVersion: 6,
+          deferChannelPromotion: true,
+        }
+      );
+      expect(() =>
+        promoteChannelParticipant(manager, 'v5-room', 'v6-joiner', 'v6-joiner-socket', {
+          identity: { username: 'v6-joiner' },
+          entitlement: { ...FREE_MEDIA_ENTITLEMENT },
+          serverMuted: false,
+          serverDeafened: false,
+        })
+      ).toThrow(
+        expect.objectContaining({ code: 'crypto_version_mismatch', roomVersion: 5, joinVersion: 6 })
+      );
+
+      await manager.joinRoom(
+        'v6-room',
+        'v6-owner',
+        'v6-owner-socket',
+        { username: 'v6-owner' },
+        undefined,
+        {
+          mediaFrameCryptoVersion: 6,
+          deferChannelPromotion: true,
+        }
+      );
+      promoteChannelParticipant(manager, 'v6-room', 'v6-owner', 'v6-owner-socket', {
+        identity: { username: 'v6-owner' },
+        entitlement: { ...FREE_MEDIA_ENTITLEMENT },
+        serverMuted: false,
+        serverDeafened: false,
+      });
+      await manager.joinRoom(
+        'v6-room',
+        'v5-joiner',
+        'v5-joiner-socket',
+        { username: 'v5-joiner' },
+        undefined,
+        {
+          mediaFrameCryptoVersion: 5,
+          deferChannelPromotion: true,
+        }
+      );
+      expect(() =>
+        promoteChannelParticipant(manager, 'v6-room', 'v5-joiner', 'v5-joiner-socket', {
+          identity: { username: 'v5-joiner' },
+          entitlement: { ...FREE_MEDIA_ENTITLEMENT },
+          serverMuted: false,
+          serverDeafened: false,
+        })
+      ).toThrow(
+        expect.objectContaining({ code: 'crypto_version_mismatch', roomVersion: 6, joinVersion: 5 })
+      );
     });
   });
 
@@ -5794,19 +5880,30 @@ describe('RoomManager', () => {
       let leaving!: Promise<void>;
       let leaveSettled = false;
       let returnProducer!: (producer: typeof orphan) => void;
-      const nativeProduce = new Promise<typeof orphan>((resolve) => { returnProducer = resolve; });
+      const nativeProduce = new Promise<typeof orphan>((resolve) => {
+        returnProducer = resolve;
+      });
       const produceStarted = new Promise<void>((resolve) => {
         participant.sendTransport!.produce = vi.fn().mockImplementationOnce(() => {
           leaving = manager.leaveRoom('room-1', 'u-1');
-          void leaving.then(() => { leaveSettled = true; });
+          void leaving.then(() => {
+            leaveSettled = true;
+          });
           resolve();
           return nativeProduce;
         });
       });
       const producing = manager.produce(
-        'room-1', 'u-1', sendTransport.id, 'audio', createRtpParameters() as any, 'mic'
+        'room-1',
+        'u-1',
+        sendTransport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
       );
-      const refusal = expect(producing).rejects.toThrow(/Participant left during producer creation/);
+      const refusal = expect(producing).rejects.toThrow(
+        /Participant left during producer creation/
+      );
       await produceStarted;
       expect(manager.getParticipant('room-1', 'u-1')).toBeUndefined();
       expect(leaveSettled).toBe(false);
@@ -5860,7 +5957,13 @@ describe('RoomManager', () => {
       // Propagate appData exactly as mediasoup does — the closeConsumer release
       // path rebuilds the dedupe key from the server-set consumer.appData.
       transport.consume.mockImplementation((options: any) =>
-        Promise.resolve(createMockConsumer({ producerId, kind: 'audio', appData: options.appData }))
+        Promise.resolve(
+          createMockConsumer({
+            producerId: options.producerId,
+            kind: 'audio',
+            appData: options.appData,
+          })
+        )
       );
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
       await manager.createTransport('room-1', 'u-2', 'recv');
@@ -5898,15 +6001,273 @@ describe('RoomManager', () => {
     // on the main window's socket, :250 consumes the same producer, and :351-373
     // PAUSES — does not close — the main window's matching consumers. A two-part
     // key would hand PiP that paused consumer and its video would never start.
-    it('PiP: allows a second consumer for the same producer on a DIFFERENT transport', async () => {
-      const main = await addRecvTransport();
-      const pip = await addRecvTransport();
+    it('PiP: allows a copy on the main and both PiP receive transports', async () => {
+      const transports = [];
+      for (let i = 0; i < MAX_RECV_TRANSPORTS_PER_PARTICIPANT; i += 1) {
+        transports.push(await addRecvTransport());
+      }
 
-      const mainConsumer = await manager.consume('room-1', 'u-2', producerId, main.id);
-      const pipConsumer = await manager.consume('room-1', 'u-2', producerId, pip.id);
+      const consumers = [];
+      for (const transport of transports.slice(0, MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT)) {
+        consumers.push(await manager.consume('room-1', 'u-2', producerId, transport.id));
+      }
 
-      expect(pipConsumer!.id).not.toBe(mainConsumer!.id);
-      expect(manager.getParticipant('room-1', 'u-2')!.consumers.size).toBe(2);
+      expect(new Set(consumers.map((consumer) => consumer!.id)).size).toBe(
+        MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT
+      );
+      await expect(manager.consume('room-1', 'u-2', producerId, transports[3].id)).rejects.toThrow(
+        'Per-producer consumer limit reached'
+      );
+    });
+
+    it('Frames PiP: copies every active mic and camera producer', async () => {
+      const [main, pip] = [await addRecvTransport(), await addRecvTransport()];
+      const publisher = manager.getParticipant('room-1', 'u-1')!;
+      const activeProducerIds = [
+        producerId,
+        'camera-producer-1',
+        'camera-producer-2',
+        'mic-producer-2',
+      ];
+
+      for (const id of activeProducerIds.slice(1)) {
+        publisher.producers.set(id, {
+          producer: createMockProducer({
+            id,
+            kind: id.startsWith('mic') ? 'audio' : 'video',
+          }) as any,
+          source: id.startsWith('mic') ? 'mic' : 'camera',
+          kind: id.startsWith('mic') ? 'audio' : 'video',
+          policed: false,
+          createdAtMs: 0,
+        });
+      }
+
+      for (const id of activeProducerIds) {
+        await expect(manager.consume('room-1', 'u-2', id, main.id)).resolves.not.toBeNull();
+      }
+      for (const id of activeProducerIds) {
+        await expect(manager.consume('room-1', 'u-2', id, pip.id)).resolves.not.toBeNull();
+      }
+
+      expect(manager.getParticipant('room-1', 'u-2')!.consumers.size).toBe(8);
+    });
+
+    it('prevents cloning one producer across every receive transport', async () => {
+      const transports = [];
+      for (let i = 0; i < MAX_RECV_TRANSPORTS_PER_PARTICIPANT; i += 1) {
+        transports.push(await addRecvTransport());
+      }
+      for (const transport of transports.slice(0, MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT)) {
+        await manager.consume('room-1', 'u-2', producerId, transport.id);
+      }
+      await expect(manager.consume('room-1', 'u-2', producerId, transports[3].id)).rejects.toThrow(
+        'Per-producer consumer limit reached'
+      );
+      expect(transports[3].consume).not.toHaveBeenCalled();
+    });
+
+    it('reserves per-producer capacity before asynchronous consumer creation', async () => {
+      const transports = [];
+      for (let i = 0; i < MAX_RECV_TRANSPORTS_PER_PARTICIPANT; i += 1) {
+        transports.push(await addRecvTransport());
+      }
+      for (const transport of transports.slice(0, MAX_CONSUMERS_PER_PRODUCER_PER_PARTICIPANT - 1)) {
+        await manager.consume('room-1', 'u-2', producerId, transport.id);
+      }
+
+      let releaseFirst: (() => void) | undefined;
+      transports[2].consume.mockImplementationOnce(
+        (options: any) =>
+          new Promise((resolve) => {
+            releaseFirst = () =>
+              resolve(
+                createMockConsumer({
+                  producerId: options.producerId,
+                  kind: 'audio',
+                  appData: options.appData,
+                })
+              );
+          })
+      );
+      const finalAllowedCopy = manager.consume('room-1', 'u-2', producerId, transports[2].id);
+
+      await expect(manager.consume('room-1', 'u-2', producerId, transports[3].id)).rejects.toThrow(
+        'Per-producer consumer limit reached'
+      );
+      expect(transports[3].consume).not.toHaveBeenCalled();
+      releaseFirst!();
+      await expect(finalAllowedCopy).resolves.not.toBeNull();
+    });
+
+    it('enforces the absolute consumer ceiling and releases closed capacity', async () => {
+      const transport = await addRecvTransport();
+      const participant = manager.getParticipant('room-1', 'u-2')!;
+      for (let i = 0; i < MAX_CONSUMERS_PER_PARTICIPANT - 1; i += 1) {
+        const seeded = createMockConsumer({
+          id: `seeded-consumer-${i}`,
+          appData: { producerId: `seeded-producer-${i}` },
+        });
+        participant.consumers.set(seeded.id, seeded as any);
+      }
+
+      const atLimit = await manager.consume('room-1', 'u-2', producerId, transport.id);
+      expect(participant.consumers.size).toBe(MAX_CONSUMERS_PER_PARTICIPANT);
+      const repeatedAtLimit = await manager.consume('room-1', 'u-2', producerId, transport.id);
+      expect(repeatedAtLimit!.id).toBe(atLimit!.id);
+      expect(transport.consume).toHaveBeenCalledTimes(1);
+
+      const cameraProducerId = 'camera-producer';
+      manager.getParticipant('room-1', 'u-1')!.producers.set(cameraProducerId, {
+        producer: createMockProducer({ id: cameraProducerId, kind: 'video' }) as any,
+        source: 'camera',
+        kind: 'video',
+        policed: false,
+        createdAtMs: 0,
+      });
+      await expect(
+        manager.consume('room-1', 'u-2', cameraProducerId, transport.id)
+      ).rejects.toThrow(`Consumer limit reached (max ${MAX_CONSUMERS_PER_PARTICIPANT})`);
+      expect(transport.consume).toHaveBeenCalledTimes(1);
+
+      expect(manager.closeConsumer('room-1', 'u-2', atLimit!.id)).toBe(true);
+      await expect(
+        manager.consume('room-1', 'u-2', cameraProducerId, transport.id)
+      ).resolves.not.toBeNull();
+    });
+
+    it('enforces the participant-wide duplicate budget across producers', async () => {
+      const transports = [await addRecvTransport(), await addRecvTransport()];
+      const participant = manager.getParticipant('room-1', 'u-2')!;
+      for (let i = 0; i <= MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT; i += 1) {
+        const seeded = createMockConsumer({
+          id: `seeded-copy-${i}`,
+          producerId: 'seeded-producer',
+          appData: { producerId: 'seeded-producer' },
+        });
+        participant.consumers.set(seeded.id, seeded as any);
+      }
+      participant.producerCopies.set(
+        'seeded-producer',
+        MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT + 1
+      );
+
+      await expect(
+        manager.consume('room-1', 'u-2', producerId, transports[0].id)
+      ).resolves.not.toBeNull();
+      await expect(manager.consume('room-1', 'u-2', producerId, transports[1].id)).rejects.toThrow(
+        `Duplicate consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
+      );
+      expect(transports[1].consume).not.toHaveBeenCalled();
+
+      expect(manager.closeConsumer('room-1', 'u-2', 'seeded-copy-0')).toBe(true);
+      await expect(
+        manager.consume('room-1', 'u-2', producerId, transports[1].id)
+      ).resolves.not.toBeNull();
+    });
+
+    it('keeps an out-of-order pending primary in the duplicate budget', async () => {
+      const transports = [
+        await addRecvTransport(),
+        await addRecvTransport(),
+        await addRecvTransport(),
+        await addRecvTransport(),
+      ];
+      const participant = manager.getParticipant('room-1', 'u-2')!;
+      for (let i = 0; i < MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT - 1; i += 1) {
+        const seededProducerId = `seeded-producer-${i}`;
+        for (let copy = 0; copy < 2; copy += 1) {
+          const seeded = createMockConsumer({
+            id: `seeded-consumer-${i}-${copy}`,
+            producerId: seededProducerId,
+            appData: { producerId: seededProducerId },
+          });
+          participant.consumers.set(seeded.id, seeded as any);
+        }
+        participant.producerCopies.set(seededProducerId, 2);
+      }
+
+      const gateProducerId = 'gate-producer';
+      manager.getParticipant('room-1', 'u-1')!.producers.set(gateProducerId, {
+        producer: createMockProducer({ id: gateProducerId, kind: 'audio' }) as any,
+        source: 'mic',
+        kind: 'audio',
+        policed: false,
+        createdAtMs: 0,
+      });
+
+      let releaseFirst: (() => void) | undefined;
+      let releaseSecond: (() => void) | undefined;
+      transports[0].consume.mockImplementationOnce(
+        (options: any) =>
+          new Promise((resolve) => {
+            releaseFirst = () =>
+              resolve(
+                createMockConsumer({
+                  producerId: options.producerId,
+                  kind: 'audio',
+                  appData: options.appData,
+                })
+              );
+          })
+      );
+      transports[1].consume.mockImplementationOnce(
+        (options: any) =>
+          new Promise((resolve) => {
+            releaseSecond = () =>
+              resolve(
+                createMockConsumer({
+                  producerId: options.producerId,
+                  kind: 'audio',
+                  appData: options.appData,
+                })
+              );
+          })
+      );
+
+      const first = manager.consume('room-1', 'u-2', producerId, transports[0].id);
+      const second = manager.consume('room-1', 'u-2', producerId, transports[1].id);
+      expect(participant.pendingConsumeKeys.size).toBe(2);
+      expect(releaseFirst).toBeTypeOf('function');
+      expect(releaseSecond).toBeTypeOf('function');
+      releaseSecond!();
+      await expect(second).resolves.not.toBeNull();
+
+      await expect(
+        manager.consume('room-1', 'u-2', gateProducerId, transports[2].id)
+      ).resolves.not.toBeNull();
+      await expect(
+        manager.consume('room-1', 'u-2', gateProducerId, transports[3].id)
+      ).rejects.toThrow(
+        `Duplicate consumer limit reached (max ${MAX_DUPLICATE_CONSUMERS_PER_PARTICIPANT})`
+      );
+      expect(transports[3].consume).not.toHaveBeenCalled();
+
+      releaseFirst!();
+      await expect(first).resolves.not.toBeNull();
+    });
+
+    it('does not commit a consumer whose producer closed during consume', async () => {
+      const transport = await addRecvTransport();
+      const producerEntry = manager.getParticipant('room-1', 'u-1')!.producers.get(producerId)!;
+      let minted: ReturnType<typeof createMockConsumer> | undefined;
+      transport.consume.mockImplementationOnce((options: any) => {
+        (producerEntry.producer as unknown as { closed: boolean }).closed = true;
+        minted = createMockConsumer({
+          producerId: options.producerId,
+          kind: 'audio',
+          appData: options.appData,
+        });
+        return Promise.resolve(minted);
+      });
+
+      await expect(manager.consume('room-1', 'u-2', producerId, transport.id)).rejects.toThrow(
+        'Producer closed during consume'
+      );
+      expect(minted!.close).toHaveBeenCalled();
+      const participant = manager.getParticipant('room-1', 'u-2')!;
+      expect(participant.consumers.size).toBe(0);
+      expect(participant.producerCopies.size).toBe(0);
     });
 
     it('rejects a concurrent duplicate with consume_in_progress', async () => {
@@ -5933,19 +6294,59 @@ describe('RoomManager', () => {
       expect(second!.id).not.toBe(first!.id);
     });
 
-    it('releases the in-flight key when the consume fails', async () => {
+    it('releases the in-flight quota reservation when the consume fails', async () => {
       const transport = await addRecvTransport();
       transport.consume.mockRejectedValueOnce(new Error('worker error'));
 
       await expect(manager.consume('room-1', 'u-2', producerId, transport.id)).rejects.toThrow(
         'worker error'
       );
+      expect(manager.getParticipant('room-1', 'u-2')!.pendingConsumeKeys.size).toBe(0);
 
-      // A failed attempt must not seal the pair off behind consume_in_progress.
+      // A failed attempt must not retain dedupe or participant-wide quota capacity.
       await expect(
         manager.consume('room-1', 'u-2', producerId, transport.id)
-      ).resolves.toBeDefined();
+      ).resolves.not.toBeNull();
     });
+
+    it.each([false, true])(
+      'rejects a consumer returned after its receive transport closes (already closed: %s)',
+      async (alreadyClosed) => {
+        const transport = await addRecvTransport();
+        const lateConsumer = createMockConsumer({
+          producerId,
+          appData: { producerId, recvTransportId: transport.id },
+        });
+        let resolveConsumer!: (consumer: typeof lateConsumer) => void;
+        transport.consume.mockImplementationOnce(
+          () =>
+            new Promise<typeof lateConsumer>((resolve) => {
+              resolveConsumer = resolve;
+            })
+        );
+
+        const consuming = manager.consume('room-1', 'u-2', producerId, transport.id);
+        expect(transport.consume).toHaveBeenCalledOnce();
+        expect(manager.closeRecvTransport('room-1', 'u-2', transport.id)).toBe(true);
+        transport.closed = true;
+        lateConsumer.closed = alreadyClosed;
+        resolveConsumer(lateConsumer);
+
+        await expect(consuming).rejects.toThrow('Receive transport changed during consume');
+
+        const participant = manager.getParticipant('room-1', 'u-2')!;
+        expect(participant.consumers.size).toBe(0);
+        expect(participant.consumersByKey.size).toBe(0);
+        expect(participant.pendingConsumeKeys.size).toBe(0);
+        expect(lateConsumer.close).toHaveBeenCalledTimes(alreadyClosed ? 0 : 1);
+
+        const replacement = await addRecvTransport();
+        await expect(
+          manager.consume('room-1', 'u-2', producerId, replacement.id)
+        ).resolves.not.toBeNull();
+        expect(participant.consumers.size).toBe(1);
+      }
+    );
 
     describe('consumer index release paths', () => {
       it.each(['transportclose', 'producerclose', 'closeConsumer', 'closeParticipantConsumers'])(
@@ -5969,6 +6370,7 @@ describe('RoomManager', () => {
           }
 
           expect(participant.consumersByKey.size).toBe(0);
+          expect(participant.consumers.size).toBe(0);
         }
       );
     });
@@ -6010,10 +6412,17 @@ describe('RoomManager', () => {
         id: consumerId,
         kind: 'video',
         type: 'svc',
-        appData: { source: 'camera' },
+        appData: { source: 'camera', producerId: `fixture-${consumerId}` },
       });
       participant.consumers.set(consumerId, consumer as any);
       return { participant, consumer };
+    }
+
+    // VULN-158: the gate counts distinct viewers, so a fixture that needs two
+    // viewers must put its second consumer on a second participant.
+    async function cameraViewer(userId: string) {
+      await ensureParticipant(userId);
+      return manager.getParticipant('room-1', userId)!;
     }
 
     async function addCameraProducer(
@@ -6180,7 +6589,6 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', svcCodecs);
       await addCameraProducer('u-2', 'p2', svcCodecs);
       const { consumer: consumer1 } = await addCameraConsumer('u-1', 'c1');
-      const participant = manager.getParticipant('room-1', 'u-1')!;
       const consumer2 = createMockConsumer({
         id: 'c2',
         kind: 'video',
@@ -6190,12 +6598,12 @@ describe('RoomManager', () => {
       });
       (consumer1 as any).type = 'simple';
       consumer1.setPreferredLayers.mockRejectedValue(new Error('simple consumer'));
-      participant.consumers.set('c2', consumer2 as any);
+      (await cameraViewer('u-v2')).consumers.set('c2', consumer2 as any);
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6212,23 +6620,22 @@ describe('RoomManager', () => {
       manager.onEvent(handler);
       await addCameraProducer('u-1', 'p1', ['video/VP9']);
       await addCameraConsumer('u-1', 'c1');
-      const participant = manager.getParticipant('room-1', 'u-1')!;
       const consumer2 = createMockConsumer({
         id: 'c2',
         kind: 'video',
         appData: { source: 'camera' },
       });
-      participant.consumers.set('c2', consumer2 as any);
+      (await cameraViewer('u-v2')).consumers.set('c2', consumer2 as any);
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6237,12 +6644,35 @@ describe('RoomManager', () => {
       ]);
     });
 
+    // VULN-158: one client opening several camera consumers is still one viewer.
+    it('one viewer with several camera consumers does not enable the gate', async () => {
+      const handler = vi.fn();
+      manager.onEvent(handler);
+      await addCameraProducer('u-2', 'p2', ['video/VP9']);
+      await addCameraProducer('u-3', 'p3', ['video/VP9']);
+      await addCameraConsumer('u-1', 'c1');
+      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-1', 'c3');
+
+      await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
+      await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c2'));
+      await manager.setPreferredLayers(
+        'room-1',
+        'u-1',
+        validLayerDemand('c3', { cssWidth: 1920, cssHeight: 1080 })
+      );
+
+      expect(manager.getRoom('room-1')!.cameraLayerDemands.size).toBe(3);
+      expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(false);
+      expect(gateEvents(handler)).toEqual([]);
+    });
+
     it('keeps the simulcast threshold when a capability update removes the common codec', async () => {
       const handler = vi.fn();
       manager.onEvent(handler);
       await addCameraProducer('u-1', 'camera-1', ['video/VP8']);
-      const { participant } = await addCameraConsumer('u-2', 'c1', ['video/VP8']);
-      participant.consumers.set(
+      await addCameraConsumer('u-2', 'c1', ['video/VP8']);
+      (await cameraViewer('u-v2')).consumers.set(
         'c2',
         createMockConsumer({ id: 'c2', kind: 'video', appData: { source: 'camera' } }) as any
       );
@@ -6251,7 +6681,7 @@ describe('RoomManager', () => {
         'u-2',
         validLayerDemand('c1', { cssWidth: 320, cssHeight: 180 })
       );
-      await manager.setPreferredLayers('room-1', 'u-2', validLayerDemand('c2'));
+      await manager.setPreferredLayers('room-1', 'u-v2', validLayerDemand('c2'));
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(false);
 
       manager.updateRtpCapabilities('room-1', 'u-2', createRtpCapabilities(['video/VP9']) as any);
@@ -6264,15 +6694,15 @@ describe('RoomManager', () => {
       const handler = vi.fn();
       manager.onEvent(handler);
       await addCameraProducer('u-1', 'p1', ['video/VP9'], 'video/VP8');
-      const { participant } = await addCameraConsumer('u-1', 'c1');
-      participant.consumers.set(
+      await addCameraConsumer('u-1', 'c1');
+      (await cameraViewer('u-v2')).consumers.set(
         'c2',
         createMockConsumer({ id: 'c2', kind: 'video', appData: { source: 'camera' } }) as any
       );
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(false);
@@ -6290,11 +6720,11 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', ['video/VP9']);
       await addCameraProducer('u-2', 'p2', ['video/VP9']);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(true);
@@ -6315,20 +6745,20 @@ describe('RoomManager', () => {
         await addCameraProducer('u-1', 'p1', ['video/VP9']);
         await addCameraConsumer('u-1', 'c1');
         const participant = manager.getParticipant('room-1', 'u-1')!;
-        participant.consumers.set(
+        (await cameraViewer('u-v2')).consumers.set(
           'c2',
           createMockConsumer({ id: 'c2', kind: 'video', appData: { source: 'camera' } }) as any
         );
         await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
         await manager.setPreferredLayers(
           'room-1',
-          'u-1',
+          'u-v2',
           validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
         );
 
         expect(manager.closeConsumer('room-1', 'u-1', 'c1')).toBe(true);
         expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(true);
-        expect(manager.closeConsumer('room-1', 'u-1', 'c2')).toBe(true);
+        expect(manager.closeConsumer('room-1', 'u-v2', 'c2')).toBe(true);
 
         // Re-consuming during producer replacement restores live demand before
         // the pending OFF; the room gate must not flap and trigger another publish.
@@ -6363,20 +6793,19 @@ describe('RoomManager', () => {
         manager.onEvent(handler);
         await addCameraProducer('u-1', 'p1', ['video/VP9']);
         await addCameraConsumer('u-1', 'c1');
-        const participant = manager.getParticipant('room-1', 'u-1')!;
-        participant.consumers.set(
+        (await cameraViewer('u-v2')).consumers.set(
           'c2',
           createMockConsumer({ id: 'c2', kind: 'video', appData: { source: 'camera' } }) as any
         );
         await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
         await manager.setPreferredLayers(
           'room-1',
-          'u-1',
+          'u-v2',
           validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
         );
         const staleRoom = manager.getRoom('room-1')!;
         expect(manager.closeConsumer('room-1', 'u-1', 'c1')).toBe(true);
-        expect(manager.closeConsumer('room-1', 'u-1', 'c2')).toBe(true);
+        expect(manager.closeConsumer('room-1', 'u-v2', 'c2')).toBe(true);
         expect(staleRoom.cameraGateOffTimer).toBeDefined();
 
         mockRouter.closed = true;
@@ -6400,6 +6829,407 @@ describe('RoomManager', () => {
       }
     });
 
+    // VULN-158: a member may move the room camera gate at most twice per 30 s.
+    // The charge goes to the member whose change moved the computed value
+    // (spec ruling 9), never to whichever recompute happens to apply it.
+    describe('camera gate flip budget (VULN-158)', () => {
+      let handler: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        vi.useFakeTimers();
+        handler = vi.fn();
+        manager.onEvent(handler);
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      const room = () => manager.getRoom('room-1')!;
+      const enabled = () => gateEvents(handler).map((event) => event.enabled);
+      const flipKeys = () => [...(room().cameraGateBudget?.flips.keys() ?? [])];
+      const flipsOf = (userId: string) => room().cameraGateBudget?.flips.get(userId);
+      const on = (userId: string, consumerId: string) =>
+        manager.setPreferredLayers('room-1', userId, validLayerDemand(consumerId));
+      const hide = (userId: string, consumerId: string) =>
+        manager.setPreferredLayers(
+          'room-1',
+          userId,
+          validLayerDemand(consumerId, { visible: false })
+        );
+      const showTop = (userId: string, consumerId: string) =>
+        manager.setPreferredLayers(
+          'room-1',
+          userId,
+          validLayerDemand(consumerId, { cssWidth: 1920, cssHeight: 1080 })
+        );
+      // From u-a's third request until its first flip leaves the window.
+      const deferredWait = CAMERA_GATE_MEMBER_FLIP_WINDOW_MS - CAMERA_GATE_OFF_DEBOUNCE_MS;
+
+      // u-b is a visible top-layer viewer above the free spatial cap: it counts
+      // toward the viewer threshold but brings no layer benefit, so u-a's demand
+      // alone moves the gate.
+      async function setupRoom() {
+        await addCameraProducer('u-1', 'p1', ['video/VP9']);
+        await addCameraProducer('u-2', 'p2', ['video/VP9']);
+        await addCameraConsumer('u-a', 'c-a');
+        const { participant: viewerB } = await addCameraConsumer('u-b', 'c-b');
+        viewerB.maxManualBitrateBps = Number.MAX_SAFE_INTEGER;
+        await addCameraConsumer('u-c', 'c-c');
+        await showTop('u-b', 'c-b');
+      }
+
+      // u-a spends both flips (ON, then OFF after the debounce) and asks for ON again.
+      async function deferThirdFlip() {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        expect(enabled()).toEqual([true, false]);
+        await on('u-a', 'c-a');
+      }
+
+      // Consumers created through the real consume() path, so the real
+      // 'producerclose' listener runs and appData is the one consume() sets.
+      async function consumeCamera(userId: string, consumerId: string, producerId: string) {
+        const viewer = await cameraViewer(userId);
+        viewer.rtpCapabilities ??= createRtpCapabilities(['video/VP9']) as any;
+        const transport = createMockTransport();
+        mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
+        await manager.createTransport('room-1', userId, 'recv');
+        transport.consume.mockImplementationOnce(async (options: { appData: unknown }) =>
+          createMockConsumer({
+            id: consumerId,
+            producerId,
+            kind: 'video',
+            type: 'svc',
+            appData: options.appData,
+          })
+        );
+        await manager.consume('room-1', userId, producerId, transport.id);
+        return viewer.consumers.get(consumerId) as unknown as { _emit: (event: string) => void };
+      }
+
+      // Publisher u-1 closes `producerId`; the SFU then closes each viewer's consumer.
+      async function closeCamera(
+        producerId: string,
+        ...consumers: { _emit: (event: string) => void }[]
+      ) {
+        await manager.closeProducer('room-1', 'u-1', producerId);
+        for (const consumer of consumers) consumer._emit('producerclose');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+      }
+
+      // regression for the camera-arrival attribution finding
+      it("charges a publisher's camera toggles to the publisher, never to its viewers", async () => {
+        await setupRoom();
+        // Viewers u-a and u-c watch u-1's camera p1 at a low layer.
+        let ca = await consumeCamera('u-a', 'ca1', 'p1');
+        let cc = await consumeCamera('u-c', 'cc1', 'p1');
+        await on('u-a', 'ca1');
+        await on('u-c', 'cc1');
+        expect(enabled()).toEqual([true]);
+
+        await closeCamera('p1', ca, cc);
+        // u-1 re-produces; the viewers' clients consume it and resend demand.
+        await addCameraProducer('u-1', 'p1b', ['video/VP9']);
+        cc = await consumeCamera('u-c', 'cc2', 'p1b');
+        ca = await consumeCamera('u-a', 'ca2', 'p1b');
+        await on('u-c', 'cc2');
+        await on('u-a', 'ca2');
+        await closeCamera('p1b', cc, ca);
+
+        // The camera's arrival and its close spent u-1's two flips. The ON after
+        // the re-produce waited on u-1's budget, so the gate moved twice, not four times.
+        expect(enabled()).toEqual([true, false]);
+        expect(flipKeys()).toEqual(['u-1']);
+        expect(flipsOf('u-1')).toHaveLength(2);
+        // A viewer's own change still applies at once on its untouched budget.
+        await on('u-a', 'c-a');
+        expect(room().cameraGateBudget?.deferTimer).toBeUndefined();
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipsOf('u-a')).toHaveLength(1);
+      });
+
+      // regression for the camera-arrival attribution finding
+      it("defers the ON after a publisher's re-produce on the publisher's budget, not a viewer's", async () => {
+        await setupRoom();
+        const ca = await consumeCamera('u-a', 'ca1', 'p1');
+        const cc = await consumeCamera('u-c', 'cc1', 'p1');
+        await on('u-a', 'ca1');
+        await on('u-c', 'cc1');
+        await closeCamera('p1', cc, ca);
+        // The producerclose removals are charged to u-1, not to the demands' owners.
+        expect(enabled()).toEqual([true, false]);
+        expect(flipKeys()).toEqual(['u-1']);
+
+        await addCameraProducer('u-1', 'p1b', ['video/VP9']);
+        await consumeCamera('u-c', 'cc2', 'p1b');
+        await consumeCamera('u-a', 'ca2', 'p1b');
+        await on('u-c', 'cc2');
+        await on('u-a', 'ca2');
+        // u-1's third transition inside the window waits on u-1's own budget.
+        expect(room().cameraGateBudget?.deferTimer).toBeDefined();
+        expect(enabled()).toEqual([true, false]);
+        expect(flipsOf('u-c')).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(deferredWait);
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipKeys()).toEqual(['u-1']);
+        expect(flipsOf('u-1')).toHaveLength(2);
+      });
+
+      // regression for the camera-arrival attribution finding: the arrival rule must not
+      // let a viewer spend a publisher's budget more than once per camera.
+      it("charges a camera's arrival to its publisher once, then the viewer's changes to the viewer", async () => {
+        await setupRoom();
+        await consumeCamera('u-a', 'ca1', 'p1');
+        await on('u-a', 'ca1');
+        await hide('u-a', 'ca1');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        await on('u-a', 'ca1');
+
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipsOf('u-1')).toHaveLength(1);
+        expect(flipsOf('u-a')).toHaveLength(2);
+      });
+
+      // regression for the camera-arrival attribution finding
+      it("counts a camera's own produce as its arrival, so no later demand charges the publisher again", async () => {
+        // No camera yet, so u-a's low demand beside u-b's top demand cannot arm the gate.
+        await addCameraConsumer('u-a', 'c-a');
+        const { participant: viewerB } = await addCameraConsumer('u-b', 'c-b');
+        viewerB.maxManualBitrateBps = Number.MAX_SAFE_INTEGER;
+        await showTop('u-b', 'c-b');
+        await on('u-a', 'c-a');
+        expect(enabled()).toEqual([]);
+
+        // u-1's real produce moves the gate ON and pays for it.
+        await ensureParticipant('u-1', ['video/VP9']);
+        const send = createMockTransport();
+        mockRouter.createWebRtcTransport.mockResolvedValueOnce(send);
+        await manager.createTransport('room-1', 'u-1', 'send');
+        const vp9 = { mimeType: 'video/VP9', payloadType: 98, clockRate: 90000 };
+        send.produce.mockResolvedValueOnce(
+          createMockProducer({
+            id: 'p-live',
+            kind: 'video',
+            rtpParameters: { codecs: [vp9], encodings: [{}] },
+          })
+        );
+        const rtp = { ...createVideoRtpParameters(), codecs: [vp9] };
+        await manager.produce('room-1', 'u-1', send.id, 'video', rtp as any, 'camera');
+        expect(enabled()).toEqual([true]);
+        expect(flipKeys()).toEqual(['u-1']);
+
+        // u-a hides (its own OFF); u-c then watches u-1's camera, and that ON is u-c's.
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        await consumeCamera('u-c', 'cc1', 'p-live');
+        await on('u-c', 'cc1');
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipsOf('u-1')).toHaveLength(1);
+        expect(flipsOf('u-c')).toHaveLength(1);
+      });
+
+      it("defers one viewer's third flip inside 30 s and applies it when the window frees", async () => {
+        await deferThirdFlip();
+        expect(room().cameraLayeringGateEnabled).toBe(false);
+        expect(enabled()).toEqual([true, false]);
+
+        await vi.advanceTimersByTimeAsync(deferredWait - 1);
+        expect(enabled()).toEqual([true, false]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(enabled()).toEqual([true, false, true]);
+        expect(room().cameraLayeringGateEnabled).toBe(true);
+        // The defer timer applied it, and the deferred member paid for it.
+        expect(flipKeys()).toEqual(['u-a']);
+        expect(flipsOf('u-a')).toHaveLength(2);
+      });
+
+      it("another member's recompute that does not move the value neither applies nor is charged", async () => {
+        await deferThirdFlip();
+        await hide('u-c', 'c-c');
+        expect(room().cameraLayeringGateEnabled).toBe(false);
+        expect(enabled()).toEqual([true, false]);
+        expect(flipKeys()).toEqual(['u-a']);
+
+        await vi.advanceTimersByTimeAsync(deferredWait);
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipKeys()).toEqual(['u-a']);
+      });
+
+      it("another member's change that moves the value back cancels the pending flip with no charge", async () => {
+        await deferThirdFlip();
+        await hide('u-b', 'c-b');
+        expect(room().cameraGateBudget?.deferTimer).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        expect(enabled()).toEqual([true, false]);
+        expect(room().cameraLayeringGateEnabled).toBe(false);
+        expect(flipKeys()).toEqual(['u-a']);
+        expect(flipsOf('u-a')).toHaveLength(2);
+      });
+
+      it("another member's flip is immediate when nothing is pending", async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        expect(enabled()).toEqual([true, false]);
+
+        await on('u-c', 'c-c');
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipsOf('u-c')).toHaveLength(1);
+      });
+
+      it('the budget survives leave and rejoin', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        await manager.leaveRoom('room-1', 'u-a');
+        await addCameraConsumer('u-a', 'c-a2');
+
+        await on('u-a', 'c-a2');
+        expect(enabled()).toEqual([true, false]);
+        expect(flipsOf('u-a')).toHaveLength(2);
+        expect(room().cameraGateBudget?.deferTimer).toBeDefined();
+      });
+
+      it('charges a demand removal to its owner', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        expect(manager.closeConsumer('room-1', 'u-a', 'c-a')).toBe(true);
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+
+        expect(enabled()).toEqual([true, false]);
+        expect(flipKeys()).toEqual(['u-a']);
+        expect(flipsOf('u-a')).toHaveLength(2);
+      });
+
+      // A live camera producer's codec overrides receive claims, and with no
+      // camera producer the gate is OFF, so no capability update moves the value
+      // today. The pin is the attribution the recompute receives.
+      it('charges a codec-kind change via updateRtpCapabilities to its caller', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        const recompute = vi.spyOn(
+          manager as unknown as {
+            recomputeCameraLayeringGate: (room: Room, causeUserId?: string) => void;
+          },
+          'recomputeCameraLayeringGate'
+        );
+
+        manager.updateRtpCapabilities('room-1', 'u-c', createRtpCapabilities(['video/VP8']) as any);
+
+        expect(recompute).toHaveBeenCalledWith(room(), 'u-c');
+      });
+
+      it('does not charge a change absorbed by the OFF debounce, nor the timers', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS - 1);
+        await on('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+
+        expect(enabled()).toEqual([true]);
+        expect(flipKeys()).toEqual(['u-a']);
+        expect(flipsOf('u-a')).toHaveLength(1);
+      });
+
+      it('room close clears the defer timer and the budget when a stale room is replaced', async () => {
+        await deferThirdFlip();
+        const stale = room();
+        expect(stale.cameraGateBudget?.deferTimer).toBeDefined();
+
+        mockRouter.closed = true;
+        mockMediasoup.getOrCreateRouter.mockResolvedValueOnce(createMockRouter());
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-z', 'sock-z', { username: 'z' });
+
+        expect(room()).not.toBe(stale);
+        expect(stale.cameraGateBudget).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        expect(enabled()).toEqual([true, false]);
+      });
+
+      it('room close clears the defer timer and the budget when the last member leaves', async () => {
+        await setupRoom();
+        await on('u-a', 'c-a');
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        await hide('u-b', 'c-b');
+        await on('u-a', 'c-a');
+        await showTop('u-b', 'c-b');
+        expect(enabled()).toEqual([true, false, true]);
+        // u-a, over budget, is the member whose change turns the gate OFF.
+        await hide('u-a', 'c-a');
+        const stale = room();
+        expect(stale.cameraGateBudget?.deferTimer).toBeDefined();
+
+        for (const userId of ['u-c', 'u-1', 'u-2', 'u-b', 'u-a']) {
+          await manager.leaveRoom('room-1', userId);
+        }
+
+        expect(manager.getRoom('room-1')).toBeUndefined();
+        expect(stale.cameraGateBudget).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        expect(enabled()).toEqual([true, false, true]);
+      });
+
+      it('a stale defer timer does not touch a recreated room with the same id', async () => {
+        await deferThirdFlip();
+        const stale = room();
+        // Drop the room without its teardown, so only the timer's own room check stands.
+        (manager as unknown as { rooms: Map<string, Room> }).rooms.delete('room-1');
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-z', 'sock-z', { username: 'z' });
+        const fresh = room();
+        expect(fresh).not.toBe(stale);
+
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        expect(enabled()).toEqual([true, false]);
+        expect(fresh.cameraLayeringGateEnabled).toBe(false);
+        expect(stale.cameraLayeringGateEnabled).toBe(false);
+      });
+
+      it('keeps the setPreferredLayers ack and applies consumer layers while deferred', async () => {
+        await setupRoom();
+        const consumer = manager
+          .getParticipant('room-1', 'u-a')!
+          .consumers.get('c-a') as unknown as {
+          setPreferredLayers: ReturnType<typeof vi.fn>;
+        };
+        const firstAck = await on('u-a', 'c-a');
+        const firstLayers = consumer.setPreferredLayers.mock.calls.at(-1);
+        expect(firstLayers).toBeDefined();
+        await hide('u-a', 'c-a');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        const callsBefore = consumer.setPreferredLayers.mock.calls.length;
+
+        const deferredAck = await on('u-a', 'c-a');
+
+        expect(room().cameraGateBudget?.deferTimer).toBeDefined();
+        expect(deferredAck).toEqual(firstAck);
+        expect(consumer.setPreferredLayers).toHaveBeenCalledTimes(callsBefore + 1);
+        expect(consumer.setPreferredLayers.mock.calls.at(-1)).toEqual(firstLayers);
+      });
+
+      it('a user with no flip inside the window has no map key after the next charge', async () => {
+        await setupRoom();
+        await on('u-c', 'c-c');
+        await hide('u-c', 'c-c');
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_OFF_DEBOUNCE_MS);
+        expect(flipKeys()).toEqual(['u-c']);
+
+        await vi.advanceTimersByTimeAsync(CAMERA_GATE_MEMBER_FLIP_WINDOW_MS);
+        await on('u-a', 'c-a');
+
+        expect(enabled()).toEqual([true, false, true]);
+        expect(flipKeys()).toEqual(['u-a']);
+      });
+    });
+
     it('keeps fallback simulcast gate disabled with only two camera producers', async () => {
       const handler = vi.fn();
       manager.onEvent(handler);
@@ -6407,12 +7237,12 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', fallbackCodecs);
       await addCameraProducer('u-2', 'p2', fallbackCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6431,11 +7261,11 @@ describe('RoomManager', () => {
       await addCameraProducer('u-2', 'p2', fallbackCodecs);
       await addCameraProducer('u-3', 'p3', fallbackCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(true);
@@ -6529,11 +7359,11 @@ describe('RoomManager', () => {
       await addCameraProducer('u-2', 'p2', fallbackCodecs);
       await addCameraProducer('u-3', 'p3', fallbackCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
       expect(manager.getRoom('room-1')!.cameraLayeringGateEnabled).toBe(true);
@@ -6624,12 +7454,12 @@ describe('RoomManager', () => {
       await addCameraProducer('u-2', 'p2', fallbackCodecs);
       await addCameraProducer('u-3', 'p3', fallbackCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6649,11 +7479,11 @@ describe('RoomManager', () => {
         await addCameraProducer('u-2', 'p2', fallbackCodecs);
         await addCameraProducer('u-3', 'p3', fallbackCodecs);
         await addCameraConsumer('u-1', 'c1');
-        await addCameraConsumer('u-1', 'c2');
+        await addCameraConsumer('u-v2', 'c2');
         await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
         await manager.setPreferredLayers(
           'room-1',
-          'u-1',
+          'u-v2',
           validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
         );
 
@@ -6683,12 +7513,12 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', svcCodecs);
       await addCameraProducer('u-2', 'p2', svcCodecs);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 
@@ -6702,12 +7532,12 @@ describe('RoomManager', () => {
       await addCameraProducer('u-1', 'p1', ['video/VP9'], 'video/VP8');
       await addCameraProducer('u-2', 'p2', ['video/VP9']);
       await addCameraConsumer('u-1', 'c1');
-      await addCameraConsumer('u-1', 'c2');
+      await addCameraConsumer('u-v2', 'c2');
 
       await manager.setPreferredLayers('room-1', 'u-1', validLayerDemand('c1'));
       await manager.setPreferredLayers(
         'room-1',
-        'u-1',
+        'u-v2',
         validLayerDemand('c2', { cssWidth: 1920, cssHeight: 1080 })
       );
 

@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
 // uniqueAdminUsername returns a per-call unique handle. The admin_* tables are
@@ -54,6 +54,8 @@ func TestAdminRepo_CreatePending(t *testing.T) {
 		assert.Equal(t, username, u.Username)
 		assert.Equal(t, admin.StatusPending, u.Status)
 		assert.False(t, u.CreatedAt.IsZero())
+		_, err = db.ExecContext(ctx, `UPDATE admin_users SET session_generation = 0 WHERE id = $1`, u.ID)
+		require.ErrorContains(t, err, "admin_users_session_generation_positive")
 	})
 
 	t.Run("rejects a duplicate username", func(t *testing.T) {
@@ -356,4 +358,30 @@ func TestMigration000197Down_RefusesAfterReset(t *testing.T) {
 	_, err = tx.ExecContext(ctx, string(down))
 	require.Error(t, err, "down must refuse after a reset revoked sessions")
 	assert.Contains(t, err.Error(), "cannot roll back 000197")
+}
+
+func TestMigration000199Up_RefusesExistingZero(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	var validated bool
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT convalidated FROM pg_constraint
+		WHERE conrelid = 'admin_users'::regclass AND conname = 'admin_users_session_generation_positive'`).Scan(&validated))
+	assert.True(t, validated, "000200 must validate the positive-generation check")
+	created, err := admin.NewAdminRepo(db).CreatePending(ctx, uniqueAdminUsername("zero-guard"), "test-hash")
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, created.ID)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, "ALTER TABLE admin_users DROP CONSTRAINT admin_users_session_generation_positive")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, "UPDATE admin_users SET session_generation = 0 WHERE id = $1", created.ID)
+	require.NoError(t, err)
+
+	up, err := os.ReadFile("../../migrations/000199_add_positive_admin_session_generation_check.up.sql")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, string(up))
+	require.ErrorContains(t, err, "cannot install positive admin session generation check while a nonpositive row exists")
 }

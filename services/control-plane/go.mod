@@ -1,4 +1,4 @@
-module github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane
+module github.com/Concord-Voice/Self-Hosted/services/control-plane
 
 go 1.27.4
 
@@ -12,7 +12,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/golang-migrate/migrate/v4 v4.20.2-0.20261116072128-a746b101346e
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.3
+	github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.12.3
 	github.com/minio/minio-go/v7 v7.4.1

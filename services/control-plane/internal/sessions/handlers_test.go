@@ -8,11 +8,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/sessions"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/sessions"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -303,7 +303,7 @@ func TestRevokeAllSessionsExceptCurrent_WithoutSessionIdentityFailsSafely(t *tes
 	assert.Empty(t, w.Result().Cookies(), "rejected admission must not clear a refresh cookie")
 
 	assertSessionFamilyLive(t, ts, claims.UserID, claims.SessionID)
-	assertSessionCounts(t, ts, claims.UserID, 1, 0)
+	assertSessionState(t, ts, claims.UserID, 1, false)
 	var active int
 	require.NoError(t, ts.DB.QueryRow(
 		`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, claims.UserID,
@@ -338,7 +338,7 @@ func TestRevokeAllSessions_EpochAdvanceAfterAuthenticationReturnsUnauthorized(t 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	require.True(t, admitted, "real family must pass AuthRequired before epoch advance")
 	assertSessionFamilyLive(t, ts, claims.UserID, claims.SessionID)
-	assertSessionCounts(t, ts, claims.UserID, 1, 0)
+	assertSessionState(t, ts, claims.UserID, 1, false)
 	var operations int
 	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM login_family_revocations WHERE user_id=$1`, claims.UserID).Scan(&operations))
 	assert.Zero(t, operations)

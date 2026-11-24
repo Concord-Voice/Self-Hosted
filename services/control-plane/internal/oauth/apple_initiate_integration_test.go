@@ -18,8 +18,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/oauth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/oauth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
 // newDualProviderInitiateRig wires Initiate with BOTH providers registered so
@@ -85,28 +85,50 @@ func getInitiateWithBinding(r *gin.Engine, provider, challenge, binding string) 
 	return w
 }
 
-func TestInitiateGlobalLimitRejectsBeforeStateAllocationAndSeparatesProviders(t *testing.T) {
+func TestInitiatePerCallerLimitDoesNotBlockOtherClients(t *testing.T) {
 	r, rdb, putter := newDualProviderInitiateRig(t)
+	require.NoError(t, r.SetTrustedProxies([]string{"127.0.0.1/32"}))
 	ctx := context.Background()
-	invalid := getInitiateWithBinding(r, "google", strings.Repeat("a", 43), "")
+	challenge := strings.Repeat("a", 43)
+	request := func(provider, remoteAddr, forwardedFor, binding string) *httptest.ResponseRecorder {
+		target := "/api/v1/auth/sso/" + provider + "?redirect_uri=" + url.QueryEscape(initiateRedirect) + "&code_challenge=" + challenge
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("X-Concord-SSO-Client-Binding", binding)
+		if forwardedFor != "" {
+			req.Header.Set("X-Forwarded-For", forwardedFor)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	invalid := request("google", "192.0.2.10:1234", "", "")
 	require.Equal(t, http.StatusBadRequest, invalid.Code)
-	noBudget, err := rdb.Exists(ctx, "ratelimit:sso:initiate:google").Result()
+	keys, err := rdb.Keys(ctx, "ratelimit:sso:initiate:*").Result()
 	require.NoError(t, err)
-	require.Zero(t, noBudget, "invalid client binding must not spend the provider budget")
-	require.NoError(t, rdb.Set(ctx, "ratelimit:sso:initiate:apple", "600", time.Minute).Err())
-	blocked := getInitiate(r, "apple", strings.Repeat("a", 43))
+	require.Empty(t, keys, "invalid binding must not spend an initiation budget")
+
+	firstCallerKey := "ratelimit:sso:initiate:google:192.0.2.10"
+	require.NoError(t, rdb.Set(ctx, firstCallerKey, "600", time.Minute).Err())
+	blocked := request("google", "192.0.2.10:1234", "198.51.100.20", testSSOClientBinding)
 	require.Equal(t, http.StatusTooManyRequests, blocked.Code, blocked.Body.String())
 	require.Contains(t, blocked.Body.String(), "rate_limited")
-	keys, err := rdb.Keys(ctx, "sso_state:*").Result()
+	states, err := rdb.Keys(ctx, "sso_state:*").Result()
 	require.NoError(t, err)
-	require.Empty(t, keys)
+	require.Empty(t, states)
 	require.Empty(t, putter.calls)
 
-	allowed := getInitiate(r, "google", strings.Repeat("a", 43))
+	// A stale provider-wide key must not let one caller deny service to another.
+	require.NoError(t, rdb.Set(ctx, "ratelimit:sso:initiate:google", "600", time.Minute).Err())
+	allowed := request("google", "198.51.100.20:1234", "", testSSOClientBinding)
 	require.Equal(t, http.StatusOK, allowed.Code, allowed.Body.String())
-	count, err := rdb.Get(ctx, "ratelimit:sso:initiate:google").Int64()
+	count, err := rdb.Get(ctx, "ratelimit:sso:initiate:google:198.51.100.20").Int64()
 	require.NoError(t, err)
 	require.Equal(t, int64(1), count)
+	otherProvider := request("apple", "192.0.2.10:1234", "", testSSOClientBinding)
+	require.Equal(t, http.StatusOK, otherProvider.Code, otherProvider.Body.String())
+	require.Len(t, putter.calls, 1)
 }
 
 type rejectInitiateCounterHook struct{}
@@ -127,7 +149,7 @@ func (rejectInitiateCounterHook) ProcessHook(next redis.ProcessHook) redis.Proce
 	}
 }
 
-func TestInitiateGlobalLimitFailsClosedOnRedisError(t *testing.T) {
+func TestInitiatePerCallerLimitFailsClosedOnRedisError(t *testing.T) {
 	r, rdb, putter := newDualProviderInitiateRig(t)
 	rdb.AddHook(rejectInitiateCounterHook{})
 	response := getInitiate(r, "apple", strings.Repeat("a", 43))

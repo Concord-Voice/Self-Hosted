@@ -16,21 +16,21 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/ingressbudget"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/roomplacement"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/erasureclear"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/ingressbudget"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/roomplacement"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
@@ -209,8 +209,7 @@ func (s *NATSSubscriber) withServerVoiceTerminalTransaction(
 	serverID string,
 	channelID, userID uuid.UUID,
 	respectGrace bool,
-	requalify func(context.Context, *sql.Tx) (bool, error),
-	deleteParticipant func(context.Context, *sql.Tx) (bool, error),
+	requalify, deleteParticipant func(context.Context, *sql.Tx) (bool, error),
 ) (result serverVoiceTerminalResult, returnErr error) {
 	preflightTemporary, preflightPermanent, err := s.preflightServerVoiceTerminalGrant(
 		ctx, channelID, userID, respectGrace,
@@ -1482,8 +1481,7 @@ func buildPrivateVoiceOldScopeRevision(
 	conversationID uuid.UUID,
 	participantIDs []uuid.UUID,
 	callID uuid.UUID,
-	recheckViewers map[uuid.UUID]bool,
-	seenParticipants map[uuid.UUID]bool,
+	recheckViewers, seenParticipants map[uuid.UUID]bool,
 ) (privateVoiceOldScopeRevision, []uuid.UUID, error) {
 	if conversationID == uuid.Nil || callID == uuid.Nil {
 		return privateVoiceOldScopeRevision{}, nil, errors.New(
@@ -7694,8 +7692,7 @@ func (s *NATSSubscriber) runDMHeartbeatBulkRefresh(
 			mutation: func(
 				mutationCtx context.Context,
 				tx *sql.Tx,
-				accepted []uuid.UUID,
-				removed []uuid.UUID,
+				accepted, removed []uuid.UUID,
 			) (applied bool, returnErr error) {
 				result.removedParticipantIDs = append(
 					result.removedParticipantIDs[:0], removed...,

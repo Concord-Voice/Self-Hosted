@@ -14,21 +14,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/expiration"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/e2eekeys"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/expiration"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/requestid"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/e2eekeys"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -3588,21 +3588,12 @@ func (h *Handler) dmPendingConversationAvailable(ctx context.Context, conversati
 		if err != nil {
 			return false, err
 		}
-		available := false
-		err = func() error {
-			if _, err := dmblock.PrepareConversationTx(ctx, tx, conversationID, []uuid.UUID{caller}, dmblock.LockShare, dmblock.LockShare); err != nil {
-				return err
-			}
-			var participant string
-			if err := tx.QueryRowContext(ctx, `SELECT user_id FROM dm_participants WHERE conversation_id = $1 AND user_id = $2 FOR SHARE`, conversationID, userID).Scan(&participant); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return nil
-				}
-				return err
-			}
-			available = true
-			return tx.Commit()
-		}()
+		available, err := readDMPendingParticipantTx(ctx, tx, conversationID, userID, caller)
+		if err == nil && available {
+			// A commit failure keeps available=true, and the Rollback below
+			// tolerates the finished transaction.
+			err = tx.Commit()
+		}
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			h.log.Error("Failed to rollback DM pending-read transaction", "error", rbErr)
 		}
@@ -3615,6 +3606,24 @@ func (h *Handler) dmPendingConversationAvailable(ctx context.Context, conversati
 		return available, err
 	}
 	return false, dmblock.ErrMembershipChanged
+}
+
+// readDMPendingParticipantTx is one attempt's read inside the transaction its
+// caller opened, commits and rolls back. It prepares the conversation under
+// share locks, then reads the caller's participant row FOR SHARE. A missing
+// row is (false, nil); a present row is (true, nil).
+func readDMPendingParticipantTx(ctx context.Context, tx *sql.Tx, conversationID, userID string, caller uuid.UUID) (bool, error) {
+	if _, err := dmblock.PrepareConversationTx(ctx, tx, conversationID, []uuid.UUID{caller}, dmblock.LockShare, dmblock.LockShare); err != nil {
+		return false, err
+	}
+	var participant string
+	if err := tx.QueryRowContext(ctx, `SELECT user_id FROM dm_participants WHERE conversation_id = $1 AND user_id = $2 FOR SHARE`, conversationID, userID).Scan(&participant); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // GetUnifiedKeys resolves a context_id to either a server channel or DM conversation
@@ -4649,7 +4658,7 @@ func (h *Handler) distributeDMKeys(ctx context.Context, actorID, tokenEpoch, con
 			}
 			return 0, fmt.Errorf("commit dm distribution tx: %w", err)
 		}
-		h.notifyDMKeyDistribution(conversationID, outcome.delivered, outcome.alreadyHeld)
+		h.notifyDMKeyDistribution(conversationID, outcome.delivered)
 		return len(outcome.delivered), nil
 	}
 	return 0, fmt.Errorf("retry dm distribution topology: %w", dmblock.ErrMembershipChanged)
@@ -4662,9 +4671,6 @@ type dmDistributionOutcome struct {
 	keyVersion      int
 	previousVersion int
 	delivered       []string
-	// alreadyHeld lists recipients that already held keyVersion; their
-	// pending requests are deleted after commit.
-	alreadyHeld []string
 }
 
 // dmDistributionBatch is one caller's distribution request: who is posting
@@ -4774,11 +4780,38 @@ func distributeDMKeysTx(ctx context.Context, tx *sql.Tx, batch dmDistributionBat
 		return dmDistributionOutcome{}, err
 	}
 	outcome.delivered = delivered
-	outcome.alreadyHeld = alreadyHeld
 	if err := recordDMSuccessorRevocationTx(ctx, tx, batch, previousVersion, keyVersion, stale); err != nil {
 		return dmDistributionOutcome{}, err
 	}
+	fulfilled := append(slices.Clone(delivered), alreadyHeld...)
+	if err := deleteFulfilledDMKeyRequestsTx(ctx, tx, conversationID, keyVersion, fulfilled); err != nil {
+		return dmDistributionOutcome{}, err
+	}
 	return outcome, nil
+}
+
+// Pending rows are per recipient rather than per epoch. Clear one only while
+// its recipient still holds the delivered epoch; the key-row lock serializes
+// cleanup with an account reset that removes that key.
+func deleteFulfilledDMKeyRequestsTx(ctx context.Context, tx *sql.Tx, conversationID string, keyVersion int, userIDs []string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM dm_pending_key_requests pending
+		WHERE pending.conversation_id = $1
+		  AND pending.user_id = ANY($2::uuid[])
+		  AND EXISTS (
+			SELECT 1 FROM dm_channel_keys key
+			WHERE key.conversation_id = pending.conversation_id
+			  AND key.user_id = pending.user_id
+			  AND key.key_version = $3
+			FOR SHARE
+		  )
+	`, conversationID, pq.Array(userIDs), keyVersion); err != nil {
+		return fmt.Errorf("clear fulfilled dm key requests: %w", err)
+	}
+	return nil
 }
 
 // applyDMKeyBatchTx writes each wrap in the batch and reports which recipients
@@ -5035,37 +5068,10 @@ func canonicalizeWrappedKeyMaps(wrappedKeys map[string]string, wrappedKeyVersion
 	return keys, versions, nil
 }
 
-// notifyDMKeyDistribution is the DM counterpart to notifyChannelKeyDistribution:
-// the post-commit half of a distribution, split out for the same reason its
-// sibling is. Keeping it inline left distributeDMKeys at exactly the S3776
-// cognitive-complexity threshold, so adding the error branch below — the one
-// thing this loop was missing — pushed it over.
-//
-// cleanup lists recipients that already held the epoch: their pending requests
-// are redundant and deleted too (VULN-207), but they get no key_delivered.
-func (h *Handler) notifyDMKeyDistribution(conversationID string, delivered, cleanup []string) {
-	for _, memberUserID := range cleanup {
-		h.deletePendingDMKeyRequest(conversationID, memberUserID)
-	}
+// notifyDMKeyDistribution sends delivery notifications only after commit.
+func (h *Handler) notifyDMKeyDistribution(conversationID string, delivered []string) {
 	for _, memberUserID := range delivered {
-		h.deletePendingDMKeyRequest(conversationID, memberUserID)
 		h.notifyKeyDelivered(conversationID, memberUserID)
-	}
-}
-
-// deletePendingDMKeyRequest is best-effort POST-commit cleanup. A failure must
-// be logged, not discarded: it is self-amplifying, because a pending row that
-// outlives its own fulfilment keeps the recipient in pendingKeyRequestsPage,
-// so every holder re-POSTs for them each sweep, against the per-conversation
-// budget.
-func (h *Handler) deletePendingDMKeyRequest(conversationID, memberUserID string) {
-	if _, err := h.db.Exec(
-		`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`,
-		conversationID, memberUserID,
-	); err != nil {
-		h.log.Warn("dm key distribution: pending cleanup failed",
-			"conversation_id", sanitizeID(conversationID),
-			"user_id", sanitizeID(memberUserID), "error", err)
 	}
 }
 

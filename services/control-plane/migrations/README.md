@@ -83,7 +83,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000197)
+## Existing Migrations (000001–000200)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -305,7 +305,36 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000194 | add_login_family_authority | Logical login families and immutable SID membership, sealed revocation frontiers, exact media connection/room associations and closure evidence, permanent boot fences and one-way activation receipt; down refuses activation or retained authority/delivery evidence (#2272; 000190 belongs to #4131 and 000191 to #4137). |
 | 000195 | add_voice_participant_admission_id | Adds nullable `voice_participants.admission_id` and `admission_socket_id`: the admission and socket a Server Voice join consumed. A redelivered `voice.joined` whose reservation is gone is a replay when the row holds that exact pair (#253). The down drops only replay evidence. |
 | 000196 | admin_credential_generation | Adds an administrator credential generation that enrollment ceremonies must match; reset increments it atomically with credential removal. Down refuses once a generation has advanced. |
-| 000197 | add_admin_session_generation | Adds a nonnegative durable generation to `admin_users`; reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; every administrator starts at 1, so pre-migration sessions stop matching and any value above 1 records a revocation; down refuses once any generation passes 1. |
+| 000197 | add_admin_session_generation | Initially adds a nonnegative durable generation to `admin_users` (tightened by 000199–000200); reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; every administrator starts at 1, so pre-migration sessions stop matching and any value above 1 records a revocation; down refuses once any generation passes 1. |
+| 000198 | add_session_revoke_allowance | Moves the rolling session-revocation allowance to a nullable users timestamp and binds simple-mode auth windows to a reset generation. Existing users start a conservative 24-hour window; new users start with no timestamp. Down refuses while any recorded window is active. |
+| 000199 | add_positive_admin_session_generation_check | Aborts under a bounded write-blocking lock if any existing admin generation is nonpositive, then adds a positive check for future writes. The original nonnegative check remains. |
+| 000200 | validate_positive_admin_session_generation | Validates the positive check against existing administrator rows without holding an exclusive lock across the scan. Existing nonpositive rows are already rejected by 000199. |
+
+If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
+
+### Session-revocation allowance cutover (migration 000198)
+
+This migration is **not safe with old and new control-plane writers running at
+the same time**: the old binaries authorize the free revoke in Redis, while the
+new binaries authorize it in PostgreSQL. Stop admitting requests, drain all
+in-flight requests, and stop every old control-plane writer before applying
+000198. Apply the migration using the normal migration runner, then start only
+the new binaries and resume traffic. Do not rely on a rolling or blue-green
+overlap for this cutover.
+
+Existing accounts are conservatively treated as having just revoked a session,
+so a free revoke may require password and any enrolled MFA for up to 24 hours.
+New accounts receive the normal fresh allowance. Existing simple-mode Redis
+authentication windows are invalidated; a new one may be granted after a
+successful authenticated revoke. Revoke-all and mode changes advance the
+generation, so a delayed Redis write cannot revive a previous auth window.
+
+For rollback, stop and drain every new writer first. The down migration refuses
+while any PostgreSQL timestamp is within its 24-hour window, because an older
+binary cannot see those revokes. Wait until the guard passes, and at least five
+minutes after draining for simple-mode authentication windows to expire, before
+running the down migration and starting old binaries. A binary-only rollback
+does not transfer the PostgreSQL allowance back into Redis and is unsafe.
 
 ### Logical login authority (migration 000194, #2272)
 

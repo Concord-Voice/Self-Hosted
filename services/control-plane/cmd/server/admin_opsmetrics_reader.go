@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 type openAdminOpsMetricsReaderFunc func(
@@ -59,8 +59,7 @@ func (reader *deferredAdminOpsMetricsReader) Series(
 	ctx context.Context,
 	nodeID string,
 	key opsmetrics.MetricKey,
-	start time.Time,
-	end time.Time,
+	start, end time.Time,
 ) ([]opsmetrics.Bucket, error) {
 	bound, err := reader.boundReader()
 	if err != nil {

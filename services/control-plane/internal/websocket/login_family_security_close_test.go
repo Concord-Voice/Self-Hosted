@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/google/uuid"
 	ws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
@@ -104,6 +104,7 @@ func familyHubWithPublished(t *testing.T, clients ...*Client) *Hub {
 			hub.userClients[c.UserID] = map[uuid.UUID]bool{}
 		}
 		hub.userClients[c.UserID][c.ID] = true
+		hub.recordFamilySnapshotBinding(c)
 	}
 	go hub.Run()
 	t.Cleanup(hub.Shutdown)
@@ -111,6 +112,98 @@ func familyHubWithPublished(t *testing.T, clients ...*Client) *Hub {
 }
 func familyPublishedClient(user, family uuid.UUID, conn *ws.Conn) *Client {
 	return &Client{ID: uuid.New(), UserID: user, FamilyID: family, SessionID: uuid.NewString(), TokenExpiresAt: time.Now().Add(time.Hour), Conn: conn, Send: make(chan []byte, 8), Channels: make(map[uuid.UUID]bool)}
+}
+
+func TestLoginFamilySnapshotIncludesOnlyDistinctLocalFamilies(t *testing.T) {
+	user, firstFamily, secondFamily := uuid.New(), uuid.New(), uuid.New()
+	clients := make([]*Client, 0, 4)
+	for _, binding := range []struct{ user, family uuid.UUID }{
+		{user, firstFamily}, {user, firstFamily}, {user, secondFamily}, {uuid.New(), uuid.New()},
+	} {
+		conn, _, _ := familyInstrumentedSocket(t)
+		clients = append(clients, familyPublishedClient(binding.user, binding.family, conn))
+	}
+	hub := familyHubWithPublished(t, clients...)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	families, err := hub.SnapshotUserFamiliesContext(ctx, user)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []uuid.UUID{firstFamily, secondFamily}, families)
+
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	_, err = hub.SnapshotUserFamiliesContext(canceled, user)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = hub.SnapshotUserFamiliesContext(ctx, uuid.Nil)
+	require.Error(t, err)
+}
+
+func TestLoginFamilySnapshotRejectsAnUnboundedOrInvalidFrontier(t *testing.T) {
+	user := uuid.New()
+	for _, invalidBinding := range []bool{false, true} {
+		t.Run(map[bool]string{false: "too many families", true: "missing family"}[invalidBinding], func(t *testing.T) {
+			hub := NewHub(nil, nil)
+			hub.userClients[user] = make(map[uuid.UUID]bool)
+			for i := 0; i <= maxConnectionsPerUser; i++ {
+				client := familyPublishedClient(user, uuid.New(), nil)
+				if invalidBinding {
+					client.FamilyID = uuid.Nil
+				}
+				hub.clients[client.ID] = client
+				hub.userClients[user][client.ID] = true
+				hub.recordFamilySnapshotBinding(client)
+			}
+			_, err := hub.SnapshotUserFamiliesContext(context.Background(), user)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestLoginFamilySnapshotStopsWhenHubOrRequestStops(t *testing.T) {
+	user := uuid.New()
+
+	t.Run("hub stopped before request", func(t *testing.T) {
+		hub := NewHub(nil, nil)
+		close(hub.done)
+		_, err := hub.SnapshotUserFamiliesContext(context.Background(), user)
+		require.ErrorContains(t, err, "hub stopped")
+	})
+
+	t.Run("request already canceled", func(t *testing.T) {
+		hub := NewHub(nil, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		result := make(chan error, 1)
+		go func() {
+			_, err := hub.SnapshotUserFamiliesContext(ctx, user)
+			result <- err
+		}()
+		require.ErrorIs(t, <-result, context.Canceled)
+	})
+}
+
+func TestSnapshotUserFamiliesDoesNotWaitForHubRunLoop(t *testing.T) {
+	user, family := uuid.New(), uuid.New()
+	hub := NewHub(nil, nil)
+	client := familyPublishedClient(user, family, nil)
+	hub.clients[client.ID] = client
+	hub.userClients[user] = map[uuid.UUID]bool{client.ID: true}
+	hub.recordFamilySnapshotBinding(client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	families, err := hub.SnapshotUserFamiliesContext(ctx, user)
+	require.NoError(t, err, "snapshot must not wait for the Hub Run loop")
+	require.Equal(t, []uuid.UUID{family}, families)
+}
+
+func TestLoginFamilyDisconnectWaitHonorsContextBeforeEnqueue(t *testing.T) {
+	hub := NewHub(nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := hub.DisconnectFamiliesContext(ctx, uuid.New(), []uuid.UUID{uuid.New()})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestLoginFamilySecurityReceiptFencesEverySiblingBeforeTransportClose(t *testing.T) {
@@ -217,6 +310,41 @@ func TestLoginFamilySecurityReceiptContinuesAfterCloseFailureAndMissingTransport
 			assert.True(t, sibling.securityTerminal.Load())
 			assert.Positive(t, siblingTransport.calls.Load(), "failure must not skip sibling Close")
 		})
+	}
+}
+
+func TestLoginFamilyBatchFenceContinuesAfterTransportCloseFailure(t *testing.T) {
+	user := uuid.New()
+	firstConn, _, firstTransport := familyInstrumentedSocket(t)
+	secondConn, _, secondTransport := familyInstrumentedSocket(t)
+	first := familyPublishedClient(user, uuid.New(), firstConn)
+	second := familyPublishedClient(user, uuid.New(), secondConn)
+	firstTransport.closeErr = errors.New("test transport close failure")
+	first.asyncWg.Add(1)
+	second.asyncWg.Add(1)
+	hub := familyHubWithPublished(t, first, second)
+	t.Cleanup(func() { first.asyncWg.Done(); second.asyncWg.Done() })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.Error(t, hub.DisconnectFamiliesContext(ctx, user, []uuid.UUID{first.FamilyID, second.FamilyID}))
+	assert.True(t, first.securityTerminal.Load())
+	assert.True(t, second.securityTerminal.Load())
+	assert.Positive(t, secondTransport.calls.Load(), "one failed close must not skip the other family")
+}
+
+func TestLoginFamilyBatchFenceRejectsInvalidFrontier(t *testing.T) {
+	hub := NewHub(nil, nil)
+	user, family := uuid.New(), uuid.New()
+	for _, test := range []struct {
+		user     uuid.UUID
+		families []uuid.UUID
+	}{
+		{uuid.Nil, []uuid.UUID{family}},
+		{user, nil},
+		{user, []uuid.UUID{uuid.Nil}},
+		{user, make([]uuid.UUID, maxConnectionsPerUser+1)},
+	} {
+		require.Error(t, hub.DisconnectFamiliesContext(context.Background(), test.user, test.families))
 	}
 }
 

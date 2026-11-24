@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"math"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // The live owner verbs (§3.4, DoR:1732–1735): seal-legacy, revoke-key,

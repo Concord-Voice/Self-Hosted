@@ -8,23 +8,24 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/klipy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/klipy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/lib/pq"
@@ -214,6 +215,9 @@ type Hub struct {
 
 	// Mutex protecting maps accessed from outside the Run goroutine
 	mu sync.RWMutex
+	// The family index has its own lock so revocation can snapshot it without
+	// waiting behind Run work that may itself be waiting on a user-row lock.
+	familySnapshotMu sync.RWMutex
 
 	// Deterministic test seam invoked after a custom-text snapshot authorizes a
 	// viewer but before it enqueues the frame. Nil in production.
@@ -276,6 +280,8 @@ type Hub struct {
 
 	// User ID to client IDs mapping (for multi-device support)
 	userClients map[uuid.UUID]map[uuid.UUID]bool
+	// User ID to client ID to family ID, maintained with client publication.
+	familySnapshotByUser map[uuid.UUID]map[uuid.UUID]uuid.UUID
 
 	// lastInboundAt is the wall time of each user's most recent inbound
 	// APPLICATION frame, and is the presence sweeper's evidence that a renderer
@@ -769,6 +775,7 @@ func newHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *H
 		redis:                        redisClient,
 		clients:                      make(map[uuid.UUID]*Client),
 		userClients:                  make(map[uuid.UUID]map[uuid.UUID]bool),
+		familySnapshotByUser:         make(map[uuid.UUID]map[uuid.UUID]uuid.UUID),
 		lastInboundAt:                make(map[uuid.UUID]time.Time),
 		hiddenPresence:               make(map[uuid.UUID]string),
 		presenceRecovery:             make(map[uuid.UUID]presenceRecoveryState),
@@ -1334,8 +1341,7 @@ func (h *Hub) spawnRichPresenceSuppression(userID uuid.UUID, forced ...bool) {
 // Shutdown established after stopping the Run loop from accepting new work.
 func (h *Hub) spawnRichPresenceSuppressionDuringShutdown(
 	userID uuid.UUID,
-	allowStopping bool,
-	forced bool,
+	allowStopping, forced bool,
 ) {
 	if h == nil || h.richPresenceHiddenSuppressor == nil {
 		return
@@ -1548,6 +1554,7 @@ func (h *Hub) shutdownClients() {
 	}
 	observer := h.activityObserver
 	clear(h.userClients)
+	h.clearFamilySnapshot()
 	h.mu.Unlock()
 
 	if observer != nil {
@@ -1634,9 +1641,11 @@ func (h *Hub) handleRegister(client *Client) {
 	isFirstConnection := h.registerClient(client)
 
 	if isFirstConnection {
-		ctx := context.Background()
+		// Presence persistence must not be cancelled with the client's async
+		// work, so detach from that context's cancellation.
+		presenceCtx := context.WithoutCancel(ctx)
 		recovery := presenceRecoveryState{status: statusOnline}
-		if err := h.redis.Set(ctx, presence.StatusRedisKey(client.UserID), statusOnline, presence.StatusTTL).Err(); err != nil {
+		if err := h.redis.Set(presenceCtx, presence.StatusRedisKey(client.UserID), statusOnline, presence.StatusTTL).Err(); err != nil {
 			log.Printf("[hub] failed to persist initial presence for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
 			recovery.pending = true
 			h.setPresenceRecovery(client.UserID, recovery)
@@ -1645,7 +1654,7 @@ func (h *Hub) handleRegister(client *Client) {
 			// must not keep publishing.
 			h.failClosedPresenceHeartbeat(client.UserID)
 		} else {
-			if err := h.clearOfflinePresenceFence(ctx, client.UserID); err != nil {
+			if err := h.clearOfflinePresenceFence(presenceCtx, client.UserID); err != nil {
 				log.Printf("[hub] failed to clear offline presence fence for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
 				recovery.pending = true
 				h.setPresenceRecovery(client.UserID, recovery)
@@ -1682,6 +1691,7 @@ func (h *Hub) registerClient(client *Client) bool {
 	client.presenceDispatchSeq = h.presenceGenCounter
 
 	h.clients[client.ID] = client
+	h.recordFamilySnapshotBinding(client)
 
 	if _, ok := h.userClients[client.UserID]; !ok {
 		h.userClients[client.UserID] = make(map[uuid.UUID]bool)
@@ -1995,6 +2005,7 @@ func (h *Hub) unregisterClient(client *Client) (bool, bool, int) {
 	}
 
 	delete(h.clients, client.ID)
+	h.removeFamilySnapshotBinding(client)
 	isLastConnection := h.removeUserClient(client)
 	h.removeClientSubscriptions(client)
 	remaining := len(h.clients)
@@ -5761,12 +5772,12 @@ func (h *Hub) enforceDMEpoch(msg IncomingMessage, convUUID uuid.UUID, keyVersion
 	return false
 }
 
-func (h *Hub) persistDMMessage(convUUID uuid.UUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, []models.AttachmentSummary, error) {
+func (h *Hub) persistDMMessage(convUUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, []models.AttachmentSummary, error) {
 	messageID, createdAt, updatedAt, _, attachments, err := h.persistDMMessageWithExpiry(convUUID, userID, credEpoch, input)
 	return messageID, createdAt, updatedAt, attachments, err
 }
 
-func (h *Hub) persistDMMessageWithExpiry(convUUID uuid.UUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, *time.Time, []models.AttachmentSummary, error) {
+func (h *Hub) persistDMMessageWithExpiry(convUUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, *time.Time, []models.AttachmentSummary, error) {
 	messageID := uuid.New()
 	ctx, cancel := context.WithTimeout(context.Background(), channelAuthCtxTimeout)
 	defer cancel()
@@ -8204,7 +8215,84 @@ func (h *Hub) BroadcastServerVoiceCounts() {
 type familyDisconnect struct {
 	userID   uuid.UUID
 	familyID uuid.UUID
+	families []uuid.UUID
 	done     chan error
+}
+
+func (h *Hub) recordFamilySnapshotBinding(client *Client) {
+	h.familySnapshotMu.Lock()
+	defer h.familySnapshotMu.Unlock()
+	if h.familySnapshotByUser == nil {
+		h.familySnapshotByUser = make(map[uuid.UUID]map[uuid.UUID]uuid.UUID)
+	}
+	if h.familySnapshotByUser[client.UserID] == nil {
+		h.familySnapshotByUser[client.UserID] = make(map[uuid.UUID]uuid.UUID)
+	}
+	h.familySnapshotByUser[client.UserID][client.ID] = client.FamilyID
+}
+
+func (h *Hub) removeFamilySnapshotBinding(client *Client) {
+	h.familySnapshotMu.Lock()
+	defer h.familySnapshotMu.Unlock()
+	clients := h.familySnapshotByUser[client.UserID]
+	delete(clients, client.ID)
+	if len(clients) == 0 {
+		delete(h.familySnapshotByUser, client.UserID)
+	}
+}
+
+func (h *Hub) clearFamilySnapshot() {
+	h.familySnapshotMu.Lock()
+	clear(h.familySnapshotByUser)
+	h.familySnapshotMu.Unlock()
+}
+
+// SnapshotUserFamiliesContext reads the published local frontier without
+// queueing behind Run, which may be waiting on a user lock held by revocation.
+// Registration publishes its family before the post-registration DB recheck;
+// an unpublished upgrade therefore cannot pass that recheck before revocation.
+func (h *Hub) SnapshotUserFamiliesContext(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	if userID == uuid.Nil {
+		return nil, errors.New("invalid family snapshot identity")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-h.done:
+		return nil, errors.New("family snapshot incomplete: hub stopped")
+	default:
+	}
+
+	h.familySnapshotMu.RLock()
+	families := make([]uuid.UUID, 0, maxConnectionsPerUser)
+	seen := make(map[uuid.UUID]struct{}, maxConnectionsPerUser)
+	for _, familyID := range h.familySnapshotByUser[userID] {
+		if familyID == uuid.Nil {
+			h.familySnapshotMu.RUnlock()
+			return nil, errors.New("invalid local family binding")
+		}
+		if _, ok := seen[familyID]; ok {
+			continue
+		}
+		if len(families) == maxConnectionsPerUser {
+			h.familySnapshotMu.RUnlock()
+			return nil, errors.New("local family limit exceeded")
+		}
+		seen[familyID] = struct{}{}
+		families = append(families, familyID)
+	}
+	h.familySnapshotMu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-h.done:
+		return nil, errors.New("family snapshot incomplete: hub stopped")
+	default:
+	}
+	return families, nil
 }
 
 // DisconnectFamilyContext waits for fencing and transport closure, not presence cleanup.
@@ -8212,10 +8300,28 @@ func (h *Hub) DisconnectFamilyContext(ctx context.Context, userID, familyID uuid
 	if userID == uuid.Nil || familyID == uuid.Nil {
 		return errors.New("invalid family disconnect identity")
 	}
+	return h.disconnectFamiliesContext(ctx, familyDisconnect{userID: userID, familyID: familyID})
+}
+
+// DisconnectFamiliesContext fences a bounded captured frontier before closing
+// any one of its transports.
+func (h *Hub) DisconnectFamiliesContext(ctx context.Context, userID uuid.UUID, families []uuid.UUID) error {
+	if userID == uuid.Nil || len(families) == 0 || len(families) > maxConnectionsPerUser {
+		return errors.New("invalid family disconnect frontier")
+	}
+	for _, family := range families {
+		if family == uuid.Nil {
+			return errors.New("invalid family disconnect frontier")
+		}
+	}
+	return h.disconnectFamiliesContext(ctx, familyDisconnect{userID: userID, families: slices.Clone(families)})
+}
+
+func (h *Hub) disconnectFamiliesContext(ctx context.Context, command familyDisconnect) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	command := familyDisconnect{userID: userID, familyID: familyID, done: make(chan error, 1)}
+	command.done = make(chan error, 1)
 	select {
 	case h.disconnectFamily <- command:
 	case <-ctx.Done():
@@ -8240,7 +8346,9 @@ func (h *Hub) handleDisconnectFamily(command familyDisconnect) {
 	matches := make([]*Client, 0, len(h.userClients[command.userID]))
 	for clientID := range h.userClients[command.userID] {
 		client := h.clients[clientID]
-		if client != nil && client.UserID == command.userID && client.FamilyID == command.familyID {
+		if client != nil && client.UserID == command.userID &&
+			((command.familyID != uuid.Nil && client.FamilyID == command.familyID) ||
+				slices.Contains(command.families, client.FamilyID)) {
 			matches = append(matches, client)
 		}
 	}

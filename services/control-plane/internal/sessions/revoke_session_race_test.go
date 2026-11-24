@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,9 +28,8 @@ type freeRevokeResponse struct {
 	body string
 }
 
-// The first request is parked after policy admission but before its database
-// effect commits. The second must observe the pre-effect Redis reservation and
-// require step-up; the vulnerable check-then-record path parks both requests.
+// The first request holds the user lock after policy admission but before its
+// effect commits. The second must wait for that transaction, then require step-up.
 func TestRevokeSession_ConcurrentRequestsAllowOnlyOneFreeRevoke(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "concurrentfreerevoke")
@@ -38,7 +37,7 @@ func TestRevokeSession_ConcurrentRequestsAllowOnlyOneFreeRevoke(t *testing.T) {
 	secondTarget := createSession(t, ts, user.ID, "Device2", testIP2)
 	createSession(t, ts, user.ID, "Device3", "10.0.0.3")
 	createSession(t, ts, user.ID, "Device4", "10.0.0.4")
-	assertSessionCounts(t, ts, user.ID, 4, 0)
+	assertSessionState(t, ts, user.ID, 4, false)
 
 	installFreeRevokeEffectBarrier(t, ts.DB)
 	releaseBarrier := holdFreeRevokeEffectBarrier(t)
@@ -51,16 +50,19 @@ func TestRevokeSession_ConcurrentRequestsAllowOnlyOneFreeRevoke(t *testing.T) {
 	firstDone := make(chan freeRevokeResponse, 1)
 	go func() { firstDone <- request(firstTarget) }()
 	dbtest.WaitForAdvisoryLockWaiter(t, ts.DB, freeRevokeBarrierLockID)
+	classID, objectID := dbtest.AdvisoryKeyHalves(freeRevokeBarrierLockID)
+	var firstTxID int64
+	require.NoError(t, ts.DB.QueryRow(`
+		SELECT x.transactionid::text::bigint
+		FROM pg_locks a JOIN pg_locks x ON x.pid=a.pid
+		WHERE a.locktype='advisory' AND a.objsubid=1 AND a.classid::bigint=$1
+		  AND a.objid::bigint=$2 AND NOT a.granted
+		  AND x.locktype='transactionid' AND x.mode='ExclusiveLock' AND x.granted`,
+		classID, objectID).Scan(&firstTxID))
 
 	secondDone := make(chan freeRevokeResponse, 1)
 	go func() { secondDone <- request(secondTarget) }()
-	select {
-	case second := <-secondDone:
-		require.Equal(t, http.StatusForbidden, second.code, second.body)
-		require.JSONEq(t, `{"error":"password_required","message":"Password verification required to revoke this session"}`, second.body)
-	case <-time.After(10 * time.Second):
-		t.Fatal("second revoke reached the database effect instead of requiring step-up")
-	}
+	dbtest.WaitForRowLockWaiter(t, ts.DB, firstTxID)
 
 	releaseBarrier()
 	select {
@@ -69,10 +71,17 @@ func TestRevokeSession_ConcurrentRequestsAllowOnlyOneFreeRevoke(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("first revoke did not finish after releasing its database barrier")
 	}
+	select {
+	case second := <-secondDone:
+		require.Equal(t, http.StatusForbidden, second.code, second.body)
+		require.JSONEq(t, `{"error":"password_required","message":"Password verification required to revoke this session"}`, second.body)
+	case <-time.After(10 * time.Second):
+		t.Fatal("second revoke did not finish after the first committed")
+	}
 
 	assertSessionFamilyRevoked(t, ts, user.ID, firstTarget)
 	assertSessionFamilyLive(t, ts, user.ID, secondTarget)
-	assertSessionCounts(t, ts, user.ID, 3, 1)
+	assertSessionState(t, ts, user.ID, 3, true)
 }
 
 func installFreeRevokeEffectBarrier(t *testing.T, db *sql.DB) {

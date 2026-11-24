@@ -15,13 +15,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -1596,8 +1596,9 @@ func TestRecoveryBeginStoresCodeInRedisWithTTL(t *testing.T) {
 	key := recoveryCodeKeyPfx + user.Email
 	waitForRecoveryRecord(t, ts, key)
 	ttl := ts.Redis.TTL(context.Background(), key).Val()
-	assert.Greater(t, ttl, time.Duration(0))
-	assert.LessOrEqual(t, ttl, 10*time.Minute)
+	// The first send of the day uses the 15-minute tier (#344).
+	assert.Greater(t, ttl, 14*time.Minute)
+	assert.LessOrEqual(t, ttl, 15*time.Minute)
 }
 
 // ── Recovery Token Validation Edge Cases ───────────────────────────────────

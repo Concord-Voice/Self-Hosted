@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "context7": {
+      "serverUrl": "https://mcp.context7.com/mcp",
+      "enabledTools": [
+        "resolve-library-id",
+        "query-docs"
+      ]
+    }
+  }
+}

@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/sessions"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/sessions"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -178,14 +178,14 @@ func assertSessionFamilyRevoked(t *testing.T, ts *testhelpers.TestServer, userID
 	return operation
 }
 
-func assertSessionCounts(t *testing.T, ts *testhelpers.TestServer, userID string, active, tracked int64) {
+func assertSessionState(t *testing.T, ts *testhelpers.TestServer, userID string, active int64, allowanceUsed bool) {
 	t.Helper()
 	var count int64
 	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM refresh_tokens WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>NOW()`, userID).Scan(&count))
 	assert.Equal(t, active, count)
-	n, err := ts.Redis.ZCard(context.Background(), "session_revokes:"+userID).Result()
-	require.NoError(t, err)
-	assert.Equal(t, tracked, n)
+	var recorded bool
+	require.NoError(t, ts.DB.QueryRow(`SELECT last_session_revoke_at IS NOT NULL FROM users WHERE id=$1`, userID).Scan(&recorded))
+	assert.Equal(t, allowanceUsed, recorded)
 }
 
 func hashStr(s string) string {
@@ -414,14 +414,14 @@ func TestRevokeSession_PasswordRequiredUnder3Sessions(t *testing.T) {
 
 	sessionID := createSession(t, ts, user.ID, "TargetDevice", testIP1)
 
-	assertSessionCounts(t, ts, user.ID, 1, 0)
+	assertSessionState(t, ts, user.ID, 1, false)
 	w := ts.DoRequest("DELETE", sessionsPath+"/"+sessionID, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Equal(t, "password_required", body["error"])
-	assertSessionCounts(t, ts, user.ID, 1, 0)
+	assertSessionState(t, ts, user.ID, 1, false)
 	assertSessionFamilyLive(t, ts, user.ID, sessionID)
 	var operations int
 	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM login_family_revocations WHERE user_id=$1`, user.ID).Scan(&operations))
@@ -437,7 +437,7 @@ func TestRevokeSession_WithCorrectPassword(t *testing.T) {
 	payload := map[string]interface{}{
 		"password": sessTestPassword,
 	}
-	assertSessionCounts(t, ts, user.ID, 1, 0)
+	assertSessionState(t, ts, user.ID, 1, false)
 	w := ts.DoRequest("DELETE", sessionsPath+"/"+sessionID, payload, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
@@ -445,7 +445,7 @@ func TestRevokeSession_WithCorrectPassword(t *testing.T) {
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Equal(t, "Session revoked successfully", body["message"])
 	assert.Equal(t, sessionID, body["session_id"])
-	assertSessionCounts(t, ts, user.ID, 0, 1)
+	assertSessionState(t, ts, user.ID, 0, true)
 	assertSessionFamilyRevoked(t, ts, user.ID, sessionID)
 }
 
@@ -458,14 +458,14 @@ func TestRevokeSession_IncorrectPassword(t *testing.T) {
 	payload := map[string]interface{}{
 		"password": wrongPassword,
 	}
-	assertSessionCounts(t, ts, user.ID, 1, 0)
+	assertSessionState(t, ts, user.ID, 1, false)
 	w := ts.DoRequest("DELETE", sessionsPath+"/"+sessionID, payload, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Equal(t, "Incorrect password", body["error"])
-	assertSessionCounts(t, ts, user.ID, 1, 0)
+	assertSessionState(t, ts, user.ID, 1, false)
 	assertSessionFamilyLive(t, ts, user.ID, sessionID)
 	var operations int
 	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM login_family_revocations WHERE user_id=$1`, user.ID).Scan(&operations))
@@ -492,10 +492,10 @@ func TestRevokeSession_FreeRevokeWith3PlusSessions(t *testing.T) {
 	createSession(t, ts, user.ID, "Device2", testIP2)
 	targetID := createSession(t, ts, user.ID, "Device3", "10.0.0.3")
 
-	assertSessionCounts(t, ts, user.ID, 3, 0)
+	assertSessionState(t, ts, user.ID, 3, false)
 	w := ts.DoRequest("DELETE", sessionsPath+"/"+targetID, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
-	assertSessionCounts(t, ts, user.ID, 2, 1)
+	assertSessionState(t, ts, user.ID, 2, true)
 	assertSessionFamilyRevoked(t, ts, user.ID, targetID)
 }
 
@@ -508,13 +508,13 @@ func TestRevokeSession_SecondRevokeRequiresPassword(t *testing.T) {
 	s3 := createSession(t, ts, user.ID, "Device3", "10.0.0.3")
 	createSession(t, ts, user.ID, "Device4", "10.0.0.4")
 
-	assertSessionCounts(t, ts, user.ID, 4, 0)
+	assertSessionState(t, ts, user.ID, 4, false)
 	// First free revoke
 	w := ts.DoRequest("DELETE", sessionsPath+"/"+s1, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	assertSessionFamilyRevoked(t, ts, user.ID, s1)
-	assertSessionCounts(t, ts, user.ID, 3, 1)
+	assertSessionState(t, ts, user.ID, 3, true)
 	// Second should require password
 	w = ts.DoRequest("DELETE", sessionsPath+"/"+s3, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -522,7 +522,7 @@ func TestRevokeSession_SecondRevokeRequiresPassword(t *testing.T) {
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Equal(t, "password_required", body["error"])
 	assertSessionFamilyLive(t, ts, user.ID, s3)
-	assertSessionCounts(t, ts, user.ID, 3, 1)
+	assertSessionState(t, ts, user.ID, 3, true)
 }
 
 // ── RevokeAllSessions (extended) ─────────────────────────────────────────────
@@ -575,7 +575,7 @@ func TestRevokeAllSessions_IncludesCount(t *testing.T) {
 	s1 := createSession(t, ts, user.ID, "Device1", testIP1)
 	s2 := createSession(t, ts, user.ID, "Device2", testIP2)
 
-	assertSessionCounts(t, ts, user.ID, 2, 0)
+	assertSessionState(t, ts, user.ID, 2, false)
 	payload := map[string]interface{}{
 		"password":        sessTestPassword,
 		"include_current": true,
@@ -586,7 +586,7 @@ func TestRevokeAllSessions_IncludesCount(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Equal(t, float64(2), body["count"], "count is changed refresh rows, excluding the access-only family")
-	assertSessionCounts(t, ts, user.ID, 0, 0)
+	assertSessionState(t, ts, user.ID, 0, false)
 	owner := assertSessionFamilyRevoked(t, ts, user.ID, s1)
 	assert.Equal(t, owner, assertSessionFamilyRevoked(t, ts, user.ID, s2))
 	var frontier int
@@ -724,13 +724,13 @@ func TestSimpleMode_AuthWindowAllowsSubsequentRevokes(t *testing.T) {
 	assertSessionFamilyRevoked(t, ts, user.ID, sessionID)
 	window, err := ts.Redis.Get(context.Background(), "session_revoke_auth:"+user.ID).Result()
 	require.NoError(t, err)
-	require.Equal(t, "1", window)
+	require.Equal(t, "v2:1", window)
 	// Second revoke within window should NOT require password
 	sessionID2 := createSession(t, ts, user.ID, "Device2", testIP2)
 	w = ts.DoRequest("DELETE", sessionsPath+"/"+sessionID2, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assertSessionFamilyRevoked(t, ts, user.ID, sessionID2)
-	assertSessionCounts(t, ts, user.ID, 0, 2)
+	assertSessionState(t, ts, user.ID, 0, true)
 }
 
 // ── RevokeAll resets tracking ────────────────────────────────────────────────
@@ -744,13 +744,13 @@ func TestRevokeAll_ResetsTracking(t *testing.T) {
 	s3 := createSession(t, ts, user.ID, "D3", ipAddr3)
 	createSession(t, ts, user.ID, "D4", "4.4.4.4")
 
-	assertSessionCounts(t, ts, user.ID, 4, 0)
+	assertSessionState(t, ts, user.ID, 4, false)
 	// Use the free revoke
 	w := ts.DoRequest("DELETE", sessionsPath+"/"+s3, nil, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	assertSessionFamilyRevoked(t, ts, user.ID, s3)
-	assertSessionCounts(t, ts, user.ID, 3, 1)
+	assertSessionState(t, ts, user.ID, 3, true)
 	require.NoError(t, ts.Redis.Set(context.Background(), "session_revoke_auth:"+user.ID, "1", time.Minute).Err())
 	// Revoke all (resets tracking)
 	payload := map[string]interface{}{
@@ -760,7 +760,7 @@ func TestRevokeAll_ResetsTracking(t *testing.T) {
 	w = ts.DoRequest("POST", revokeAllPath, payload, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
 
-	assertSessionCounts(t, ts, user.ID, 0, 0)
+	assertSessionState(t, ts, user.ID, 0, false)
 	exists, err := ts.Redis.Exists(context.Background(), "session_revoke_auth:"+user.ID).Result()
 	require.NoError(t, err)
 	assert.Zero(t, exists)
@@ -774,7 +774,7 @@ func TestRevokeAll_ResetsTracking(t *testing.T) {
 	createSession(t, ts, user.ID, "N2", ipAddr2)
 	n3 := createSession(t, ts, user.ID, "N3", ipAddr3)
 
-	assertSessionCounts(t, ts, user.ID, 4, 0)
+	assertSessionState(t, ts, user.ID, 4, false)
 	var outside int
 	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM login_family_revocation_targets t JOIN login_family_sids s USING(family_id,user_id) WHERE t.operation_id=$1 AND s.sid IN ($2,$3)`, oldOwner, freshSID, n3).Scan(&outside))
 	assert.Zero(t, outside, "later logins must stay outside the old sealed frontier")
@@ -782,7 +782,7 @@ func TestRevokeAll_ResetsTracking(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assertSessionFamilyRevoked(t, ts, user.ID, n3)
 	assertSessionFamilyLive(t, ts, user.ID, freshSID)
-	assertSessionCounts(t, ts, user.ID, 3, 1)
+	assertSessionState(t, ts, user.ID, 3, true)
 }
 
 // ── Switching back to secure clears auth window ──────────────────────────────
@@ -842,7 +842,7 @@ func TestRevokeAllSessions_WithMultipleSessions(t *testing.T) {
 	s2 := createSession(t, ts, user.ID, "D2", ipAddr2)
 	s3 := createSession(t, ts, user.ID, "D3", ipAddr3)
 
-	assertSessionCounts(t, ts, user.ID, 3, 0)
+	assertSessionState(t, ts, user.ID, 3, false)
 	payload := map[string]interface{}{
 		"password":        sessTestPassword,
 		"include_current": true,
@@ -854,7 +854,7 @@ func TestRevokeAllSessions_WithMultipleSessions(t *testing.T) {
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Equal(t, float64(3), body["count"], "count is changed refresh rows, excluding the access-only family")
 	assert.Equal(t, true, body["include_current"])
-	assertSessionCounts(t, ts, user.ID, 0, 0)
+	assertSessionState(t, ts, user.ID, 0, false)
 	owner := assertSessionFamilyRevoked(t, ts, user.ID, s1)
 	assert.Equal(t, owner, assertSessionFamilyRevoked(t, ts, user.ID, s2))
 	assert.Equal(t, owner, assertSessionFamilyRevoked(t, ts, user.ID, s3))

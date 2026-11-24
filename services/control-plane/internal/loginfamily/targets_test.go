@@ -1,8 +1,8 @@
 package loginfamily_test
 
 import (
-	lf "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	lf "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"testing"
@@ -126,4 +126,32 @@ func TestEmptyFrontierCreatesNoOperationAndBadTargetInputCannotBroadenCapture(t 
 	require.Error(t, err)
 	require.NoError(t, tx.Commit())
 	require.Zero(t, count(t, db, `SELECT count(*) FROM login_family_revocations`))
+}
+
+func TestCapturedFamilySubsetMatchesOnlyCapturedFamilies(t *testing.T) {
+	db := database(t)
+	user := testdb.CreateUser(t, db)
+	preserve := newFamily(t, db, user, expires())
+	selected := newFamily(t, db, user, expires())
+
+	var preservedFamily, selectedFamily uuid.UUID
+	require.NoError(t, db.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid=$1`, preserve.SID).Scan(&preservedFamily))
+	require.NoError(t, db.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid=$1`, selected.SID).Scan(&selectedFamily))
+
+	tx := transaction(t, db)
+	u := authority(t, tx, user, lf.UserNoKeyUpdate)
+	targets, err := lf.CaptureUserTargetsTx(ctx, tx, u, &preserve)
+	require.NoError(t, err)
+
+	subset, err := lf.CapturedFamilySubsetTx(ctx, tx, targets, []uuid.UUID{selectedFamily, preservedFamily, uuid.New(), selectedFamily})
+	require.NoError(t, err)
+	require.Equal(t, []uuid.UUID{selectedFamily}, subset)
+
+	subset, err = lf.CapturedFamilySubsetTx(ctx, tx, targets, nil)
+	require.NoError(t, err)
+	require.Empty(t, subset)
+	_, err = lf.CapturedFamilySubsetTx(ctx, tx, targets, []uuid.UUID{uuid.Nil})
+	reason(t, err, lf.ErrContract, lf.ReasonArgumentInvalid)
+	_, err = lf.CapturedFamilySubsetTx(ctx, tx, lf.Targets{}, []uuid.UUID{selectedFamily})
+	require.Error(t, err, "an unvalidated capture target must not query the transaction frontier")
 }
