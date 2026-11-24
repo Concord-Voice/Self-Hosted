@@ -3243,10 +3243,16 @@ func NewRouter(
 	return router, hub, natsClient, opsRuntime, voicePermEnforcer, presenceRecheckExecutor, closePresenceWorkers, activePlanRail, activePlanReconciler, ownershipHandler.CompleteExpiredTransfers, nil
 }
 
+// credentialEpochVoiceEjector is the one dmblock.Reconciler method the
+// credential fence's post-commit evictor calls.
+type credentialEpochVoiceEjector interface {
+	DeliverCredentialEpochVoiceEjection(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) error
+}
+
 // credentialEpochVoiceEvictor is the credential fence's post-commit evictor:
 // it delivers the credential-epoch voice ejection and logs a fixed failure
 // class when delivery is retained for reconciliation.
-func credentialEpochVoiceEvictor(dmBlockReconciler *dmblock.Reconciler, log *logger.Logger) func(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) {
+func credentialEpochVoiceEvictor(dmBlockReconciler credentialEpochVoiceEjector, log *logger.Logger) func(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) {
 	return func(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) {
 		if err := dmBlockReconciler.DeliverCredentialEpochVoiceEjection(ctx, userID, credentialEpoch, supersededCredentialEpoch); err != nil {
 			log.Error("Credential media eviction retained", "failure_class", "delivery")

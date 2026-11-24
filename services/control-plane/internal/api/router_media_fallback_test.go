@@ -48,4 +48,37 @@ func TestNewRouterMediaUnconfiguredFallbacks(t *testing.T) {
 			assert.JSONEq(t, tc.body, w.Body.String())
 		})
 	}
+
+	// The protected fallbacks must sit inside the authenticated group: without
+	// credentials they answer 401, never the 503 a fallback registered on the
+	// public group would give.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/media/upload/avatar"},
+		{http.MethodPost, "/api/v1/media/upload/attachment"},
+		{http.MethodGet, "/api/v1/media/attachments/" + fileID},
+		{http.MethodDelete, "/api/v1/media/" + fileID},
+	} {
+		t.Run("unauthenticated "+tc.method+" "+tc.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			f.router.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			assert.Equal(t, http.StatusUnauthorized, w.Code, "%s %s: %s", tc.method, tc.path, w.Body.String())
+		})
+	}
+
+	// The public fallbacks are never cached.
+	for _, path := range []string{
+		"/api/v1/media/avatars/" + fileID,
+		"/api/v1/media/banners/" + fileID,
+		"/api/v1/media/server-icons/" + fileID,
+		"/api/v1/media/server-banners/" + fileID,
+		"/api/v1/media/feedback-screenshots/" + fileID,
+	} {
+		t.Run("public no-store "+path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			f.router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+			assert.Equal(t, http.StatusServiceUnavailable, w.Code, "%s: %s", path, w.Body.String())
+			assert.JSONEq(t, unavailable, w.Body.String())
+			assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+		})
+	}
 }

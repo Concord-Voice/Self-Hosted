@@ -90,10 +90,12 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 	}
 
 	if err := h.revokeAccessTokens(c, userID); err != nil {
-		h.logError("erase-account: access token revocation failed",
-			"user_id", userID,
-			"error", err,
-		)
+		if h.log != nil {
+			h.log.Error("erase-account: access token revocation failed",
+				"user_id", userID,
+				"error", err,
+			)
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "access token revocation failed"})
 		return
 	}
@@ -135,10 +137,12 @@ func (h *Handler) writeDeleteAccountFailure(c *gin.Context, userID string, err e
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Authentication temporarily unavailable"})
 		return true
 	case !errors.Is(err, presencecapture.ErrPostCommitDelivery):
-		h.logError("erase-account: account deletion failed",
-			"user_id", userID,
-			"error", err,
-		)
+		if h.log != nil {
+			h.log.Error("erase-account: account deletion failed",
+				"user_id", userID,
+				"error", err,
+			)
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "account deletion failed"})
 		return true
 	}
@@ -150,20 +154,14 @@ func (h *Handler) writeDeleteAccountFailure(c *gin.Context, userID string, err e
 	// already-issued access token keeps working against an erased account.
 	// [internal]rules/backend.md requires both to be set BEFORE returning
 	// success (code review, PR #2840).
-	h.logError("erase-account: presence delivery did not settle",
-		"user_id", userID,
-		"failure_class", "delivery",
-		"error", err,
-	)
-	return false
-}
-
-// logError logs through h.log when one is wired. A nil logger is tolerated
-// in tests that do not exercise the failure path (see NewHandler).
-func (h *Handler) logError(msg string, args ...any) {
 	if h.log != nil {
-		h.log.Error(msg, args...)
+		h.log.Error("erase-account: presence delivery did not settle",
+			"user_id", userID,
+			"failure_class", "delivery",
+			"error", err,
+		)
 	}
+	return false
 }
 
 func (h *Handler) revokeAccessTokens(c *gin.Context, userID string) error {
