@@ -229,7 +229,7 @@ export interface ProducerEntry {
    */
   closing?: boolean;
   /**
-   * Security#176. Set once, when this camera's arrival first moves the room
+   * Set once, when this camera's arrival first moves the room
    * camera gate's computed value ON, by its own produce or by a demand on one
    * of its consumers. That transition is charged to this producer's owner,
    * never to the viewer whose re-sent demand applied it. Never cleared — the
@@ -238,7 +238,7 @@ export interface ProducerEntry {
   cameraArrivalAttributed?: boolean;
 }
 
-/** A camera producer whose arrival has not yet moved the camera gate ON (Security#176). */
+/** A camera producer whose arrival has not yet moved the camera gate ON. */
 interface CameraArrival {
   entry: ProducerEntry;
   ownerUserId: string;
@@ -4699,7 +4699,7 @@ export class RoomManager {
         consumer.consumersByKey.delete(key);
         room.lastNPausedConsumers.delete(newConsumer.id);
         // The publisher closed its producer, so its owner caused this removal
-        // (Security#176), not the viewer whose demand it was.
+        // and not the viewer whose demand it was.
         this.clearCameraLayerDemand(room, newConsumer.id, producerUserId);
         this.clearScreenLayerDemand(room, newConsumer.id);
       });
@@ -6463,7 +6463,7 @@ export class RoomManager {
    * transition. Only the two timers pass no cause.
    *
    * `arrival` names the camera whose produce, or a demand on whose consumer,
-   * triggered this recompute (Security#176). A camera's arrival is its owner's
+   * triggered this recompute. A camera's arrival is its owner's
    * change: the first move to ON it triggers is attributed to the owner, once
    * per producer, and later moves go to `causeUserId`. Without this a
    * publisher toggling its camera made each viewer's re-sent demand pay for
