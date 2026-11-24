@@ -809,6 +809,8 @@ Durable administrator session generations must be positive: legacy Redis session
 
 **Hosted edge-gating:** Cloudflare Access wraps hosted admin traffic (identity allowlist + hardware-key requirement) before origin, then nginx serves the codename vhost with a Cloudflare Origin Certificate, and the Go `/admin` route group verifies `Cf-Access-Jwt-Assertion` against the Access JWKS/audience before any admin handler runs. The origin firewall helper restricts `:443` to Cloudflare IP ranges. The codename hostname is not the access control. Protected administration and metrics requests pass both Cloudflare Access and local admin-session gates. The SPA shell, auth, and enrollment routes pass the hosted outer gate without requiring a local session.
 
+**Access JWKS refresh:** the verifier refreshes the Access JWKS at most once per second. A failed lookup for an unknown key is cached negatively (256 entries, 1 minute). The response body is limited to 1 MiB. Keys are refreshed ahead of expiry, 10 minutes before their TTL ends, and a key past its TTL is never served without a successful refresh. The policy fails closed: a cached key verifies only while its key set is under 1 hour old, and after that never without a successful refresh. A failed lookup caused by an unavailable key set returns 503 `jwks_unavailable` and is logged; it is distinct from the 403 returned when a fresh key set does not hold the key. During a Cloudflare certs outage that outlasts the refresh-ahead window, Access-gated admin sign-in fails with `jwks_unavailable` until a refresh succeeds. The host-root path on the machine still works.
+
 **Self-hosted Server area (#186):** `GET /admin/api/v1/server/status`,
 `/server/health`, and `/server/logs` run behind the local admin-session gate and
 proxy to the root Concord Host Agent over `/run/concord-agent/agent.sock`, which
@@ -848,7 +850,16 @@ and serves a separate wizard build of `client/admin` (`setup/`,
 root-only file `/run/concord-agent/setup-token`, run `install-selfhost.sh --preflight-only --json` and
 `--env-file` respectively. Setup closes for good after the first install that
 writes `.env`, or after 60 minutes until the agent restarts with a new token.
-Control-plane is not involved: it is not running yet.
+Control-plane is not involved: it is not running yet. The setup listener admits
+at most four connections per source (an IPv6 source is keyed by its /64), on
+top of the global 16-connection cap. The install route's response has an
+11-minute write deadline: the 10-minute install budget plus time to serialize
+the result.
+
+**Backup admission:** the agent admits one backup job per rolling hour and
+refuses another with 429 `backup_rate_limited`. `selfhost-backup.sh` refuses
+when the target already holds 24 archives or when free space is below twice
+the source size plus 1 GiB. It never prunes old backups.
 
 The `concord-selfhost` `.deb` (`scripts/release/build-selfhost-deb.sh`) owns
 the agent (`/usr/libexec/concord-agent`), its unit and the wizard pages, and

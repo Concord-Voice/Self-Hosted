@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
@@ -345,7 +346,23 @@ func runExportAgentAuthorizer(ctx context.Context, deps adminCtlDeps, args []str
 	}
 	digest := sha256.Sum256(data)
 	outf(deps.stderr, "Authorizer export SHA-256: %s\n", hex.EncodeToString(digest[:]))
+	// Host root picks each key's purpose at import, so list them by ID.
+	for _, credential := range doc.Credentials {
+		outf(deps.stderr, "%s  %s\n", credential.CredentialID, printableLabel(credential.Label))
+	}
+	outf(deps.stderr, "import with --action-credential <id> to let a key authorize host writes; that key can then no longer be used to log in\n")
 	return nil
+}
+
+// printableLabel replaces control characters in an operator-chosen key label
+// so it cannot drive the terminal it is printed to.
+func printableLabel(label string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, label)
 }
 
 // outf writes to an operator-facing stdout, discarding the non-actionable write

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -45,6 +46,18 @@ func recordingAgent(t *testing.T, status int, body string) (string, func() []age
 }
 
 func writeEngine(sock string, audit *fakeAudit) *gin.Engine {
+	r, _ := writeEngineArea(sock, audit)
+	return r
+}
+
+// boundEngine is writeEngine with a Begin already issued for the test handle.
+func boundEngine(sock string, audit *fakeAudit, action string) *gin.Engine {
+	r, area := writeEngineArea(sock, audit)
+	area.bind(testAuthorizationHandle, "admin-1", action, map[string]string{})
+	return r
+}
+
+func writeEngineArea(sock string, audit *fakeAudit) (*gin.Engine, *ServerArea) {
 	gin.SetMode(gin.TestMode)
 	log := logger.NewWithWriter(&bytes.Buffer{})
 	h := &Handler{server: newArea(sock, audit), log: log}
@@ -54,7 +67,7 @@ func writeEngine(sock string, audit *fakeAudit) *gin.Engine {
 	r.POST("/server/stepup", h.ServerStepUpBegin)
 	r.GET("/server/jobs", h.server.ServerJobs)
 	r.GET("/server/jobs/:id", h.server.ServerJob)
-	return r
+	return r, h.server
 }
 
 func send(r *gin.Engine, target, body string) *httptest.ResponseRecorder {
@@ -172,7 +185,7 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 	for _, tc := range cases {
 		sock, _ := recordingAgent(t, tc.status, tc.body)
 		audit := &fakeAudit{}
-		rec := send(writeEngine(sock, audit), "/server/actions/backup", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
+		rec := send(boundEngine(sock, audit, "backup"), "/server/actions/backup", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
 		if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.reason) {
 			t.Errorf("%s: got %d %s", tc.body, rec.Code, rec.Body)
 		}
@@ -191,7 +204,7 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 			t.Errorf("%s: may_have_started %v", tc.body, ev.Detail["may_have_started"])
 		}
 	}
-	rec := send(writeEngine("/nonexistent/agent.sock", &fakeAudit{}), "/server/actions/start", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
+	rec := send(boundEngine("/nonexistent/agent.sock", &fakeAudit{}, "start"), "/server/actions/start", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "agent_unavailable") {
 		t.Fatalf("no agent: %d %s", rec.Code, rec.Body)
 	}
@@ -298,7 +311,7 @@ func TestServerStepUpBeginFailsClosedOnAgentRefusal(t *testing.T) {
 
 func TestServerActionFailsClosedWhenAuditIsDown(t *testing.T) {
 	sock, calls := recordingAgent(t, http.StatusAccepted, `{"id":"`+testJobID+`"}`)
-	rec := send(writeEngine(sock, &fakeAudit{err: errors.New("db down")}), "/server/actions/backup", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
+	rec := send(boundEngine(sock, &fakeAudit{err: errors.New("db down")}, "backup"), "/server/actions/backup", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "audit_unavailable") {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
 	}
@@ -313,11 +326,175 @@ func TestServerActionOutlivesTheClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req := httptest.NewRequest(http.MethodPost, "/server/actions/backup", strings.NewReader(`{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)).WithContext(ctx)
-	writeEngine(sock, audit).ServeHTTP(httptest.NewRecorder(), req)
+	boundEngine(sock, audit, "backup").ServeHTTP(httptest.NewRecorder(), req)
 	if len(calls()) != 1 {
 		t.Fatal("agent not called")
 	}
 	if ev := audit.events[len(audit.events)-1]; ev.Result != AuditSuccess || ev.Detail["job_id"] != testJobID {
 		t.Fatalf("audit %+v", ev)
+	}
+}
+
+func TestServerStepUpBeginPassesAgentRefusalsThrough(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		code   string
+		result string
+	}{
+		{http.StatusConflict, "appliance_managed", AuditFailure},
+		{http.StatusConflict, "unknown_archive", AuditFailure},
+		{http.StatusConflict, "untrusted_backups", AuditFailure},
+		{http.StatusBadRequest, "invalid_authorization", AuditFailure},
+		{http.StatusTooManyRequests, "authorization_busy", AuditFailure},
+		{http.StatusForbidden, "writes_disabled", AuditFailure},
+		{http.StatusForbidden, "authorization_denied", AuditDenied},
+		{http.StatusServiceUnavailable, "authorizer_unavailable", AuditFailure},
+		{http.StatusTooManyRequests, "backup_rate_limited", AuditFailure},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			sock, calls := recordingAgent(t, tc.status, `{"error":"`+tc.code+`"}`)
+			audit := &fakeAudit{}
+			rec := send(writeEngine(sock, audit), "/server/stepup", `{"action":"backup"}`)
+			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), `"error":"`+tc.code+`"`) {
+				t.Fatalf("got %d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.code)
+			}
+			if strings.Contains(rec.Body.String(), "stepup_failed") || strings.Contains(rec.Body.String(), "stepup_unavailable") {
+				t.Fatalf("refusal shown as a key failure: %s", rec.Body)
+			}
+			if len(calls()) != 1 || len(audit.events) != 1 || audit.events[0].Result != tc.result || audit.events[0].Detail["reason"] != tc.code {
+				t.Fatalf("audit: %+v", audit.events)
+			}
+		})
+	}
+}
+
+func TestServerStepUpBeginRelaysOnlyKnownApplianceName(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"error":"appliance_managed","appliance":"truenas"}`, `"appliance":"truenas"`},
+		{`{"error":"appliance_managed","appliance":"<script>"}`, `appliance_managed`},
+	} {
+		sock, _ := recordingAgent(t, http.StatusConflict, tc.body)
+		rec := send(writeEngine(sock, &fakeAudit{}), "/server/stepup", `{"action":"start"}`)
+		if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), "<script>") || !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("%s: %d %s", tc.body, rec.Code, rec.Body)
+		}
+	}
+}
+
+func bindingAgent(t *testing.T) (string, func() []agentCall) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []agentCall
+	sock := fakeAgent(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		calls = append(calls, agentCall{r.Method + " " + r.URL.Path, string(b)})
+		mu.Unlock()
+		if r.URL.Path == "/v1/authorizations" {
+			_, _ = w.Write([]byte(`{"handle":"` + testAuthorizationHandle + `","options":{}}`))
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"` + testJobID + `"}`))
+	})
+	return sock, func() []agentCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]agentCall(nil), calls...)
+	}
+}
+
+const bindingStep = `"stepup":{"handle":"` + testAuthorizationHandle + `","assertion":{}}`
+
+func agentActionCalls(calls []agentCall) int {
+	n := 0
+	for _, c := range calls {
+		if strings.HasPrefix(c.path, "POST /v1/actions/") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestServerActionRejectsArgumentsDifferentFromBegin(t *testing.T) {
+	for _, tc := range []struct{ name, action, body, sentKey, sent string }{
+		{"other tag", "update", `{"tag":"v9.9.9",` + bindingStep + `}`, "sent_tag", "v9.9.9"},
+		{"prerelease tag", "update", `{"tag":"v1.2.3-rc1",` + bindingStep + `}`, "sent_tag", "v1.2.3-rc1"},
+		{"other action", "restart", `{` + bindingStep + `}`, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock, calls := bindingAgent(t)
+			audit := &fakeAudit{}
+			r := writeEngine(sock, audit)
+			if rec := send(r, "/server/stepup", `{"action":"update","tag":"v1.2.3"}`); rec.Code != http.StatusOK {
+				t.Fatalf("begin: %d %s", rec.Code, rec.Body)
+			}
+			rec := send(r, "/server/actions/"+tc.action, tc.body)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "stepup_binding_mismatch") {
+				t.Fatalf("%d %s", rec.Code, rec.Body)
+			}
+			if agentActionCalls(calls()) != 0 {
+				t.Fatalf("agent called for a mismatch: %+v", calls())
+			}
+			last := audit.events[len(audit.events)-1]
+			if last.Result != AuditDenied || last.Detail["reason"] != "stepup_binding_mismatch" || last.Detail["bound_tag"] != "v1.2.3" {
+				t.Fatalf("audit: %+v", last)
+			}
+			if tc.sentKey != "" && last.Detail[tc.sentKey] != tc.sent {
+				t.Fatalf("audit lacks sent args: %+v", last)
+			}
+			// The mismatch spent the handle: the correct request cannot follow it.
+			if rec := send(r, "/server/actions/update", `{"tag":"v1.2.3",`+bindingStep+`}`); rec.Code != http.StatusBadRequest {
+				t.Fatalf("retry after mismatch: %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+func TestServerActionRejectsUnknownHandle(t *testing.T) {
+	sock, calls := bindingAgent(t)
+	audit := &fakeAudit{}
+	rec := send(writeEngine(sock, audit), "/server/actions/backup", `{`+bindingStep+`}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "stepup_binding_mismatch") {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if len(calls()) != 0 {
+		t.Fatalf("agent called: %+v", calls())
+	}
+}
+
+func TestServerActionRejectsExpiredHandle(t *testing.T) {
+	sock, calls := bindingAgent(t)
+	r, area := writeEngineArea(sock, &fakeAudit{})
+	clock := time.Now()
+	area.now = func() time.Time { return clock }
+	if rec := send(r, "/server/stepup", `{"action":"backup"}`); rec.Code != http.StatusOK {
+		t.Fatalf("begin: %d %s", rec.Code, rec.Body)
+	}
+	clock = clock.Add(bindingTTL + time.Second)
+	rec := send(r, "/server/actions/backup", `{`+bindingStep+`}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "stepup_binding_mismatch") {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if agentActionCalls(calls()) != 0 {
+		t.Fatalf("agent called: %+v", calls())
+	}
+}
+
+func TestServerActionHandleIsSingleUse(t *testing.T) {
+	sock, calls := bindingAgent(t)
+	r := writeEngine(sock, &fakeAudit{})
+	if rec := send(r, "/server/stepup", `{"action":"backup"}`); rec.Code != http.StatusOK {
+		t.Fatalf("begin: %d %s", rec.Code, rec.Body)
+	}
+	if rec := send(r, "/server/actions/backup", `{`+bindingStep+`}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("first use: %d %s", rec.Code, rec.Body)
+	}
+	rec := send(r, "/server/actions/backup", `{`+bindingStep+`}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "stepup_binding_mismatch") {
+		t.Fatalf("reuse: %d %s", rec.Code, rec.Body)
+	}
+	if agentActionCalls(calls()) != 1 {
+		t.Fatalf("agent action calls: %+v", calls())
 	}
 }

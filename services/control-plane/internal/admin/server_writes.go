@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -46,6 +47,7 @@ var agentRefusals = map[string]bool{
 	"appliance_managed": true, "backup_rate_limited": true,
 	"authorization_denied": true, "authorizer_unavailable": true,
 	"peer_forbidden": true, "authorization_busy": true, "invalid_authorization": true,
+	"writes_disabled": true,
 }
 
 type serverActionRequest struct {
@@ -119,16 +121,7 @@ func (h *Handler) ServerStepUpBegin(c *gin.Context) {
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		switch resp.StatusCode {
-		case http.StatusForbidden:
-			fail(http.StatusForbidden, AuditDenied, "stepup_failed")
-		case http.StatusServiceUnavailable:
-			fail(http.StatusServiceUnavailable, AuditFailure, "stepup_unavailable")
-		case http.StatusTooManyRequests:
-			fail(http.StatusTooManyRequests, AuditFailure, "stepup_unavailable")
-		default:
-			fail(http.StatusBadGateway, AuditFailure, "agent_error")
-		}
+		h.server.beginRefusal(c, detail, resp.StatusCode, body)
 		return
 	}
 	var authorization struct {
@@ -139,6 +132,7 @@ func (h *Handler) ServerStepUpBegin(c *gin.Context) {
 		fail(http.StatusBadGateway, AuditFailure, "agent_error")
 		return
 	}
+	h.server.bind(authorization.Handle, c.GetString(adminIDContextKey), req.Action, args)
 	h.server.recordWrite(c, detail, AuditSuccess, "")
 	c.JSON(http.StatusOK, gin.H{"handle": authorization.Handle, "publicKey": authorization.Options})
 }
@@ -162,12 +156,28 @@ func (h *Handler) ServerAction(c *gin.Context) {
 		deny(http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if _, ok := serverActionArgs(action, req); !ok {
+	args, ok := serverActionArgs(action, req)
+	if !ok {
 		deny(http.StatusBadRequest, "invalid_request")
 		return
 	}
 	if req.StepUp == nil || !serverStepUpHandle.MatchString(req.StepUp.Handle) || len(req.StepUp.Assertion) == 0 {
 		deny(http.StatusForbidden, "stepup_required")
+		return
+	}
+	// The agent runs the arguments bound at Begin and ignores these, so a
+	// different tag or archive here would make the audit row lie about what ran.
+	// The binding is single-use: an unknown, expired, reused or mismatched
+	// handle is refused before the agent is called.
+	bound, ok := h.server.consumeBinding(req.StepUp.Handle, c.GetString(adminIDContextKey), action, args)
+	if !ok {
+		for k, v := range args {
+			detail["sent_"+k] = v
+		}
+		for k, v := range bound {
+			detail["bound_"+k] = v
+		}
+		deny(http.StatusBadRequest, "stepup_binding_mismatch")
 		return
 	}
 	detail["stepup"] = true
@@ -280,18 +290,14 @@ func (s *ServerArea) startJob(c *gin.Context, action string, detail map[string]a
 		return
 	}
 	if resp.StatusCode != http.StatusAccepted {
-		var refusal struct {
-			Error     string `json:"error"`
-			Appliance string `json:"appliance"`
-		}
-		if json.Unmarshal(body, &refusal) == nil && agentRefusals[refusal.Error] && resp.StatusCode >= 400 && resp.StatusCode < 600 {
-			if refusal.Error == "appliance_managed" && applianceNames[refusal.Appliance] {
+		if code, appliance, ok := parseRefusal(resp.StatusCode, body); ok {
+			if code == "appliance_managed" && applianceNames[appliance] {
 				// The panel needs the name to point at the appliance's own UI.
-				s.recordWrite(c, detail, AuditFailure, refusal.Error)
-				c.JSON(resp.StatusCode, gin.H{"error": refusal.Error, "appliance": refusal.Appliance})
+				s.recordWrite(c, detail, AuditFailure, code)
+				c.JSON(resp.StatusCode, gin.H{"error": code, "appliance": appliance})
 				return
 			}
-			s.writeFail(c, detail, resp.StatusCode, refusal.Error)
+			s.writeFail(c, detail, resp.StatusCode, code)
 			return
 		}
 		s.writeFail(c, detail, http.StatusBadGateway, "agent_error")
@@ -342,4 +348,100 @@ func requestedRow(detail map[string]any) map[string]any {
 	row := maps.Clone(detail)
 	row["phase"] = "requested"
 	return row
+}
+
+// parseRefusal returns the agent's own refusal code when the response is a
+// 4xx/5xx carrying one it is known to send.
+func parseRefusal(status int, body []byte) (code, appliance string, ok bool) {
+	var refusal struct {
+		Error     string `json:"error"`
+		Appliance string `json:"appliance"`
+	}
+	if json.Unmarshal(body, &refusal) != nil || !agentRefusals[refusal.Error] || status < 400 || status >= 600 {
+		return "", "", false
+	}
+	return refusal.Error, refusal.Appliance, true
+}
+
+// beginRefusal relays a non-200 answer to the authorization begin. A real
+// refusal keeps its code and status and is never shown as a failed key check;
+// only an answer with no known code keeps the older step-up wording.
+func (s *ServerArea) beginRefusal(c *gin.Context, detail map[string]any, status int, body []byte) {
+	reply := func(code int, result, reason string, extra gin.H) {
+		s.recordWrite(c, detail, result, reason)
+		out := gin.H{"error": reason}
+		maps.Copy(out, extra)
+		c.JSON(code, out)
+	}
+	if code, appliance, ok := parseRefusal(status, body); ok {
+		result := AuditFailure
+		if code == "authorization_denied" {
+			result = AuditDenied
+		}
+		if code == "appliance_managed" && applianceNames[appliance] {
+			reply(status, result, code, gin.H{"appliance": appliance})
+			return
+		}
+		reply(status, result, code, nil)
+		return
+	}
+	switch status {
+	case http.StatusForbidden:
+		reply(http.StatusForbidden, AuditDenied, "stepup_failed", nil)
+	case http.StatusServiceUnavailable:
+		reply(http.StatusServiceUnavailable, AuditFailure, "stepup_unavailable", nil)
+	case http.StatusTooManyRequests:
+		reply(http.StatusTooManyRequests, AuditFailure, "stepup_unavailable", nil)
+	default:
+		reply(http.StatusBadGateway, AuditFailure, "agent_error", nil)
+	}
+}
+
+const bindingTTL = 10 * time.Minute
+
+type stepUpBinding struct {
+	admin, action string
+	args          map[string]string
+	expires       time.Time
+}
+
+// bind remembers the arguments a Begin was issued for.
+func (s *ServerArea) bind(handle, admin, action string, args map[string]string) {
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+	if s.bindings == nil {
+		s.bindings = map[string]stepUpBinding{}
+	}
+	now := s.clock()
+	for k, b := range s.bindings {
+		if now.After(b.expires) {
+			delete(s.bindings, k)
+		}
+	}
+	s.bindings[handle] = stepUpBinding{admin, action, maps.Clone(args), now.Add(bindingTTL)}
+}
+
+// consumeBinding removes the handle's binding and reports whether this process
+// issued it, it is unexpired, and the request is for what it was issued for.
+// It returns the arguments bound at Begin (nil for an unknown handle). The
+// binding is deleted whether or not it matched, so a handle is checked once.
+func (s *ServerArea) consumeBinding(handle, admin, action string, args map[string]string) (map[string]string, bool) {
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+	b, known := s.bindings[handle]
+	if !known {
+		return nil, false
+	}
+	delete(s.bindings, handle)
+	if s.clock().After(b.expires) {
+		return nil, false
+	}
+	return b.args, b.admin == admin && b.action == action && maps.Equal(b.args, args)
+}
+
+func (s *ServerArea) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }

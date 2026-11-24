@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,15 +22,22 @@ const (
 	maxAuditFileBytes  = 20 << 20
 )
 
-// AuditEvent contains only fixed action/outcome/reason values and opaque IDs.
-// Assertion bytes, credential IDs, tags, archive names, and bodies cannot be
-// represented by this type.
+var errAuditFull = errors.New("host-agent audit full")
+
+// AuditEvent contains only fixed action/outcome/reason values, opaque IDs and
+// the validated arguments a job ran with. Assertion bytes, credential IDs and
+// bodies cannot be represented by this type: Tag must be a release tag the
+// update parser accepts and Archive a CLI-generated backup name.
 type AuditEvent struct {
 	Action  string
 	Outcome string
 	Reason  string
 	AdminID string
 	JobID   string
+	Tag     string
+	Archive string
+	// Suppressed counts identical denials dropped since the last record.
+	Suppressed int
 }
 
 // Audit writes a bounded, fsynced host-agent JSONL stream. It is independent
@@ -41,6 +49,7 @@ type Audit struct {
 	trustRoot string
 	syncFile  func(*os.File) error
 	broken    bool
+	full      bool // logged once until a write succeeds again
 }
 
 // OpenAudit requires a root-owned log boundary and a root-only stream. It
@@ -127,8 +136,11 @@ func validAuditEvent(e AuditEvent) bool {
 		return false
 	}
 	switch e.Reason {
-	case "peer_forbidden", "begin_denied", "assertion_denied", "replay_denied", "admission_approved", "job_started", "job_succeeded", "job_failed", "write_in_progress", "job_unavailable", "backup_rate_limited":
+	case "peer_forbidden", "begin_denied", "assertion_denied", "replay_denied", "clone_detected", "counter_stale", "admission_approved", "admission_failed", "job_started", "job_succeeded", "job_failed", "write_in_progress", "job_unavailable", "backup_rate_limited", "no_action_credential", "action_credential_login":
 	default:
+		return false
+	}
+	if e.Suppressed < 0 || (e.Tag != "" && (len(e.Tag) > 128 || !updateTagPattern.MatchString(e.Tag))) || (e.Archive != "" && !archivePattern.MatchString(e.Archive)) {
 		return false
 	}
 	if e.AdminID != "" {
@@ -169,7 +181,10 @@ func (a *Audit) Write(event AuditEvent) error {
 		Reason     string `json:"reason_code"`
 		AdminID    string `json:"admin_id,omitempty"`
 		JobID      string `json:"job_id,omitempty"`
-	}{"host-agent-audit.v1", id.String(), time.Now().UTC().Format(time.RFC3339Nano), "host-agent", "privileged_action", event.Action, event.Outcome, event.Reason, event.AdminID, event.JobID}
+		Tag        string `json:"tag,omitempty"`
+		Archive    string `json:"archive,omitempty"`
+		Suppressed int    `json:"suppressed_count,omitempty"`
+	}{"host-agent-audit.v1", id.String(), time.Now().UTC().Format(time.RFC3339Nano), "host-agent", "privileged_action", event.Action, event.Outcome, event.Reason, event.AdminID, event.JobID, event.Tag, event.Archive, event.Suppressed}
 	data, err := json.Marshal(record)
 	if err != nil || len(data)+1 > maxAuditLineBytes {
 		return errors.New("host-agent audit event too large")
@@ -180,6 +195,9 @@ func (a *Audit) Write(event AuditEvent) error {
 	if a.broken {
 		return errors.New("host-agent audit requires repair")
 	}
+	// Write opens the path afresh every time, so a stream that logrotate
+	// renamed away and recreated (create 0600 root root), or one truncated in
+	// place, is picked up by the next write after the same checks as OpenAudit.
 	if err := a.checkDirectories(filepath.Dir(a.path)); err != nil {
 		return err
 	}
@@ -189,25 +207,40 @@ func (a *Audit) Write(event AuditEvent) error {
 	}
 	f := os.NewFile(uintptr(fd), a.path)
 	info, err := f.Stat()
-	if err != nil || a.checkFile(f) != nil || info.Size()+int64(len(data)) > maxAuditFileBytes {
+	if err != nil || a.checkFile(f) != nil {
 		_ = f.Close()
-		return errors.New("unsafe or full host-agent audit file")
+		return errors.New("unsafe host-agent audit file")
+	}
+	if info.Size()+int64(len(data)) > maxAuditFileBytes {
+		_ = f.Close()
+		if !a.full {
+			a.full = true
+			log.Print("concord-agent: host-agent audit full; privileged writes refused until the stream is rotated")
+		}
+		return errAuditFull
 	}
 	written, writeErr := f.Write(data)
 	if written != len(data) || writeErr != nil {
 		_ = f.Truncate(info.Size())
 		_ = f.Close()
-		a.broken = true
-		return errors.New("host-agent audit append failed")
+		return a.breakStream("append")
 	}
 	if err := a.syncFile(f); err != nil {
 		_ = f.Close()
-		a.broken = true
-		return errors.New("host-agent audit sync failed")
+		return a.breakStream("sync")
 	}
 	if err := f.Close(); err != nil {
-		a.broken = true
-		return errors.New("host-agent audit close failed")
+		return a.breakStream("close")
 	}
+	a.full = false
 	return nil
+}
+
+// breakStream latches the audit off after a failed append, sync or close: the
+// stream may hold a torn or unsynced record, so only a restart after repair
+// re-enables it.
+func (a *Audit) breakStream(stage string) error {
+	a.broken = true
+	log.Printf("concord-agent: host-agent audit %s failed; audit disabled until repaired and the agent restarted", stage)
+	return fmt.Errorf("host-agent audit %s failed", stage)
 }

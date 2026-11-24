@@ -28,6 +28,7 @@ run_reset() (
     printf '%s\n' "$WORK/agent"
   }
   safe_empty_authorizer_projection() { return "${STUB_EMPTY_TRUST:-1}"; }
+  no_host_agent_installed() { return "${STUB_NO_AGENT_HOST:-1}"; }
   compose() {
     printf 'compose %s\n' "$*" >>"$CALLS"
     case "$*" in
@@ -36,6 +37,7 @@ run_reset() (
         printf '%s\n' "${STUB_LOOKUP_ID:-$ADMIN_ID}"
         ;;
       'exec -T control-plane ./main admin reset-enrollment --username alice')
+        [[ "${STUB_RESET_RC:-0}" == 0 ]] || return "$STUB_RESET_RC"
         printf 'new-enrollment-token\n'
         ;;
       *) return 1 ;;
@@ -46,7 +48,7 @@ run_reset() (
 
 : >"$CALLS"
 out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice)"; rc=$?
-expected="$(printf 'compose exec -T control-plane ./main admin lookup-id --username alice\nagent authorizer revoke --admin-id %s\ncompose exec -T control-plane ./main admin reset-enrollment --username alice' "$ADMIN_ID")"
+expected="$(printf 'compose exec -T control-plane ./main admin lookup-id --username alice\nagent authorizer list\nagent authorizer revoke --admin-id %s\ncompose exec -T control-plane ./main admin reset-enrollment --username alice' "$ADMIN_ID")"
 [[ "$rc" == 0 && "$out" == 'new-enrollment-token' && "$(cat "$CALLS")" == "$expected" ]] \
   && pass 'lookup, root revoke, then DB reset' || fail "happy path rc=$rc calls=$(cat "$CALLS")"
 
@@ -107,6 +109,26 @@ STUB_UNSAFE_PATH="$binary_dir" STUB_UNSAFE_STAT='0 777' check_binary "$binary_di
 ln -s "$binary_dir" "$WORK/agent-link"
 check_binary "$WORK/agent-link/concord-agent" >/dev/null 2>&1 \
   && fail 'symlinked executable ancestor accepted' || pass 'symlinked executable ancestor refused'
+
+# A host with no Host Agent at all has nothing to revoke; it must still reset.
+: >"$CALLS"
+out="$(STUB_NO_AGENT_HOST=0 STUB_AGENT_PRESENT=0 CALLS="$CALLS" run_reset reset-enrollment --username alice)"; rc=$?
+expected="$(printf 'compose exec -T control-plane ./main admin lookup-id --username alice\ncompose exec -T control-plane ./main admin reset-enrollment --username alice')"
+[[ "$rc" == 0 && "$out" == 'new-enrollment-token' && "$(cat "$CALLS")" == "$expected" ]] \
+  && pass 'host with no Host Agent installed resets without a revoke' || fail "no-agent host rc=$rc calls=$(cat "$CALLS")"
+
+# The reset failing AFTER the revoke must say trust is already revoked.
+: >"$CALLS"
+err="$(STUB_RESET_RC=1 CALLS="$CALLS" run_reset reset-enrollment --username alice 2>&1 >/dev/null)"; rc=$?
+[[ "$rc" != 0 && "$err" == *'AFTER Host Agent trust was revoked'* ]] \
+  && pass 'reset failure after revoke tells the operator trust is already revoked' || fail "post-revoke failure rc=$rc err=$err"
+
+# The operator sees the root store before anything is revoked.
+: >"$CALLS"
+CALLS="$CALLS" run_reset reset-enrollment --username alice >/dev/null 2>&1
+list_line="$(grep -n '^agent authorizer list$' "$CALLS" | cut -d: -f1)"; revoke_line="$(grep -n '^agent authorizer revoke ' "$CALLS" | cut -d: -f1)"
+[[ -n "$list_line" && -n "$revoke_line" && "$list_line" -lt "$revoke_line" ]] \
+  && pass 'authorizer list is shown before the revoke' || fail "list/revoke order list=$list_line revoke=$revoke_line"
 
 for scenario in root lookup malformed agent revoke; do
   : >"$CALLS"

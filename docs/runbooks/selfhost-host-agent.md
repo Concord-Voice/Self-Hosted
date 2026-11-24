@@ -107,8 +107,12 @@ of 30 requests per minute per client address; more get 429 `rate_limited`.
 2. The console sends the normalized action and, for update or restore, its
    tag or archive to begin the ceremony. The agent returns a one-use handle
    and assertion options. The handle is bound to that administrator, action
-   and exact arguments, expires after two minutes, and is spent before the
-   assertion is checked. A retry always needs a new ceremony.
+   and exact arguments as the agent recorded them at begin time, expires after
+   two minutes, and is spent before the assertion is checked. A retry always
+   needs a new ceremony. The assertion is bound to the agent's own record of
+   the action, not to what the user sees: the authenticator shows the relying
+   party, not the action. Action and login ceremonies share the RP ID but not
+   credentials: only the admin's action credentials can sign an action.
 3. The console then submits only the handle and assertion. The agent executes
    the normalized arguments stored at begin time after it verifies the
    assertion, persists the authenticator counter, and durably records the
@@ -188,6 +192,26 @@ operation. While the Host Agent overlay is active, admin WebAuthn login also
 checks the imported credential's root-owned counter. If the Host Agent is
 unavailable, login fails closed rather than accepting a database-only result.
 
+#### Why two keys
+
+Host root decides at import which of an administrator's credentials may
+authorize root actions. A credential named with `--action-credential` is an
+action credential; every other imported credential is a login credential. An
+action credential never satisfies an admin login: the control plane leaves it
+out of the login allow-list and answers its login assertion with 403
+`action_credential_not_for_login`, and the agent refuses it too. A login
+credential never authorizes a root action. So register two keys per
+administrator in the console, one for sign-in and one for host actions.
+
+With no action credential imported, every host write is refused
+(`authorization_denied`, audit reason `no_action_credential`).
+
+The residual risk is the user's own touch. A user who deliberately touches the
+action key at a sign-in prompt, or whose action key is also usable at another
+relying party's prompt for the same RP ID, can still be tricked into
+authorizing the action that prompt was minted for. The agent's record of what
+was authorized remains the authority.
+
 #### First import on a new overlay
 
 The Admin Console, including its pre-auth enrollment routes, is mounted only
@@ -199,15 +223,17 @@ fails closed with a service-unavailable response. This does not block the
 separate pre-auth enrollment route.
 
 Bootstrap the administrator through the out-of-band control-plane CLI, then
-complete the one-time enrollment link and register the hardware key. Before the
+complete the one-time enrollment link and register two hardware keys: one for
+sign-in and one for host actions. Before the
 administrator's first normal login, host root must export the now-active
 administrator's public-key bundle from the running control-plane, record the
-SHA-256 printed to standard error, and import that exact file into the Host
-Agent:
+SHA-256 printed to standard error, and note the action key's credential ID from
+the `credential-id  label` list the export prints. Import that exact file into
+the Host Agent, naming the action key with `--action-credential`:
 
 ```bash
 sudo docker exec concordvoice-control-plane ./main admin export-agent-authorizer --username <handle> > admin-authorizer.json
-sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256>
+sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256> --action-credential <action-credential-id>
 sudo systemctl restart concord-agent
 ```
 
@@ -259,8 +285,12 @@ hold, and otherwise leaves control-plane exactly as before:
 2. The `concord-agent` group exists on the host.
 
 It then adds `docker-compose.host-agent.yml`, which mounts
-`/run/concord-agent` read-only into control-plane and adds the container to
-that group. Run `concord-selfhost up` after installing the agent to apply it.
+`/run/concord-agent` and `/etc/concord-voice/agent-authorizers` read-only into
+control-plane, adds the container to that group, and sets
+`HOST_AGENT_AUTHORIZER_PROJECTION=1`. The projection check reads the file's
+owner as uid 0 inside the container, so rootless Docker and `userns-remap`
+installs are unsupported: the mapped uid 0 is not host root, so the check
+cannot be trusted there. Run `concord-selfhost up` after installing the agent to apply it.
 Until the agent is running the page says "The host agent is not reachable.
 Install and start it, then run concord-selfhost up."
 
@@ -334,8 +364,9 @@ Setup-mode rules:
   flood out of the journal; it never locks out the operator.
 - One preflight runs at a time; a second gets 409. At most 16 connections
   are open at once. At most four setup connections from one canonical source
-  IP are admitted; an excess connection closes before TLS. A setup response
-  has a 30-second write deadline.
+  IP are admitted; an excess connection closes before TLS. The install
+  response has an 11-minute write deadline (the 10-minute install budget plus
+  time to serialize the result).
 - One install runs at a time; a second gets 409. An install may take up to
   10 minutes, and closing the browser does not stop it. Its output is capped
   at 256 KiB, with terminal escapes and control characters removed; output
@@ -367,7 +398,8 @@ sudo apt-get install ./concord-selfhost_<version>_<arch>.deb
 
 On first install the package:
 
-1. Creates the `concord-agent` system group.
+1. Creates the `concord-agent` system group and the root-owned
+   `/etc/concord-voice/agent-authorizers` directory (mode `0755`).
 2. Unpacks the release into `/opt/concord`, owned by root, with no file
    writable by group or others and no setuid bits, unless `/opt/concord`
    already exists (then it is left exactly as it is).
@@ -407,6 +439,43 @@ your running server: create
 Without it the agent finds no `.env` beside the fresh `/opt/concord` the
 package unpacks, and opens the setup wizard on a host that is already
 installed.
+
+**Upgrading a checkout install.** The new unit keeps `/etc` read-only except
+for the authorizer directory. If you keep your old unit copy in
+`/etc/systemd/system`, `/etc` stays read-only for the agent and the counter
+advance after each login fails. If you copy the new unit without first
+creating `/etc/concord-voice/agent-authorizers`, the unit fails to start with
+status `226/NAMESPACE`. Create the directory first, then copy the unit.
+
+### Upgrading an existing install
+
+Do all of this before the first admin login after the upgrade. With
+`docker-compose.host-agent.yml` setting `HOST_AGENT_AUTHORIZER_PROJECTION=1`
+and no `authorizers.json`, the agent disables trust and admin WebAuthn login
+fails closed with 503. Write actions return `authorizer_unavailable` until the
+import is done.
+
+1. Upgrade the files. Package install: `sudo apt-get install
+   ./concord-selfhost_<version>_<arch>.deb` (the postinst creates
+   `/etc/concord-voice/agent-authorizers`). Checkout install: update the
+   checkout, rebuild the agent as in "From a checkout", and run
+   `sudo install -d -o root -g root -m 0755 /etc/concord-voice/agent-authorizers`.
+2. Checkout install only: re-copy `infrastructure/host-agent/concord-agent.service`
+   to `/etc/systemd/system/`, re-apply your `ExecStart` and
+   `CONCORD_AGENT_CLI` edits, and run `sudo systemctl daemon-reload`.
+3. For each administrator, export the credentials from the running control
+   plane and note the SHA-256 printed to standard error:
+   `sudo docker exec concordvoice-control-plane ./main admin export-agent-authorizer --username <handle> > admin-authorizer.json`.
+   The export lists `credential-id  label` for each key. Each administrator
+   needs a second key registered in the console for host actions; see "Why two
+   keys". Note that key's credential ID.
+4. Import each export with its exact fingerprint, naming the action key:
+   `sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256> --action-credential <action-credential-id>`
+   (`/usr/local/libexec/concord-agent` on a checkout install). Repeat the flag
+   for more than one action key. Without it, every host write is refused.
+5. Restart the agent: `sudo systemctl restart concord-agent`.
+6. Run `concord-selfhost up` to apply the overlay, then check the store with
+   `sudo concord-agent authorizer list`.
 
 ### From a checkout
 

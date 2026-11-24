@@ -194,13 +194,13 @@ func TestRestoreTakesOnlyAnArchiveInBackups(t *testing.T) {
 		`{"archive":"` + name + `","tag":"v1.0.0"}`,
 	} {
 		rec := postBegin(t, s, "restore", body)
-		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "authorization_denied") {
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_archive") {
 			t.Errorf("%s: got %d %s", body, rec.Code, rec.Body)
 		}
 	}
 	for _, missing := range []string{"concord-backup-20261106T071502Z.tar.gz", "concord-backup-20261106T071501Z.tar.gz"} {
 		rec := postBegin(t, s, "restore", `{"archive":"`+missing+`"}`) // absent, then a link
-		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "authorization_denied") {
+		if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "unknown_archive") {
 			t.Errorf("%s: got %d %s", missing, rec.Code, rec.Body)
 		}
 	}
@@ -208,8 +208,8 @@ func TestRestoreTakesOnlyAnArchiveInBackups(t *testing.T) {
 	if err := os.Chmod(dir, 0o777); err != nil { //nolint:gosec // deliberately unsafe input
 		t.Fatal(err)
 	}
-	if rec := postBegin(t, s, "restore", `{"archive":"`+name+`"}`); rec.Code != http.StatusForbidden ||
-		!strings.Contains(rec.Body.String(), "authorization_denied") {
+	if rec := postBegin(t, s, "restore", `{"archive":"`+name+`"}`); rec.Code != http.StatusConflict ||
+		!strings.Contains(rec.Body.String(), "untrusted_backups") {
 		t.Errorf("writable backups: got %d %s", rec.Code, rec.Body)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // root-only directory, as the agent expects
@@ -263,7 +263,7 @@ func TestRefusesBadWriteRequests(t *testing.T) {
 		}
 	}
 	for _, arguments := range []string{`{"tag":"main"}`, `{"tag":"v1.0.0;id"}`, `{"tag":"--help"}`} {
-		if rec := postBegin(t, s, "update", arguments); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "authorization_denied") {
+		if rec := postBegin(t, s, "update", arguments); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_tag") {
 			t.Errorf("invalid update begin %s: got %d %s", arguments, rec.Code, rec.Body)
 		}
 	}
@@ -282,8 +282,8 @@ func TestRestartChecksTheLogBoundaryFirst(t *testing.T) {
 	f := &fakeRunner{}
 	s, _ := writeServer(t, f)
 	s.writes.boundary = filepath.Join(t.TempDir(), "missing")
-	if rec := postBegin(t, s, "restart", `{}`); rec.Code != http.StatusForbidden ||
-		!strings.Contains(rec.Body.String(), "authorization_denied") {
+	if rec := postBegin(t, s, "restart", `{}`); rec.Code != http.StatusConflict ||
+		!strings.Contains(rec.Body.String(), "security_log_boundary_missing") {
 		t.Errorf("got %d %s", rec.Code, rec.Body)
 	}
 	if len(f.args) != 0 {
@@ -353,7 +353,12 @@ func TestBackupAdmissionPersistsAcrossFailureAndRestart(t *testing.T) {
 	if rec := postAuthorized(t, s2, "/v1/actions/backup", ""); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("restart backup: %d %s", rec.Code, rec.Body)
 	}
-	s2.writes.now = func() time.Time { return now.Add(backupWindow) }
+	s2.writes.now = func() time.Time { return now.Add(time.Hour - time.Nanosecond) }
+	if rec := postAuthorized(t, s2, "/v1/actions/backup", ""); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("backup 1ns before the hour: %d %s", rec.Code, rec.Body)
+	}
+	// A literal hour, so a change to backupWindow cannot move both sides.
+	s2.writes.now = func() time.Time { return now.Add(time.Hour) }
 	if job := started(t, postAuthorized(t, s2, "/v1/actions/backup", "")); waitJob(t, s2, job.ID).State != "succeeded" {
 		t.Fatalf("backup at window boundary did not succeed")
 	}
@@ -374,12 +379,18 @@ func TestBackupAdmissionDoesNotSpendWindowWithoutAJob(t *testing.T) {
 			} else {
 				s.writes.marker = filepath.Join(t.TempDir(), "missing", "write-in-progress")
 			}
-			job, err := s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+			job, err := s.writes.start("backup", list[0].AdminID, actionRequest{}, [][]string{{"backup", jsonFlag}}, longJobBudget)
 			require.Error(t, err)
 			require.Nil(t, job)
 			_, err = os.Stat(s.writes.admission)
 			require.ErrorIs(t, err, os.ErrNotExist, "a rejected backup must not consume the hourly slot")
 			require.Empty(t, s.writes.list)
+			if failure == "marker" {
+				lines := readAuditLines(t, s.audit.path)
+				require.Len(t, lines, 2)
+				require.Equal(t, "admission_failed", lines[1]["reason_code"], "a rolled-back admission is closed in the audit")
+				require.Equal(t, lines[0]["job_id"], lines[1]["job_id"])
+			}
 
 			if failure == "marker" {
 				s.writes.marker = marker
@@ -389,7 +400,7 @@ func TestBackupAdmissionDoesNotSpendWindowWithoutAJob(t *testing.T) {
 				replacement.writes.now = s.writes.now
 				s = replacement
 			}
-			job, err = s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+			job, err = s.writes.start("backup", list[0].AdminID, actionRequest{}, [][]string{{"backup", jsonFlag}}, longJobBudget)
 			require.NoError(t, err)
 			require.NotNil(t, job)
 			waitJob(t, s, job.ID)
@@ -404,23 +415,33 @@ func TestBackupAdmissionCommitFailureRemovesMarker(t *testing.T) {
 	list, err := s.authorizations.authorizers.List()
 	require.NoError(t, err)
 	require.Len(t, list, 1)
+	changed := false
 	s.audit.syncFile = func(f *os.File) error {
 		// The state changes after the eligibility check, at the admitted audit.
-		if err := os.Mkdir(s.writes.admission, 0o700); err != nil {
-			return err
+		if !changed {
+			changed = true
+			if err := os.Mkdir(s.writes.admission, 0o700); err != nil {
+				return err
+			}
 		}
 		return f.Sync()
 	}
-	job, err := s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+	job, err := s.writes.start("backup", list[0].AdminID, actionRequest{}, [][]string{{"backup", jsonFlag}}, longJobBudget)
 	require.ErrorContains(t, err, "publish backup admission state")
 	require.Nil(t, job)
+	lines := readAuditLines(t, s.audit.path)
+	require.Len(t, lines, 2, "the rolled-back admission gets a terminal record")
+	require.Equal(t, "admission_approved", lines[0]["reason_code"])
+	require.Equal(t, "failed", lines[1]["outcome"])
+	require.Equal(t, "admission_failed", lines[1]["reason_code"])
+	require.Equal(t, lines[0]["job_id"], lines[1]["job_id"])
 	require.Empty(t, s.writes.list)
 	_, err = os.Stat(s.writes.marker)
 	require.ErrorIs(t, err, os.ErrNotExist)
 
 	require.NoError(t, os.Remove(s.writes.admission))
 	s.audit.syncFile = func(f *os.File) error { return f.Sync() }
-	job, err = s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+	job, err = s.writes.start("backup", list[0].AdminID, actionRequest{}, [][]string{{"backup", jsonFlag}}, longJobBudget)
 	require.NoError(t, err)
 	require.NotNil(t, job)
 	waitJob(t, s, job.ID)
@@ -483,7 +504,7 @@ func TestBackupAdmissionConcurrent(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			job, err := s.writes.start("backup", list[0].AdminID, [][]string{{"backup", jsonFlag}}, longJobBudget)
+			job, err := s.writes.start("backup", list[0].AdminID, actionRequest{}, [][]string{{"backup", jsonFlag}}, longJobBudget)
 			results <- result{job: job, err: err}
 		}()
 	}
@@ -497,6 +518,25 @@ func TestBackupAdmissionConcurrent(t *testing.T) {
 		waitJob(t, s, first.job.ID)
 	} else {
 		waitJob(t, s, second.job.ID)
+	}
+
+	// With nothing running, the one-write guard is out of the way: concurrent
+	// admissions inside the window are refused by the rate limit alone.
+	start = make(chan struct{})
+	results = make(chan result, 4)
+	for range 4 {
+		go func() {
+			<-start
+			job, err := s.writes.start("backup", list[0].AdminID, actionRequest{}, [][]string{{"backup", jsonFlag}}, longJobBudget)
+			results <- result{job: job, err: err}
+		}()
+	}
+	close(start)
+	for range 4 {
+		r := <-results
+		if r.job != nil || !errors.Is(r.err, errBackupLimited) {
+			t.Fatalf("admission inside the window: job=%v err=%v", r.job, r.err)
+		}
 	}
 }
 

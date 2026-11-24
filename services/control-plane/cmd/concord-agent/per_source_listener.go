@@ -42,7 +42,13 @@ func canonicalTCPSource(addr net.Addr) (string, bool) {
 	if ipv4 := tcp.IP.To4(); ipv4 != nil {
 		return ipv4.String(), true
 	}
-	return tcp.IP.String(), true
+	// One IPv6 host is normally handed a whole /64, so key the cap on that
+	// prefix: otherwise each address in it would get its own four slots.
+	ipv6 := tcp.IP.To16()
+	if ipv6 == nil {
+		return "", false
+	}
+	return (&net.IPNet{IP: ipv6.Mask(net.CIDRMask(64, 128)), Mask: net.CIDRMask(64, 128)}).String(), true
 }
 
 func (l *perSourceListener) reserve(source string) bool {

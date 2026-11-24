@@ -38,7 +38,7 @@ run_fn() {
       printf 'compose %s\n' "$*" >>"$WORK/calls"
       case "$*" in
         'exec -T postgres pg_dump '*) printf 'PGDUMP-DATA' ;;
-        *' psql '*) printf '%s\n' "${STUB_PG_BYTES:-1}" ;;
+        *' psql '*pg_database_size*) printf '%s\n' "${STUB_PG_BYTES:-1}" ;;
         'exec -T postgres pg_restore '*) cat >"$WORK/restored.dump" ;;
         'exec -T postgres psql '*) return "${STUB_REFRESH_REVOKE_RC:-0}" ;;
         'up -d redis') return "${STUB_REDIS_START_RC:-0}" ;;
@@ -122,8 +122,11 @@ mkdir -m 700 "$admit_out"
 for bad in bad 999999999999999999999999999999999999; do
   : >"$WORK/calls"
   STUB_PG_BYTES="$bad" STUB_AVAILABLE_BYTES=999999999999 run_fn verb_backup --out "$admit_out" >/dev/null 2>&1; rc=$?
-  [[ $rc -ne 0 && -z "$(find "$admit_out" -name '.staging*')" ]] && ! grep -Eq 'pg_dump|entrypoint tar' "$WORK/calls" \
-    && pass "invalid or overflow source size refuses before copy" || fail "bad source=$bad rc=$rc calls=$(cat "$WORK/calls")"
+  err="$(STUB_PG_BYTES="$bad" STUB_AVAILABLE_BYTES=999999999999 run_fn verb_backup --out "$admit_out" 2>&1 >/dev/null)"
+  if [[ "$bad" == bad ]]; then want='not numeric'; label='non-numeric source size refuses with a parse error before copy'
+  else want='insufficient free space'; label='oversized source size refuses for lack of free space before copy'; fi
+  [[ $rc -ne 0 && -z "$(find "$admit_out" -name '.staging*')" && "$err" == *"$want"* ]] && ! grep -Eq 'pg_dump|entrypoint tar' "$WORK/calls" \
+    && pass "$label" || fail "bad source=$bad rc=$rc err=$err calls=$(cat "$WORK/calls")"
 done
 : >"$WORK/calls"
 STUB_PG_BYTES=5 STUB_MINIO_BYTES=7 STUB_AVAILABLE_BYTES=1073741847 run_fn verb_backup --out "$admit_out" >/dev/null 2>&1; rc=$?

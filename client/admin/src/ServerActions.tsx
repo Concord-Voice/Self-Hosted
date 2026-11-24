@@ -36,7 +36,7 @@ const REFUSALS: Record<string, string> = {
   stepup_required: "This action needs your security key.",
   stepup_failed: "The security key check failed. Try again.",
   authorization_denied:
-    "The host agent rejected this admin's security key proof. Start again; if this persists, ask a host-root operator to import this admin's authorizer with concord-agent authorizer import.",
+    "The host agent rejected this admin's security key proof. Host actions need this admin's dedicated action key, imported by a host-root operator with concord-agent authorizer import --action-credential. Touch that key, not your login key; if this persists, ask a host-root operator to check the import.",
   authorizer_unavailable:
     "The host agent cannot load its trusted authorizers. Ask a host-root operator to check the authorizer file and import it with concord-agent authorizer import.",
   peer_forbidden:
@@ -65,6 +65,10 @@ const REFUSALS: Record<string, string> = {
   rate_limited: "Too many requests. Wait a minute, then try again.",
   invalid_tag: "Enter a release tag such as v0.3.1.",
   invalid_archive: "Choose a backup from the list.",
+  writes_disabled:
+    "Host writes are switched off because the agent has no audit log or no trusted authorizer. Ask a host-root operator to check the agent log and import this admin's authorizer.",
+  stepup_binding_mismatch:
+    "The request changed after your security key was requested. Start the action again.",
 };
 
 interface ServerActionsProps {

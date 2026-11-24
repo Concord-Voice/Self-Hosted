@@ -17,6 +17,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -43,6 +44,9 @@ const (
 	// backupAdmissionFile survives agent restarts so backup admission remains
 	// rate limited across processes. It shares the dedicated socket directory.
 	backupAdmissionFile = "backup-last-admitted"
+	// backupAdmissionTempPrefix is the CreateTemp prefix hostagent uses while
+	// publishing backupAdmissionFile; a crash can leave one behind.
+	backupAdmissionTempPrefix = ".backup-admission-"
 	// setupMaxConns bounds the TLS connections a LAN client can hold open.
 	setupMaxConns          = 16
 	setupMaxConnsPerSource = 4
@@ -107,7 +111,8 @@ func run() int {
 	}
 	audit, auditErr := hostagent.OpenAudit(hostagent.HostAgentAuditPath)
 	if auditErr != nil {
-		log.Print("concord-agent: host-agent audit unavailable; writes disabled")
+		// The audit's errors carry fixed strings and the fixed stream path only.
+		log.Printf("concord-agent: host-agent audit unavailable; writes disabled: %v", auditErr)
 	} else if err := agent.SetAudit(audit); err != nil {
 		log.Print("concord-agent: startup failed: host-agent audit")
 		return 1
@@ -151,19 +156,21 @@ func run() int {
 // configureAuthorizerTrust enables peer-gated login assertions without granting
 // write authority. Missing or unsafe trust leaves the endpoint unavailable.
 func configureAuthorizerTrust(agent *hostagent.Server, path string) bool {
+	// The trust file holds public keys only; its load errors name the path
+	// and the failed check, never key material.
 	authorizers, err := hostagent.LoadAuthorizers(path)
 	if err != nil {
-		log.Print("concord-agent: authorizer trust unavailable; login and writes disabled")
+		log.Printf("concord-agent: authorizer trust unavailable; login and writes disabled: %v", err)
 		return false
 	}
 	rpID, origins, err := authorizers.RPConfig()
 	if err != nil {
-		log.Print("concord-agent: authorizer trust unavailable; login and writes disabled")
+		log.Printf("concord-agent: authorizer RP configuration unavailable; login and writes disabled: %v", err)
 		return false
 	}
 	verifier, err := mfa.NewWebAuthnService(rpID, "Concord Voice Admin", origins)
 	if err != nil {
-		log.Print("concord-agent: authorizer verifier unavailable; login and writes disabled")
+		log.Printf("concord-agent: authorizer verifier unavailable; login and writes disabled: %v", err)
 		return false
 	}
 	if err := agent.SetAuthorizationStore(hostagent.NewAuthorizationStore(authorizers, verifier, time.Now)); err != nil {
@@ -185,6 +192,7 @@ func configureWriteAccess(agent *hostagent.Server, cli, resolved, sock string, a
 		return nil
 	}
 	if !auditAvailable || !trusted {
+		agent.DisableWrites()
 		return nil
 	}
 	// Writes report progress on stderr. The CLI's backups directory is three
@@ -287,6 +295,40 @@ func writeTokenFile(path, content string) error {
 	return f.Close()
 }
 
+// staleAdmissionTemp matches only os.CreateTemp names for the backup
+// admission state: the fixed prefix followed by its random decimal suffix.
+func staleAdmissionTemp(name string) bool {
+	suffix, ok := strings.CutPrefix(name, backupAdmissionTempPrefix)
+	if !ok || suffix == "" {
+		return false
+	}
+	for _, c := range suffix {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// sweepStale removes a leftover marker or temporary file, but only a regular
+// file owned by the agent's own user (root under systemd); anything else in
+// the directory is refused rather than deleted.
+func sweepStale(path string) error {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !st.Mode().IsRegular() || !ok || int64(sys.Uid) != int64(os.Geteuid()) {
+		return fmt.Errorf("socket directory %s holds an unexpected %s; use a dedicated directory", filepath.Dir(path), filepath.Base(path))
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	log.Printf("concord-agent: removed stale %s from the socket directory", filepath.Base(path))
+	return nil
+}
+
 // listen opens the socket with no window in which it is world-accessible:
 // the directory is 0750 root:group (owner is the agent, root under systemd), the umask makes the socket 0600, and it is
 // then handed to the group as 0660.
@@ -302,7 +344,14 @@ func listen(path string, gid int) (net.Listener, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if e.Name() != filepath.Base(path) && e.Name() != setupTokenFile && e.Name() != backupAdmissionFile {
+		switch name := e.Name(); {
+		case name == filepath.Base(path) || name == setupTokenFile || name == backupAdmissionFile:
+		case name == writeMarkerFile || staleAdmissionTemp(name):
+			// A crashed write or admission commit leaves these behind.
+			if err := sweepStale(filepath.Join(dir, name)); err != nil {
+				return nil, err
+			}
+		default:
 			return nil, fmt.Errorf("socket directory %s is not empty; use a dedicated directory", dir)
 		}
 	}

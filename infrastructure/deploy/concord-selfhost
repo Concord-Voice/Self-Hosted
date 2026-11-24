@@ -125,6 +125,16 @@ safe_empty_authorizer_projection() {
   [[ -d "$dir" && ! -e "$file" && ! -L "$file" ]] && trusted_root_path "$dir"
 }
 
+# no_host_agent_installed — true only when there is nothing Host Agent to revoke:
+# no authorizer directory, no installed agent binary, no agent group. Anything
+# less (a directory without a binary, a binary without a directory) still fails
+# closed in verb_admin.
+no_host_agent_installed() {
+  [[ ! -e /etc/concord-voice/agent-authorizers && ! -L /etc/concord-voice/agent-authorizers ]] \
+    && ! find_agent_binary /usr/libexec/concord-agent /usr/local/libexec/concord-agent >/dev/null 2>&1 \
+    && ! getent group concord-agent >/dev/null 2>&1
+}
+
 verb_admin() {
   if [[ $# -ne 3 || "$1" != reset-enrollment || "$2" != --username || -z "$3" ]]; then
     echo 'concord-selfhost: expected admin reset-enrollment --username <handle>' >&2
@@ -140,14 +150,41 @@ verb_admin() {
     echo 'concord-selfhost: admin ID lookup returned an invalid UUID; enrollment unchanged' >&2
     return 1
   fi
-  if ! safe_empty_authorizer_projection /etc/concord-voice/agent-authorizers/authorizers.json; then
+  if no_host_agent_installed; then
+    : # no Host Agent on this host: nothing to revoke
+  elif ! safe_empty_authorizer_projection /etc/concord-voice/agent-authorizers/authorizers.json; then
     agent_bin="$(find_agent_binary /usr/libexec/concord-agent /usr/local/libexec/concord-agent)" || return 1
-    if ! "$agent_bin" authorizer revoke --admin-id "$admin_id"; then
-      echo 'concord-selfhost: Host Agent revocation failed; enrollment unchanged' >&2
+    # The ID above came from the control-plane container, which this check exists
+    # to distrust. Show the root store so the operator can see what it holds, and
+    # on a terminal make them confirm the account before anything is revoked.
+    echo "concord-selfhost: Host Agent authorizers (revoking admin ${admin_id} for '${username}'):" >&2
+    "$agent_bin" authorizer list >&2 || {
+      echo 'concord-selfhost: cannot list Host Agent authorizers; enrollment unchanged' >&2
+      return 1
+    }
+    local allow_missing=()
+    if [[ -t 0 ]]; then
+      local answer
+      read -r -p "Type the username to confirm this is the account being reset: " answer
+      if [[ "$answer" != "$username" ]]; then
+        echo 'concord-selfhost: not confirmed; enrollment unchanged' >&2
+        return 1
+      fi
+      # Only a confirmed operator may accept an admin the store never held.
+      allow_missing=(--allow-missing)
+    fi
+    # Without a terminal confirmation the agent exits non-zero when that admin
+    # had no credential to revoke, so a wrong or unknown ID cannot silently pass.
+    if ! "$agent_bin" authorizer revoke ${allow_missing[@]+"${allow_missing[@]}"} --admin-id "$admin_id"; then
+      echo 'concord-selfhost: Host Agent revocation failed or revoked nothing; enrollment unchanged' >&2
       return 1
     fi
+    echo "concord-selfhost: Host Agent revoke step finished for admin ${admin_id}" >&2
   fi
-  compose exec -T control-plane ./main admin reset-enrollment --username "$username"
+  if ! compose exec -T control-plane ./main admin reset-enrollment --username "$username"; then
+    echo 'concord-selfhost: enrollment reset failed AFTER Host Agent trust was revoked; fix the cause and run the same command again' >&2
+    return 1
+  fi
 }
 
 # require_security_log_boundary — refuse `up` before Docker's opaque "bind source

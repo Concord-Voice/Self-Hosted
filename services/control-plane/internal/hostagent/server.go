@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -65,6 +66,8 @@ type Server struct {
 	followers       chan struct{}
 	writes          *jobs  // nil unless EnableWrites was called
 	managedBy       string // an appliance that owns writes; see SetManagedBy
+	writesDisabled  bool   // writes are off because audit or trust is missing
+	peerDenials     peerDenialLimiter
 	// writeGrace is how long past an action's budget a response may take to
 	// write before the connection is cut.
 	writeGrace time.Duration
@@ -115,10 +118,89 @@ func (s *Server) SetAudit(audit *Audit) error {
 	return nil
 }
 
+// DisableWrites makes every write-side route answer writes_disabled instead of
+// unknown_action, so the console can say why. It is set before serving.
+func (s *Server) DisableWrites() {
+	s.writes = nil
+	s.writesDisabled = true
+}
+
+// WritesEnabled reports whether write actions are being served.
+func (s *Server) WritesEnabled() bool { return s.writes != nil }
+
+// WritesDisabled reports whether write routes answer writes_disabled.
+func (s *Server) WritesDisabled() bool { return s.writesDisabled }
+
 func (s *Server) auditEvent(event AuditEvent) {
-	if s.audit != nil {
-		_ = s.audit.Write(event)
+	if s.audit == nil {
+		return
 	}
+	if err := s.audit.Write(event); err != nil {
+		// The audit's errors are fixed strings and the fixed stream path.
+		log.Printf("concord-agent: host-agent audit write failed: reason=%s: %v", event.Reason, err)
+	}
+}
+
+const (
+	peerDenialWindow   = time.Minute
+	maxPeerDenialUIDs  = 256
+	unknownPeerUID     = -1
+	overflowPeerDenial = -2
+)
+
+// peerDenialLimiter keeps any process that can reach the socket from filling
+// the bounded audit with peer_forbidden records: each UID gets at most one
+// record per window, and that record counts the denials dropped before it.
+type peerDenialLimiter struct {
+	mu      sync.Mutex
+	now     func() time.Time
+	entries map[int]*peerDenialEntry
+}
+
+type peerDenialEntry struct {
+	windowStart time.Time
+	suppressed  int
+}
+
+// admit reports whether a denial for uid is recorded now and how many denials
+// for it were dropped since its last record.
+func (l *peerDenialLimiter) admit(uid int) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if l.now != nil {
+		now = l.now()
+	}
+	if l.entries == nil {
+		l.entries = make(map[int]*peerDenialEntry)
+	}
+	entry, ok := l.entries[uid]
+	if !ok {
+		for key, e := range l.entries {
+			if now.Sub(e.windowStart) >= peerDenialWindow && e.suppressed == 0 {
+				delete(l.entries, key)
+			}
+		}
+		if len(l.entries) >= maxPeerDenialUIDs {
+			uid = overflowPeerDenial
+			if entry, ok = l.entries[uid]; ok {
+				return l.step(entry, now)
+			}
+		}
+		l.entries[uid] = &peerDenialEntry{windowStart: now}
+		return true, 0
+	}
+	return l.step(entry, now)
+}
+
+func (l *peerDenialLimiter) step(entry *peerDenialEntry, now time.Time) (bool, int) {
+	if now.Sub(entry.windowStart) < peerDenialWindow {
+		entry.suppressed++
+		return false, 0
+	}
+	suppressed := entry.suppressed
+	entry.windowStart, entry.suppressed = now, 0
+	return true, suppressed
 }
 
 // ServeHTTP routes three GET reads and, once enabled, the write actions and
@@ -127,7 +209,13 @@ func (s *Server) auditEvent(event AuditEvent) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	peer, ok := peerFromContext(r.Context())
 	if !ok || peer.UID != s.expectedPeerUID {
-		s.auditEvent(AuditEvent{Action: requestAction(r.URL.Path), Outcome: "denied", Reason: "peer_forbidden"})
+		uid := unknownPeerUID
+		if ok {
+			uid = peer.UID
+		}
+		if record, suppressed := s.peerDenials.admit(uid); record {
+			s.auditEvent(AuditEvent{Action: requestAction(r.URL.Path), Outcome: "denied", Reason: "peer_forbidden", Suppressed: suppressed})
+		}
 		refuse(w, http.StatusForbidden, "peer_forbidden")
 		return
 	}
@@ -137,6 +225,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.managedBy != "" && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {
 		s.refuseManaged(w)
+		return
+	}
+	if s.writes == nil && s.writesDisabled && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {
+		refuse(w, http.StatusServiceUnavailable, "writes_disabled")
 		return
 	}
 	if s.handleWriteRoute(w, r) {
@@ -236,8 +328,17 @@ func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request
 	}
 	handle, options, err := s.authorizations.Begin(body.AdminID, body.Action, body.Arguments)
 	if err != nil {
-		s.auditEvent(AuditEvent{Action: actionName(body.Action), Outcome: "denied", Reason: "begin_denied", AdminID: canonicalAuditAdminID(body.AdminID)})
+		reason := "begin_denied"
+		if errors.Is(err, errNoActionCredential) {
+			reason = "no_action_credential"
+		}
+		s.auditEvent(AuditEvent{Action: actionName(body.Action), Outcome: "denied", Reason: reason, AdminID: canonicalAuditAdminID(body.AdminID)})
+		var no *refusal
 		switch {
+		case errors.As(err, &no):
+			// The request itself was refused (bad arguments, missing archive,
+			// untrusted backups): pass its own status and reason through.
+			refuse(w, no.code, no.reason)
 		case errors.Is(err, ErrAuthorizationBusy):
 			refuse(w, http.StatusTooManyRequests, "authorization_busy")
 		case errors.Is(err, ErrAuthorizerUnavailable):

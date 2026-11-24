@@ -289,7 +289,74 @@ describe("ServerActions", () => {
   });
 
   it.each([
+    ["start", "Start"],
+    ["stop", "Stop"],
+    ["restart", "Restart"],
+  ])("asks for the security key before %s", async (action, label) => {
+    lists();
+    let stepUpBody: unknown;
+    let actionBody: Record<string, unknown> | undefined;
+    server.use(
+      http.post(`${base}/stepup`, async ({ request }) => {
+        stepUpBody = await request.json();
+        return HttpResponse.json(stepUpOptions);
+      }),
+      http.post(`${base}/actions/${action}`, async ({ request }) => {
+        actionBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(job("running", { action }), { status: 202 });
+      }),
+      http.get(`${base}/jobs/${id}`, () =>
+        HttpResponse.json(job("failed", { action, output: "no\n" })),
+      ),
+    );
+    const get = vi
+      .spyOn(navigator.credentials, "get")
+      .mockResolvedValue(assertionCredential());
+    renderActions();
+    await userEvent
+      .setup()
+      .click(await screen.findByRole("button", { name: label }));
+    await waitFor(() => expect(actionBody).toBeDefined());
+    expect(stepUpBody).toEqual({ action });
+    expect(get).toHaveBeenCalledOnce();
+    expect((actionBody?.stepup as { handle: string }).handle).toBe(
+      stepUpOptions.handle,
+    );
+  });
+
+  it.each([
+    [409, "appliance_managed", "An appliance runs this server"],
+    [409, "unknown_archive", "no longer in the backups folder"],
+    [409, "untrusted_backups", "not owned by root"],
+    [400, "invalid_authorization", "did not accept this authorization request"],
+    [429, "authorization_busy", "Another host authorization is in progress"],
+  ])(
+    "shows begin refusal %s %s without a key failure",
+    async (status, code, text) => {
+      lists();
+      server.use(
+        http.post(`${base}/stepup`, () =>
+          HttpResponse.json({ error: code }, { status }),
+        ),
+      );
+      renderActions();
+      await userEvent
+        .setup()
+        .click(await screen.findByRole("button", { name: "Stop" }));
+      expect(await screen.findByText(new RegExp(text))).toBeVisible();
+      expect(
+        screen.queryByText("The security key check failed. Try again."),
+      ).toBeNull();
+    },
+  );
+
+  it.each([
     [403, "authorization_denied", "concord-agent authorizer import"],
+    [
+      403,
+      "authorization_denied",
+      "dedicated action key.*host-root operator.*--action-credential",
+    ],
     [503, "authorizer_unavailable", "cannot load its trusted authorizers"],
     [403, "peer_forbidden", "agent socket permissions"],
     [429, "authorization_busy", "Another host authorization is in progress"],

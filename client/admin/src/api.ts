@@ -18,6 +18,8 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly retryAfter: number | null,
+    // The server's stable error code, when its error body names one.
+    public readonly code: string | null = null,
   ) {
     super("Admin Portal request failed");
     this.name = "ApiError";
@@ -54,6 +56,19 @@ export function retryAfter(value: string | null): number | null {
   return Number.isSafeInteger(seconds) && seconds <= 3600 ? seconds : null;
 }
 
+async function errorCode(response: Response): Promise<string | null> {
+  try {
+    const value: unknown = await response.json();
+    if (typeof value === "object" && value !== null && "error" in value) {
+      const { error } = value as { error: unknown };
+      return typeof error === "string" ? error : null;
+    }
+  } catch {
+    // An error without a JSON body carries no code.
+  }
+  return null;
+}
+
 async function request<T>(
   path: string,
   parser: (value: unknown) => T,
@@ -83,6 +98,7 @@ async function request<T>(
     throw new ApiError(
       response.status,
       retryAfter(response.headers.get("Retry-After")),
+      await errorCode(response),
     );
   }
 

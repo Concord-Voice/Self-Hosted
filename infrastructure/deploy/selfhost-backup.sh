@@ -91,7 +91,10 @@ _backup_minio_bytes() {
 }
 
 _backup_available_bytes() {
-  df -PB1 -- "$1" | awk 'END { print $4 }'
+  local report
+  # No pipefail here: a failing df must not look like an empty answer.
+  report="$(df -PB1 -- "$1")" || return 1
+  printf '%s\n' "$report" | awk 'END { print $4 }'
 }
 
 # _backup_admit checks retention and staging headroom before any data copy.
@@ -106,19 +109,22 @@ _backup_admit() {
     minio="${minio%%[[:space:]]*}"
   fi
   available="$(_backup_available_bytes "$out")" || { _backup_fail 'cannot determine free space'; return 1; }
-  python3 - "$pg" "$minio" "$available" "$BACKUP_RESERVE_BYTES" <<'PY' || {
+  local gate_rc=0
+  python3 - "$pg" "$minio" "$available" "$BACKUP_RESERVE_BYTES" <<'PY' || gate_rc=$?
 import re, sys
 values = sys.argv[1:]
 if not all(re.fullmatch(r"[0-9]+", value) for value in values):
-    sys.exit(1)
+    sys.exit(2)  # a size probe returned something that is not a byte count
 source = int(values[0]) + int(values[1])
 required = source * 2 + int(values[3])
 if int(values[2]) < required:
-    sys.exit(1)
+    sys.exit(1)  # genuinely not enough free space
 PY
-    _backup_fail 'insufficient free space for backup staging'
-    return 1
-  }
+  case "$gate_rc" in
+    0) ;;
+    2) _backup_fail 'a backup size or free-space probe returned a value that is not numeric'; return 1 ;;
+    *) _backup_fail 'insufficient free space for backup staging'; return 1 ;;
+  esac
 }
 
 _backup_run() {

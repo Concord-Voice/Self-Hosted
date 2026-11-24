@@ -223,7 +223,7 @@
 - Produces: uniform clone-warning rejection and bounded `accessVerifier.lookupKey`.
 
 - [ ] **Step 1: Add login clone-warning test.** No session, sign-count update, or success audit occurs; denial is uniform.
-- [ ] **Step 2: Add JWKS concurrency/bounds tests.** Known key remains fast during slow unknown fetch; one fetch per burst; one-minute negative cache max 256; 1 MiB+1 and trailing JSON fail; failed refresh preserves good keys.
+- [ ] **Step 2: Add JWKS concurrency/bounds tests.** Known key remains fast during slow unknown fetch; one fetch per burst; one-minute negative cache max 256; 1 MiB+1 and trailing JSON fail; a failed refresh keeps cached keys only while the key set is under one hour old, then fails closed with 503 `jwks_unavailable` (distinct from 401 `unknown_kid`); refresh-ahead runs in the last 10 minutes.
 - [ ] **Step 3: Implement the smallest clone check.** Check immediately after finish and before every success mutation.
 - [ ] **Step 4: Refactor refresh around singleflight.** Fetch/decode outside the mutex, record last attempt, then swap the validated nonempty map under lock. Keep cache semantics explicit.
 - [ ] **Step 5: Verify and commit.** Run `go test -race ./internal/admin ./internal/middleware -count=1`; commit `fix(security): reject cloned admin keys and bound jwks refresh`.
