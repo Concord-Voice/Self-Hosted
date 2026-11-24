@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 )
 
@@ -738,8 +738,7 @@ func (m *tempGrantManager) deleteTemporaryGrantAlreadyLocked(
 func (m *tempGrantManager) deleteTemporaryGrantFenceAlreadyLocked(
 	ctx context.Context,
 	tx *sql.Tx,
-	channelID, userID string,
-	grantXmin string,
+	channelID, userID, grantXmin string,
 ) (*keyrotation.Rotation, bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM channel_permission_overrides

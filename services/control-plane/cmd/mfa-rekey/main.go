@@ -30,8 +30,8 @@ import (
 	_ "github.com/joho/godotenv/autoload" // dotenv autoload for DATABASE_URL + MFA_* vars
 	_ "github.com/lib/pq"                 // postgres driver
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 // rekeyOptions groups the CLI flags (mirrors cmd/issue-codes' issueOptions).

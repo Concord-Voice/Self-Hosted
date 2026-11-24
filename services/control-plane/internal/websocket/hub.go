@@ -15,17 +15,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/klipy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/klipy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/lib/pq"
@@ -1341,8 +1341,7 @@ func (h *Hub) spawnRichPresenceSuppression(userID uuid.UUID, forced ...bool) {
 // Shutdown established after stopping the Run loop from accepting new work.
 func (h *Hub) spawnRichPresenceSuppressionDuringShutdown(
 	userID uuid.UUID,
-	allowStopping bool,
-	forced bool,
+	allowStopping, forced bool,
 ) {
 	if h == nil || h.richPresenceHiddenSuppressor == nil {
 		return
@@ -1642,9 +1641,11 @@ func (h *Hub) handleRegister(client *Client) {
 	isFirstConnection := h.registerClient(client)
 
 	if isFirstConnection {
-		ctx := context.Background()
+		// Presence persistence must not be cancelled with the client's async
+		// work, so detach from that context's cancellation.
+		presenceCtx := context.WithoutCancel(ctx)
 		recovery := presenceRecoveryState{status: statusOnline}
-		if err := h.redis.Set(ctx, presence.StatusRedisKey(client.UserID), statusOnline, presence.StatusTTL).Err(); err != nil {
+		if err := h.redis.Set(presenceCtx, presence.StatusRedisKey(client.UserID), statusOnline, presence.StatusTTL).Err(); err != nil {
 			log.Printf("[hub] failed to persist initial presence for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
 			recovery.pending = true
 			h.setPresenceRecovery(client.UserID, recovery)
@@ -1653,7 +1654,7 @@ func (h *Hub) handleRegister(client *Client) {
 			// must not keep publishing.
 			h.failClosedPresenceHeartbeat(client.UserID)
 		} else {
-			if err := h.clearOfflinePresenceFence(ctx, client.UserID); err != nil {
+			if err := h.clearOfflinePresenceFence(presenceCtx, client.UserID); err != nil {
 				log.Printf("[hub] failed to clear offline presence fence for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
 				recovery.pending = true
 				h.setPresenceRecovery(client.UserID, recovery)
@@ -5771,12 +5772,12 @@ func (h *Hub) enforceDMEpoch(msg IncomingMessage, convUUID uuid.UUID, keyVersion
 	return false
 }
 
-func (h *Hub) persistDMMessage(convUUID uuid.UUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, []models.AttachmentSummary, error) {
+func (h *Hub) persistDMMessage(convUUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, []models.AttachmentSummary, error) {
 	messageID, createdAt, updatedAt, _, attachments, err := h.persistDMMessageWithExpiry(convUUID, userID, credEpoch, input)
 	return messageID, createdAt, updatedAt, attachments, err
 }
 
-func (h *Hub) persistDMMessageWithExpiry(convUUID uuid.UUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, *time.Time, []models.AttachmentSummary, error) {
+func (h *Hub) persistDMMessageWithExpiry(convUUID, userID uuid.UUID, credEpoch string, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, *time.Time, []models.AttachmentSummary, error) {
 	messageID := uuid.New()
 	ctx, cancel := context.WithTimeout(context.Background(), channelAuthCtxTimeout)
 	defer cancel()

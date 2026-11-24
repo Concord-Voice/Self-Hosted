@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voice"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
 )
 
 // Nothing pinned parseVoiceEventTime before #3205 -- zero test hits for its

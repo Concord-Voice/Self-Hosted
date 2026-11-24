@@ -18,12 +18,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/friends"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/invites"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/friends"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/invites"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 const (
@@ -103,6 +103,33 @@ func TestBlockUser_Success(t *testing.T) {
 	`, user1.ID, user2.ID).Scan(&reconciliationCount)
 	require.NoError(t, err)
 	assert.Equal(t, 1, reconciliationCount)
+}
+
+// A block whose DM reconciliation obligation cannot be recorded must fail and
+// leave the friendship as it was: the block write and the obligation commit
+// together or not at all.
+func TestBlockUser_ReconciliationRecordFailureLeavesFriendship(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "blocker_obl_fail")
+	user2 := ts.CreateTestUser(t, "blocked_obl_fail")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	_, err := ts.DB.Exec(`ALTER TABLE dm_block_reconciliations ADD CONSTRAINT block_obligation_fixture_refuse CHECK(false) NOT VALID`)
+	require.NoError(t, err)
+	defer func() {
+		_, err := ts.DB.Exec(`ALTER TABLE dm_block_reconciliations DROP CONSTRAINT block_obligation_fixture_refuse`)
+		require.NoError(t, err)
+	}()
+
+	w := ts.DoRequest("POST", pathFriendsPrefix+user2.ID+pathBlock, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	assert.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+
+	var status string
+	err = ts.DB.QueryRow(
+		`SELECT status FROM friendships WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)`,
+		user1.ID, user2.ID,
+	).Scan(&status)
+	require.NoError(t, err)
+	assert.Equal(t, statusAccepted, status)
 }
 
 func TestBlockUser_DefersRevocationUntilSuccessorClaim(t *testing.T) {

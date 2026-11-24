@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voicecommand"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/requestid"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voicecommand"
 	"github.com/gin-gonic/gin"
 )
 

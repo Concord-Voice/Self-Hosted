@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,6 +85,7 @@ func TestServerMove_SelfMove(t *testing.T) {
 		map[string]interface{}{"target_channel_id": to}, testhelpers.AuthHeaders(mover.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.False(t, moveTempOverrideExists(t, ts, to, mover.ID), "self-move must not insert a temp grant")
+	assert.Equal(t, 0, auditMoveCount(t, ts, serverID, mover.ID), "a self-move is never audited")
 }
 
 // TestServerMove_WithPermission_HiddenChannel_GrantsTemp: a MOVE_MEMBERS holder

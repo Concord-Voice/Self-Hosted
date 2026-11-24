@@ -7,7 +7,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/source"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/migrationrunner"
 )
 
 // closeCounter is a source.Driver that only counts Close; RunSource's early

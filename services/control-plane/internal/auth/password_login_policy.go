@@ -1,6 +1,6 @@
 package auth
 
-import "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+import "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 
 // EffectivePasswordLoginDisabled applies deployment policy to the stored preference.
 // Self-hosted instances keep native password login available without changing

@@ -3,7 +3,7 @@ package messages
 import (
 	"context"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 )
 
 // SetBeforeSoftLockConfirmHookForTest installs the delete-rate soft-lock's

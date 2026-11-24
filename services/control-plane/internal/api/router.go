@@ -11,52 +11,52 @@ import (
 	"os"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/channels"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/clientconfig"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/email"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/feedback"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/feedbackscreenshots"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/friends"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/graphpresence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/health"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/invites"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/joinpause"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/klipy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedredis"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/members"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/messages"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/notifications"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/ownership"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/servercapabilities"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/servers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/sessions"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/subscriptions"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/updates"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voice"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voicepresence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/channels"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/clientconfig"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/email"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/erasureclear"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/feedback"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/feedbackscreenshots"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/friends"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/graphpresence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/health"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/invites"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/joinpause"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/klipy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedredis"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/members"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/messages"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/notifications"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/ownership"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/servercapabilities"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/servers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/sessions"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/subscriptions"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/updates"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voicepresence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -170,8 +170,7 @@ func (a *permissionCheckerAdapter) HasChannelPermissionsUncachedTx(ctx context.C
 
 func (a *permissionCheckerAdapter) FilterVisibleUserIDsForChannelFresh(
 	ctx context.Context,
-	serverID string,
-	channelID string,
+	serverID, channelID string,
 	candidateUserIDs []string,
 ) ([]string, error) {
 	return a.resolver.FilterVisibleUserIDsForChannelFresh(ctx, serverID, channelID, candidateUserIDs)
@@ -1394,11 +1393,7 @@ func NewRouter(
 	// replica, including self-hosted deployments without NATS.
 	dmBlockReconciler := wireDMBlockReconciler(db, log, purgeEngine, activePlanReconciler, hub, natsClient, cfg.JWTSecret)
 	voiceEnforcementSessionHandler.authoritySnapshot = newVoiceAuthRuntime(db, natsClient, cfg.JWTSecret, hub, dmBlockReconciler).AuthoritySnapshot
-	credFence.SetPostCommitEvictor(func(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) {
-		if err := dmBlockReconciler.DeliverCredentialEpochVoiceEjection(ctx, userID, credentialEpoch, supersededCredentialEpoch); err != nil {
-			log.Error("Credential media eviction retained", "failure_class", "delivery")
-		}
-	})
+	credFence.SetPostCommitEvictor(credentialEpochVoiceEvictor(dmBlockReconciler, log))
 
 	// Expired A1 reservations are database-only and must not depend on NATS
 	// startup succeeding; the existing active-plan ticker supplies its bound.
@@ -1678,45 +1673,7 @@ func NewRouter(
 		//
 		// Server icons and server banners are also public Tier 1 assets.
 		// DM icons are registered in the protected media group below.
-		if mediaHandler != nil {
-			v1.GET("/media/avatars/:user_id",
-				noStore,
-				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
-				mediaHandler.ProxyAvatar,
-			)
-			v1.GET("/media/banners/:user_id",
-				noStore,
-				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
-				mediaHandler.ProxyBanner,
-			)
-			v1.GET("/media/server-icons/:server_id",
-				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
-				mediaHandler.ProxyServerIcon,
-			)
-			v1.GET("/media/server-banners/:server_id",
-				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
-				mediaHandler.ProxyServerBanner,
-			)
-			// Public so GitHub's camo image proxy can fetch screenshots embedded
-			// in filed bug-report issues without an Authorization header (#1747).
-			v1.GET("/media/feedback-screenshots/:id",
-				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
-				feedbackHandler.RequireEnabled,
-				mediaHandler.ProxyFeedbackScreenshot,
-			)
-		} else {
-			// Match the protected fallback below so misconfiguration fails
-			// with a clear 503 instead of a 404 for all public Tier 1 routes.
-			mediaUnavailable := func(c *gin.Context) {
-				c.Header(headerCacheControl, "no-store")
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "media storage not configured"})
-			}
-			v1.GET("/media/avatars/:user_id", mediaUnavailable)
-			v1.GET("/media/banners/:user_id", mediaUnavailable)
-			v1.GET("/media/server-icons/:server_id", mediaUnavailable)
-			v1.GET("/media/server-banners/:server_id", mediaUnavailable)
-			v1.GET("/media/feedback-screenshots/:id", feedbackHandler.RequireEnabled, mediaUnavailable)
-		}
+		registerPublicTier1MediaRoutes(v1, mediaHandler, feedbackHandler, redis, noStore)
 
 		// Client attestation routes (#677). Verify takes the configured TTL via
 		// closure since gin.HandlerFunc has a fixed signature.
@@ -3253,74 +3210,7 @@ func NewRouter(
 			middleware.RateLimitByIP(redis, 60, 1*time.Minute),
 			dmIconReadHandler.ProxyDMIcon,
 		)
-		if mediaHandler != nil {
-			// Tier 1 uploads (authenticated, server-processed)
-			mediaRoutes.POST("/upload/avatar",
-				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
-				mediaHandler.UploadAvatar,
-			)
-			mediaRoutes.POST("/upload/banner",
-				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
-				mediaHandler.UploadBanner,
-			)
-			mediaRoutes.POST("/upload/server-icon",
-				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
-				mediaHandler.UploadServerIcon,
-			)
-			mediaRoutes.POST("/upload/server-banner",
-				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
-				mediaHandler.UploadServerBanner,
-			)
-			mediaRoutes.POST("/upload/dm-icon",
-				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
-				mediaHandler.UploadDMIcon,
-			)
-			// Bug-report screenshots (#1747): up to 4 per report, so allow a
-			// modest burst above the dm-icon rate.
-			mediaRoutes.POST("/upload/feedback-screenshot",
-				middleware.RateLimitByUser(redis, 12, 1*time.Minute),
-				feedbackHandler.RequireEnabled,
-				mediaHandler.UploadFeedbackScreenshot,
-			)
-
-			// Tier 2 upload (E2EE attachments — ciphertext stored as-is)
-			mediaRoutes.POST("/upload/attachment",
-				middleware.RateLimitByUser(redis, 30, 1*time.Minute),
-				mediaHandler.UploadAttachment,
-			)
-
-			// Tier 2 chunked upload session (#2157 PR 2) — init / PUT chunk /
-			// commit / cancel. Registered WITHOUT trailing slashes: Gin's 301
-			// fires during the router tree walk, before the handler chain, so a
-			// trailing-slash form would silently skip auth and rate limiting.
-			// TestUploadSessionRouteShapes locks the exact paths.
-			media.RegisterUploadSessionRoutes(mediaRoutes, mediaHandler, redis)
-
-			// Tier 2 proxy download (E2EE attachment — proxied, not presigned)
-			mediaRoutes.GET("/attachments/:file_id",
-				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
-				mediaHandler.DownloadAttachment,
-			)
-
-			// Delete media (uploader only)
-			mediaRoutes.DELETE("/:file_id",
-				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
-				mediaHandler.DeleteMedia,
-			)
-		} else {
-			mediaUnavailable503 := func(c *gin.Context) {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "media storage not configured"})
-			}
-			mediaRoutes.POST("/upload/avatar", mediaUnavailable503)
-			mediaRoutes.POST("/upload/banner", mediaUnavailable503)
-			mediaRoutes.POST("/upload/server-icon", mediaUnavailable503)
-			mediaRoutes.POST("/upload/server-banner", mediaUnavailable503)
-			mediaRoutes.POST("/upload/dm-icon", mediaUnavailable503)
-			mediaRoutes.POST("/upload/feedback-screenshot", feedbackHandler.RequireEnabled, mediaUnavailable503)
-			mediaRoutes.POST("/upload/attachment", mediaUnavailable503)
-			mediaRoutes.GET("/attachments/:file_id", mediaUnavailable503)
-			mediaRoutes.DELETE("/:file_id", mediaUnavailable503)
-		}
+		registerProtectedMediaRoutes(mediaRoutes, mediaHandler, feedbackHandler, redis)
 
 		// WebSocket endpoint (requires JWT authentication via query parameter or header)
 		v1.GET("/ws", wsHandler.HandleWebSocket)
@@ -3351,6 +3241,143 @@ func NewRouter(
 	}
 
 	return router, hub, natsClient, opsRuntime, voicePermEnforcer, presenceRecheckExecutor, closePresenceWorkers, activePlanRail, activePlanReconciler, ownershipHandler.CompleteExpiredTransfers, nil
+}
+
+// credentialEpochVoiceEjector is the one dmblock.Reconciler method the
+// credential fence's post-commit evictor calls.
+type credentialEpochVoiceEjector interface {
+	DeliverCredentialEpochVoiceEjection(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) error
+}
+
+// credentialEpochVoiceEvictor is the credential fence's post-commit evictor:
+// it delivers the credential-epoch voice ejection and logs a fixed failure
+// class when delivery is retained for reconciliation.
+func credentialEpochVoiceEvictor(dmBlockReconciler credentialEpochVoiceEjector, log *logger.Logger) func(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) {
+	return func(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) {
+		if err := dmBlockReconciler.DeliverCredentialEpochVoiceEjection(ctx, userID, credentialEpoch, supersededCredentialEpoch); err != nil {
+			log.Error("Credential media eviction retained", "failure_class", "delivery")
+		}
+	}
+}
+
+// registerPublicTier1MediaRoutes registers the public Tier 1 media GETs on v1,
+// or their 503 fallbacks when media storage is not configured. NewRouter calls
+// it in place, so route registration order is unchanged.
+func registerPublicTier1MediaRoutes(v1 *gin.RouterGroup, mediaHandler *media.Handler, feedbackHandler *feedback.Handler, redis *redis.Client, noStore gin.HandlerFunc) {
+	if mediaHandler != nil {
+		v1.GET("/media/avatars/:user_id",
+			noStore,
+			middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+			mediaHandler.ProxyAvatar,
+		)
+		v1.GET("/media/banners/:user_id",
+			noStore,
+			middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+			mediaHandler.ProxyBanner,
+		)
+		v1.GET("/media/server-icons/:server_id",
+			middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+			mediaHandler.ProxyServerIcon,
+		)
+		v1.GET("/media/server-banners/:server_id",
+			middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+			mediaHandler.ProxyServerBanner,
+		)
+		// Public so GitHub's camo image proxy can fetch screenshots embedded
+		// in filed bug-report issues without an Authorization header (#1747).
+		v1.GET("/media/feedback-screenshots/:id",
+			middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+			feedbackHandler.RequireEnabled,
+			mediaHandler.ProxyFeedbackScreenshot,
+		)
+	} else {
+		// Match the protected fallback below so misconfiguration fails
+		// with a clear 503 instead of a 404 for all public Tier 1 routes.
+		mediaUnavailable := func(c *gin.Context) {
+			c.Header(headerCacheControl, "no-store")
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "media storage not configured"})
+		}
+		v1.GET("/media/avatars/:user_id", mediaUnavailable)
+		v1.GET("/media/banners/:user_id", mediaUnavailable)
+		v1.GET("/media/server-icons/:server_id", mediaUnavailable)
+		v1.GET("/media/server-banners/:server_id", mediaUnavailable)
+		v1.GET("/media/feedback-screenshots/:id", feedbackHandler.RequireEnabled, mediaUnavailable)
+	}
+}
+
+// registerProtectedMediaRoutes registers the authenticated media upload,
+// download and delete routes, or their 503 fallbacks when media storage is not
+// configured. NewRouter calls it in place, so route registration order is
+// unchanged.
+func registerProtectedMediaRoutes(mediaRoutes *gin.RouterGroup, mediaHandler *media.Handler, feedbackHandler *feedback.Handler, redis *redis.Client) {
+	if mediaHandler != nil {
+		// Tier 1 uploads (authenticated, server-processed)
+		mediaRoutes.POST("/upload/avatar",
+			middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+			mediaHandler.UploadAvatar,
+		)
+		mediaRoutes.POST("/upload/banner",
+			middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+			mediaHandler.UploadBanner,
+		)
+		mediaRoutes.POST("/upload/server-icon",
+			middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+			mediaHandler.UploadServerIcon,
+		)
+		mediaRoutes.POST("/upload/server-banner",
+			middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+			mediaHandler.UploadServerBanner,
+		)
+		mediaRoutes.POST("/upload/dm-icon",
+			middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+			mediaHandler.UploadDMIcon,
+		)
+		// Bug-report screenshots (#1747): up to 4 per report, so allow a
+		// modest burst above the dm-icon rate.
+		mediaRoutes.POST("/upload/feedback-screenshot",
+			middleware.RateLimitByUser(redis, 12, 1*time.Minute),
+			feedbackHandler.RequireEnabled,
+			mediaHandler.UploadFeedbackScreenshot,
+		)
+
+		// Tier 2 upload (E2EE attachments — ciphertext stored as-is)
+		mediaRoutes.POST("/upload/attachment",
+			middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+			mediaHandler.UploadAttachment,
+		)
+
+		// Tier 2 chunked upload session (#2157 PR 2) — init / PUT chunk /
+		// commit / cancel. Registered WITHOUT trailing slashes: Gin's 301
+		// fires during the router tree walk, before the handler chain, so a
+		// trailing-slash form would silently skip auth and rate limiting.
+		// TestUploadSessionRouteShapes locks the exact paths.
+		media.RegisterUploadSessionRoutes(mediaRoutes, mediaHandler, redis)
+
+		// Tier 2 proxy download (E2EE attachment — proxied, not presigned)
+		mediaRoutes.GET("/attachments/:file_id",
+			middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+			mediaHandler.DownloadAttachment,
+		)
+
+		// Delete media (uploader only)
+		mediaRoutes.DELETE("/:file_id",
+			middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+			mediaHandler.DeleteMedia,
+		)
+	} else {
+		mediaUnavailable503 := func(c *gin.Context) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "media storage not configured"})
+		}
+		mediaRoutes.POST("/upload/avatar", mediaUnavailable503)
+		mediaRoutes.POST("/upload/banner", mediaUnavailable503)
+		mediaRoutes.POST("/upload/server-icon", mediaUnavailable503)
+		mediaRoutes.POST("/upload/server-banner", mediaUnavailable503)
+		mediaRoutes.POST("/upload/dm-icon", mediaUnavailable503)
+		mediaRoutes.POST("/upload/feedback-screenshot", feedbackHandler.RequireEnabled, mediaUnavailable503)
+		mediaRoutes.POST("/upload/attachment", mediaUnavailable503)
+		mediaRoutes.GET("/attachments/:file_id", mediaUnavailable503)
+		mediaRoutes.DELETE("/:file_id", mediaUnavailable503)
+	}
 }
 
 // nightwatchSecurityObserver records only a closed route template or a closed

@@ -6,9 +6,9 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/policy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/signer"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/policy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/signer"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // decodeDeviceSubmit decodes a device-submit (A2's pattern check) into the
@@ -36,25 +36,10 @@ func decodeDeviceSubmit(body []byte) (*request, Outcome, bool) {
 		}
 		rq.Bind, rq.H = &b, ac.Digest(ds.RecoveryBind)
 	}
-	if len(ds.DeviceIntent) > 0 {
-		di, err := ac.DecodeDeviceIntent(ds.DeviceIntent)
-		if err != nil {
-			return malformed()
-		}
-		rq.DI, rq.D = &di, ac.Digest(ds.DeviceIntent)
-		rq.Intent = ac.Intent{RealmID: di.RealmID, AccountID: di.AccountID, RequestID: di.RequestID, Op: di.Op, ExpiresAtMs: di.ExpiresAtMs}
-		rq.IntentDigest = rq.D
-	} else { // the sheet form of cancel_recovery_bind
-		rq.Intent = ac.Intent{RealmID: rq.Bind.RealmID, AccountID: rq.Bind.AccountID, RequestID: rq.Bind.RequestID,
-			Op: ac.OpCancelRecoveryBind, ExpiresAtMs: rq.Bind.ExpiresAtMs}
-		rq.IntentDigest = rq.H
+	if !decodeDeviceIntentInto(rq, ds.DeviceIntent) {
+		return malformed()
 	}
-	// B names the device-intent's realm and account, and the device-intent
-	// names B: #18 = H(B) (DoR:420). A2's CheckDeviceSubmit already pins
-	// B.request_id to #5 for bind, unbind and the root-form cancel, and B #7
-	// to #8 on the root-form cancel (submitPatternHolds, E3-10).
-	if rq.Bind != nil && (rq.Bind.RealmID != rq.Intent.RealmID || rq.Bind.AccountID != rq.Intent.AccountID ||
-		(rq.DI != nil && !bytes.Equal(rq.DI.RecoveryBindDigest, rq.H))) {
+	if bindMismatchesIntent(rq) {
 		return malformed()
 	}
 	rq.LedgerDigest = rq.IntentDigest
@@ -63,6 +48,35 @@ func decodeDeviceSubmit(body []byte) (*request, Outcome, bool) {
 	}
 	rq.Class = classOfOp(rq.Intent.Op)
 	return rq, Outcome{}, true // no signature here: admitAndDecode may run this without a slot
+}
+
+// decodeDeviceIntentInto sets rq's intent from the device-intent, or from B on
+// the sheet form of cancel_recovery_bind (no device-intent). It reports false
+// when the device-intent does not decode.
+func decodeDeviceIntentInto(rq *request, raw []byte) bool {
+	if len(raw) == 0 { // the sheet form of cancel_recovery_bind
+		rq.Intent = ac.Intent{RealmID: rq.Bind.RealmID, AccountID: rq.Bind.AccountID, RequestID: rq.Bind.RequestID,
+			Op: ac.OpCancelRecoveryBind, ExpiresAtMs: rq.Bind.ExpiresAtMs}
+		rq.IntentDigest = rq.H
+		return true
+	}
+	di, err := ac.DecodeDeviceIntent(raw)
+	if err != nil {
+		return false
+	}
+	rq.DI, rq.D = &di, ac.Digest(raw)
+	rq.Intent = ac.Intent{RealmID: di.RealmID, AccountID: di.AccountID, RequestID: di.RequestID, Op: di.Op, ExpiresAtMs: di.ExpiresAtMs}
+	rq.IntentDigest = rq.D
+	return true
+}
+
+// bindMismatchesIntent: B names the device-intent's realm and account, and the
+// device-intent names B: #18 = H(B) (DoR:420). A2's CheckDeviceSubmit already
+// pins B.request_id to #5 for bind, unbind and the root-form cancel, and B #7
+// to #8 on the root-form cancel (submitPatternHolds, E3-10).
+func bindMismatchesIntent(rq *request) bool {
+	return rq.Bind != nil && (rq.Bind.RealmID != rq.Intent.RealmID || rq.Bind.AccountID != rq.Intent.AccountID ||
+		(rq.DI != nil && !bytes.Equal(rq.DI.RecoveryBindDigest, rq.H)))
 }
 
 // verifyNewDevice is step 4 on the device path: sig_new_device over D under

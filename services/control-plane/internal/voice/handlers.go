@@ -16,19 +16,19 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/joinpause"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/roomplacement"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/joinpause"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/requestid"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/roomplacement"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/mediaproof"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -1593,17 +1593,7 @@ func (h *Handler) ServerMove(c *gin.Context) {
 			h.log.Error("move: credential transaction rollback", "error", rbErr)
 		}
 	}()
-	if err := rbac.LockServerVisibilityCapture(c.Request.Context(), tx, serverID); err != nil {
-		h.log.Error("move: lock server authority", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
-		return
-	}
-	// The visibility lock serializes RBAC writers before the users lock is held
-	// through the no-grant move decision. That makes reset and the committed
-	// decision a single linearization point: reset first yields 401; guard first
-	// makes reset wait, then the committed decision may signal the move.
-	if err := credepoch.GuardFamilyTx(c.Request.Context(), tx, actorID, middleware.TokenCredentialEpoch(c)); err != nil {
-		h.respondVoiceGuardTxError(c, err, errMsgMovePrep)
+	if !h.lockServerMoveTx(c, tx, serverID, actorID) {
 		return
 	}
 
@@ -1619,13 +1609,11 @@ func (h *Handler) ServerMove(c *gin.Context) {
 			return
 		}
 		h.signalMove(serverID, targetID, decision.fromChannelID, req.TargetChannelID)
-		if !mod.self {
-			h.auditVoiceMove(c.Request.Context(), voiceMoveAudit{
-				serverID: serverID, actorID: actorID, targetID: targetID,
-				fromChannelID: decision.fromChannelID, toChannelID: req.TargetChannelID,
-				crossed: decision.crossed, temporaryGrant: false,
-			})
-		}
+		h.auditDirectMove(c.Request.Context(), mod, voiceMoveAudit{
+			serverID: serverID, actorID: actorID, targetID: targetID,
+			fromChannelID: decision.fromChannelID, toChannelID: req.TargetChannelID,
+			crossed: decision.crossed, temporaryGrant: false,
+		})
 		c.JSON(http.StatusOK, gin.H{"moved": true})
 		return
 	}
@@ -1654,6 +1642,35 @@ func (h *Handler) ServerMove(c *gin.Context) {
 		crossed: decision.crossed, temporaryGrant: granted,
 	})
 	c.JSON(http.StatusOK, gin.H{"moved": true})
+}
+
+// lockServerMoveTx takes the server visibility lock and checks the actor's
+// credential epoch inside tx, in that order. It writes the error response and
+// returns false on failure.
+func (h *Handler) lockServerMoveTx(c *gin.Context, tx *sql.Tx, serverID, actorID string) bool {
+	if err := rbac.LockServerVisibilityCapture(c.Request.Context(), tx, serverID); err != nil {
+		h.log.Error("move: lock server authority", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
+		return false
+	}
+	// The visibility lock serializes RBAC writers before the users lock is held
+	// through the no-grant move decision. That makes reset and the committed
+	// decision a single linearization point: reset first yields 401; guard first
+	// makes reset wait, then the committed decision may signal the move.
+	if err := credepoch.GuardFamilyTx(c.Request.Context(), tx, actorID, middleware.TokenCredentialEpoch(c)); err != nil {
+		h.respondVoiceGuardTxError(c, err, errMsgMovePrep)
+		return false
+	}
+	return true
+}
+
+// auditDirectMove audits a move that needed no temporary grant. A self-move is
+// never audited.
+func (h *Handler) auditDirectMove(ctx context.Context, mod *voiceModContext, m voiceMoveAudit) {
+	if mod.self {
+		return
+	}
+	h.auditVoiceMove(ctx, m)
 }
 
 // serverMoveDecision is what the ServerMove decision transaction established.

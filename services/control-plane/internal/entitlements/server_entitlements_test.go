@@ -3,7 +3,7 @@ package entitlements_test
 import (
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
 	"github.com/stretchr/testify/assert"
 )
 
