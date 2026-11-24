@@ -47,54 +47,69 @@ This subsection is **Proposed**, not part of the frozen account-authority protoc
 
 **Frozen existing protocol boundary.** Account-authority protocol v1 keeps its existing canonical layouts unchanged. In particular, the RSK-signed `status` object remains an account-root status, its array position 10 remains `active_root_digest`, its signed-type registry remains closed, and the existing `status` delegation scope does not authorize credential assertions. The private `cp-evidence.credential_epoch_digest` is operation evidence, not credential-protocol state. The proposed proof therefore does not append fields to `status`, reinterpret position 10, or widen the meaning of an existing delegation.
 
-**Proposed versioned extension.** A follow-on authority protocol version would add an explicit `credential-status` delegation scope and the RSK-signed `legacy-credential-status` layout below. Array positions are shown to prevent a future implementation from confusing its publication digest with v1 `status.active_root_digest`:
+**Proposed versioned extension.** A follow-on authority protocol v2 would preserve every v1 codec and signed-type meaning and add two distinct RSK delegation scopes: `credential-publication` for durable credential-state transitions and `credential-status` for the short-lived statement considered during login. Every proposed v2 signed object uses this canonical UTF-8 JSON envelope:
 
-| Position | Field | Proposed constraint |
-|---|---|---|
-| 0 | protocol discriminator | `concord-account-authority` |
-| 1 | protocol version | The approved extension version, distinct from frozen v1 |
-| 2 | tag | `legacy-credential-status` |
-| 3 | `realm_id` | Lowercase canonical authority-realm UUID |
-| 4 | `account_id` | Lowercase canonical authority-bound account UUID |
-| 5 | `credential_protocol` | Closed enum; only `legacy` authorizes fallback |
-| 6 | `credential_generation` | Integer in `1..9007199254740991` |
-| 7 | `publication_sequence` | Monotonic per-account integer in `1..9007199254740991` |
-| 8 | `issued_at_ms` | Authority database time in milliseconds |
-| 9 | `valid_until_ms` | Exactly `issued_at_ms + 300000`; overflow rejects |
-| 10 | `credential_publication_digest` | Standard padded base64 of the 48-byte SHA-384 digest of the separately frozen canonical publication bytes |
-| 11 | `challenge` | Standard padded base64 of exactly 32 client-generated CSPRNG bytes |
-| 12 | `delegation_gen` | Product-root generation selecting the signing delegation |
-| 13 | `delegation_serial` | Nonzero serial of a delegation carrying `credential-status` |
+```text
+["concord-account-authority",2,"credential-signed","<type>","<canonical-inner-b64>","<p384-p1363-signature-b64>"]
+```
 
-The statement uses the authority's canonical signed envelope and the RSK's P-384 ECDSA/SHA-384 signature encoding for the approved extension version. The client verifies the independently authenticated realm trust, never-decreasing delegation high-water, exact restored account identity, `credential-status` signer scope, exact challenge, proof lifetime, credential publication high-water, protocol and generation before it releases the raw password. A parse, signature, scope, identity, freshness, persistence or high-water failure denies fallback. The 32-byte challenge is generated for one login attempt, held only in client memory and consumed when that attempt submits or terminates. The control plane may relay the challenge and signed statement, but it cannot choose the challenge or supply the account identity against which the client verifies it.
+`canonical-inner-b64` is standard padded base64 of the exact canonical inner-array bytes. `p384-p1363-signature-b64` is standard padded base64 of the 96-byte IEEE P1363 encoding of an RSK P-384 ECDSA/SHA-384 signature over those exact inner bytes. A client rejects a noncanonical outer array, a type that differs from the inner tag, a noncanonical base64 field, a signature of any other length or encoding, a signer without the tag's distinct scope, or any re-encoding mismatch. This proposed envelope and its new scopes do not extend v1's closed registry until the pending decisions below are approved.
 
-The proposed proof is derived from an authority-owned, durable credential publication. Its separately frozen canonical bytes must bind at least the realm, account, credential protocol, credential generation, publication sequence, previous publication digest, credential-epoch digest, publication time and transition-request digest. The authority accepts a publication only by compare-and-swap from its durable per-account high-water. Exact duplicates may be idempotent; a lower sequence, a changed digest at the same sequence, a lower credential generation or any `split` to `legacy` transition is refused.
+The proposed authority-owned credential publication inner array is:
+
+```text
+["concord-account-authority",2,"credential-publication","<realm-id>","<account-id>","<credential-protocol>",<credential-generation>,<publication-sequence>,"<previous-publication-digest-b64-or-empty>","<credential-epoch-digest-b64>","<descriptor-digest-b64-or-empty>","<transition-request-digest-b64>",<authority-chain-sequence>,"<authority-chain-head-digest-b64>",<issued-at-ms>]
+```
+
+`credential-protocol` is the closed proposed enum `legacy`, `split-pending`, or `split-auth-wrap-v1`. The publication digest is SHA-384 of the exact inner bytes. Sequence 1 uses the empty string for `previous_publication_digest`; every later publication names the standard padded base64 SHA-384 digest of its exact predecessor. `descriptor_digest` is empty only where the credential state has no split descriptor. Every nonempty digest field decodes to exactly 48 bytes and uses standard padded base64. These fields bind the credential epoch, transition request and independently authenticated authority-chain position without embedding their source objects in the publication.
+
+The authority accepts a publication only through a per-account compare-and-swap from the exact durable predecessor. An exact duplicate may return the existing publication. It refuses a lower or skipped sequence, a changed digest at the same sequence, a predecessor mismatch, a decreasing credential generation, a decreasing authority-chain position, a changed authority-chain head at the same sequence, or any transition from `split-pending` or `split-auth-wrap-v1` to `legacy`. Only an RSK delegation carrying the proposed `credential-publication` scope may sign this inner type.
+
+The proposed short-lived credential status inner array is:
+
+```text
+["concord-account-authority",2,"legacy-credential-status","<realm-id>","<account-id>","legacy",<credential-generation>,<publication-sequence>,<issued-at-ms>,<valid-until-ms>,"<publication-digest-b64>","<publication-evidence-digest-b64>","<challenge-b64>",<delegation-gen>,<delegation-serial>]
+```
+
+`valid_until_ms` is exactly `issued_at_ms + 300000`; overflow rejects. `publication_digest` is the standard padded base64 SHA-384 digest of the exact referenced `credential-publication` inner bytes. `publication_evidence_digest` is the standard padded base64 SHA-384 digest of the exact proposed evidence inner bytes below. `challenge` decodes to exactly 32 client-generated CSPRNG bytes. Only an RSK delegation carrying the distinct proposed `credential-status` scope may sign this inner type.
+
+The proposed evidence inner array is:
+
+```text
+["concord-account-authority",2,"credential-publication-evidence","<publication-digest-b64>","<directory-adapter-id>","<realm-id>","<account-id>","<lookup-proof-digest-b64>","<history-or-consistency-proof-digest-b64>","<checkpoint-digest-b64>",<checkpoint-size>,<checkpoint-issued-at-ms>,"<observer-quorum-digest-b64>",<observed-at-ms>,<valid-until-ms>]
+```
+
+Every digest field in this array decodes to exactly 48 bytes and uses standard padded base64. The array prevents a status signer from silently substituting different publication evidence, but it does not settle Security #10's evidence system or register a third RSK signing scope. The directory adapter, lookup proof, history or consistency proof, checkpoint, observer quorum, their exact canonical encodings and digest inputs, and their freshness and disagreement rules remain explicitly unresolved. Until #10 freezes them and the security owner approves that choice, no implementation may treat this proposed carrier or its digest as sufficient independent publication evidence.
+
+Before releasing a raw password, a client would have to verify the independently authenticated realm trust, exact restored account identity, v2 envelope and type, the tag-specific signer scope, exact publication and evidence digests, exact one-attempt challenge, proof lifetime, the selected #10 evidence policy, and both durable high-waters. A parse, signature, scope, identity, evidence, freshness, persistence or high-water failure denies fallback. The challenge is held only in client memory and consumed when that login attempt submits or terminates. The control plane may relay the challenge and signed objects, but it cannot choose the challenge, choose the account identity against which the client verifies, or replace the independent publication evidence.
 
 The proposed state machine is:
 
 ```text
 legacy(g, n) -> legacy(g'>g, n+1)
 legacy(g, n) -> split-pending(g+1, n+1)
-split-pending -> split
-split(g, n) -> split(g'>g, n+1)
+split-pending(g, n) -> split-auth-wrap-v1(g, n+1)
+split-auth-wrap-v1(g, n) -> split-auth-wrap-v1(g'>g, n+1)
 ```
 
 `split-pending` is terminal for legacy-proof issuance. Upgrade ordering is authority fence first, control-plane credential transaction second, and authority finalization third. If any outcome after the fence is ambiguous, the account remains ineligible for a legacy proof until durable reconciliation; it never rolls back to `legacy`. This chooses migration availability loss over exposing a raw password after an upgrade that may already have committed.
 
-The client retains two separate high-waters. The existing realm value tracks product-root generation, delegation serial and `min_valid_serial`. A new per-account value tracks publication sequence, publication digest, credential generation and a terminal-nonlegacy-seen bit. Before raw-password release the client durably compare-and-advances the account value. A lower sequence, conflicting same-sequence digest, decreasing generation, a legacy proof after terminal nonlegacy state, or failure to persist denies fallback.
+The client retains two separate high-waters. The existing realm value tracks product-root generation, delegation serial and `min_valid_serial`. A new per-account value tracks publication sequence, publication digest, credential generation, the accepted authority-chain sequence and head digest, and a terminal-nonlegacy-seen bit. Before raw-password release the client durably compare-and-advances the account value. A lower sequence, conflicting same-sequence digest, decreasing generation, authority-chain rollback or fork, a legacy proof after terminal nonlegacy state, or failure to persist denies fallback. The exact restored artifact and storage procedure for these high-waters remain pending rather than being inferred from the control-plane login.
 
 On a fresh device, independently restored identity means an account ID and authority state recovered through an authenticated account-authority or recovery artifact whose verification does not depend on the current control-plane login response, a username-to-ID mapping from that control plane, the synthetic credential descriptor, cached `legacy` state alone, or the raw password under consideration. The restored state binds the realm, account, realm high-water and any previously established account publication high-water. A fresh device without that material remains deny-only. The current control-plane-mTLS authority transport may relay opaque proofs; this proposal does not authorize or require a new public client-to-authority endpoint.
 
+Existing legacy accounts require a sealed initial import before any proof could become eligible. The proposed import consumes an independently audited source manifest binding at least the authority realm and account, `legacy`, the credential generation, the credential-epoch state, the authenticated authority-chain head and an import digest. The manifest itself is SHA-384 digested, and an owner-only authority transaction creates the account's sequence-1 publication exactly once. Re-import is forbidden. Eligibility begins only after the selected #10 checkpoint and observer policy independently covers that publication. New split accounts instead begin with a sequence-1 `split-auth-wrap-v1` publication. The authoritative legacy source, manifest codec, auditor identity and independence requirements, reconciliation procedure and owner-only ceremony remain unresolved; the existing legacy encryption-key population is not a credential-generation source and cannot fill those gaps.
+
 **Pending security-owner decisions.** None of the following has sign-off merely because it appears in this Proposed ADR:
 
-1. Approve a versioned authority extension with a distinct `credential-status` scope, rather than changing frozen v1 or widening its `status` scope.
-2. Approve the exact `legacy-credential-status` layout, RSK signature contract, 32-byte one-attempt challenge and five-minute lifetime above.
-3. Freeze the canonical credential-publication bytes, publication signer and scope, SHA-384 digest rule, previous-digest chain and authority compare-and-swap semantics.
-4. Approve terminal `split-pending` before the control-plane credential commit, including the fail-closed availability consequence after an ambiguous or failed later step.
-5. Approve the separate durable per-account client high-water and the requirement to persist it before raw-password release.
-6. Freeze the independent restoration artifact and verification procedure that proves the authority-bound account identity and high-water on a fresh device. The security owner has already approved the fail-closed fresh-device rule; this decision specifies how an eligible device proves it. Ordinary username/password first contact remains ineligible.
-7. Approve a sealed, audited initial credential-publication import for existing legacy accounts and an initial split publication for new accounts; the existing legacy encryption-key population is not a credential-generation source.
-8. Approve clock handling: authority database time for issuance, strict expiry at five minutes, and either the existing authority future-skew tolerance or a newly frozen smaller bound.
+1. Approve authority protocol v2, its `credential-signed` envelope and the two distinct `credential-publication` and `credential-status` delegation scopes, without changing frozen v1 or widening its `status` scope.
+2. Approve the exact publication, status and evidence layouts, the exact-inner-byte SHA-384 digest rules, the publication/status P-384/SHA-384 P1363 signature contract, publication chain and compare-and-swap semantics described above.
+3. Freeze Security #10's directory adapter, lookup and history or consistency proof encodings, checkpoint source and codec, observer quorum, freshness windows, fork and disagreement handling, and every digest input represented by the proposed evidence carrier.
+4. Select the independent legacy import source and auditor, then freeze the source-manifest codec, audit and reconciliation procedure, owner-only import ceremony and no-reimport enforcement. The existing legacy encryption-key population remains ineligible as a credential-generation source.
+5. Approve authority database time, the exact five-minute status lifetime, strict expiry and the permitted future-skew bound; choose explicitly between the existing authority tolerance and a smaller v2-specific bound.
+6. Approve the irreversible `split-pending` fence before the control-plane credential commit, including deny-only behavior and availability loss after an ambiguous or failed later step until durable reconciliation finalizes `split-auth-wrap-v1`.
+7. Freeze the independent restoration artifact and durable realm/account high-water procedure for existing and fresh devices. The security owner has already approved the fail-closed fresh-device rule; this decision specifies how an eligible device proves identity and freshness. Ordinary username/password first contact remains ineligible.
+8. Approve a cross-runtime vector set covering both signer scopes, every array field and digest, predecessor forks, stale and conflicting high-waters, checkpoint or observer disagreement, sealed-import replay or mismatch, ambiguous upgrade outcomes, wrong realm/account/challenge, signature encoding errors and strict expiry.
 
 Until all eight decisions are recorded and the publication and proof vectors pass every client runtime, the existing rule remains unchanged: no authority proof means no raw-password continuation.
 
