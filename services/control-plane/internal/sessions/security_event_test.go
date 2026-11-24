@@ -277,7 +277,7 @@ func issueFamilyAccess(t *testing.T, rig securityEventFamilyRig) (access, sid st
 	return access, sid
 }
 
-const passwordRequiredBody = `{"error":"password_required","message":"Password verification required to revoke this session"}`
+const passwordRequiredBody = `{"error":"password_required","message":"Password verification required to revoke this session"}` // #nosec G101 -- refusal response body, not a credential
 
 // VULN-014 regression: a Simple-mode revoke window belongs to the login family
 // that proved its password. Family B proves and earns a window; family A, a
