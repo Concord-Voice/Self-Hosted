@@ -33,12 +33,16 @@ func TestRunAdminCtlWithWriterForTestReportsCloseFailure(t *testing.T) {
 	rdb, redisCleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(redisCleanup)
 
+	username := uniqueAdminUsername("close-failure")
+	// The bootstrap succeeds before the writer fails to close; remove its admin
+	// so it is not an existing admin in later tests' sign-in notices.
+	t.Cleanup(func() { removeAdminNamed(t, db, username) })
 	var output bytes.Buffer
 	closeErr := errors.New("writer close failed")
 	code := admin.RunAdminCtlWithWriterForTest(
 		context.Background(), db, rdb,
 		strings.NewReader("Str0ng-P@ssw0rd-123\n"), &output, "https://admin.test",
-		[]string{"bootstrap", "--username", uniqueAdminUsername("close-failure"), "--password-stdin"},
+		[]string{"bootstrap", "--username", username, "--password-stdin"},
 		func() (securityevent.Emitter, io.Closer, error) {
 			return securityevent.Discard, errorCloser{err: closeErr}, nil
 		},

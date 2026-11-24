@@ -401,8 +401,33 @@ class PrepareTest(unittest.TestCase):
             self.prepare()
         self.jobs_data[3]["conclusion"] = "success"
         self.metadata.append(dict(self.metadata[0]))
-        with self.assertRaisesRegex(MODULE.Reject, "artifact missing or duplicate"):
-            self.prepare()
+        with patch.object(MODULE.time, "sleep") as sleep:
+            with self.assertRaisesRegex(MODULE.Reject, "artifact missing or duplicate"):
+                self.prepare()
+        sleep.assert_not_called()
+
+    def test_artifact_waits_for_exact_attempt_inventory_visibility(self):
+        name = "protected-sonar-caller-proof-42-2"
+        started = MODULE.timestamp(self.run_data["run_started_at"])
+        old = dict(self.metadata[0], id=7, name="protected-sonar-caller-proof-42-1")
+        with patch.object(self.api, "artifacts", side_effect=[[old], [old, self.metadata[0]]]) as inventory, \
+                patch.object(MODULE.time, "sleep") as sleep:
+            found = MODULE.settled_proof_inventory(self.api, 42, name, started)
+            proof = self.api.artifact(found, name, 42, started, MODULE.MAX_PROOF_ZIP)
+        self.assertEqual(proof, self.zips[1])
+        self.assertEqual(inventory.call_count, 2)
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_missing_artifact_rejects_after_bounded_inventory_wait(self):
+        name = "protected-sonar-caller-proof-42-2"
+        started = MODULE.timestamp(self.run_data["run_started_at"])
+        with patch.object(self.api, "artifacts", return_value=[]) as inventory, \
+                patch.object(MODULE.time, "sleep") as sleep:
+            found = MODULE.settled_proof_inventory(self.api, 42, name, started)
+            with self.assertRaisesRegex(MODULE.Reject, "artifact missing or duplicate"):
+                self.api.artifact(found, name, 42, started, MODULE.MAX_PROOF_ZIP)
+        self.assertEqual(inventory.call_count, MODULE.ARTIFACT_SETTLE_ATTEMPTS)
+        self.assertEqual(sleep.call_count, MODULE.ARTIFACT_SETTLE_ATTEMPTS - 1)
 
     def test_old_attempt_coverage_artifact_does_not_duplicate_current_attempt(self):
         old = dict(self.metadata[1], id=7, created_at="2026-10-16T23:59:00Z")
