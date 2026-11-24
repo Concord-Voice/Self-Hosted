@@ -11,8 +11,7 @@ import (
 )
 
 // Migrations 000202 and 000203 index admin_audit_log for the admin sign-in
-// notice (AuditLog.AdminsAddedSinceLastSignIn). 000201 belongs to another
-// change; these files stand at 000202 and 000203.
+// notice (AuditLog.AdminsAddedSinceLastSignIn).
 
 // migrationStatements returns the file's SQL statements, comments dropped.
 func migrationStatements(t *testing.T, path string) []string {
