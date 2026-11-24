@@ -40,6 +40,10 @@ func DefaultAuthBanConfig() AuthBanConfig {
 	}
 }
 
+// authBudgetTimeout bounds every auth source-budget Redis call so a hung
+// backend yields the fixed 503 rather than a stalled request.
+const authBudgetTimeout = 2 * time.Second
+
 const (
 	authBanKeyPrefix     = "auth_ban:ip:"
 	authFailureKeyPrefix = "auth_failures:ip:"
@@ -58,7 +62,7 @@ func AuthBanCheck(redisClient *redis.Client) gin.HandlerFunc {
 
 		key := authBanKeyPrefix + ClientIPBucket(c)
 
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(c.Request.Context(), authBudgetTimeout)
 		defer cancel()
 
 		ttl, err := redisClient.TTL(ctx, key).Result()
@@ -91,11 +95,7 @@ func AuthBanCheck(redisClient *redis.Client) gin.HandlerFunc {
 
 func abortAuthBudgetBackendUnavailable(c *gin.Context) {
 	MarkNightwatchVerdict(c, NightwatchVerdict{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityMedium, Reason: securityevent.ReasonRateLimitBackendUnavailable})
-	c.Header("Retry-After", "1")
-	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
-		"error":   "service unavailable",
-		"message": "rate-limit backend unavailable; please retry shortly",
-	})
+	abortBackendUnavailable(c)
 }
 
 // RecordAuthFailure increments the cumulative failure counter for an IP.
@@ -137,7 +137,9 @@ func recordAuthFailure(ctx context.Context, redisClient *redis.Client, bucket st
 // bucket. It returns false only after writing the fixed fail-closed 503, and a
 // caller that receives false must return before any ordinary denial response.
 func RecordAuthFailure(c *gin.Context, redisClient *redis.Client, cfg AuthBanConfig) bool {
-	outcome := recordAuthFailure(c.Request.Context(), redisClient, ClientIPBucket(c), cfg)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), authBudgetTimeout)
+	defer cancel()
+	outcome := recordAuthFailure(ctx, redisClient, ClientIPBucket(c), cfg)
 	MarkAuthFailureOutcome(c, outcome)
 	if outcome == AuthFailureBackendUnavailable {
 		abortAuthBudgetBackendUnavailable(c)
@@ -157,12 +159,12 @@ func MarkAuthFailureOutcome(c *gin.Context, outcome AuthFailureOutcome) {
 	}
 }
 
-// ClearAuthFailures removes the failure counter for an IP on successful authentication.
-func ClearAuthFailures(ctx context.Context, redisClient *redis.Client, ip string) {
+// ClearAuthFailures removes the failure counter for an IP's source bucket on
+// successful authentication. A failed delete only leaves a stale count, which
+// fails toward more limiting, so callers log the error and continue.
+func ClearAuthFailures(ctx context.Context, redisClient *redis.Client, ip string) error {
 	if redisClient == nil {
-		return
+		return nil
 	}
-	if err := redisClient.Del(ctx, authFailureKeyPrefix+IPBucket(ip)).Err(); err != nil {
-		return
-	}
+	return redisClient.Del(ctx, authFailureKeyPrefix+IPBucket(ip)).Err()
 }

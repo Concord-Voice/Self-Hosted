@@ -2091,7 +2091,9 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool, 
 	// Clear cumulative IP auth failures only after full auth completion
 	// (credentials + MFA if enabled). This prevents resetting the counter
 	// by repeatedly passing the credential step while brute-forcing MFA.
-	middleware.ClearAuthFailures(c.Request.Context(), h.redis, c.ClientIP())
+	if err := middleware.ClearAuthFailures(c.Request.Context(), h.redis, c.ClientIP()); err != nil {
+		h.log.Warn("Failed to clear auth failure counter", "error", err)
+	}
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonAuthenticationSucceeded, AuthMethod: primaryAuthMethod, RouteTemplate: securityevent.RouteAuthLogin})
 
 	h.log.Info("User logged in (MFA verified)", "user_id", userID)
@@ -4793,7 +4795,9 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		return
 	}
 
-	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
+	if err := middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP()); err != nil {
+		h.log.Warn("Failed to clear auth failure counter", "error", err)
+	}
 	h.log.Info("Password reset via recovery", "operation", "forced_security_clear")
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonRecoveryReset, AuthMethod: securityevent.AuthRecovery, RouteTemplate: securityevent.RouteRecoveryResetPassword})
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully. Please sign in with your new password."})

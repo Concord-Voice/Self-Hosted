@@ -155,10 +155,46 @@ func TestRecordAuthFailureNilRedisFailsClosed(t *testing.T) {
 	assert.False(t, recordAuthFailure(t, nil, "10.0.0.6", testBanConfig))
 }
 
-func TestClearAuthFailuresNilRedisNoOp(_ *testing.T) {
+func TestClearAuthFailuresNilRedisNoOp(t *testing.T) {
 	ctx := context.Background()
 	// Should not panic
-	middleware.ClearAuthFailures(ctx, nil, "10.0.0.7")
+	require.NoError(t, middleware.ClearAuthFailures(ctx, nil, "10.0.0.7"))
+}
+
+func TestRecordAuthFailureBackendErrorFailsClosedWith503(t *testing.T) {
+	// A live client that cannot reach Redis exercises the Incr-error branch,
+	// unlike the nil-client case above.
+	dead := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: time.Millisecond, MaxRetries: -1})
+	t.Cleanup(func() { _ = dead.Close() })
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, pathAuthBanTest, nil)
+	c.Request.RemoteAddr = "10.0.0.8:1234"
+
+	assert.False(t, middleware.RecordAuthFailure(c, dead, testBanConfig))
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+}
+
+func TestClearAuthFailuresReturnsBackendError(t *testing.T) {
+	dead := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: time.Millisecond, MaxRetries: -1})
+	t.Cleanup(func() { _ = dead.Close() })
+	require.Error(t, middleware.ClearAuthFailures(context.Background(), dead, "10.0.0.9"))
+}
+
+func TestClearAuthFailuresBucketsIPv6(t *testing.T) {
+	ts := setupTS(t)
+	ctx := context.Background()
+	const bucket = "2001:db8:7:8::"
+
+	require.NoError(t, ts.Redis.Set(ctx, "auth_failures:ip:"+bucket, 3, time.Minute).Err())
+	// A different host in the same /64 clears the shared counter.
+	require.NoError(t, middleware.ClearAuthFailures(ctx, ts.Redis, "2001:db8:7:8::beef"))
+
+	exists, err := ts.Redis.Exists(ctx, "auth_failures:ip:"+bucket).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), exists)
 }
 
 func TestRecordAuthFailureIncrementsCounter(t *testing.T) {
@@ -239,7 +275,7 @@ func TestClearAuthFailuresRemovesCounter(t *testing.T) {
 	require.True(t, recordAuthFailure(t, ts.Redis, testIPClearAuth, testBanConfig))
 
 	// Clear
-	middleware.ClearAuthFailures(ctx, ts.Redis, testIPClearAuth)
+	require.NoError(t, middleware.ClearAuthFailures(ctx, ts.Redis, testIPClearAuth))
 
 	exists, err := ts.Redis.Exists(ctx, "auth_failures:ip:"+testIPClearAuth).Result()
 	require.NoError(t, err)

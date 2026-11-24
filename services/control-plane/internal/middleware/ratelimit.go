@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
@@ -204,12 +203,6 @@ func AllowUserAction(ctx context.Context, rdb redis.Cmdable, key string, limit i
 func rateLimit(redis *redis.Client, config RateLimitConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestConfig := config
-		// Every public auth route must preserve source-budget enforcement during a
-		// Redis outage. Keeping this at the core prevents a future auth route from
-		// accidentally using the availability-first constructor.
-		if strings.HasPrefix(c.FullPath(), "/api/v1/auth/") {
-			requestConfig.FailClosed = true
-		}
 		key := requestConfig.KeyFunc(c)
 		count, ok := incrementRateLimitCounter(c, redis, requestConfig, key)
 		if !ok {
@@ -235,8 +228,14 @@ func rateLimit(redis *redis.Client, config RateLimitConfig) gin.HandlerFunc {
 	}
 }
 
+// rateLimitBackendTimeout bounds each limiter Redis call so a hung backend
+// produces the fixed fail-closed response instead of holding the request open.
+const rateLimitBackendTimeout = 2 * time.Second
+
 func incrementRateLimitCounter(c *gin.Context, redis *redis.Client, config RateLimitConfig, key string) (int64, bool) {
-	count, err := redis.Incr(context.Background(), key).Result()
+	ctx, cancel := context.WithTimeout(context.Background(), rateLimitBackendTimeout)
+	defer cancel()
+	count, err := redis.Incr(ctx, key).Result()
 	if err == nil {
 		return count, true
 	}
@@ -255,7 +254,8 @@ func resolveRateLimitTTL(
 	key string,
 	count int64,
 ) (time.Duration, bool) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), rateLimitBackendTimeout)
+	defer cancel()
 	ttl, ttlErr := redis.TTL(ctx, key).Result()
 	if ttlErr != nil && abortOnRateLimitBackendError(c, config) {
 		return 0, false
@@ -299,12 +299,18 @@ func abortOnRateLimitBackendError(c *gin.Context, config RateLimitConfig) bool {
 	}
 	// Privileged route: the limiter is a required control, so a Redis outage
 	// must not open the floodgate. Reject with the shared fixed response.
+	abortBackendUnavailable(c)
+	return true
+}
+
+// abortBackendUnavailable writes the one fixed fail-closed response shared by
+// the rate limiters and the auth source budget.
+func abortBackendUnavailable(c *gin.Context) {
 	c.Header("Retry-After", "1")
 	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 		"error":   "service unavailable",
 		"message": "rate-limit backend unavailable; please retry shortly",
 	})
-	return true
 }
 
 func maxInt(a, b int) int {

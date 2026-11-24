@@ -2353,7 +2353,9 @@ func (h *Handler) completeVerifiedChallenge(ctx context.Context, c *gin.Context,
 	}
 	// A stale count only brings the next lockout closer.
 	h.delBestEffort(ctx, "Failed to clear MFA verification attempt counter", claims.UserID, attemptsKey)
-	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
+	if err := middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP()); err != nil {
+		h.log.Warn("Failed to clear auth failure counter", "error", err)
+	}
 	if h.completeVerifyPurpose(ctx, c, claims, purpose, rememberMe, method) {
 		h.emitHTTPEvent(c, mfaChallengeVerifiedEvent(method))
 	}
