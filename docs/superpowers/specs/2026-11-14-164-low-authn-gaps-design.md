@@ -33,13 +33,13 @@ dependency is introduced.
 | VULN-009 | No production edit here; verify the separate refresh-machine binding fix in `internal/auth` | exact-head regression evidence |
 | VULN-021 | `internal/mfa/handlers.go`; existing security-event vocabulary only | MFA WebAuthn and security-event tests |
 | VULN-026 | `internal/mfa/handlers.go`; existing `withMFAFactorWriteTx` | real PostgreSQL concurrent finish test |
-| VULN-022 | `internal/mfa/totp.go`, backup-code callers, migrations `000198_*` | unit, integration, migration up/down tests; architecture docs |
+| VULN-022 | `internal/mfa/totp.go`, backup-code callers, migrations `000201_*` | unit, integration, migration up/down tests; architecture docs |
 | VULN-028 | `internal/mfa/handlers.go` | handler tests; OpenAPI constraints |
 | VULN-002 | `internal/auth/handlers.go`, `pending.go` | registration boundary and work-order tests; OpenAPI limits |
 | VULN-192 | `internal/middleware/attestation.go`, `internal/websocket/handler.go`, router wiring tests | JWT/ticket WebSocket tests; OpenAPI and architecture docs |
 
 The Self-Hosted migration number was `000195` at the inspected `origin/main`
-head (`b3b7f490`); PR B2 re-resolved it and uses `000198`. The hosted deployment currently ends at `000197`, so its reviewed mirror is
+head (`b3b7f490`); PR B2 re-resolved it and uses `000201`. The hosted deployment currently ends at `000197`, so its reviewed mirror is
 expected to use `000198`. Both numbers are reservations, not constants: each
 implementer must re-resolve the next free number immediately before creating
 the migration.
@@ -205,7 +205,7 @@ indices, and returns an error for any other stored element. A storage error
 fails the verifier closed. The existing atomic consumption mutation remains
 the sole owner of marking a code used; this work does not redesign existing atomic backup-code consumption.
 
-Migration `000198` rewrites every bare 64-hex legacy element to `v1$...` in
+Migration `000201` rewrites every bare 64-hex legacy element to `v1$...` in
 place while preserving array order and `backup_codes_used`. It does not hash or
 log plaintext because none exists. Its down migration strips `v1$` only after
 holding a `SHARE ROW EXCLUSIVE` table lock, which blocks every write but not
