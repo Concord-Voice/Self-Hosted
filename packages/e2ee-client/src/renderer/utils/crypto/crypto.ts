@@ -5,6 +5,25 @@
 
 import { argon2id } from 'hash-wasm';
 
+// The non-media envelope reader validates stored provenance and context before
+// calling this primitive. Keep WebCrypto operations in the designated module.
+export function decryptNonmediaAesGcm(
+  key: CryptoKey,
+  payload: Uint8Array,
+  aad: Uint8Array
+): Promise<ArrayBuffer> {
+  return crypto.subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: new Uint8Array(payload.slice(0, 12)),
+      additionalData: new Uint8Array(aad),
+      tagLength: 128,
+    },
+    key,
+    new Uint8Array(payload.slice(12))
+  );
+}
+
 // Constants for PBKDF2 key derivation (legacy — kept for migration)
 const PBKDF2_ITERATIONS = 600000; // 600k iterations (OWASP 2023)
 const SALT_LENGTH = 16; // 16 bytes

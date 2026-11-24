@@ -83,7 +83,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000201)
+## Existing Migrations (000001–000202)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -309,7 +309,8 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000198 | add_session_revoke_allowance | Moves the rolling session-revocation allowance to a nullable users timestamp and binds simple-mode auth windows to a reset generation. Existing users start a conservative 24-hour window; new users start with no timestamp. Down refuses while any recorded window is active. |
 | 000199 | add_positive_admin_session_generation_check | Aborts under a bounded write-blocking lock if any existing admin generation is nonpositive, then adds a positive check for future writes. The original nonnegative check remains. |
 | 000200 | validate_positive_admin_session_generation | Validates the positive check against existing administrator rows without holding an exclusive lock across the scan. Existing nonpositive rows are already rejected by 000199. |
-| 000201 | prefix_legacy_backup_code_hashes | Rewrites each bare lowercase 64-hex SHA-256 element of `user_mfa_totp.backup_codes_hash` to `v1$` plus the same digest, keeping array order and `backup_codes_used`; other elements are untouched. Run only after every serving replica reads bare, v1 and v2 hashes. The down strips `v1$` under a `SHARE ROW EXCLUSIVE` lock and refuses while any element is neither bare nor v1, such as a generated v2 code. |
+| 000201 | e2ee_format_metadata | Adds nullable dormant stored-format and request-fingerprint metadata to channel/DM messages and encrypted media, with user/message-v1/attachment-v4 shape constraints; no writer or fallback behavior is enabled. |
+| 000202 | prefix_legacy_backup_code_hashes | Rewrites each bare lowercase 64-hex SHA-256 element of `user_mfa_totp.backup_codes_hash` to `v1$` plus the same digest, keeping array order and `backup_codes_used`; other elements are untouched. Run only after every serving replica reads bare, v1 and v2 hashes. The down strips `v1$` under a `SHARE ROW EXCLUSIVE` lock and refuses while any element is neither bare nor v1, such as a generated v2 code. |
 
 If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
 

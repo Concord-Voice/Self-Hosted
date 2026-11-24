@@ -90,7 +90,7 @@ Migration 000160 creates the bounded pending channel-admission table and expiry 
 Migration 000161 adds the exact admission and socket identity columns. The positive
 authorization-revision sequence is owned by migration 000159; do not recreate or drop it.
 
-Migration 000201 prefixes legacy backup-code hashes. `TestBackupHashPrefixMigrationRoundTrip` (`internal/mfa`, `-tags integration`) runs it on a
+Migration 000202 prefixes legacy backup-code hashes. `TestBackupHashPrefixMigrationRoundTrip` (`internal/mfa`, `-tags integration`) runs it on a
 disposable database. Its fixture rows hold bare digests with mixed used flags, an empty
 array, and a rollout row mixing a bare digest, a v2 hash and an upper-case digest no reader
 accepts. The test checks that up prefixes only the bare elements and keeps order and used

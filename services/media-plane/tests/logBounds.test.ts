@@ -271,7 +271,7 @@ describe('boundedFields format (VULN-157)', () => {
     expect(splat).toEqual(splatBefore);
   });
 
-  // regression for Security#176 red-team finding
+  // regression for the camera-arrival attribution finding
   it('bounds SPLAT like other meta, so a later format.splat() cannot bypass the bounds', () => {
     const splat = [
       'a'.repeat(5000),

@@ -1,5 +1,5 @@
 # Self-Hosted bundle inputs retained from Alpha's deploy manifest.
-# The managed deployment entries stay in Hosted.
+# The managed deployment entries are not part of this repository.
 docker-compose.yml
 docker-compose.production.yml
 docker-compose.selfhost.yml
