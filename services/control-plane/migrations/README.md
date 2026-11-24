@@ -83,7 +83,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000203, 000201 pending)
+## Existing Migrations (000001–000203)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
