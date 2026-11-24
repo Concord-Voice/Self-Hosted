@@ -107,6 +107,65 @@ func TestReservationBackfillFailsClosedWhenCompletedBaselineIsIncomplete(t *test
 	require.ErrorContains(t, err, "anti-join is incomplete")
 }
 
+func TestReservationBackfillFailsClosedForMissingReservationTable(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		CREATE SCHEMA s177_missing_reservations;
+		CREATE TABLE s177_missing_reservations.message_id_reservation_rollout (
+			singleton BOOLEAN PRIMARY KEY,
+			backfill_complete BOOLEAN NOT NULL
+		);
+		INSERT INTO s177_missing_reservations.message_id_reservation_rollout (singleton, backfill_complete)
+		VALUES (TRUE, FALSE);
+		CREATE TABLE s177_missing_reservations.messages (id UUID PRIMARY KEY);
+		CREATE TABLE s177_missing_reservations.dm_messages (id UUID PRIMARY KEY)`)
+	require.NoError(t, err)
+	defer func() {
+		_, dropErr := db.Exec(`DROP SCHEMA s177_missing_reservations CASCADE`)
+		require.NoError(t, dropErr)
+	}()
+
+	backfillDB, err := sql.Open("postgres", testdb.DatabaseURL()+"&search_path=s177_missing_reservations")
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, backfillDB.Close())
+	}()
+	err = (&reservationBackfill{db: backfillDB, batchSize: 1}).run(context.Background())
+	require.ErrorContains(t, err, "reserve messages batch")
+}
+
+func TestReservationBackfillFailsClosedWhenCompletionCannotPersist(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	_, err := db.Exec(`
+		CREATE SCHEMA s177_completion_rejected;
+		CREATE TABLE s177_completion_rejected.message_id_reservation_rollout (
+			singleton BOOLEAN PRIMARY KEY,
+			backfill_complete BOOLEAN NOT NULL CHECK (backfill_complete = FALSE)
+		);
+		INSERT INTO s177_completion_rejected.message_id_reservation_rollout (singleton, backfill_complete)
+		VALUES (TRUE, FALSE);
+		CREATE TABLE s177_completion_rejected.message_id_reservations (message_id UUID PRIMARY KEY);
+		CREATE TABLE s177_completion_rejected.messages (id UUID PRIMARY KEY);
+		CREATE TABLE s177_completion_rejected.dm_messages (id UUID PRIMARY KEY)`)
+	require.NoError(t, err)
+	defer func() {
+		_, dropErr := db.Exec(`DROP SCHEMA s177_completion_rejected CASCADE`)
+		require.NoError(t, dropErr)
+	}()
+
+	backfillDB, err := sql.Open("postgres", testdb.DatabaseURL()+"&search_path=s177_completion_rejected")
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, backfillDB.Close())
+	}()
+	err = (&reservationBackfill{db: backfillDB, batchSize: 1}).run(context.Background())
+	require.ErrorContains(t, err, "mark message ID reservation baseline complete")
+}
+
 func TestReservationBackfillDatabaseErrorsFailClosed(t *testing.T) {
 	closedDB, err := sql.Open("postgres", testdb.DatabaseURL())
 	require.NoError(t, err)
@@ -114,6 +173,7 @@ func TestReservationBackfillDatabaseErrorsFailClosed(t *testing.T) {
 
 	backfill := &reservationBackfill{db: closedDB, batchSize: 1}
 	ctx := context.Background()
+	require.ErrorContains(t, backfill.run(ctx), "acquire dedicated database connection")
 	_, err = backfill.backfillComplete(ctx, closedDB)
 	require.ErrorContains(t, err, "read message ID reservation rollout state")
 	require.ErrorContains(t, backfill.verifyBaseline(ctx, closedDB), "check message ID cross-table collisions")
@@ -129,6 +189,48 @@ func TestReservationBackfillDatabaseErrorsFailClosed(t *testing.T) {
 	require.NoError(t, conn.Close())
 	require.ErrorContains(t, backfill.removeDeleteCapture(ctx, conn), "begin delete-capture cleanup transaction")
 	require.NoError(t, openDB.Close())
+}
+
+func TestRemoveDeleteCaptureFailsClosedForCancelledContext(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, conn.Close())
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = (&reservationBackfill{}).removeDeleteCapture(ctx, conn)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestRemoveDeleteCaptureFailsClosedWhenTriggerLockCannotBeAcquired(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	locker, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer func() {
+		_, rollbackErr := locker.ExecContext(context.Background(), `ROLLBACK`)
+		require.NoError(t, rollbackErr)
+		require.NoError(t, locker.Close())
+	}()
+	_, err = locker.ExecContext(context.Background(), `BEGIN; LOCK TABLE messages IN SHARE ROW EXCLUSIVE MODE`)
+	require.NoError(t, err)
+
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, conn.Close())
+	}()
+	_, err = conn.ExecContext(context.Background(), `SET lock_timeout = '50ms'`)
+	require.NoError(t, err)
+
+	err = (&reservationBackfill{}).removeDeleteCapture(context.Background(), conn)
+	require.ErrorContains(t, err, "remove temporary message ID delete capture")
 }
 
 func TestDropDeleteCaptureExecutesBothStatementsAndStopsOnFailure(t *testing.T) {
