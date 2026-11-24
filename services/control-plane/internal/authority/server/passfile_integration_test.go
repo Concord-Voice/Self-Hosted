@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/authoritydb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/authoritydb"
 )
 
 func randHex(t *testing.T, n int) string {

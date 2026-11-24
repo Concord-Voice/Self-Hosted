@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq" // register postgres driver for the unreachable-DSN error case
 	"github.com/stretchr/testify/assert"

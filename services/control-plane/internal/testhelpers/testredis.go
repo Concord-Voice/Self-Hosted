@@ -6,7 +6,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
 )
 
 // SetupTestRedis returns a Redis client scoped to THIS PROCESS's own logical

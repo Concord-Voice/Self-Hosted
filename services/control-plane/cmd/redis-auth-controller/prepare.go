@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedredis"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedredis"
 )
 
 const lostStateMode = "recover-lost-state"

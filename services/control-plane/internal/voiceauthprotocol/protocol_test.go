@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	p "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voiceauthprotocol"
+	p "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voiceauthprotocol"
 	"github.com/stretchr/testify/require"
 )
 

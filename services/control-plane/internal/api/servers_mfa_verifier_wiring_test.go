@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/servers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/servers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // stubServersMFAVerifier satisfies servers.MFAVerifier; the guard cares only

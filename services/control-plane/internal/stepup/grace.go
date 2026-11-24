@@ -12,8 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/permgen"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/permgen"
 )
 
 // GraceTTL is how long one verified confirmation covers repeats (#3454 D-2).

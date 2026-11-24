@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // Task 5: the legacy population and seal-legacy (DoR:1596-1612, 1730-1735,

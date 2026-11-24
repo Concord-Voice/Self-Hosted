@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"slices"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // NCancelMs is N_CANCEL_MS (§2.3 authority-only, Tier 2 row 4).

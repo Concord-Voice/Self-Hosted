@@ -7,13 +7,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/privacy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/erasureclear"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/privacy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 )
 
 // erasureClearWiring is the #2447 erasure capture and cross-replica clear

@@ -14,21 +14,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 func invokeRemoveMember(t *testing.T, h *Handler, convID, callerID, targetID string) *httptest.ResponseRecorder {

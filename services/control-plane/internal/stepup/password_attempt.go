@@ -10,9 +10,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 )
 
 // A step-up password is one guess against the account's shared /auth/login
