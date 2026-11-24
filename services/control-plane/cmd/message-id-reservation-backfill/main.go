@@ -27,6 +27,7 @@ type reservationBackfill struct {
 func main() {
 	databaseURL := flag.String("database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL")
 	batchSize := flag.Int("batch-size", 1_000, "Maximum IDs to reserve per keyset batch")
+	runTimeout := flag.Duration("timeout", 0, "Maximum total runtime; 0 disables the total deadline")
 	flag.Parse()
 
 	if *databaseURL == "" {
@@ -34,6 +35,9 @@ func main() {
 	}
 	if *batchSize < 1 {
 		log.Fatal("batch-size must be positive")
+	}
+	if *runTimeout < 0 {
+		log.Fatal("timeout must not be negative")
 	}
 
 	db, err := sql.Open("postgres", *databaseURL)
@@ -46,7 +50,7 @@ func main() {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := backfillContext(*runTimeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		log.Fatalf("ping database: %v", err)
@@ -56,6 +60,13 @@ func main() {
 		log.Fatalf("message ID reservation baseline failed: %v", err)
 	}
 	log.Println("message ID reservation baseline verified; no message-v1 writer was enabled")
+}
+
+func backfillContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout == 0 {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 func (b *reservationBackfill) run(ctx context.Context) error {
@@ -258,6 +269,9 @@ func (b *reservationBackfill) removeDeleteCapture(ctx context.Context, conn *sql
 }
 
 func dropDeleteCapture(ctx context.Context, q execContexter) error {
+	if _, err := q.ExecContext(ctx, `SET LOCAL lock_timeout = '5s'`); err != nil {
+		return fmt.Errorf("set message ID delete-capture lock timeout: %w", err)
+	}
 	for _, statement := range []string{
 		`DROP TRIGGER IF EXISTS message_id_reservations_before_delete ON messages`,
 		`DROP TRIGGER IF EXISTS message_id_reservations_before_delete ON dm_messages`,

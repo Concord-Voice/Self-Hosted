@@ -8,6 +8,7 @@ import (
 	"flag"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
@@ -227,12 +228,15 @@ func TestRemoveDeleteCaptureFailsClosedWhenTriggerLockCannotBeAcquired(t *testin
 	conn, err := db.Conn(context.Background())
 	require.NoError(t, err)
 	defer func() {
-		require.NoError(t, conn.Close())
+		closeErr := conn.Close()
+		if closeErr != nil && !errors.Is(closeErr, sql.ErrConnDone) {
+			t.Errorf("close lock-timeout connection: %v", closeErr)
+		}
 	}()
-	_, err = conn.ExecContext(context.Background(), `SET lock_timeout = '50ms'`)
-	require.NoError(t, err)
 
-	err = (&reservationBackfill{}).removeDeleteCapture(context.Background(), conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	err = (&reservationBackfill{}).removeDeleteCapture(ctx, conn)
 	require.ErrorContains(t, err, "remove temporary message ID delete capture")
 }
 
@@ -240,11 +244,19 @@ func TestDropDeleteCaptureExecutesBothStatementsAndStopsOnFailure(t *testing.T) 
 	ctx := context.Background()
 	success := &execContextStub{}
 	require.NoError(t, dropDeleteCapture(ctx, success))
-	require.Len(t, success.statements, 2)
+	require.Equal(t, []string{
+		`SET LOCAL lock_timeout = '5s'`,
+		`DROP TRIGGER IF EXISTS message_id_reservations_before_delete ON messages`,
+		`DROP TRIGGER IF EXISTS message_id_reservations_before_delete ON dm_messages`,
+	}, success.statements)
 
-	failure := &execContextStub{failAt: 2}
-	require.ErrorContains(t, dropDeleteCapture(ctx, failure), "remove temporary message ID delete capture")
-	require.Len(t, failure.statements, 2)
+	timeoutFailure := &execContextStub{failAt: 1}
+	require.ErrorContains(t, dropDeleteCapture(ctx, timeoutFailure), "set message ID delete-capture lock timeout")
+	require.Len(t, timeoutFailure.statements, 1)
+
+	dropFailure := &execContextStub{failAt: 2}
+	require.ErrorContains(t, dropDeleteCapture(ctx, dropFailure), "remove temporary message ID delete capture")
+	require.Len(t, dropFailure.statements, 2)
 }
 
 func TestMainVerifiesCompletedBaseline(t *testing.T) {
@@ -262,6 +274,19 @@ func TestMainVerifiesCompletedBaseline(t *testing.T) {
 	})
 
 	main()
+}
+
+func TestBackfillContextUsesNoDeadlineUnlessConfigured(t *testing.T) {
+	unbounded, cancel := backfillContext(0)
+	defer cancel()
+	_, hasDeadline := unbounded.Deadline()
+	assert.False(t, hasDeadline)
+
+	bounded, boundedCancel := backfillContext(time.Minute)
+	defer boundedCancel()
+	deadline, hasDeadline := bounded.Deadline()
+	assert.True(t, hasDeadline)
+	assert.WithinDuration(t, time.Now().Add(time.Minute), deadline, time.Second)
 }
 
 type execContextStub struct {
