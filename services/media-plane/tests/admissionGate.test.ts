@@ -8,6 +8,8 @@ import {
   resolveClientIp,
   HANDSHAKE_BURST,
   MAX_TRACKED_IPS,
+  EVICTION_SCAN_LIMIT,
+  HARD_MAX_TRACKED_IPS,
   PROXY_FALLBACK_WARN_INTERVAL_MS,
   type AdmissionRequest,
 } from '../src/lib/admissionGate.js';
@@ -444,6 +446,27 @@ describe('createAdmissionGate', () => {
     expect(cb).toHaveBeenLastCalledWith(null, false);
   });
 
+  it('keeps many over-budget buckets through eviction, even beyond one scan window', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    const limitedIps = Array.from(
+      { length: EVICTION_SCAN_LIMIT * 2 },
+      (_, i) => `198.51.${Math.floor(i / 256)}.${i % 256}`
+    );
+    for (const ip of limitedIps) {
+      for (let n = 0; n <= HANDSHAKE_BURST; n += 1) gate(req({ 'x-real-ip': ip }), vi.fn());
+    }
+    for (let i = 0; i < MAX_TRACKED_IPS + 500; i += 1) {
+      gate(req({ 'x-real-ip': `203.0.${Math.floor(i / 256)}.${i % 256}` }), vi.fn());
+    }
+    for (const ip of limitedIps) {
+      const cb = vi.fn();
+      gate(req({ 'x-real-ip': ip }), cb);
+      expect(cb).toHaveBeenLastCalledWith(null, false);
+    }
+    expect(gate.trackedCount()).toBeLessThanOrEqual(HARD_MAX_TRACKED_IPS);
+  });
+
   it('still bounds the store when every tracked bucket is over budget', () => {
     const clock = makeClock();
     const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
@@ -451,7 +474,7 @@ describe('createAdmissionGate', () => {
       const headers = { 'x-real-ip': `203.0.${Math.floor(i / 256)}.${i % 256}` };
       for (let n = 0; n < HANDSHAKE_BURST; n += 1) gate(req(headers), vi.fn());
     }
-    expect(gate.trackedCount()).toBeLessThanOrEqual(MAX_TRACKED_IPS);
+    expect(gate.trackedCount()).toBeLessThanOrEqual(HARD_MAX_TRACKED_IPS);
   });
 
   it('warns, at most once a minute and without an address, when a trusted proxy forwards no client address', () => {

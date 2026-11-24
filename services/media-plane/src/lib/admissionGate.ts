@@ -20,6 +20,8 @@ export const HANDSHAKE_WINDOW_MS = 10_000;
 export const MAX_TRACKED_IPS = 10_000;
 /** Most entries one eviction inspects, so a full store costs O(1) per request. */
 export const EVICTION_SCAN_LIMIT = 64;
+/** Hard ceiling on tracked buckets; the store may overshoot MAX_TRACKED_IPS up to here. */
+export const HARD_MAX_TRACKED_IPS = MAX_TRACKED_IPS * 2;
 /** Minimum spacing of the "trusted proxy sent no client address" warning. */
 export const PROXY_FALLBACK_WARN_INTERVAL_MS = 60_000;
 
@@ -319,23 +321,33 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
 
     if (!entry) {
       // Bounded store: evict rather than growing without limit under an
-      // IPv6-source flood. Prefer the oldest bucket that is NOT over budget, so
-      // cycling through many buckets cannot evict (and so reset) a bucket that is
-      // currently being limited. Only when every tracked bucket is over budget
-      // does the oldest one go, which keeps the store bounded. The scan is capped
-      // so a store full of limited buckets cannot make every new bucket pay for
-      // a full pass.
+      // IPv6-source flood. Never evict a bucket that is currently over budget,
+      // because that would reset it. Scan a bounded number of the oldest buckets:
+      // evict the first under-budget one, and rotate the over-budget ones to the
+      // back so the next eviction starts past them. If a whole scan finds only
+      // limited buckets, let the store overshoot MAX_TRACKED_IPS (bounded by
+      // HARD_MAX_TRACKED_IPS) instead of resetting a limited bucket; only at the
+      // hard ceiling does the oldest bucket go.
       if (counters.size >= MAX_TRACKED_IPS) {
         let victim: string | undefined;
-        let scanned = 0;
+        const rotate: string[] = [];
         for (const [key, candidate] of counters) {
-          victim ??= key;
           if (!isOverBudget(candidate, nowMs)) {
             victim = key;
             break;
           }
-          scanned += 1;
-          if (scanned >= EVICTION_SCAN_LIMIT) break;
+          rotate.push(key);
+          if (rotate.length >= EVICTION_SCAN_LIMIT) break;
+        }
+        for (const key of rotate) {
+          const limited = counters.get(key);
+          if (limited) {
+            counters.delete(key);
+            counters.set(key, limited);
+          }
+        }
+        if (victim === undefined && counters.size >= HARD_MAX_TRACKED_IPS) {
+          victim = counters.keys().next().value;
         }
         if (victim !== undefined) counters.delete(victim);
       }
