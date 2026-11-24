@@ -73,7 +73,10 @@ func (o ordered) MarshalJSON() ([]byte, error) {
 		if i != 0 {
 			b.WriteByte(',')
 		}
-		k, _ := json.Marshal(e.key)
+		k, err := json.Marshal(e.key)
+		if err != nil {
+			return nil, err
+		}
 		v, err := json.Marshal(e.value)
 		if err != nil {
 			return nil, err
