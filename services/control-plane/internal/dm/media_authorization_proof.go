@@ -31,8 +31,7 @@ const (
 // version and attestation gates. Neither can be replayed as the other.
 func (h *Handler) validDMVoiceMediaAuthorizationProof(
 	c *gin.Context,
-	conversationID uuid.UUID,
-	requestedCallID uuid.UUID,
+	conversationID, requestedCallID uuid.UUID,
 ) bool {
 	if h.cfg == nil {
 		h.logProofRejection("no_config")

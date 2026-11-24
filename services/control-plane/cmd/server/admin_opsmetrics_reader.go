@@ -59,8 +59,7 @@ func (reader *deferredAdminOpsMetricsReader) Series(
 	ctx context.Context,
 	nodeID string,
 	key opsmetrics.MetricKey,
-	start time.Time,
-	end time.Time,
+	start, end time.Time,
 ) ([]opsmetrics.Bucket, error) {
 	bound, err := reader.boundReader()
 	if err != nil {

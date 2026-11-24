@@ -1927,36 +1927,10 @@ func (h *Handler) removeActiveMemberTx(
 	var newCreatorID string
 	var maxVersion int
 	err := h.activePlans.WithGatedTx(ctx, preflight.activeSubjects, func(tx *sql.Tx) error {
-		if err := lockMemberRemovalPrivateVoiceScopes(ctx, tx, preflight.activeSubjects); err != nil {
+		if err := h.lockActiveMemberRemovalTx(ctx, tx, convID, callerUserID, credentialEpoch, preflight); err != nil {
 			return err
 		}
-		if h.afterPrivateVoiceScopesLockHook != nil {
-			h.afterPrivateVoiceScopesLockHook()
-		}
-		actor, err := uuid.Parse(callerUserID)
-		if err != nil {
-			return fmt.Errorf("parse member-removal actor: %w", err)
-		}
-		lockedSubjects, err := dmblock.LockConversationUsersTx(ctx, tx, convID, []uuid.UUID{actor}, dmblock.LockNoKeyUpdate)
-		if err != nil {
-			return err
-		}
-		conversationID, err := uuid.Parse(convID)
-		if err != nil {
-			return fmt.Errorf("parse member-removal conversation: %w", err)
-		}
-		if err := LockDMVoiceParticipantSetTx(ctx, tx, conversationID); err != nil {
-			return err
-		}
-		if _, err := dmblock.PrepareResolutionConversationAfterUserLocksTx(ctx, tx, convID, lockedSubjects, dmblock.LockNoKeyUpdate); err != nil {
-			return err
-		}
-		if err := credepoch.GuardFamilyTx(ctx, tx, callerUserID, credentialEpoch); err != nil {
-			return err
-		}
-		if h.afterUsersLockHook != nil {
-			h.afterUsersLockHook(tx)
-		}
+		var err error
 		var keys []activepresence.PlanKey
 		newCreatorID, maxVersion, keys, err = h.removeMemberRowsTx(
 			ctx, tx, convID, targetID, callerUserID, preflight,
@@ -1970,6 +1944,48 @@ func (h *Handler) removeActiveMemberTx(
 		return h.activePlans.CompleteAlreadyGated(ctx, nil, keys)
 	})
 	return newCreatorID, maxVersion, err
+}
+
+// lockActiveMemberRemovalTx takes the active member-removal lock prefix in
+// order: private-voice scopes, the actor's users row, the DM voice participant
+// set, the resolution conversation, then the credential-epoch fence.
+func (h *Handler) lockActiveMemberRemovalTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	convID, callerUserID, credentialEpoch string,
+	preflight memberRemovalPreflight,
+) error {
+	if err := lockMemberRemovalPrivateVoiceScopes(ctx, tx, preflight.activeSubjects); err != nil {
+		return err
+	}
+	if h.afterPrivateVoiceScopesLockHook != nil {
+		h.afterPrivateVoiceScopesLockHook()
+	}
+	actor, err := uuid.Parse(callerUserID)
+	if err != nil {
+		return fmt.Errorf("parse member-removal actor: %w", err)
+	}
+	lockedSubjects, err := dmblock.LockConversationUsersTx(ctx, tx, convID, []uuid.UUID{actor}, dmblock.LockNoKeyUpdate)
+	if err != nil {
+		return err
+	}
+	conversationID, err := uuid.Parse(convID)
+	if err != nil {
+		return fmt.Errorf("parse member-removal conversation: %w", err)
+	}
+	if err := LockDMVoiceParticipantSetTx(ctx, tx, conversationID); err != nil {
+		return err
+	}
+	if _, err := dmblock.PrepareResolutionConversationAfterUserLocksTx(ctx, tx, convID, lockedSubjects, dmblock.LockNoKeyUpdate); err != nil {
+		return err
+	}
+	if err := credepoch.GuardFamilyTx(ctx, tx, callerUserID, credentialEpoch); err != nil {
+		return err
+	}
+	if h.afterUsersLockHook != nil {
+		h.afterUsersLockHook(tx)
+	}
+	return nil
 }
 
 func (h *Handler) removeInactiveMemberTx(

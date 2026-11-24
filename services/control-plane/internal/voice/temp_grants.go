@@ -738,8 +738,7 @@ func (m *tempGrantManager) deleteTemporaryGrantAlreadyLocked(
 func (m *tempGrantManager) deleteTemporaryGrantFenceAlreadyLocked(
 	ctx context.Context,
 	tx *sql.Tx,
-	channelID, userID string,
-	grantXmin string,
+	channelID, userID, grantXmin string,
 ) (*keyrotation.Rotation, bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM channel_permission_overrides

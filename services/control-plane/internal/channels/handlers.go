@@ -3588,21 +3588,12 @@ func (h *Handler) dmPendingConversationAvailable(ctx context.Context, conversati
 		if err != nil {
 			return false, err
 		}
-		available := false
-		err = func() error {
-			if _, err := dmblock.PrepareConversationTx(ctx, tx, conversationID, []uuid.UUID{caller}, dmblock.LockShare, dmblock.LockShare); err != nil {
-				return err
-			}
-			var participant string
-			if err := tx.QueryRowContext(ctx, `SELECT user_id FROM dm_participants WHERE conversation_id = $1 AND user_id = $2 FOR SHARE`, conversationID, userID).Scan(&participant); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return nil
-				}
-				return err
-			}
-			available = true
-			return tx.Commit()
-		}()
+		available, err := readDMPendingParticipantTx(ctx, tx, conversationID, userID, caller)
+		if err == nil && available {
+			// A commit failure keeps available=true, and the Rollback below
+			// tolerates the finished transaction.
+			err = tx.Commit()
+		}
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			h.log.Error("Failed to rollback DM pending-read transaction", "error", rbErr)
 		}
@@ -3615,6 +3606,24 @@ func (h *Handler) dmPendingConversationAvailable(ctx context.Context, conversati
 		return available, err
 	}
 	return false, dmblock.ErrMembershipChanged
+}
+
+// readDMPendingParticipantTx is one attempt's read inside the transaction its
+// caller opened, commits and rolls back. It prepares the conversation under
+// share locks, then reads the caller's participant row FOR SHARE. A missing
+// row is (false, nil); a present row is (true, nil).
+func readDMPendingParticipantTx(ctx context.Context, tx *sql.Tx, conversationID, userID string, caller uuid.UUID) (bool, error) {
+	if _, err := dmblock.PrepareConversationTx(ctx, tx, conversationID, []uuid.UUID{caller}, dmblock.LockShare, dmblock.LockShare); err != nil {
+		return false, err
+	}
+	var participant string
+	if err := tx.QueryRowContext(ctx, `SELECT user_id FROM dm_participants WHERE conversation_id = $1 AND user_id = $2 FOR SHARE`, conversationID, userID).Scan(&participant); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // GetUnifiedKeys resolves a context_id to either a server channel or DM conversation

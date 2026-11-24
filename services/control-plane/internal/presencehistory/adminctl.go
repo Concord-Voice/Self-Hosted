@@ -586,8 +586,7 @@ func clearAdminCtlOwner(
 	ctx context.Context,
 	tx *sql.Tx,
 	ownerID uuid.UUID,
-	settingsPresent bool,
-	forceOff bool,
+	settingsPresent, forceOff bool,
 ) (adminCtlOwnerResult, error) {
 	var result adminCtlOwnerResult
 	if settingsPresent {

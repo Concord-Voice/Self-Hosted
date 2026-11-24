@@ -254,14 +254,7 @@ func (h *Handler) persist(ctx context.Context, claim Claim, sigB64 string) (last
 	// Session revocation rotates neither the credential epoch nor the claim
 	// key, so revalidate the requesting login under the user lock: a family
 	// revoked while this request waited must not disable the account.
-	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
-	if !ok || identity.UserID != id {
-		return time.Time{}, credepoch.ErrEpochMismatch
-	}
-	if err = loginfamily.GuardLockedActorFamilyTx(ctx, tx, identity); err != nil {
-		if errors.Is(err, loginfamily.ErrDenied) {
-			return time.Time{}, errors.Join(credepoch.ErrEpochMismatch, err)
-		}
+	if err = guardRequestingFamilyTx(ctx, tx, id); err != nil {
 		return time.Time{}, err
 	}
 	var disabled bool
@@ -273,15 +266,9 @@ func (h *Handler) persist(ctx context.Context, claim Claim, sigB64 string) (last
 	}
 	var owners []loginfamily.DeliveryOwner
 	if !claim.ValidAge {
-		targets, err := loginfamily.CaptureUserTargetsTx(ctx, tx, user, nil)
-		if err != nil {
+		if owners, err = revokeForDisablementTx(ctx, tx, user); err != nil {
 			return time.Time{}, err
 		}
-		revoked, err := loginfamily.RevokeFamiliesTx(ctx, tx, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeUser, Reason: loginfamily.ReasonDisablement})
-		if err != nil {
-			return time.Time{}, err
-		}
-		owners = revoked.Owners
 	}
 
 	// Atomic disabled-guard + RETURNING. The `WHERE NOT EXISTS (... disabled=TRUE)`
@@ -323,19 +310,59 @@ func (h *Handler) persist(ctx context.Context, claim Claim, sigB64 string) (last
 	}
 
 	if !claim.ValidAge {
-		// Detach the post-commit side effects from the REQUEST context. The disabling
-		// actor controls the HTTP connection; a cancel between Commit and the denylist
-		// Set would otherwise skip the immediate-effect key (the "synchronous before
-		// 200" invariant). context.WithoutCancel keeps context values but drops the
-		// request's cancellation/deadline; the timeout bounds a hung Redis.
-		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if setErr := h.redis.Set(bgCtx, middleware.UserDisabledKey(claim.UserID), "1", 0).Err(); setErr != nil {
-			h.log.Error("age: denylist set failed", "error", setErr)
-		}
-		h.closeDisabledSessions(ctx, id, owners)
+		h.applyCommittedDisablement(ctx, claim.UserID, id, owners)
 	}
 	return lastChange, nil
+}
+
+// guardRequestingFamilyTx revalidates the requesting login under the user lock.
+// Session revocation rotates neither the credential epoch nor the claim key, so
+// a family revoked while this request waited must not disable the account. A
+// missing or foreign identity is an epoch mismatch; a denied family is joined
+// with ErrEpochMismatch so callers map it to the same refusal.
+func guardRequestingFamilyTx(ctx context.Context, tx *sql.Tx, id uuid.UUID) error {
+	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
+	if !ok || identity.UserID != id {
+		return credepoch.ErrEpochMismatch
+	}
+	if err := loginfamily.GuardLockedActorFamilyTx(ctx, tx, identity); err != nil {
+		if errors.Is(err, loginfamily.ErrDenied) {
+			return errors.Join(credepoch.ErrEpochMismatch, err)
+		}
+		return err
+	}
+	return nil
+}
+
+// revokeForDisablementTx captures the user's login-family targets and
+// terminalizes them for disablement inside the caller's transaction, returning
+// the delivery owners whose sockets must be closed after commit.
+func revokeForDisablementTx(ctx context.Context, tx *sql.Tx, user loginfamily.UserAuthority) ([]loginfamily.DeliveryOwner, error) {
+	targets, err := loginfamily.CaptureUserTargetsTx(ctx, tx, user, nil)
+	if err != nil {
+		return nil, err
+	}
+	revoked, err := loginfamily.RevokeFamiliesTx(ctx, tx, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeUser, Reason: loginfamily.ReasonDisablement})
+	if err != nil {
+		return nil, err
+	}
+	return revoked.Owners, nil
+}
+
+// applyCommittedDisablement runs the post-commit side effects of a terminal
+// disablement: the synchronous denylist set, then the socket fence.
+func (h *Handler) applyCommittedDisablement(ctx context.Context, userID string, id uuid.UUID, owners []loginfamily.DeliveryOwner) {
+	// Detach the post-commit side effects from the REQUEST context. The disabling
+	// actor controls the HTTP connection; a cancel between Commit and the denylist
+	// Set would otherwise skip the immediate-effect key (the "synchronous before
+	// 200" invariant). context.WithoutCancel keeps context values but drops the
+	// request's cancellation/deadline; the timeout bounds a hung Redis.
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if setErr := h.redis.Set(bgCtx, middleware.UserDisabledKey(userID), "1", 0).Err(); setErr != nil {
+		h.log.Error("age: denylist set failed", "error", setErr)
+	}
+	h.closeDisabledSessions(ctx, id, owners)
 }
 
 // closeDisabledSessions fences the disabled user's sockets before the 200. The

@@ -13,7 +13,7 @@ func newDurableErasedMediaReclaimer(
 	wake func(),
 	enqueue func([]media.BlobRef),
 ) users.ErasedMediaReclaimer {
-	return func(_ context.Context, _ []media.BlobRef, tier2 []media.BlobRef) {
+	return func(_ context.Context, _, tier2 []media.BlobRef) {
 		if wake != nil {
 			wake()
 		}
