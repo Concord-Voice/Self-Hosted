@@ -132,9 +132,8 @@ function validContext(tag: string, fields: unknown[]): boolean {
     if (name === 'content_kind' && value !== 'message-body') return false;
     if (
       name === 'blob_purpose' &&
-      !['preferences', 'saved_gifs', 'friend_organization', 'presence_overrides'].includes(
-        String(value)
-      )
+      (typeof value !== 'string' ||
+        !['preferences', 'saved_gifs', 'friend_organization', 'presence_overrides'].includes(value))
     )
       return false;
     if (
