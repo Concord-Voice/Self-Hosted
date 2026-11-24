@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	protocol "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voiceauthprotocol"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	protocol "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voiceauthprotocol"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/mediaproof"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"

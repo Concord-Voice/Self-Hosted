@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 )
 
 // RebuildDisabledDenylist re-seeds the user_disabled:<id> keys from the

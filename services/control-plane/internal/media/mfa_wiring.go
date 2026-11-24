@@ -1,6 +1,6 @@
 package media
 
-import "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+import "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 
 // SetMFAVerifier wires the verifier that confirms #3454's dangerous-action
 // gates on server icon and banner uploads. A nil verifier fails every gate

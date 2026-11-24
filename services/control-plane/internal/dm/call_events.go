@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
 	"github.com/google/uuid"
 )
 

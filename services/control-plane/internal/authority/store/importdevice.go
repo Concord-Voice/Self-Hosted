@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"slices"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // reconcile/import of private-op device entries and of row 22 (DoR:1727, the

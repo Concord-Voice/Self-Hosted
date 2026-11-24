@@ -18,9 +18,9 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/attestation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/attestation/appattest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/appattesttest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/attestation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/attestation/appattest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/appattesttest"
 )
 
 // RT-F1: a key proves only for the account that attested it. Another
