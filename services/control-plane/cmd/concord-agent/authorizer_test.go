@@ -48,7 +48,7 @@ func (s *fakeAuthorizerStore) Revoke(adminID string) (int, error) {
 		return 0, s.revokeErr
 	}
 	for i, entry := range s.entries {
-		if entry.AdminID == adminID {
+		if entry.AdminID == adminID && !entry.Revoked {
 			s.entries = append(s.entries[:i], s.entries[i+1:]...)
 			return 1, nil
 		}
@@ -327,6 +327,16 @@ func TestAuthorizerRevokeOfNothingExitsNonZero(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runAuthorizerCLIWith("/authorizers.json", []string{"revoke", "--admin-id", "3e7138e5-6eb9-4a79-8133-5eab67b7f2b6"}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store})
 	if code != 1 || !strings.Contains(stderr.String(), "nothing was revoked") || strings.Contains(stdout.String(), "Revoked") {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestAuthorizerRevokeOfAlreadyRevokedAdminSucceeds(t *testing.T) {
+	const id = "3e7138e5-6eb9-4a79-8133-5eab67b7f2b6"
+	store := &fakeAuthorizerStore{entries: []hostagent.AuthorizerListing{{AdminID: id, Revoked: true}}}
+	var stdout, stderr bytes.Buffer
+	code := runAuthorizerCLIWith("/authorizers.json", []string{"revoke", "--admin-id", id}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store})
+	if code != 0 || !strings.Contains(stderr.String(), "already revoked") || strings.Contains(stdout.String(), "Revoked ") {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 	}
 }

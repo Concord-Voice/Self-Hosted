@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/hostagent"
@@ -240,8 +241,17 @@ func revokeAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 		return err
 	}
 	if removed == 0 {
-		// Callers (concord-selfhost admin reset-enrollment) rely on a non-zero
-		// exit so a mistyped or never-imported admin is not reported as revoked.
+		// A retry after a failed enrollment reset finds every credential already
+		// revoked; that is success so the caller can go on to the reset.
+		entries, lerr := store.List()
+		if lerr != nil {
+			return lerr
+		}
+		if slices.ContainsFunc(entries, func(e hostagent.AuthorizerListing) bool { return e.AdminID == *adminID }) {
+			_, err = fmt.Fprintf(stderr, "Admin %s was already revoked; nothing more to revoke\n", *adminID)
+			return err
+		}
+		// A mistyped or never-imported admin must not be reported as revoked.
 		return fmt.Errorf("no active authorizer credentials for admin %s; nothing was revoked", *adminID)
 	}
 	_, err = fmt.Fprintf(stdout, "Revoked %d authorizer credentials for admin %s\n", removed, *adminID)
