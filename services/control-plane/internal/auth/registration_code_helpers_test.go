@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -174,4 +175,83 @@ func TestPrepareInitialCodeRefusesWithoutAnEmailService(t *testing.T) {
 	_, _, raw, err := h.prepareInitialCode(ctx, nil, helperPendingID, "a@example.test")
 	require.Error(t, err)
 	require.Empty(t, raw)
+}
+
+func answerOf(t *testing.T, write func(c *gin.Context)) (int, string) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	write(c)
+	return w.Code, w.Body.String()
+}
+
+func TestWriteResendFailureMapsEachOutcome(t *testing.T) {
+	h, _ := newHelperHandler(t)
+	boom := errors.New("boom")
+	cases := []struct {
+		name                      string
+		err, issuanceErr, prepErr error
+		status                    int
+		body                      string
+	}{
+		{"issuance exhausted", boom, errRegistrationCodesExhausted, nil, http.StatusTooManyRequests, "registration_codes_exhausted"},
+		{"preparation failed", boom, nil, boom, http.StatusServiceUnavailable, errMsgVerificationSendFailed},
+		{"preparation hit an expiring row", ErrPendingExpired, nil, ErrPendingExpired, http.StatusGone, "pending_expired"},
+		{"not found", ErrPendingNotFound, nil, nil, http.StatusNotFound, "pending_not_found"},
+		{"resends exhausted", ErrResendsExhausted, nil, nil, http.StatusTooManyRequests, "resends_exhausted"},
+		{"cooldown", ErrResendCooldown, nil, nil, http.StatusTooManyRequests, "cooldown_active"},
+		{"expired", ErrPendingExpired, nil, nil, http.StatusGone, "pending_expired"},
+		{"unexpected", boom, nil, nil, http.StatusInternalServerError, errMsgInternalError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := answerOf(t, func(c *gin.Context) { h.writeResendFailure(c, tc.err, tc.issuanceErr, tc.prepErr) })
+			require.Equal(t, tc.status, status)
+			require.Contains(t, body, tc.body)
+		})
+	}
+}
+
+func TestWriteChangeEmailFailureMapsEachOutcome(t *testing.T) {
+	h, _ := newHelperHandler(t)
+	boom := errors.New("boom")
+	cases := []struct {
+		name         string
+		err, prepErr error
+		status       int
+		body         string
+	}{
+		{"preparation failed", boom, boom, http.StatusServiceUnavailable, "Failed to send verification code"},
+		{"not found", ErrPendingNotFound, nil, http.StatusNotFound, "pending_not_found"},
+		{"expired", ErrPendingExpired, nil, http.StatusGone, "pending_expired"},
+		{"email registered", ErrEmailAlreadyRegister, nil, http.StatusConflict, "email_already_registered"},
+		{"email pending", ErrEmailPending, nil, http.StatusConflict, "registration_pending"},
+		{"resends exhausted", ErrResendsExhausted, nil, http.StatusTooManyRequests, "resends_exhausted"},
+		{"cooldown", ErrResendCooldown, nil, http.StatusTooManyRequests, "cooldown_active"},
+		{"unexpected", boom, nil, http.StatusInternalServerError, errMsgInternalError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := answerOf(t, func(c *gin.Context) { h.writeChangeEmailFailure(c, tc.err, tc.prepErr) })
+			require.Equal(t, tc.status, status)
+			require.Contains(t, body, tc.body)
+		})
+	}
+}
+
+func TestWriteStaleCodeRefusal(t *testing.T) {
+	h, ctx := newHelperHandler(t)
+	proof := &registrationCodeProof{email: "a@example.test", raw: rollbackOldRaw, attempts: 1}
+	require.NoError(t, h.redis.Set(ctx, redisKey(helperPendingID), rollbackOldRaw, time.Minute).Err())
+
+	status, body := answerOf(t, func(c *gin.Context) { h.writeStaleCodeRefusal(ctx, c, helperPendingID, proof) })
+	require.Equal(t, http.StatusUnauthorized, status)
+	require.Contains(t, body, "invalid_code")
+	require.Contains(t, body, `"attempts_remaining":`+strconv.Itoa(MaxCodeAttempts-1))
+	require.Zero(t, h.redis.Exists(ctx, redisKey(helperPendingID)).Val(), "the stale record is removed")
+
+	broken, bctx := newBrokenRedisHandler(t)
+	status, _ = answerOf(t, func(c *gin.Context) { broken.writeStaleCodeRefusal(bctx, c, helperPendingID, proof) })
+	require.Equal(t, http.StatusInternalServerError, status)
 }

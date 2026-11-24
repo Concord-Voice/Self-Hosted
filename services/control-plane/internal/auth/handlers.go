@@ -908,15 +908,7 @@ func (h *Handler) ConfirmRegistration(c *gin.Context) {
 			return
 		}
 		if errors.Is(err, ErrVerificationEmailChanged) || errors.Is(err, ErrVerificationCodeReplaced) {
-			if cleanupErr := h.deleteVerificationMaterialIfCurrent(ctx, pendingID, proof.raw); cleanupErr != nil {
-				h.log.Error("confirm: stale verification cleanup failed", "error", cleanupErr)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
-				return
-			}
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"code":               "invalid_code",
-				"attempts_remaining": max(0, MaxCodeAttempts-proof.attempts),
-			})
+			h.writeStaleCodeRefusal(ctx, c, pendingID, proof)
 			return
 		}
 		h.log.Error("confirm: promotion failed", "error", err)
@@ -1433,31 +1425,7 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 	})
 	if err != nil {
 		h.abandonUncommittedCode(ctx, "resend", pendingID, raw, previous, refundIssuance)
-		if issuanceErr != nil {
-			h.writeRegistrationIssuanceError(c, issuanceErr)
-			return
-		}
-		if prepareErr != nil && !errors.Is(err, ErrPendingExpired) {
-			h.log.Error("resend: code preparation failed", "error", err)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgVerificationSendFailed})
-			return
-		}
-		switch {
-		case errors.Is(err, ErrPendingNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
-		case errors.Is(err, ErrResendsExhausted):
-			c.JSON(http.StatusTooManyRequests, gin.H{"code": "resends_exhausted"})
-		case errors.Is(err, ErrResendCooldown):
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"code":                "cooldown_active",
-				"retry_after_seconds": int(ResendCooldown.Seconds()),
-			})
-		case errors.Is(err, ErrPendingExpired):
-			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
-		default:
-			h.log.Error("resend: increment failed", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
-		}
+		h.writeResendFailure(c, err, issuanceErr, prepareErr)
 		return
 	}
 	if err := h.emailSvc.SendVerificationCode(recipientEmail, code); err != nil {
@@ -1520,28 +1488,7 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 	})
 	if err != nil {
 		h.abandonUncommittedCode(ctx, "change-email", pendingID, raw, previous, refundIssuance)
-		if prepareErr != nil && !errors.Is(err, ErrPendingExpired) {
-			h.log.Error("change-email: code preparation failed", "error", err)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Failed to send verification code to new email"})
-			return
-		}
-		switch {
-		case errors.Is(err, ErrPendingNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
-		case errors.Is(err, ErrPendingExpired):
-			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
-		case errors.Is(err, ErrEmailAlreadyRegister):
-			c.JSON(http.StatusConflict, gin.H{"code": "email_already_registered"})
-		case errors.Is(err, ErrEmailPending):
-			c.JSON(http.StatusConflict, gin.H{"code": "registration_pending"})
-		case errors.Is(err, ErrResendsExhausted):
-			c.JSON(http.StatusTooManyRequests, gin.H{"code": "resends_exhausted"})
-		case errors.Is(err, ErrResendCooldown):
-			c.JSON(http.StatusTooManyRequests, gin.H{"code": "cooldown_active", "retry_after_seconds": int(ResendCooldown.Seconds())})
-		default:
-			h.log.Error("change-email: update failed", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
-		}
+		h.writeChangeEmailFailure(c, err, prepareErr)
 		return
 	}
 
@@ -5305,4 +5252,74 @@ func (h *Handler) listSSOProviders(ctx context.Context, userID string) ([]string
 		return nil, fmt.Errorf("rows: %w", err)
 	}
 	return out, nil
+}
+
+// writeStaleCodeRefusal answers a confirm whose accepted code no longer
+// matches the pending row: the code was replaced, or its recipient changed.
+// The stale record is removed, and the answer is the one a wrong code gets.
+func (h *Handler) writeStaleCodeRefusal(ctx context.Context, c *gin.Context, pendingID uuid.UUID, proof *registrationCodeProof) {
+	if cleanupErr := h.deleteVerificationMaterialIfCurrent(ctx, pendingID, proof.raw); cleanupErr != nil {
+		h.log.Error("confirm: stale verification cleanup failed", "error", cleanupErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		return
+	}
+	c.JSON(http.StatusUnauthorized, gin.H{
+		"code":               "invalid_code",
+		"attempts_remaining": max(0, MaxCodeAttempts-proof.attempts),
+	})
+}
+
+// writeResendFailure maps a failed resend transaction to its HTTP answer.
+func (h *Handler) writeResendFailure(c *gin.Context, err, issuanceErr, prepareErr error) {
+	if issuanceErr != nil {
+		h.writeRegistrationIssuanceError(c, issuanceErr)
+		return
+	}
+	if prepareErr != nil && !errors.Is(err, ErrPendingExpired) {
+		h.log.Error("resend: code preparation failed", "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgVerificationSendFailed})
+		return
+	}
+	switch {
+	case errors.Is(err, ErrPendingNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
+	case errors.Is(err, ErrResendsExhausted):
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": "resends_exhausted"})
+	case errors.Is(err, ErrResendCooldown):
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"code":                "cooldown_active",
+			"retry_after_seconds": int(ResendCooldown.Seconds()),
+		})
+	case errors.Is(err, ErrPendingExpired):
+		c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
+	default:
+		h.log.Error("resend: increment failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+	}
+}
+
+// writeChangeEmailFailure maps a failed change-email transaction to its HTTP answer.
+func (h *Handler) writeChangeEmailFailure(c *gin.Context, err, prepareErr error) {
+	if prepareErr != nil && !errors.Is(err, ErrPendingExpired) {
+		h.log.Error("change-email: code preparation failed", "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Failed to send verification code to new email"})
+		return
+	}
+	switch {
+	case errors.Is(err, ErrPendingNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
+	case errors.Is(err, ErrPendingExpired):
+		c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
+	case errors.Is(err, ErrEmailAlreadyRegister):
+		c.JSON(http.StatusConflict, gin.H{"code": "email_already_registered"})
+	case errors.Is(err, ErrEmailPending):
+		c.JSON(http.StatusConflict, gin.H{"code": "registration_pending"})
+	case errors.Is(err, ErrResendsExhausted):
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": "resends_exhausted"})
+	case errors.Is(err, ErrResendCooldown):
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": "cooldown_active", "retry_after_seconds": int(ResendCooldown.Seconds())})
+	default:
+		h.log.Error("change-email: update failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+	}
 }
