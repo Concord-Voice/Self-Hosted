@@ -322,7 +322,7 @@ func TestCorpusPositiveVectorsMatchIndependentGoPrimitives(t *testing.T) {
 		root := argon2.IDKey(password, salt, 3, 65536, 4, 32)
 		var generationBytes [8]byte
 		binary.BigEndian.PutUint64(generationBytes[:], uint64(generation))
-		bind := append([]byte("concord-credential-bind-v1\x00"+input["realm"].(string)), subject...)
+		bind := append([]byte("concord-credential-bind-v1\x00"+stringValue(t, input["realm"])), subject...)
 		bind = append(bind, generationBytes[:]...)
 		prk := hmacSHA256(bind, root) // HKDF-Extract(salt=bind, IKM=root).
 		assertEncodedOutput(t, outputs, "root_b64", root, base64.StdEncoding)
@@ -333,11 +333,11 @@ func TestCorpusPositiveVectorsMatchIndependentGoPrimitives(t *testing.T) {
 	t.Run("canonical context and rsa label", func(t *testing.T) {
 		contextVector := requireNamedVector(t, vectors, "context/encode/message-v1/base", "context", "encode")
 		contextInput := object(t, contextVector.Input)
-		contextBytes := marshalContext(t, contextInput["tag"].(string), contextInput["context_fields"].([]any))
+		contextBytes := marshalContext(t, stringValue(t, contextInput["tag"]), arrayValue(t, contextInput["context_fields"]))
 		assertEncodedOutput(t, acceptedOutputs(t, contextVector), "context_b64", contextBytes, base64.StdEncoding)
 
 		labelVector := requireNamedVector(t, vectors, "rsa-label/derive/channel-key-capsule-v1/base", "rsa-label", "derive")
-		labelFields := object(t, labelVector.Input)["context_fields"].([]any)
+		labelFields := arrayValue(t, object(t, labelVector.Input)["context_fields"])
 		label := marshalContext(t, "channel-key-capsule-v1", labelFields)
 		assertEncodedOutput(t, acceptedOutputs(t, labelVector), "label_b64", label, base64.StdEncoding)
 	})
@@ -387,11 +387,11 @@ func TestEveryPositiveCryptoBaseMatchesIndependentGoPrimitives(t *testing.T) {
 		case "context/encode":
 			t.Run(name, func(t *testing.T) {
 				input := object(t, v.Input)
-				assertEncodedOutput(t, acceptedOutputs(t, v), "context_b64", marshalContext(t, input["tag"].(string), input["context_fields"].([]any)), base64.StdEncoding)
+				assertEncodedOutput(t, acceptedOutputs(t, v), "context_b64", marshalContext(t, stringValue(t, input["tag"]), arrayValue(t, input["context_fields"])), base64.StdEncoding)
 			})
 		case "rsa-label/derive":
 			t.Run(name, func(t *testing.T) {
-				fields := object(t, v.Input)["context_fields"].([]any)
+				fields := arrayValue(t, object(t, v.Input)["context_fields"])
 				assertEncodedOutput(t, acceptedOutputs(t, v), "label_b64", marshalContext(t, "channel-key-capsule-v1", fields), base64.StdEncoding)
 			})
 		case "aead/encrypt":
@@ -409,7 +409,7 @@ func TestPasswordScalarVectorsUseIndependentStrictUTF16(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			input := object(t, v.Input)
-			utf8, err := strictUTF16Units(input["utf16_units_hex"].(string))
+			utf8, err := strictUTF16Units(stringValue(t, input["utf16_units_hex"]))
 			expect := object(t, v.Expect)
 			if expect["verdict"] == "reject" {
 				if err == nil || expect["stage"] != "validate" || expect["reason"] != "invalid_unicode" {
@@ -467,7 +467,7 @@ func assertCredentialDerivation(t *testing.T, v vector) {
 	root := argon2.IDKey(password, salt, 3, 65536, 4, 32)
 	var generationBytes [8]byte
 	binary.BigEndian.PutUint64(generationBytes[:], uint64(generation))
-	bind := append([]byte("concord-credential-bind-v1\x00"+input["realm"].(string)), subject...)
+	bind := append([]byte("concord-credential-bind-v1\x00"+stringValue(t, input["realm"])), subject...)
 	bind = append(bind, generationBytes[:]...)
 	prk := hmacSHA256(bind, root)
 	assertEncodedOutput(t, outputs, "root_b64", root, base64.StdEncoding)
@@ -483,14 +483,14 @@ func assertAEADEncrypt(t *testing.T, v vector) {
 	context, plaintext := mustBase64(t, input["context_b64"]), mustBase64(t, input["plaintext_b64"])
 	gcm := mustGCM(t, key)
 	sealed := gcm.Seal(nil, nonce, plaintext, context)
-	assertEncodedOutput(t, acceptedOutputs(t, v), "envelope_b64", makeEnvelope(t, input["format"].(string), nonce, sealed, context), base64.StdEncoding)
+	assertEncodedOutput(t, acceptedOutputs(t, v), "envelope_b64", makeEnvelope(t, stringValue(t, input["format"]), nonce, sealed, context), base64.StdEncoding)
 }
 
 func assertAEADDecrypt(t *testing.T, v vector) {
 	t.Helper()
 	input := object(t, v.Input)
 	key, context, envelope := mustBase64(t, input["key_b64"]), mustBase64(t, input["expected_context_b64"]), mustBase64(t, input["envelope_b64"])
-	nonce, sealed := splitEnvelope(t, input["format"].(string), envelope)
+	nonce, sealed := splitEnvelope(t, stringValue(t, input["format"]), envelope)
 	plaintext, err := mustGCM(t, key).Open(nil, nonce, sealed, context)
 	if err != nil {
 		t.Fatal(err)
@@ -850,7 +850,11 @@ func assertDescriptorCandidateMutations(t *testing.T, vectors map[string]vector)
 			t.Fatalf("invalid-subject descriptor changed field %d in addition to subject", index)
 		}
 	}
-	if encoded, ok := fields[2].(string); !ok || func() bool { _, err := base64.StdEncoding.DecodeString(encoded); return err == nil }() {
+	encoded, ok := fields[2].(string)
+	if !ok {
+		t.Fatal("invalid-subject descriptor must carry a string subject candidate")
+	}
+	if _, err := base64.StdEncoding.DecodeString(encoded); err == nil {
 		t.Fatal("invalid-subject descriptor must carry a non-base64 subject candidate")
 	}
 	assertDescriptorFieldMutation(t, baseFields, mustDescriptorFields(t, vectors["credential/descriptor/wrong-discriminator"]), 0, "wrong discriminator")
@@ -892,7 +896,7 @@ func assertContextParseCandidateMutation(t *testing.T, v vector, vectors map[str
 	if json.Unmarshal(parentBytes, &parentFields) != nil || json.Unmarshal(childBytes, &childFields) != nil || len(parentFields) < 3 || len(childFields) < 3 {
 		t.Fatalf("vector %q must carry JSON context candidates", v.Name)
 	}
-	semantic := object(t, v.Mutation)["semantic_field"].(string)
+	semantic := stringValue(t, object(t, v.Mutation)["semantic_field"])
 	if semantic == "context_b64" {
 		canonical, err := json.Marshal(childFields)
 		if err != nil || bytes.Equal(canonical, childBytes) || !sameJSONValues(parentFields, childFields) {
@@ -936,7 +940,7 @@ func assertNamedPolicyPredicates(t *testing.T, vectors map[string]vector) {
 		input := object(t, v.Input)
 		mustEqualPolicyInput(t, input, predicate)
 		decision, reason := legacyDecision(
-			input["account_protocol"].(string), input["authority_proof"].(string), input["realm_match"].(bool), input["account_match"].(bool), input["freshness"].(string), input["not_expired"].(bool), input["control_plane_continuation"].(bool),
+			stringValue(t, input["account_protocol"]), stringValue(t, input["authority_proof"]), boolValue(t, input["realm_match"]), boolValue(t, input["account_match"]), stringValue(t, input["freshness"]), boolValue(t, input["not_expired"]), boolValue(t, input["control_plane_continuation"]),
 		)
 		assertPolicyExpect(t, v.Expect, decision, reason)
 	}
@@ -956,7 +960,7 @@ func assertNamedPolicyPredicates(t *testing.T, vectors map[string]vector) {
 		v := requireNamedVector(t, vectors, "policy/upgrade-outcome/"+name, "policy", "upgrade-outcome")
 		input := object(t, v.Input)
 		mustEqualPolicyInput(t, input, predicate)
-		decision, reason := upgradeDecision(input["prior_state"].(string), input["authorization_state"].(string), input["request_match"].(bool), input["mfa_complete"].(bool), input["commit_state"].(string))
+		decision, reason := upgradeDecision(stringValue(t, input["prior_state"]), stringValue(t, input["authorization_state"]), boolValue(t, input["request_match"]), boolValue(t, input["mfa_complete"]), stringValue(t, input["commit_state"]))
 		assertPolicyExpect(t, v.Expect, decision, reason)
 	}
 }
@@ -986,6 +990,30 @@ func object(t *testing.T, raw json.RawMessage) map[string]any {
 	t.Helper()
 	var got map[string]any
 	decodeCorpus(t, raw, &got)
+	return got
+}
+func stringValue(t *testing.T, value any) string {
+	t.Helper()
+	got, ok := value.(string)
+	if !ok {
+		t.Fatalf("expected JSON string, got %#v", value)
+	}
+	return got
+}
+func boolValue(t *testing.T, value any) bool {
+	t.Helper()
+	got, ok := value.(bool)
+	if !ok {
+		t.Fatalf("expected JSON bool, got %#v", value)
+	}
+	return got
+}
+func arrayValue(t *testing.T, value any) []any {
+	t.Helper()
+	got, ok := value.([]any)
+	if !ok {
+		t.Fatalf("expected JSON array, got %#v", value)
+	}
 	return got
 }
 func mustEqualJSON(t *testing.T, got map[string]any, key string, want any) {
@@ -1152,7 +1180,8 @@ func assertVectorMutation(t *testing.T, v vector, seen map[string]vector) {
 	if got := objectKeys(t, v.Mutation); !sameStrings(got, []string{"kind", "path", "semantic_field"}) {
 		t.Fatalf("vector %q mutation keys got %v", v.Name, got)
 	}
-	if kind, ok := m["kind"].(string); !ok || !map[string]bool{"replace": true, "remove": true, "insert": true, "reorder": true, "truncate": true}[kind] {
+	kind, ok := m["kind"].(string)
+	if !ok || !map[string]bool{"replace": true, "remove": true, "insert": true, "reorder": true, "truncate": true}[kind] {
 		t.Fatalf("vector %q has invalid mutation kind", v.Name)
 	}
 	path, ok := m["path"].(string)
@@ -1435,7 +1464,7 @@ func objectKeys(t *testing.T, data []byte) []string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		keys = append(keys, token.(string))
+		keys = append(keys, stringValue(t, token))
 		var discard any
 		if err := dec.Decode(&discard); err != nil {
 			t.Fatal(err)
