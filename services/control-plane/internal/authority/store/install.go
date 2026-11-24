@@ -9,7 +9,7 @@ import (
 	"maps"
 	"slices"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // TrustView is the merged trust's high-water delegation, which serve checks

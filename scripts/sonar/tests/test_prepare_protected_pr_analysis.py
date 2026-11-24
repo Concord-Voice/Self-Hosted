@@ -422,6 +422,7 @@ class PrepareTest(unittest.TestCase):
         self.assertFalse((self.root / "analysis/services/control-plane/coverage.out").exists())
 
     def test_go_coverage_accepts_module_path_prefix(self):
+        self.assertEqual(MODULE.GO_MODULE_PREFIXES, ("github.com/Concord-Voice/Self-Hosted/",))
         for module in MODULE.GO_MODULE_PREFIXES:
             with self.subTest(module=module):
                 self.zips[3] = zipped("coverage.out", (

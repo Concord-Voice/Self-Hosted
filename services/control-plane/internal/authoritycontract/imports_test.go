@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const moduleInternal = "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/"
+const moduleInternal = "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/"
 
 // TestImportBoundary pins DoR §3.1's import boundary. authorityrelay imports
 // this package (§2.15 P1), so database/sql must never enter its closure, and
