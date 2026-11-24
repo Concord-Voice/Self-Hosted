@@ -395,6 +395,26 @@ func (r *AdminRepo) DeleteCredentials(ctx context.Context, adminID string) error
 	return nil
 }
 
+// DeleteUnenrolledPending removes the admin row CreateAdmin just committed
+// when its enrollment token could not be minted, so a retry of the same
+// username is not refused as a duplicate. It deletes only while the row is
+// still that unenrolled shape: pending_enrollment, at the credential
+// generation it was created with (no reset-enrollment has minted a token for
+// it since), and holding no WebAuthn credential. Returns ErrAdminNotFound when
+// no row matches, which leaves the row for an operator.
+func (r *AdminRepo) DeleteUnenrolledPending(ctx context.Context, adminID string, credentialGeneration int64) error {
+	const q = `
+		DELETE FROM admin_users u
+		WHERE u.id = $1 AND u.status = $2 AND u.credential_generation = $3
+		  AND NOT EXISTS (SELECT 1 FROM admin_webauthn_credentials c WHERE c.admin_id = u.id)
+	`
+	res, err := r.db.ExecContext(ctx, q, adminID, string(StatusPending), credentialGeneration)
+	if err != nil {
+		return fmt.Errorf("delete unenrolled pending admin: %w", err)
+	}
+	return requireOneRow(res)
+}
+
 // CountActiveCredentials returns how many WebAuthn credentials an admin holds.
 // Used by revocation flows to refuse removing an admin's last key.
 func (r *AdminRepo) CountActiveCredentials(ctx context.Context, adminID string) (int, error) {

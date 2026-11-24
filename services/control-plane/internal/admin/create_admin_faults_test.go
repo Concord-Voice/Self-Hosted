@@ -2,9 +2,12 @@ package admin_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -62,6 +65,70 @@ func TestCreateAdmin_AuditWriteFailure_IsRetryable(t *testing.T) {
 	handle, challenge = stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", map[string]any{})
 	rec = postJSON(engine, "/admin/api/v1/admins", createBody(username, handle, signStepUp(t, va, challenge, flagUP|flagUV)))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	created, err := admin.NewAdminRepo(db).GetByUsername(t.Context(), username)
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, created.ID)
+}
+
+// failEnrollMintHook fails any command on an enrollment-token key (the SETNX
+// that mints one) and passes every other Redis command through, so step-up
+// challenges and sessions still work.
+type failEnrollMintHook struct{}
+
+func (failEnrollMintHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (failEnrollMintHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if args := cmd.Args(); len(args) > 1 {
+			if key, ok := args[1].(string); ok && strings.HasPrefix(key, "admin_enroll:") {
+				err := errors.New("forced enrollment token store failure")
+				cmd.SetErr(err)
+				return err
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (failEnrollMintHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// A failed enrollment-token mint after the pending row committed removes that
+// row and audits the failure, so a retry of the same username with a fresh
+// step-up is created (201) instead of refused as a duplicate (409).
+func TestCreateAdmin_TokenMintFailure_IsRetryable(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	actingID, _, va := enrolledAdmin(t, db, rdb)
+	failing := redis.NewClient(rdb.Options())
+	t.Cleanup(func() { _ = failing.Close() })
+	failing.AddHook(failEnrollMintHook{})
+	faulty := faultCreateEngine(t, failing, actingID, dbFault{statement: "no statement matches this fault"})
+	engine := adminCreateEngine(t, db, rdb, actingID)
+
+	username := uniqueAdminUsername("mintfail")
+	handle, challenge := stepUpBegin(t, faulty, "/admin/api/v1/admins/stepup", map[string]any{})
+	rec := postJSON(faulty, "/admin/api/v1/admins", createBody(username, handle, signStepUp(t, va, challenge, flagUP|flagUV)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "enrollment_token")
+	assertNoAdmin(t, db, username)
+
+	var reason string
+	require.NoError(t, db.QueryRow(
+		`SELECT detail->>'reason' FROM admin_audit_log
+		 WHERE event_type = $1 AND admin_id = $2 AND result = $3 AND actor = $4`,
+		admin.EventAdminCreated, actingID, admin.AuditFailure, username,
+	).Scan(&reason))
+	assert.Equal(t, "token_mint_failed", reason)
+
+	handle, challenge = stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", map[string]any{})
+	rec = postJSON(engine, "/admin/api/v1/admins", createBody(username, handle, signStepUp(t, va, challenge, flagUP|flagUV)))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "enrollment_token")
 	created, err := admin.NewAdminRepo(db).GetByUsername(t.Context(), username)
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, created.ID)

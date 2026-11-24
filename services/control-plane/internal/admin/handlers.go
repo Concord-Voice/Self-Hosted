@@ -837,7 +837,8 @@ type createAdminRequest struct {
 // the pending row, before the token is minted, and neither exists when the
 // audit row cannot be written, so
 // every live enrollment token has a durable record other admins are told about
-// at their next sign-in.
+// at their next sign-in. When the token cannot be minted, the still-unenrolled
+// pending row is removed and a failure row is written, so a retry succeeds.
 func (h *Handler) CreateAdmin(c *gin.Context) {
 	ctx := c.Request.Context()
 	actingAdminID := c.GetString(adminIDContextKey)
@@ -901,10 +902,23 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 
 	token, err := h.enroll.MintEnrollmentToken(ctx, created.ID, created.CredentialGeneration)
 	if err != nil {
-		// The pending row is committed but has no token, so it cannot be
-		// enrolled until an operator runs reset-enrollment.
+		// The pending row is committed but has no token, so nobody can
+		// enroll it. Remove it, while it is still unenrolled, so a retry
+		// with a fresh step-up can create the same username. The committed
+		// admin_created success row stays (the log is append-only); the
+		// failure row below records that the creation did not complete.
+		// The cleanup runs detached from the request, so a client that
+		// hangs up cannot leave the row behind.
 		h.log.Error("admin mint enrollment token failed", "error", err)
-		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "token_mint_failed")
+		reason := "token_mint_failed"
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		if derr := h.repo.DeleteUnenrolledPending(cleanupCtx, created.ID, created.CredentialGeneration); derr != nil {
+			// The row stays; reset-enrollment can still recover it.
+			h.log.Error("admin remove unminted pending admin failed", "error", derr)
+			reason = "token_mint_failed_row_kept"
+		}
+		cancel()
+		h.auditCreateAdmin(context.WithoutCancel(ctx), actingAdminID, req.Username, AuditFailure, reason)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
