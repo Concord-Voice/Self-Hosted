@@ -1236,6 +1236,97 @@ func (h *Handler) deleteVerificationMaterialIfCurrent(ctx context.Context, pendi
 	return nil
 }
 
+// verificationSnapshot is the code a resend or change-email replaces, captured
+// under the pending-row lock so a transaction that does not commit can put it
+// back. A zero value means there was no code to restore.
+type verificationSnapshot struct {
+	raw, testCode string
+	ttl           time.Duration
+}
+
+// snapshotVerificationCode reads the current code record and its remaining
+// lifetime. A missing or expiring record yields the zero snapshot.
+func (h *Handler) snapshotVerificationCode(ctx context.Context, pendingID uuid.UUID) (verificationSnapshot, error) {
+	raw, err := h.redis.Get(ctx, redisKey(pendingID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return verificationSnapshot{}, nil
+	}
+	if err != nil {
+		return verificationSnapshot{}, fmt.Errorf("snapshot registration verification code: %w", err)
+	}
+	ttl, err := h.redis.PTTL(ctx, redisKey(pendingID)).Result()
+	if err != nil {
+		return verificationSnapshot{}, fmt.Errorf("snapshot registration verification code lifetime: %w", err)
+	}
+	if ttl <= 0 {
+		return verificationSnapshot{}, nil
+	}
+	snap := verificationSnapshot{raw: raw, ttl: ttl}
+	if isTestEnv() {
+		if v, tErr := h.redis.Get(ctx, testVerificationCodeKey(pendingID)).Result(); tErr == nil {
+			snap.testCode = v
+		}
+	}
+	return snap, nil
+}
+
+// restoreVerificationCodeLua puts the replaced code back, but only while the
+// uncommitted code is still the current record. KEYS: code, test-only code.
+// ARGV: uncommitted raw, old raw, old lifetime (ms), old test-only code.
+const restoreVerificationCodeLua = `
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if ARGV[2] == "" then
+  redis.call("DEL", KEYS[1], KEYS[2])
+  return 1
+end
+redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[3])
+if ARGV[4] == "" then
+  redis.call("DEL", KEYS[2])
+else
+  redis.call("SET", KEYS[2], ARGV[4], "PX", ARGV[3])
+end
+return 1
+`
+
+// restoreVerificationCode undoes a code written inside a transaction that did
+// not commit: the uncommitted record is replaced by the one it overwrote, or
+// removed when there was none. A newer record is left alone.
+func (h *Handler) restoreVerificationCode(ctx context.Context, pendingID uuid.UUID, uncommittedRaw string, snap verificationSnapshot) error {
+	if _, err := h.redis.Eval(ctx, restoreVerificationCodeLua,
+		[]string{redisKey(pendingID), testVerificationCodeKey(pendingID)},
+		uncommittedRaw, snap.raw, snap.ttl.Milliseconds(), snap.testCode,
+	).Result(); err != nil {
+		return fmt.Errorf("restore registration verification code: %w", err)
+	}
+	return nil
+}
+
+// cleanupContext detaches post-failure compensation from the request, so a
+// client that disconnects mid-send does not leave an unsent code live.
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+}
+
+// abandonUncommittedCode compensates a resend or change-email whose
+// transaction did not commit: it puts the previous code back and returns the
+// issuance charge, because no code was mailed. If the restore fails the
+// uncommitted code may survive, so the charge is kept.
+func (h *Handler) abandonUncommittedCode(ctx context.Context, op string, pendingID uuid.UUID, raw string, snap verificationSnapshot, refund func()) {
+	cctx, cancel := cleanupContext(ctx)
+	defer cancel()
+	if raw != "" {
+		if err := h.restoreVerificationCode(cctx, pendingID, raw, snap); err != nil {
+			h.log.Error(op+": failed to restore code after rollback", "error", err)
+			return
+		}
+	}
+	if refund != nil {
+		refund()
+	}
+}
+
 func (h *Handler) verifyRegistrationCodeCurrent(ctx context.Context, pendingID uuid.UUID, expectedRaw string) error {
 	currentRaw, err := h.redis.Get(ctx, redisKey(pendingID)).Result()
 	if errors.Is(err, redis.Nil) {
@@ -1322,6 +1413,7 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 	var code, raw string
 	var prepareErr, issuanceErr error
 	var refundIssuance func()
+	var previous verificationSnapshot
 	newCount, reservedAt, recipientEmail, err := h.pending.IncrementResend(ctx, pendingID.String(), func(tx *sql.Tx, recipient string) error {
 		// Charge the address the code goes to, read under the same row lock as
 		// the reservation, so a racing change-email cannot move the charge.
@@ -1329,18 +1421,18 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 		if issuanceErr != nil {
 			return issuanceErr
 		}
-		h.clearVerificationCodeMaterial(ctx, pendingID)
+		// The new record overwrites the current one, so nothing is deleted
+		// here: a transaction that does not commit must leave the code the
+		// user was already mailed. Capture it so a rollback can put it back.
+		var snapErr error
+		if previous, snapErr = h.snapshotVerificationCode(ctx, pendingID); snapErr != nil {
+			return snapErr
+		}
 		codeExpires, code, raw, prepareErr = h.prepareInitialCode(ctx, tx, pendingID, recipient)
 		return prepareErr
 	})
 	if err != nil {
-		if raw != "" {
-			if cleanupErr := h.deleteVerificationMaterialIfCurrent(ctx, pendingID, raw); cleanupErr != nil {
-				h.log.Error("resend: failed to remove uncommitted code", "error", cleanupErr)
-			}
-		} else if refundIssuance != nil {
-			refundIssuance()
-		}
+		h.abandonUncommittedCode(ctx, "resend", pendingID, raw, previous, refundIssuance)
 		if issuanceErr != nil {
 			h.writeRegistrationIssuanceError(c, issuanceErr)
 			return
@@ -1369,10 +1461,12 @@ func (h *Handler) ResendRegistrationCode(c *gin.Context) {
 		return
 	}
 	if err := h.emailSvc.SendVerificationCode(recipientEmail, code); err != nil {
-		if cleanupErr := h.deleteVerificationMaterialIfCurrent(ctx, pendingID, raw); cleanupErr != nil {
+		cctx, cancel := cleanupContext(ctx)
+		defer cancel()
+		if cleanupErr := h.deleteVerificationMaterialIfCurrent(cctx, pendingID, raw); cleanupErr != nil {
 			h.log.Error("resend: failed to remove undelivered code", "error", cleanupErr)
 		}
-		h.revertResendReservation(ctx, "resend", pendingID.String(), newCount, reservedAt)
+		h.revertResendReservation(cctx, "resend", pendingID.String(), newCount, reservedAt)
 		h.log.Error("resend: email send failed", "failure_class", "registration_resend_email_delivery")
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgVerificationSendFailed})
 		return
@@ -1412,21 +1506,20 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 	var codeExpires time.Time
 	var code, raw string
 	var prepareErr error
+	var previous verificationSnapshot
 	reservedCount, reservedAt, err := h.pending.updateEmail(ctx, pendingID.String(), req.NewEmail, func(tx *sql.Tx, recipient string) error {
-		if err := h.deleteVerificationCodeMaterial(ctx, pendingID); err != nil {
-			return err
+		// The new record overwrites the old one, which names the old
+		// recipient and so can never promote the new one. Capture it instead
+		// of deleting, so a transaction that does not commit keeps the code.
+		var snapErr error
+		if previous, snapErr = h.snapshotVerificationCode(ctx, pendingID); snapErr != nil {
+			return snapErr
 		}
 		codeExpires, code, raw, prepareErr = h.prepareInitialCode(ctx, tx, pendingID, recipient)
 		return prepareErr
 	})
 	if err != nil {
-		if raw != "" {
-			if cleanupErr := h.deleteVerificationMaterialIfCurrent(ctx, pendingID, raw); cleanupErr != nil {
-				h.log.Error("change-email: failed to remove uncommitted code", "error", cleanupErr)
-			}
-		} else {
-			refundIssuance()
-		}
+		h.abandonUncommittedCode(ctx, "change-email", pendingID, raw, previous, refundIssuance)
 		if prepareErr != nil && !errors.Is(err, ErrPendingExpired) {
 			h.log.Error("change-email: code preparation failed", "error", err)
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Failed to send verification code to new email"})
@@ -1454,10 +1547,12 @@ func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
 
 	newEmailLower := strings.ToLower(strings.TrimSpace(req.NewEmail))
 	if err := h.emailSvc.SendVerificationCode(newEmailLower, code); err != nil {
-		if cleanupErr := h.deleteVerificationMaterialIfCurrent(ctx, pendingID, raw); cleanupErr != nil {
+		cctx, cancel := cleanupContext(ctx)
+		defer cancel()
+		if cleanupErr := h.deleteVerificationMaterialIfCurrent(cctx, pendingID, raw); cleanupErr != nil {
 			h.log.Error("change-email: failed to remove undelivered code", "error", cleanupErr)
 		}
-		h.revertResendReservation(ctx, "change-email", pendingID.String(), reservedCount, reservedAt)
+		h.revertResendReservation(cctx, "change-email", pendingID.String(), reservedCount, reservedAt)
 		h.log.Error("change-email: send failed", "failure_class", "registration_change_email_delivery")
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": "Failed to send verification code to new email",
