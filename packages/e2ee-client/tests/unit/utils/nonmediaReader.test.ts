@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { readFileSync } from 'node:fs';
 import { createHash, webcrypto } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   encodeNonmediaContext,
   parseNonmediaContext,
@@ -123,6 +123,20 @@ describe('dormant ADR-0051 reader', () => {
     expect(rejected.length).toBeGreaterThanOrEqual(8);
     for (const entry of rejected) {
       expect(() => parseNonmediaContext(base64(entry.input.context_b64)), entry.name).toThrow();
+    }
+  });
+
+  it('rejects an oversized nonce before base64 decoding', () => {
+    const sample = vector('context/encode/attachment-v4/base');
+    const context = parseNonmediaContext(base64(sample.expect.outputs?.context_b64 ?? ''));
+    const oversized = { ...context, fields: [...context.fields] } as NonmediaContext;
+    (oversized.fields as unknown[])[6] = 'AAAA'.repeat(4096);
+    const atobSpy = vi.spyOn(globalThis, 'atob');
+    try {
+      expect(() => encodeNonmediaContext(oversized)).toThrow();
+      expect(atobSpy).not.toHaveBeenCalled();
+    } finally {
+      atobSpy.mockRestore();
     }
   });
 

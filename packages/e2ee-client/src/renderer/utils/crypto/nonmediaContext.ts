@@ -40,6 +40,7 @@ const positive = (value: unknown): value is number =>
 const boundedBase64 = (value: unknown, length: number): boolean => {
   if (
     typeof value !== 'string' ||
+    value.length !== Math.ceil(length / 3) * 4 ||
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
   )
     return false;
