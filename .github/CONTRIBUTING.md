@@ -359,12 +359,24 @@ coverage artifacts, scans it, and waits for the quality gate. `Required PR build
 requires the child run and a SonarCloud App check from inside its run window. Fork PRs keep the
 App-check-only exception. `nightly-ci.yml` runs the main-branch analysis that PR scans compare to.
 
+SonarQube Advanced Security dependency analysis (SCA) runs only in that main-branch analysis. SCA
+can run build tools in the job that holds `SONAR_TOKEN`, so the protected PR path passes
+`sonar.sca.enabled=false` and never resolves PR-controlled manifests. At PR time, OSV-Scanner and
+Dependabot check dependencies. `sonar-project.properties` sets the SCA scope.
+
+`sonar-container-scan.yml` runs daily on `main` and by manual dispatch from `main`. It builds the
+four service images as `container-image-scan.yml` does, pulls every digest-pinned image in
+`docker-compose*.yml` and the Dockerfile `FROM` lines, and sends each one to SonarQube Cloud
+container scanning (beta). It reports and does not gate (`--fail-on none`): Trivy in
+`container-image-scan.yml` is the gate. Results are in the organization's **Container images** view.
+
 ### SonarQube Quality Gate (Mandatory)
 
 SonarQube Quality Gate is a **mandatory CI check on all PRs**. Requirements:
 
 - New code must meet **>= 80% test coverage**
 - New-code bug, vulnerability, and dependency (SCA) severity scores must each stay at or below 9
+  (PR scans run without SCA, so the dependency score applies to the main-branch analysis)
 - New-code code-smell severity score at or below 14
 - New-code duplicated-line density at or below 3%
 

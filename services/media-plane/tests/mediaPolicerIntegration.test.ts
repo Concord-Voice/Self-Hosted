@@ -77,6 +77,7 @@ function createFakeIo(socketId: string) {
     to,
     sockets: {
       sockets: new Map([[socketId, { emit: ownerEmit, disconnect }]]),
+      adapter: { rooms: new Map() },
     },
   } as unknown as MediaPolicerIO;
   return { io, to, except, peerEmit, ownerEmit, disconnect };
@@ -87,7 +88,6 @@ describe('media policer integration (#2153 real RoomManager + MediaPolicer + tic
     const mockRouter = createMockRouter();
     const worker = createMockWorker();
     const mockMediasoup = {
-      getWebRtcServer: () => undefined,
       getOrCreateRouter: vi.fn().mockResolvedValue(mockRouter),
       getWebRtcServer: vi.fn().mockReturnValue({ closed: false }),
       removeRouter: vi.fn(),

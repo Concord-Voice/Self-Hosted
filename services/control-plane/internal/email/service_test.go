@@ -232,7 +232,7 @@ func TestSendVerificationCodeDevMode(t *testing.T) {
 
 func TestSendRecoveryCodeDevMode(t *testing.T) {
 	svc := newDevService()
-	err := svc.SendRecoveryCode("test@example.com", "654321")
+	err := svc.SendRecoveryCode("test@example.com", "654321", 15)
 	assert.NoError(t, err)
 }
 
@@ -265,7 +265,8 @@ func TestSendAccountErasureConfirmationDevModeFailsClosed(t *testing.T) {
 func TestDevModeLogsCodesOnlyInDevelopmentAndTest(t *testing.T) {
 	sends := map[string]func(*Service) error{
 		"verification": func(s *Service) error { return s.SendVerificationCode(testUserEmail, "123456") },
-		"recovery":     func(s *Service) error { return s.SendRecoveryCode(testUserEmail, "123456") },
+		"recovery":     func(s *Service) error { return s.SendRecoveryCode(testUserEmail, "123456", 15) },
+		"recovery key": func(s *Service) error { return s.SendRecoveryKey(testUserEmail, "123456", 15) },
 		"ownership": func(s *Service) error {
 			return s.SendOwnershipTransferNotification(testOwnerEmail, "Srv", "new", "123456")
 		},
@@ -342,7 +343,7 @@ func TestSendRecoveryCodeProd(t *testing.T) {
 	addr, capture := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
 	svc := newProdService(addr)
 
-	err := svc.SendRecoveryCode(testUserEmail, "112233")
+	err := svc.SendRecoveryCode(testUserEmail, "112233", 15)
 	require.NoError(t, err)
 
 	msg := capture.last()
@@ -454,7 +455,7 @@ func TestTemplateRenderingVerification(t *testing.T) {
 
 func TestTemplateRenderingRecovery(t *testing.T) {
 	var body strings.Builder
-	err := recoveryTmpl.Execute(&body, map[string]string{"Code": "RECOVERME"})
+	err := recoveryTmpl.Execute(&body, map[string]any{"Code": "RECOVERME", "Minutes": 10})
 	require.NoError(t, err)
 	html := body.String()
 	assert.Contains(t, html, "RECOVERME")
@@ -528,4 +529,35 @@ func TestSendMailNoAuth(t *testing.T) {
 	err := svc.SendVerificationCode(testUserEmail, "123456")
 	require.NoError(t, err)
 	assert.NotEmpty(t, capture.last())
+}
+
+func TestRecoveryKeyTemplateRendersKeyAndMinutes(t *testing.T) {
+	var body strings.Builder
+	err := recoveryKeyTmpl.Execute(&body, map[string]any{"Key": "abcDEF_123-key", "Minutes": 60})
+	require.NoError(t, err)
+	html := body.String()
+	assert.Contains(t, html, "abcDEF_123-key")
+	assert.Contains(t, html, "expires in 60 minutes")
+	assert.Contains(t, html, "Paste this key")
+}
+
+func TestRecoveryTemplateRendersMinutes(t *testing.T) {
+	var body strings.Builder
+	err := recoveryTmpl.Execute(&body, map[string]any{"Code": "123456", "Minutes": 15})
+	require.NoError(t, err)
+	assert.Contains(t, body.String(), "expires in 15 minutes")
+}
+
+func TestSendRecoveryKeyWithoutDeliveryFails(t *testing.T) {
+	svc := NewService(&config.Config{SMTPHost: "", Environment: "production"}, logger.New("test"))
+	require.ErrorIs(t, svc.SendRecoveryKey(testUserEmail, "key", 15), ErrDeliveryNotConfigured)
+}
+
+func TestSendRecoveryKeyProd(t *testing.T) {
+	addr, capture := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
+	svc := newProdService(addr)
+	require.NoError(t, svc.SendRecoveryKey(testUserEmail, "Zm9vYmFyYmF6cXV4", 15))
+	msg := capture.last()
+	assert.Contains(t, msg, "Zm9vYmFyYmF6cXV4")
+	assert.Contains(t, msg, "Your Concord account recovery key")
 }

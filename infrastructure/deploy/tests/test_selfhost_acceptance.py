@@ -7,17 +7,14 @@ credentials, or host data.
 """
 from __future__ import annotations
 
-import importlib.util
 import hashlib
 import io
-import copy
 from collections import Counter
 import ipaddress
 import json
 import math
 import os
 import signal
-import shutil
 import subprocess
 import time
 from types import SimpleNamespace
@@ -27,7 +24,7 @@ import sys
 import tempfile
 import tarfile
 import unittest
-from unittest import mock
+import unittest.mock as mock
 
 if __package__:
     from .selfhost_acceptance_support import (
@@ -754,7 +751,7 @@ class _OwnedExecutor:
 class AcceptanceRunnerTests(unittest.TestCase):
     BLACKSMITH_PROFILE = {"RUNNER_ENVIRONMENT": "self-hosted",
                           "SELFHOST_ACCEPTANCE_RUNNER_PROFILE": "blacksmith-4vcpu-ubuntu-2404",
-                          "GITHUB_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha"}
+                          "GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted"}
     HOSTED = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
               "RUNNER_OS": "Linux", "GITHUB_EVENT_NAME": "pull_request",
               "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "run-2505"}
@@ -882,6 +879,7 @@ class AcceptanceRunnerTests(unittest.TestCase):
                 try:
                     os.kill(int(pid_file.read_text()), signal.SIGKILL)
                 except ProcessLookupError:
+                    # The descendant already exited, so there is nothing left to clean up.
                     pass
 
     def runner(self):
@@ -1825,6 +1823,9 @@ verb_logs "$@"
             {"SELFHOST_ACCEPTANCE_RUNNER_PROFILE": "blacksmith-2vcpu-ubuntu-2404"},
             {"SELFHOST_ACCEPTANCE_RUNNER_PROFILE": "unknown"},
             {"GITHUB_REPOSITORY": "untrusted/fixture"}, {"GITHUB_REPOSITORY": None},
+            {"GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted-fork"},
+            {"GITHUB_REPOSITORY": "concord-voice/self-hosted"},
+            {"GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted "},
             {"RUNNER_ENVIRONMENT": "unknown"}, {"RUNNER_ENVIRONMENT": "github-hosted"},
             {"RUNNER_ENVIRONMENT": "github-hosted", "SELFHOST_ACCEPTANCE_RUNNER_PROFILE": ""},
         )

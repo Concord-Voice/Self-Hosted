@@ -242,55 +242,10 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 	// settle. The account is gone; only the fan-out failed.
 	var deliveryFailed bool
 	if err = h.account.DeleteAccount(c.Request.Context(), erasure); err != nil {
-		var verificationErr *stepup.Error
-		if errors.As(err, &verificationErr) {
-			verificationErr.Write(c)
-			return
-		}
-		var ownedSetErr *users.ErrErasureOwnedServerSetDrifted
-		if errors.As(err, &ownedSetErr) {
-			c.JSON(http.StatusConflict, gin.H{
-				"error_code":                "owned_server_confirmation_stale",
-				"required_owned_server_ids": ownedSetErr.RequiredOwnedServerIDs,
-			})
-			return
-		}
-		if errors.Is(err, users.ErrUserNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
-			return
-		}
-		if errors.Is(err, credepoch.ErrEpochMismatch) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
-			return
-		}
-		if errors.Is(err, users.ErrErasureCandidateSetDrifted) {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": "account state changed; retry the deletion",
-			})
-			return
-		}
-		if errors.Is(err, loginfamily.ErrUnavailable) {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Authentication temporarily unavailable"})
-			return
-		}
-		if !errors.Is(err, presencecapture.ErrPostCommitDelivery) {
-			if h.log != nil {
-				h.log.Error("erase-account: account deletion failed",
-					"user_id", userID,
-					"error", err,
-				)
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "account deletion failed"})
+		if h.writeDeleteAccountFailure(c, userID, err) {
 			return
 		}
 		deliveryFailed = true
-		if h.log != nil {
-			h.log.Error("erase-account: presence delivery did not settle",
-				"user_id", userID,
-				"failure_class", "delivery",
-				"error", err,
-			)
-		}
 	}
 
 	if err := h.revokeAccessTokens(c, userID); err != nil {
@@ -418,6 +373,63 @@ func (h *Handler) writeEmailConfirmationError(c *gin.Context, err error) {
 		return
 	}
 	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
+}
+
+// writeDeleteAccountFailure classifies a DeleteAccount error. For every
+// failure that leaves the account in place (or is a precondition refusal) it
+// writes the response and returns true. It returns false only for a DURABLE
+// erasure whose post-commit presence delivery did not settle: the caller must
+// still revoke access tokens before answering.
+//
+// The arms are checked in this exact order; an error wrapping several
+// sentinels takes the first matching arm.
+func (h *Handler) writeDeleteAccountFailure(c *gin.Context, userID string, err error) bool {
+	var verificationErr *stepup.Error
+	if errors.As(err, &verificationErr) {
+		verificationErr.Write(c)
+		return true
+	}
+	var ownedSetErr *users.ErrErasureOwnedServerSetDrifted
+	if errors.As(err, &ownedSetErr) {
+		c.JSON(http.StatusConflict, gin.H{
+			"error_code":                "owned_server_confirmation_stale",
+			"required_owned_server_ids": ownedSetErr.RequiredOwnedServerIDs,
+		})
+		return true
+	}
+	switch {
+	case errors.Is(err, users.ErrUserNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+		return true
+	case errors.Is(err, credepoch.ErrEpochMismatch):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return true
+	case errors.Is(err, users.ErrErasureCandidateSetDrifted):
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "account state changed; retry the deletion",
+		})
+		return true
+	case errors.Is(err, loginfamily.ErrUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Authentication temporarily unavailable"})
+		return true
+	case !errors.Is(err, presencecapture.ErrPostCommitDelivery):
+		if h.log != nil {
+			h.log.Error("erase-account: account deletion failed",
+				"user_id", userID,
+				"error", err,
+			)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "account deletion failed"})
+		return true
+	}
+	if h.log != nil {
+		h.log.Error("erase-account: presence delivery did not settle",
+			"user_id", userID,
+			"failure_class", "delivery",
+			"error", err,
+		)
+	}
+	return false
 }
 
 func (h *Handler) revokeAccessTokens(c *gin.Context, userID string) error {

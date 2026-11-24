@@ -322,6 +322,83 @@ mv "$WORK/symlinked/Dockerfile" "$WORK/symlinked/real.txt"
 ln -s real.txt "$WORK/symlinked/Dockerfile"
 listed symlinked
 expect_exit2 "a Dockerfile that is a symbolic link is refused" "Dockerfile" "not a regular file"
+# The manifest is held to the same rule: a symbolic link would let a later edit
+# to its target change the manifest without a review of the manifest path.
+repo manifest-symlinked
+mv "$WORK/manifest-symlinked/manifest.json" "$WORK/manifest-symlinked/real.json"
+ln -s real.json "$WORK/manifest-symlinked/manifest.json"
+listed manifest-symlinked
+expect_exit2 "a manifest tracked as a symbolic link is refused" "manifest manifest.json" "mode 120000, not a regular file"
+repo manifest-untracked
+git -C "$WORK/manifest-untracked" add Dockerfile
+invoke --root "$WORK/manifest-untracked" --manifest "$WORK/manifest-untracked/manifest.json"
+expect_exit2 "an untracked manifest is refused" "manifest manifest.json is not tracked"
+repo manifest-index-link
+git -C "$WORK/manifest-index-link" add -A
+blob=$(printf 'real.json' | git -C "$WORK/manifest-index-link" hash-object -w --stdin)
+git -C "$WORK/manifest-index-link" update-index --cacheinfo "120000,$blob,manifest.json"
+invoke --root "$WORK/manifest-index-link" --manifest "$WORK/manifest-index-link/manifest.json"
+expect_exit2 "a manifest tracked as a symbolic link but a regular file on disk is refused" "mode 120000, not a regular file"
+# The checker parses the manifest blob whose mode it checked, not the file on
+# disk: on a case-insensitive checkout a colliding name can overwrite that file.
+repo manifest-index-blob
+sed 's#library/golang#library/other#' "$WORK/manifest-index-blob/manifest.json" > "$WORK/manifest-index-blob/strict.json"
+cp "$WORK/manifest-index-blob/manifest.json" "$WORK/manifest-index-blob/disk.json"
+cp "$WORK/manifest-index-blob/strict.json" "$WORK/manifest-index-blob/manifest.json"
+git -C "$WORK/manifest-index-blob" add Dockerfile manifest.json
+cp "$WORK/manifest-index-blob/disk.json" "$WORK/manifest-index-blob/manifest.json"
+invoke --root "$WORK/manifest-index-blob" --manifest "$WORK/manifest-index-blob/manifest.json"
+assert_fail identity-mismatch "the indexed manifest is checked, not a different file on disk" "library/other"
+repo manifest-conflict
+git -C "$WORK/manifest-conflict" add -A
+git -C "$WORK/manifest-conflict" -c user.name=t -c user.email=t@example.invalid commit -qm base
+git -C "$WORK/manifest-conflict" checkout -qb side
+printf '{"side":1}\n' > "$WORK/manifest-conflict/manifest.json"
+git -C "$WORK/manifest-conflict" -c user.name=t -c user.email=t@example.invalid commit -qam side
+git -C "$WORK/manifest-conflict" checkout -q -
+printf '{"main":1}\n' > "$WORK/manifest-conflict/manifest.json"
+git -C "$WORK/manifest-conflict" -c user.name=t -c user.email=t@example.invalid commit -qam main
+git -C "$WORK/manifest-conflict" -c user.name=t -c user.email=t@example.invalid merge -q side >/dev/null 2>&1 || true
+invoke --root "$WORK/manifest-conflict" --manifest "$WORK/manifest-conflict/manifest.json"
+expect_exit2 "a manifest with an unresolved merge in the index is refused" "unresolved merge"
+dyn manifest-link-files 'FROM scratch\n'
+mv "$WORK/manifest-link-files/manifest.json" "$WORK/manifest-link-files/real.json"
+ln -s real.json "$WORK/manifest-link-files/manifest.json"
+run "$WORK/manifest-link-files"
+expect_exit2 "a symbolic-link manifest is refused with a FILE list too" "cannot read manifest"
+# A rename/delete conflict can leave a single stage; the stage number, not a
+# second record, marks it unresolved.
+repo manifest-one-stage
+git -C "$WORK/manifest-one-stage" add -A
+oid=$(git -C "$WORK/manifest-one-stage" rev-parse :manifest.json)
+printf '0 %s\tmanifest.json\n100644 %s 2\tmanifest.json\n' "$(printf '0%.0s' {1..40})" "$oid" \
+  | git -C "$WORK/manifest-one-stage" update-index --index-info
+invoke --root "$WORK/manifest-one-stage" --manifest "$WORK/manifest-one-stage/manifest.json"
+expect_exit2 "a manifest with one conflict stage only is refused" "unresolved merge"
+repo manifest-gitlink
+git -C "$WORK/manifest-gitlink" add Dockerfile
+git -C "$WORK/manifest-gitlink" update-index --add --cacheinfo "160000,$(printf 'a%.0s' {1..40}),manifest.json"
+invoke --root "$WORK/manifest-gitlink" --manifest "$WORK/manifest-gitlink/manifest.json"
+expect_exit2 "a manifest tracked as a submodule is refused" "mode 160000, not a regular file"
+repo manifest-missing-blob
+git -C "$WORK/manifest-missing-blob" add Dockerfile
+git -C "$WORK/manifest-missing-blob" update-index --add --info-only --cacheinfo "100644,$(printf 'b%.0s' {1..40}),manifest.json"
+invoke --root "$WORK/manifest-missing-blob" --manifest "$WORK/manifest-missing-blob/manifest.json"
+expect_exit2 "a manifest whose indexed blob cannot be read is refused" "cannot read manifest manifest.json from the index"
+repo manifest-outside
+git -C "$WORK/manifest-outside" add -A
+cp "$WORK/manifest-outside/manifest.json" "$WORK/outside-manifest.json"
+invoke --root "$WORK/manifest-outside" --manifest "$WORK/outside-manifest.json"
+expect_exit2 "a manifest outside --root is refused" "is outside --root"
+repo manifest-executable
+git -C "$WORK/manifest-executable" add -A
+git -C "$WORK/manifest-executable" update-index --chmod=+x manifest.json
+invoke --root "$WORK/manifest-executable" --manifest "$WORK/manifest-executable/manifest.json"
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && [ -z "$err" ]; then
+  ok "a manifest tracked with mode 100755 is accepted"
+else
+  ko "a manifest tracked with mode 100755 is accepted ($(detail))"
+fi
 
 echo ""
 echo "── must pass (exit 0, no output) ──"

@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
@@ -54,72 +56,71 @@ func requireSerializedEventPrivacy(t *testing.T, events []securityevent.Event, s
 // idempotent no-op if the failing commit accidentally persisted its writes.
 func TestExecuteRevocationEmitsOnlyAfterDurableUpdate(t *testing.T) {
 	rig := newSecurityEventFamilyRig(t)
-	rig.router.DELETE("/api/v1/sessions/:id", func(c *gin.Context) {
-		rig.handler.executeRevocation(c.Request.Context(), c, c.GetString("user_id"), c.Param("id"), "")
-	})
+	localFamily := rig.captureLocalFamily(t)
+	rig.router.DELETE("/api/v1/sessions/:id", rig.handler.RevokeSession)
+	body := `{"password":"` + privacyPassword + `"}`
 	removeFault := installSecurityEventCommitFault(t, rig.db)
-	failed := rig.request(http.MethodDelete, "/api/v1/sessions/"+rig.sid, "")
+	failed := rig.request(http.MethodDelete, "/api/v1/sessions/"+rig.sid, body)
 	require.Equal(t, http.StatusServiceUnavailable, failed.Code, failed.Body.String())
 	require.JSONEq(t, `{"error":"Authentication temporarily unavailable"}`, failed.Body.String())
-	rig.requireFailedCommit(t, failed)
+	rig.requireFailedCommit(t, failed, localFamily)
 	tracking, err := rig.redis.Exists(context.Background(), revokeTrackingKey(rig.user), simpleAuthWindowKey(rig.user, rig.familyID(t))).Result()
 	require.NoError(t, err)
 	require.Zero(t, tracking)
+	var last sql.NullTime
+	require.NoError(t, rig.db.QueryRow(`SELECT last_session_revoke_at FROM users WHERE id=$1`, rig.user).Scan(&last))
+	require.False(t, last.Valid, "a rolled-back revoke must not spend the allowance")
 	removeFault()
-	succeeded := rig.request(http.MethodDelete, "/api/v1/sessions/"+rig.sid, "")
+	succeeded := rig.request(http.MethodDelete, "/api/v1/sessions/"+rig.sid, body)
 	require.Equal(t, http.StatusOK, succeeded.Code, succeeded.Body.String())
 	require.JSONEq(t, `{"message":"Session revoked successfully","session_id":"`+rig.sid+`"}`, succeeded.Body.String())
 	require.Equal(t, []securityevent.Event{{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonSessionRevoked, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionDelete}}, rig.recorder.events)
 	rig.requireCommittedOwner(t)
 	requireSerializedEventPrivacy(t, rig.recorder.events, rig.user, rig.sid, rig.access, rig.refresh)
-	members, err := rig.redis.ZRange(context.Background(), revokeTrackingKey(rig.user), 0, -1).Result()
-	require.NoError(t, err)
-	require.Equal(t, []string{rig.sid}, members)
+	require.NoError(t, rig.db.QueryRow(`SELECT last_session_revoke_at FROM users WHERE id=$1`, rig.user).Scan(&last))
+	require.True(t, last.Valid, "the committed revoke must spend the allowance")
 }
 
 func TestUpdateRevocationModeEmitsOnlyAfterDurableUpdate(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	mini := miniredis.RunT(t)
-	redisClient := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	t.Cleanup(func() { require.NoError(t, redisClient.Close()) })
-	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	rig := newSecurityEventFamilyRig(t)
+	_, err := rig.db.Exec(`UPDATE users SET last_session_revoke_at=clock_timestamp() WHERE id=$1`, rig.user)
 	require.NoError(t, err)
+	hook, hookedDB := stmthook.Open(t)
+	rig.handler.db = hookedDB
+	rig.router.PUT("/api/v1/sessions/revocation-mode", rig.handler.UpdateRevocationMode)
+	body := `{"mode":"simple","password":"` + privacyPassword + `"}`
+	hook.Arm([]string{"UPDATE users SET revocation_mode=$1"}, nil, stmthook.ErrInjected)
+	failed := rig.request(http.MethodPut, "/api/v1/sessions/revocation-mode", body)
+	require.Equal(t, http.StatusServiceUnavailable, failed.Code, failed.Body.String())
+	seen, hookErr := hook.Report()
+	require.Equal(t, 1, seen)
+	require.NoError(t, hookErr)
+	require.Empty(t, rig.recorder.events)
+	var mode string
+	var last sql.NullTime
+	var generation int64
+	require.NoError(t, rig.db.QueryRow(`SELECT revocation_mode,last_session_revoke_at,session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).Scan(&mode, &last, &generation))
+	require.Equal(t, "secure", mode)
+	require.True(t, last.Valid)
+	require.Zero(t, generation)
 
-	newContext := func() (*gin.Context, *httptest.ResponseRecorder) {
-		response := httptest.NewRecorder()
-		ginContext, _ := gin.CreateTestContext(response)
-		ginContext.Request = httptest.NewRequest(http.MethodPut, "/api/v1/sessions/revocation-mode", strings.NewReader(`{"mode":"secure","password":"`+privacyPassword+`"}`))
-		ginContext.Request.Header.Set("Content-Type", "application/json")
-		ginContext.Set("user_id", privacyUserID)
-		return ginContext, response
-	}
-
-	failureDB := sql.OpenDB(execConnector{err: errors.New("update failed"), passwordHash: passwordHash})
-	t.Cleanup(func() { require.NoError(t, failureDB.Close()) })
-	failureHandler := NewHandler(failureDB, redisClient, logger.New("test"), testDisconnector{}, nil)
-	failureRecorder := &securityEventRecorder{}
-	failureHandler.SetSecurityEvents(failureRecorder)
-	failureContext, failureResponse := newContext()
-	failureHandler.UpdateRevocationMode(failureContext)
-	require.Equal(t, http.StatusInternalServerError, failureResponse.Code)
-	require.Empty(t, failureRecorder.events)
-
-	successDB := sql.OpenDB(execConnector{rows: 1, passwordHash: passwordHash})
-	t.Cleanup(func() { require.NoError(t, successDB.Close()) })
-	successHandler := NewHandler(successDB, redisClient, logger.New("test"), testDisconnector{}, nil)
-	successRecorder := &securityEventRecorder{}
-	successHandler.SetSecurityEvents(successRecorder)
-	successContext, successResponse := newContext()
-	successHandler.UpdateRevocationMode(successContext)
-	require.Equal(t, http.StatusOK, successResponse.Code)
-	require.Equal(t, []securityevent.Event{{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonRevocationModeChanged, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionsRevocationMode}}, successRecorder.events)
-	requireSerializedEventPrivacy(t, successRecorder.events, privacyUserID, privacyPassword)
+	succeeded := rig.request(http.MethodPut, "/api/v1/sessions/revocation-mode", body)
+	require.Equal(t, http.StatusOK, succeeded.Code, succeeded.Body.String())
+	require.NoError(t, rig.db.QueryRow(`SELECT revocation_mode,last_session_revoke_at,session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).Scan(&mode, &last, &generation))
+	require.Equal(t, "simple", mode)
+	require.False(t, last.Valid)
+	require.EqualValues(t, 1, generation)
+	require.Equal(t, []securityevent.Event{{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonRevocationModeChanged, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteSessionsRevocationMode}}, rig.recorder.events)
+	requireSerializedEventPrivacy(t, rig.recorder.events, rig.user, privacyPassword)
 }
 
 func TestRevokeAllSessionsEmitsOnlyAfterCommittedBulkRevoke(t *testing.T) {
 	rig := newSecurityEventFamilyRig(t)
+	localFamily := rig.captureLocalFamily(t)
 	rig.router.POST("/api/v1/sessions/revoke-all", rig.handler.RevokeAllSessions)
 	ctx := context.Background()
+	_, err := rig.db.Exec(`UPDATE users SET last_session_revoke_at=clock_timestamp() WHERE id=$1`, rig.user)
+	require.NoError(t, err)
 	require.NoError(t, rig.redis.ZAdd(ctx, revokeTrackingKey(rig.user), redis.Z{Score: 1, Member: "existing-revoke"}).Err())
 	require.NoError(t, rig.redis.Set(ctx, simpleAuthWindowKey(rig.user, rig.familyID(t)), "1", 0).Err())
 	removeFault := installSecurityEventCommitFault(t, rig.db)
@@ -127,13 +128,18 @@ func TestRevokeAllSessionsEmitsOnlyAfterCommittedBulkRevoke(t *testing.T) {
 	failed := rig.request(http.MethodPost, "/api/v1/sessions/revoke-all", body)
 	require.Equal(t, http.StatusServiceUnavailable, failed.Code, failed.Body.String())
 	require.JSONEq(t, `{"error":"Authentication temporarily unavailable"}`, failed.Body.String())
-	rig.requireFailedCommit(t, failed)
+	rig.requireFailedCommit(t, failed, localFamily)
 	members, err := rig.redis.ZRange(ctx, revokeTrackingKey(rig.user), 0, -1).Result()
 	require.NoError(t, err)
 	require.Equal(t, []string{"existing-revoke"}, members)
 	window, err := rig.redis.Get(ctx, simpleAuthWindowKey(rig.user, rig.familyID(t))).Result()
 	require.NoError(t, err)
 	require.Equal(t, "1", window)
+	var last sql.NullTime
+	var generation int64
+	require.NoError(t, rig.db.QueryRow(`SELECT last_session_revoke_at,session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).Scan(&last, &generation))
+	require.True(t, last.Valid)
+	require.Zero(t, generation)
 	removeFault()
 	succeeded := rig.request(http.MethodPost, "/api/v1/sessions/revoke-all", body)
 	require.Equal(t, http.StatusOK, succeeded.Code, succeeded.Body.String())
@@ -144,6 +150,9 @@ func TestRevokeAllSessionsEmitsOnlyAfterCommittedBulkRevoke(t *testing.T) {
 	remaining, err := rig.redis.Exists(ctx, revokeTrackingKey(rig.user), simpleAuthWindowKey(rig.user, rig.familyID(t))).Result()
 	require.NoError(t, err)
 	require.Zero(t, remaining)
+	require.NoError(t, rig.db.QueryRow(`SELECT last_session_revoke_at,session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).Scan(&last, &generation))
+	require.False(t, last.Valid)
+	require.EqualValues(t, 1, generation)
 	cookies := succeeded.Result().Cookies()
 	require.Len(t, cookies, 1)
 	require.Equal(t, "refresh_token", cookies[0].Name)
@@ -151,13 +160,24 @@ func TestRevokeAllSessionsEmitsOnlyAfterCommittedBulkRevoke(t *testing.T) {
 }
 
 type securityEventDisconnector struct {
-	users    []uuid.UUID
-	sessions []string
-	families []uuid.UUID
+	users         []uuid.UUID
+	sessions      []string
+	families      []uuid.UUID
+	localFamilies []uuid.UUID
+	snapshotErr   error
 }
 
 func (d *securityEventDisconnector) DisconnectFamilyContext(_ context.Context, _, family uuid.UUID) error {
 	d.families = append(d.families, family)
+	return nil
+}
+
+func (d *securityEventDisconnector) SnapshotUserFamiliesContext(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return append([]uuid.UUID(nil), d.localFamilies...), d.snapshotErr
+}
+
+func (d *securityEventDisconnector) DisconnectFamiliesContext(_ context.Context, _ uuid.UUID, families []uuid.UUID) error {
+	d.families = append(d.families, families...)
 	return nil
 }
 
@@ -203,12 +223,140 @@ func newSecurityEventFamilyRig(t *testing.T) securityEventFamilyRig {
 	return securityEventFamilyRig{db: db, redis: rdb, router: router, handler: handler, recorder: recorder, disconnector: disconnector, user: user, sid: sid, access: access, refresh: refresh}
 }
 
+func (r securityEventFamilyRig) captureLocalFamily(t *testing.T) uuid.UUID {
+	t.Helper()
+	var family uuid.UUID
+	require.NoError(t, r.db.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid=$1`, r.sid).Scan(&family))
+	r.disconnector.localFamilies = []uuid.UUID{family}
+	return family
+}
+
 // familyID returns the login family that owns the rig's session.
 func (r securityEventFamilyRig) familyID(t *testing.T) string {
 	t.Helper()
+	return familyOf(t, r, r.sid)
+}
+
+func familyOf(t *testing.T, rig securityEventFamilyRig, sid string) string {
+	t.Helper()
 	var family string
-	require.NoError(t, r.db.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid = $1`, r.sid).Scan(&family))
+	require.NoError(t, rig.db.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid = $1`, sid).Scan(&family))
 	return family
+}
+
+func sessionLive(t *testing.T, rig securityEventFamilyRig, sid string) bool {
+	t.Helper()
+	var live bool
+	require.NoError(t, rig.db.QueryRow(
+		`SELECT f.terminal_at IS NULL FROM login_family_sids s JOIN login_families f ON f.family_id = s.family_id WHERE s.sid = $1`, sid,
+	).Scan(&live))
+	return live
+}
+
+// sendAs serves one request authenticated by access, a token of any family of
+// the rig's user.
+func (r securityEventFamilyRig) sendAs(access, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+access)
+	response := httptest.NewRecorder()
+	r.router.ServeHTTP(response, req)
+	return response
+}
+
+// issueFamilyAccess mints a second login family of the rig's user and returns
+// its access token and session ID.
+func issueFamilyAccess(t *testing.T, rig securityEventFamilyRig) (access, sid string) {
+	t.Helper()
+	const secret = "security-event-family-test-signing-secret" // pragma: allowlist secret
+	minter := auth.NewHandler(rig.db, rig.redis, logger.New("test"), secret, testDisconnector{})
+	access, _, sid, err := minter.IssueAccessAndRefresh(context.Background(), rig.user)
+	require.NoError(t, err)
+	return access, sid
+}
+
+const passwordRequiredBody = `{"error":"password_required","message":"Password verification required to revoke this session"}`
+
+// VULN-014 regression: a Simple-mode revoke window belongs to the login family
+// that proved its password. Family B proves and earns a window; family A, a
+// second session of the same account, must still prove before it can revoke.
+// The control (family B revoking the same target without a password) shows the
+// window exists, so A's refusal comes from the family scope and nothing else.
+func TestSimpleWindowIsPerLoginFamily(t *testing.T) {
+	rig := newSecurityEventFamilyRig(t)
+	rig.handler.hub = testDisconnector{}
+	rig.router.DELETE("/api/v1/sessions/:id", rig.handler.RevokeSession)
+	ctx := context.Background()
+	// The day's free revoke is spent, so only a window can waive the password.
+	_, err := rig.db.Exec(`UPDATE users SET revocation_mode='simple', last_session_revoke_at=clock_timestamp() WHERE id=$1`, rig.user)
+	require.NoError(t, err)
+	accessB, sidB := issueFamilyAccess(t, rig)
+	targets := issueRevocationTargets(t, rig, 2)
+
+	proved := rig.sendAs(accessB, http.MethodDelete, "/api/v1/sessions/"+targets[0], `{"password":"`+privacyPassword+`"}`)
+	require.Equal(t, http.StatusOK, proved.Code, proved.Body.String())
+
+	refused := rig.sendAs(rig.access, http.MethodDelete, "/api/v1/sessions/"+targets[1], "")
+	require.Equal(t, http.StatusForbidden, refused.Code, "family A must not spend family B's window: %s", refused.Body.String())
+	require.JSONEq(t, passwordRequiredBody, refused.Body.String())
+	require.True(t, sessionLive(t, rig, targets[1]), "a refused revoke must leave its target live")
+
+	var generation int64
+	require.NoError(t, rig.db.QueryRow(`SELECT session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).Scan(&generation))
+	windowB, err := rig.redis.Get(ctx, simpleAuthWindowKey(rig.user, familyOf(t, rig, sidB))).Result()
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("%s%d", simpleAuthWindowVersion, generation), windowB, "the window holds the generation it was earned under")
+	for _, key := range []string{simpleAuthWindowKey(rig.user, rig.familyID(t)), legacySimpleAuthWindowKey(rig.user)} {
+		exists, err := rig.redis.Exists(ctx, key).Result()
+		require.NoError(t, err)
+		require.Zero(t, exists, "only family B earned a window: %s", key)
+	}
+
+	control := rig.sendAs(accessB, http.MethodDelete, "/api/v1/sessions/"+targets[1], "")
+	require.Equal(t, http.StatusOK, control.Code, "family B's own window waives its password: %s", control.Body.String())
+	require.False(t, sessionLive(t, rig, targets[1]))
+}
+
+// A revocation-mode change ends every login family's Simple-mode window, not
+// only the requester's. Family B proves and earns a window; family A switches
+// the account to secure and back to simple. B's earlier window must no longer
+// waive its password. The control shows B's window was live before the change,
+// so the refusal comes from the mode change and nothing else.
+func TestSimpleWindowEndsForEveryFamilyOnModeChange(t *testing.T) {
+	rig := newSecurityEventFamilyRig(t)
+	rig.handler.hub = testDisconnector{}
+	rig.router.DELETE("/api/v1/sessions/:id", rig.handler.RevokeSession)
+	rig.router.PUT("/api/v1/sessions/revocation-mode", rig.handler.UpdateRevocationMode)
+	_, err := rig.db.Exec(`UPDATE users SET revocation_mode='simple', last_session_revoke_at=clock_timestamp() WHERE id=$1`, rig.user)
+	require.NoError(t, err)
+	accessB, _ := issueFamilyAccess(t, rig)
+	targets := issueRevocationTargets(t, rig, 3)
+	withPassword := `{"password":"` + privacyPassword + `"}`
+
+	proved := rig.sendAs(accessB, http.MethodDelete, "/api/v1/sessions/"+targets[0], withPassword)
+	require.Equal(t, http.StatusOK, proved.Code, proved.Body.String())
+	control := rig.sendAs(accessB, http.MethodDelete, "/api/v1/sessions/"+targets[1], "")
+	require.Equal(t, http.StatusOK, control.Code, "family B's own window waives its password before any mode change: %s", control.Body.String())
+
+	for _, mode := range []string{"secure", "simple"} {
+		changed := rig.sendAs(rig.access, http.MethodPut, "/api/v1/sessions/revocation-mode", `{"mode":"`+mode+`","password":"`+privacyPassword+`"}`)
+		require.Equal(t, http.StatusOK, changed.Code, "switch to %s: %s", mode, changed.Body.String())
+	}
+	// A mode change also restores the day's free revoke. Spend it again
+	// without touching the generation, so only a window could waive the
+	// password below.
+	_, err = rig.db.Exec(`UPDATE users SET last_session_revoke_at=clock_timestamp() WHERE id=$1`, rig.user)
+	require.NoError(t, err)
+
+	refused := rig.sendAs(accessB, http.MethodDelete, "/api/v1/sessions/"+targets[2], "")
+	require.Equal(t, http.StatusForbidden, refused.Code, "a window earned before a mode change must not survive it: %s", refused.Body.String())
+	require.JSONEq(t, passwordRequiredBody, refused.Body.String())
+	require.True(t, sessionLive(t, rig, targets[2]), "a refused revoke must leave its target live")
+
+	reproved := rig.sendAs(accessB, http.MethodDelete, "/api/v1/sessions/"+targets[2], withPassword)
+	require.Equal(t, http.StatusOK, reproved.Code, "a fresh proof under the new mode still revokes: %s", reproved.Body.String())
 }
 
 func (r securityEventFamilyRig) request(method, path, body string) *httptest.ResponseRecorder {
@@ -252,7 +400,7 @@ func installSecurityEventCommitFault(t *testing.T, db *sql.DB) func() {
 	return remove
 }
 
-func (r securityEventFamilyRig) requireFailedCommit(t *testing.T, response *httptest.ResponseRecorder) {
+func (r securityEventFamilyRig) requireFailedCommit(t *testing.T, response *httptest.ResponseRecorder, localFamily uuid.UUID) {
 	t.Helper()
 	var called bool
 	require.NoError(t, r.db.QueryRow(`SELECT is_called FROM security_event_commit_fault_seq`).Scan(&called))
@@ -260,7 +408,7 @@ func (r securityEventFamilyRig) requireFailedCommit(t *testing.T, response *http
 	require.Empty(t, r.recorder.events)
 	require.Empty(t, r.disconnector.users)
 	require.Empty(t, r.disconnector.sessions)
-	require.Empty(t, r.disconnector.families, "a failed commit must not fence any family")
+	require.Equal(t, []uuid.UUID{localFamily}, r.disconnector.families, "an ambiguous commit must fence the captured local family")
 	require.Empty(t, response.Header().Values("Set-Cookie"))
 	var count int
 	for _, query := range []string{
@@ -484,25 +632,17 @@ func TestAuthenticateForRevoke_VerifierResultControlsRevocation(t *testing.T) {
 }
 
 func TestUpdateRevocationMode_ValidMFAClearsSharedBudget(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
-	require.NoError(t, err)
-	db := sql.OpenDB(execConnector{passwordHash: passwordHash, rows: 1})
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	mini := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
-	key := stepup.DangerousActionBudget(rdb).Key(privacyUserID)
-	require.NoError(t, rdb.Set(context.Background(), key, "4", stepup.BudgetWindow).Err())
-	h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, revokeMFAVerifier{enabled: true, valid: true})
-	response := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(response)
-	c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/sessions/revocation-mode", strings.NewReader(`{"mode":"simple","password":"`+privacyPassword+`","mfa_code":"123456"}`))
-	c.Request.Header.Set("Content-Type", "application/json")
-	c.Set("user_id", privacyUserID)
-	h.UpdateRevocationMode(c)
+	rig := newSecurityEventFamilyRig(t)
+	key := stepup.DangerousActionBudget(rig.redis).Key(rig.user)
+	require.NoError(t, rig.redis.Set(context.Background(), key, "4", stepup.BudgetWindow).Err())
+	rig.handler.mfaVerifier = revokeMFAVerifier{enabled: true, valid: true}
+	rig.router.PUT("/api/v1/sessions/revocation-mode", rig.handler.UpdateRevocationMode)
+	response := rig.request(http.MethodPut, "/api/v1/sessions/revocation-mode",
+		`{"mode":"simple","password":"`+privacyPassword+`","mfa_code":"123456"}`)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
-	require.False(t, mini.Exists(key), "successful password-and-MFA update clears the shared budget")
+	remaining, err := rig.redis.Exists(context.Background(), key).Result()
+	require.NoError(t, err)
+	require.Zero(t, remaining, "successful password-and-MFA update clears the shared budget")
 }
 
 type revokeBudgetIncrFaultHook struct{ key string }
@@ -533,6 +673,14 @@ type testDisconnector struct{}
 func (testDisconnector) DisconnectUser(uuid.UUID) {}
 func (testDisconnector) DisconnectSession(string) {}
 func (testDisconnector) DisconnectFamilyContext(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (testDisconnector) SnapshotUserFamiliesContext(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+
+func (testDisconnector) DisconnectFamiliesContext(context.Context, uuid.UUID, []uuid.UUID) error {
 	return nil
 }
 
@@ -635,4 +783,44 @@ func (r *oneSessionStringRow) Next(dest []driver.Value) error {
 	dest[0] = r.value
 	r.sent = true
 	return nil
+}
+
+// A Simple-mode window waives a password only against a generation read under
+// the revocation's user lock. When that read fails, even a family holding a
+// window that matches the stored generation gets no revoke, free or waived.
+// The control shows the same window waives the password when the read works.
+func TestUnreadableRevokeGenerationGrantsNoWaivedRevoke(t *testing.T) {
+	for _, fault := range []bool{false, true} {
+		name := "control"
+		if fault {
+			name = "generation unreadable"
+		}
+		t.Run(name, func(t *testing.T) {
+			rig := newSecurityEventFamilyRig(t)
+			target := issueRevocationTargets(t, rig, 1)[0]
+			_, err := rig.db.Exec(`UPDATE users SET revocation_mode='simple', last_session_revoke_at=clock_timestamp() WHERE id=$1`, rig.user)
+			require.NoError(t, err)
+			var generation int64
+			require.NoError(t, rig.db.QueryRow(`SELECT session_revoke_auth_gen FROM users WHERE id=$1`, rig.user).Scan(&generation))
+			require.NoError(t, rig.redis.Set(context.Background(), simpleAuthWindowKey(rig.user, rig.familyID(t)), fmt.Sprintf("%s%d", simpleAuthWindowVersion, generation), 0).Err())
+			hook, hookedDB := stmthook.Open(t)
+			rig.handler.db = hookedDB
+			rig.router.DELETE("/api/v1/sessions/:id", rig.handler.RevokeSession)
+			if fault {
+				hook.Arm([]string{`SELECT revocation_mode, session_revoke_auth_gen`}, nil, stmthook.ErrInjected)
+			}
+
+			response := rig.request(http.MethodDelete, "/api/v1/sessions/"+target, "")
+			if !fault {
+				require.Equal(t, http.StatusOK, response.Code, "the matching window waives the password: %s", response.Body.String())
+				requireRefreshRevoked(t, rig, target, true)
+				return
+			}
+			require.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
+			seen, hookErr := hook.Report()
+			require.Equal(t, 1, seen)
+			require.NoError(t, hookErr)
+			require.True(t, sessionLive(t, rig, target), "a refused revoke must leave its target live")
+		})
+	}
 }

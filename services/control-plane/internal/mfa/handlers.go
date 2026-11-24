@@ -124,6 +124,9 @@ type LoginCompleter interface {
 	// transaction has committed. MFA must not record challenge verification
 	// before that point.
 	CompleteLogin(c *gin.Context, userID string, rememberMe bool, expectedEpoch string, primaryAuthMethod securityevent.AuthMethod) bool
+	// CompleteSSOLink receives only signed challenge identity and a verified
+	// factor after the one-use challenge claim succeeds.
+	CompleteSSOLink(c *gin.Context, userID, challengeJTI, expectedEpoch, verifiedMethod string) bool
 }
 
 // PermissionInvalidator makes a user's cached permissions miss on their next
@@ -450,7 +453,7 @@ func acceptTOTPStep(ctx context.Context, store codeVerificationStore, userID str
 	return true, "totp", nil
 }
 
-func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID string, code string) (bool, error) {
+func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID, code string) (bool, error) {
 	var hashes []string
 	var used []bool
 	if err := store.QueryRowContext(ctx,
@@ -468,13 +471,11 @@ func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID 
 		return false, nil
 	}
 
-	updatedUsed := append([]bool(nil), used...)
-	updatedUsed[idx] = true
 	result, err := store.ExecContext(ctx,
-		// Match the hashes read above too: a regeneration resets every used flag,
-		// so the flags alone cannot tell a revoked set from the current one.
-		`UPDATE user_mfa_totp SET backup_codes_used = $1, updated_at = NOW() WHERE user_id = $2 AND backup_codes_used = $3 AND backup_codes_hash = $4`,
-		pq.Array(updatedUsed), userID, pq.Array(used), pq.Array(hashes),
+		// Fence the matched set and factor state while allowing other codes in the
+		// same set to be claimed concurrently.
+		`UPDATE user_mfa_totp SET backup_codes_used[$2] = TRUE, updated_at = NOW() WHERE user_id = $1 AND enabled AND confirmed AND backup_codes_hash = $3 AND backup_codes_used[$2] = FALSE`,
+		userID, idx+1, pq.Array(hashes),
 	)
 	if err != nil {
 		return false, fmt.Errorf("consume backup code: %w", err)
@@ -555,6 +556,15 @@ func (h *Handler) GenerateLoginChallenge(ctx context.Context, userID string, rem
 	return token, jti, nil
 }
 
+// GenerateSSOLinkChallenge signs a dedicated continuation for an account link.
+// The auth adapter stores the provider identity separately under this JTI.
+func (h *Handler) GenerateSSOLinkChallenge(_ context.Context, userID, credEpoch string) (string, string, error) {
+	return generateChallengeTokenWithTTL(ChallengeClaims{
+		UserID: userID, Purpose: PurposeLogin, CompletionKind: CompletionKindSSOLink,
+		CredentialEpoch: credEpoch, PrimaryAuthMethod: securityevent.AuthSSO,
+	}, JWTSecret(h.jwtSecret), challengeTTL)
+}
+
 // GenerateUpgradeChallenge creates a challenge token for pre-MFA session upgrades.
 // On successful MFA verification, fresh tokens are issued (same as login).
 func (h *Handler) GenerateUpgradeChallenge(_ context.Context, userID, refreshSessionID string) (string, string, error) {
@@ -572,7 +582,7 @@ func (h *Handler) GenerateUpgradeChallenge(_ context.Context, userID, refreshSes
 // BeginWebAuthnLogin starts a WebAuthn assertion ceremony for login.
 // Stores session data in Redis keyed by the challenge JTI.
 // Returns credential request options for the client, or nil if user has no WebAuthn credentials.
-func (h *Handler) BeginWebAuthnLogin(ctx context.Context, userID string, jti string) (interface{}, error) {
+func (h *Handler) BeginWebAuthnLogin(ctx context.Context, userID, jti string) (interface{}, error) {
 	user, err := h.buildWebAuthnUser(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("build webauthn user: %w", err)
@@ -2401,7 +2411,7 @@ func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verify
 		return verified, "webauthn", responded
 	case "email":
 		verified, responded := h.verifyEmailCode(ctx, c, req.Code, claims)
-		return verified, "", responded
+		return verified, "email", responded
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid method. Use 'totp', 'backup_code', 'webauthn', or 'email'"})
 		return false, "", true
@@ -2535,6 +2545,12 @@ func (h *Handler) completeVerifyPurpose(ctx context.Context, c *gin.Context, cla
 		return h.recoveryCompleter.CompleteRecovery(c, claims.UserID, recoveryFactor(verifiedMethod))
 
 	case PurposeLogin:
+		switch claims.CompletionKind {
+		case "", CompletionKindLogin, CompletionKindSSOLink:
+		default:
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid MFA challenge"})
+			return false
+		}
 		if h.loginCompleter == nil {
 			h.log.Error("MFA login verified with no login completer wired", "user_id", claims.UserID)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Login completion not configured"})
@@ -2542,6 +2558,9 @@ func (h *Handler) completeVerifyPurpose(ctx context.Context, c *gin.Context, cla
 		}
 		// The key expires with the challenge, which is already claimed.
 		h.delBestEffort(ctx, "Failed to clear MFA challenge remember-me state", claims.UserID, auth.MFAChallengeRememberMeKey(claims.ID))
+		if claims.CompletionKind == CompletionKindSSOLink {
+			return h.loginCompleter.CompleteSSOLink(c, claims.UserID, claims.ID, claims.CredentialEpoch, verifiedMethod)
+		}
 		primaryAuthMethod, err := normalizePrimaryAuthMethod(claims.PrimaryAuthMethod)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid MFA challenge"})
@@ -3227,7 +3246,7 @@ func (h *Handler) generateAndStoreEmailSmsCodes(ctx context.Context, userID stri
 	return codes, nil
 }
 
-func (h *Handler) sendEmailSmsSetupEmail(c *gin.Context, userID string, userEmail string, codes map[string]string) bool {
+func (h *Handler) sendEmailSmsSetupEmail(c *gin.Context, userID, userEmail string, codes map[string]string) bool {
 	code, ok := codes["email"]
 	if !ok {
 		return true

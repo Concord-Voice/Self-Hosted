@@ -23,6 +23,7 @@ var templateFS embed.FS
 
 var verificationTmpl = template.Must(template.ParseFS(templateFS, "templates/verification.html"))
 var recoveryTmpl = template.Must(template.ParseFS(templateFS, "templates/recovery.html"))
+var recoveryKeyTmpl = template.Must(template.ParseFS(templateFS, "templates/recovery_key.html"))
 var ownershipTransferTmpl = template.Must(template.ParseFS(templateFS, "templates/ownership_transfer.html"))
 var accountErasureConfirmationTmpl = template.Must(template.ParseFS(templateFS, "templates/account_erasure_confirmation.html"))
 
@@ -111,8 +112,9 @@ func (s *Service) SendVerificationCode(to, code string) error {
 	return s.sendTemplatedEmail(to, "Your Concord verification code", verificationTmpl, map[string]string{"Code": code})
 }
 
-// SendRecoveryCode sends a 6-digit account recovery code to the given email address.
-func (s *Service) SendRecoveryCode(to, code string) error {
+// SendRecoveryCode sends a 6-digit account recovery code that expires in
+// minutes.
+func (s *Service) SendRecoveryCode(to, code string, minutes int) error {
 	if s.devMode {
 		if !s.logCodes {
 			return ErrDeliveryNotConfigured
@@ -120,7 +122,20 @@ func (s *Service) SendRecoveryCode(to, code string) error {
 		s.log.Info("DEV MODE — account recovery code", "to", to, "code", code)
 		return nil
 	}
-	return s.sendTemplatedEmail(to, "Your Concord account recovery code", recoveryTmpl, map[string]string{"Code": code})
+	return s.sendTemplatedEmail(to, "Your Concord account recovery code", recoveryTmpl, map[string]any{"Code": code, "Minutes": minutes})
+}
+
+// SendRecoveryKey sends a single-use account recovery key that expires in
+// minutes.
+func (s *Service) SendRecoveryKey(to, key string, minutes int) error {
+	if s.devMode {
+		if !s.logCodes {
+			return ErrDeliveryNotConfigured
+		}
+		s.log.Info("DEV MODE — account recovery key", "to", to, "key", key)
+		return nil
+	}
+	return s.sendTemplatedEmail(to, "Your Concord account recovery key", recoveryKeyTmpl, map[string]any{"Key": key, "Minutes": minutes})
 }
 
 // SendAccountErasureConfirmation sends the one-use deep link that confirms an

@@ -662,7 +662,7 @@ func (h *Handler) enforceIssuedChannelEpoch(c *gin.Context, q epochQueryRower, c
 // enforceE2EE validates ciphertext shape and epoch revocation for the channel.
 // All channels are encrypted under E2EE-everywhere (#201).
 // Returns (keyVersion, ok). On failure, writes the JSON error to c.
-func (h *Handler) enforceE2EE(c *gin.Context, channelID string, content string, reqKeyVersion int) (int, bool) {
+func (h *Handler) enforceE2EE(c *gin.Context, channelID, content string, reqKeyVersion int) (int, bool) {
 	if !isValidCiphertext(content) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidCiphertext})
 		return 0, false

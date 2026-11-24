@@ -1148,18 +1148,7 @@ func (h *Handler) withOwnershipCaptureGuardedOutcome(
 		return nil, ownershipWriteUnchanged, fmt.Errorf("begin ownership transaction: %w", err)
 	}
 	defer func() {
-		rollbackErr := tx.Rollback()
-		if errors.Is(rollbackErr, sql.ErrTxDone) {
-			return
-		}
-		if rollbackErr != nil {
-			rollbackErr = fmt.Errorf("rollback ownership transaction: %w", rollbackErr)
-			if retErr == nil {
-				retErr = rollbackErr
-			} else {
-				retErr = errors.Join(retErr, rollbackErr)
-			}
-		}
+		retErr = joinOwnershipRollbackError(retErr, tx.Rollback())
 	}()
 
 	if err := rbac.LockServerVisibilityCapture(ctx, tx, serverID); err != nil {
@@ -1203,6 +1192,22 @@ func (h *Handler) withOwnershipCaptureGuardedOutcome(
 		return nil, ownershipWriteUnchanged, fmt.Errorf("%w: %w", errOwnershipAmbiguousCommit, err)
 	}
 	return plan, outcome, nil
+}
+
+// joinOwnershipRollbackError folds the deferred Rollback result of an ownership
+// transaction into the function's return error. A nil result or sql.ErrTxDone
+// (the transaction already committed or rolled back) leaves retErr unchanged;
+// any other rollback failure is wrapped and becomes the return error, or is
+// joined to the existing one.
+func joinOwnershipRollbackError(retErr, rollbackErr error) error {
+	if errors.Is(rollbackErr, sql.ErrTxDone) || rollbackErr == nil {
+		return retErr
+	}
+	rollbackErr = fmt.Errorf("rollback ownership transaction: %w", rollbackErr)
+	if retErr == nil {
+		return rollbackErr
+	}
+	return errors.Join(retErr, rollbackErr)
 }
 
 // classifyOwnershipPrepareFailure rechecks a pending transfer without presence
