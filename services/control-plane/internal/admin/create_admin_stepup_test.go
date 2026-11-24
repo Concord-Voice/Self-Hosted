@@ -211,6 +211,17 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 
 	assert.Equal(t, 1, adminCreatedRows(t, db, actingID, admin.AuditSuccess))
 	assert.Equal(t, 7, adminCreatedRows(t, db, actingID, admin.AuditDenied), "one denied row per refusal above")
+	// Each refusal records why, in the order of the subtests above; the
+	// response stays a uniform stepup_failed.
+	assert.Equal(t, []string{
+		"stepup_required",
+		"stepup_unknown_handle",     // single-use
+		"stepup_assertion_rejected", // no user verification
+		"stepup_assertion_rejected", // tampered signature
+		"stepup_clone_warning",      // counter did not advance
+		"stepup_unknown_handle",     // another admin's handle is not reachable
+		"stepup_unknown_handle",     // server-action handle, other prefix
+	}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditDenied))
 }
 
 // Input that is refused before the step-up does not spend the handle, and a
@@ -239,7 +250,7 @@ func TestCreateAdmin_StepUpOrdering(t *testing.T) {
 	// The same handle still works after the 400; a taken username is a 409.
 	rec = postJSON(engine, "/admin/api/v1/admins", createBody(actingName, handle, assertion))
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Equal(t, 1, adminCreatedRows(t, db, actingID, admin.AuditFailure),
+	assert.Equal(t, []string{"username_taken"}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditFailure),
 		"a verified step-up spent on a taken username is audited")
 
 	handle, challenge = stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
