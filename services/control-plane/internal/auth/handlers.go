@@ -96,7 +96,7 @@ type MFAChecker interface {
 	// BeginWebAuthnLogin starts a WebAuthn assertion ceremony and stores session data
 	// in Redis keyed by the challenge JTI. Returns credential request options for the client.
 	// Returns nil options if user has no WebAuthn credentials.
-	BeginWebAuthnLogin(ctx context.Context, userID string, jti string) (options interface{}, err error)
+	BeginWebAuthnLogin(ctx context.Context, userID, jti string) (options interface{}, err error)
 	// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
 	GenerateRecoveryToken(userID, verifiedFactor string) (token string, jti string, err error)
 	// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
@@ -2881,7 +2881,7 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, re
 // pair, all inside one users FOR NO KEY UPDATE transaction so it composes with the
 // #2201 credential-epoch fence. The 30s window check already happened in the caller
 // (attemptGracePeriodRecovery); recovery keys on revokedTokenID, not the timestamp.
-func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revokedTokenID string, _ time.Time) {
+func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID, revokedTokenID string, _ time.Time) {
 	ctx := c.Request.Context()
 	tier := h.entCache.GetTier(ctx, userID)
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -4440,8 +4440,7 @@ func rotateRecoveryFamiliesTx(ctx context.Context, tx *sql.Tx, userID uuid.UUID,
 func (h *Handler) execRecoveryTx(
 	ctx context.Context,
 	c *gin.Context,
-	recoveryUsedKey string,
-	errMsg string,
+	recoveryUsedKey, errMsg string,
 	fenceOp *credepoch.Op,
 	work recoveryWork,
 ) (result recoveryPresenceResult, returnErr error) {
@@ -4533,8 +4532,7 @@ func classifyRecoveryFenceCompletion(ctx context.Context, fenceOp *credepoch.Op,
 func (h *Handler) executeRecoveryTransaction(
 	c *gin.Context,
 	senderID uuid.UUID,
-	recoveryUsedKey string,
-	errMsg string,
+	recoveryUsedKey, errMsg string,
 	fenceOp *credepoch.Op,
 	ops []recoveryTxOp,
 	claims *RecoveryClaims,
