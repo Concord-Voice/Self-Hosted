@@ -1164,7 +1164,7 @@ async function heads(ctx) {
   const devHead = async (ch, o) => encodeRaw('device-head', { realm_id: realm, account_id: account, self_device_id: '',
     last_device_result: E0, device_set: E0, chain_head_digest: await sha384(ch), admitted_by: [], secrets: [], ...o }, {});
   const pushHead = async (name, dh, ch, ok) => {
-    let accepted = true;
+    let accepted;
     try {
       const v = await decode('device-head', dh);
       await decode('chain-head', ch);

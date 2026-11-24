@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +27,7 @@ func TestFamilyErrorEnvelope_SessionRoutes(t *testing.T) {
 			}
 			t.Run(route+"/"+failure, func(t *testing.T) {
 				rig := newSecurityEventFamilyRig(t)
+				localFamily := rig.captureLocalFamily(t)
 				hook, db := stmthook.Open(t)
 				rig.handler.db = db
 				path, method := "/api/v1/sessions/"+rig.sid, http.MethodDelete
@@ -37,6 +40,8 @@ func TestFamilyErrorEnvelope_SessionRoutes(t *testing.T) {
 					rig.router.DELETE("/api/v1/sessions/:id", rig.handler.RevokeSession)
 				}
 				ctx := context.Background()
+				var beforeRevoke time.Time
+				require.NoError(t, rig.db.QueryRow(`UPDATE users SET last_session_revoke_at=clock_timestamp()-INTERVAL '1 minute' WHERE id=$1 RETURNING last_session_revoke_at`, rig.user).Scan(&beforeRevoke))
 				require.NoError(t, rig.redis.ZAdd(ctx, revokeTrackingKey(rig.user), redis.Z{Score: float64(time.Now().Unix()), Member: "existing-revoke"}).Err())
 				require.NoError(t, rig.redis.Set(ctx, simpleAuthWindowKey(rig.user), "fixture-window", 0).Err())
 				before := familyEnvelopeSessionState(t, rig)
@@ -70,8 +75,8 @@ func TestFamilyErrorEnvelope_SessionRoutes(t *testing.T) {
 				assert.Empty(t, rig.recorder.events, "unknown commit must not publish a success event")
 				assert.Empty(t, rig.disconnector.users)
 				assert.Empty(t, rig.disconnector.sessions)
-				if failure == "commit acknowledged lost" {
-					assert.NotEmpty(t, rig.disconnector.families, "a revocation committed behind a lost ACK must still fence its family")
+				if failure == "commit acknowledged lost" || failure == "commit rollback" {
+					assert.Equal(t, []uuid.UUID{localFamily}, rig.disconnector.families, "an ambiguous commit must fence the captured local family")
 				} else {
 					assert.Empty(t, rig.disconnector.families, "an uncommitted revocation must not fence any family")
 				}
@@ -83,6 +88,14 @@ func TestFamilyErrorEnvelope_SessionRoutes(t *testing.T) {
 				assert.Equal(t, "fixture-window", window)
 				if failure == "commit acknowledged lost" {
 					rig.requireCommittedOwner(t) // physical commit happened despite the lost ACK
+					var last sql.NullTime
+					require.NoError(t, rig.db.QueryRow(`SELECT last_session_revoke_at FROM users WHERE id=$1`, rig.user).Scan(&last))
+					if route == "single" {
+						require.True(t, last.Valid)
+						assert.True(t, last.Time.After(beforeRevoke), "the committed revoke must spend the allowance")
+					} else {
+						assert.False(t, last.Valid, "the committed bulk revoke must reset the allowance")
+					}
 				} else {
 					assert.True(t, reflect.DeepEqual(before, familyEnvelopeSessionState(t, rig)), "refusal must roll back durable mutation")
 				}

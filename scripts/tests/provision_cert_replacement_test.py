@@ -152,7 +152,7 @@ elif name == 'docker':
                 'com.docker.compose.project':'owned','com.docker.compose.service':'coturn'}}))
     elif running and args[:2] == ['inspect','--format'] and args[-1] == ident:
         event('coturn-inspection')
-        print(json.dumps({'Name':'/concordvoice-coturn','Image':'coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e',
+        print(json.dumps({'Name':'/concordvoice-coturn','Image':'coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e',
             'Project':'owned','Service':'coturn','Status':'running','Running':True,
             'Paused':False,'Restarting':False}))
     elif running and args == ['restart',ident]: event('coturn-restart')

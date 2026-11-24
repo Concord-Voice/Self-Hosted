@@ -10,6 +10,7 @@ import type { MediasoupService } from '../src/lib/mediasoup.js';
 import { attestationRelayHeaders, resolveParticipantIdentity } from '../src/middleware/auth.js';
 import { getIdentityAuthorityReasonCode } from '../src/lib/identityAuthority.js';
 import { mediaPolicyCooldownAck } from '../src/lib/mediaPolicyWire.js';
+import { commitChannelAdmission, commitDMAdmission } from '../src/lib/roomAdmissionCommit.js';
 import {
   cleanupEmptyDMJoin,
   DMJoinCallIdTracker,
@@ -102,7 +103,7 @@ describe('room creation refusal acknowledgement', () => {
       const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
       const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
       const names = ['registerJoinRoomHandler', 'parseJoinMediaFrameCryptoVersion', 'joinErrorAck', 'emitJoinError',
-        'rollbackRegisteredRoomJoin', 'commitChannelAdmission', 'commitDMAdmission', 'rollbackSocketMembership'];
+        'rollbackRegisteredRoomJoin'];
       const declarations = names.map(name => {
         const matches = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
         if (matches.length !== 1) throw new Error(`Expected one actual function ${name}`);
@@ -117,10 +118,11 @@ describe('room creation refusal acknowledgement', () => {
         validateChannelAccess, attestationRelayHeaders, releaseDMVoiceAuthorization, registerVoiceEnforcementSession,
         isCanonicalEnforcementUUID, parseMediaFrameCryptoVersion, resolveParticipantIdentity,
         RoomCreationRefusedError, CryptoVersionMismatchError, MediaPolicyCooldownError, mediaPolicyCooldownAck,
+        commitChannelAdmission, commitDMAdmission,
         getIdentityAuthorityReasonCode, logger: { info() {}, debug() {}, warn() {}, error() {} },
       }) as (socket: unknown, data: unknown, deps: unknown) => void;
       const socket = { id: 'placement-socket', connected: true, handshake: { auth: { token, room_kind: 'dm', ...attestationHandshake } },
-        emit: vi.fn(), join: vi.fn(), leave: vi.fn(), to: () => ({ emit: vi.fn() }) };
+        emit: vi.fn(), join: vi.fn(), leave: vi.fn(), to: () => ({ emit: vi.fn() }), nsp: { sockets: new Map() } };
       type Handler = (request: object, callback: (value: unknown) => void) => Promise<void>;
       let handler: Handler | undefined;
       const data = { userId: user, username: 'placement-fixture', credentialEpoch: epoch, tokenExpiresAt: now + 60_000 };

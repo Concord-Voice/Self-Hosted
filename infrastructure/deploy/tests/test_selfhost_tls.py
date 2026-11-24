@@ -47,7 +47,7 @@ def valid_model():
     return {
         "services": {
             "coturn": {
-                "image": "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e",
+                "image": "coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e",
                 # Production inherits the image's Config.User (nobody:nogroup);
                 # no Compose `user` override is part of the ordinary model.
                 "command": [
@@ -78,7 +78,7 @@ def valid_container():
     # contract. Config.Env and unrelated/raw inspect data are intentionally absent.
     return {
         "Config": {
-            "Image": "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e",
+            "Image": "coturn/coturn:4.19.0-alpine@sha256:136cbd65085981300ce8dda9f917f377d84f4512497041aecd5d0a42ac5fd04e",
             "User": "nobody:nogroup",
             "Labels": {"com.docker.compose.project": "concordfixture", "com.docker.compose.service": "coturn"},
             "Cmd": list(valid_model()["services"]["coturn"]["command"]),

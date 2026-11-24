@@ -121,10 +121,10 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
-      # The caller-proof verifier is Go; pin the toolchain its go.mod names
-      # rather than relying on whatever the runner image ships.
+      # Both paths need the go.mod toolchain, not the runner image's Go: the
+      # caller-proof verifier is Go, and the main-branch scan's dependency
+      # analysis (SCA) resolves services/control-plane/go.mod with it.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: ${{ !inputs.reusable-analysis }}
         with:
           go-version-file: services/control-plane/go.mod
           cache: false
@@ -183,6 +183,10 @@ jobs:
             exit 1
           fi
 
+      - name: Export CI Pip pins for Sonar SCA
+        if: ${{ inputs.reusable-analysis }}
+        run: python3 scripts/sonar/ci-pip-sbom.py
+
       - name: Mark protected analysis start
         id: analysis-start
         if: ${{ !inputs.reusable-analysis }}
@@ -195,9 +199,13 @@ jobs:
         # ref, NOT a SonarCloud API key. SonarCloud tokens and git SHAs share
         # length/character-class, so the regex collides. Suppressed inline:
         # nosemgrep: generic.secrets.security.detected-sonarqube-docs-api-key.detected-sonarqube-docs-api-key  # pragma: allowlist nextline secret
+        # SCA is off on the protected PR path: dependency analysis can run
+        # build tools in this job, which holds SONAR_TOKEN, and must never
+        # resolve PR-controlled manifests. OSV-Scanner and Dependabot check
+        # dependencies at PR time; the main-branch scan keeps SCA on.
         uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
         with:
-          args: ${{ !inputs.reusable-analysis && format('-Dsonar.projectBaseDir={0}/protected-sonar-analysis -Dsonar.qualitygate.wait=true', runner.temp) || (inputs.require-quality-gate && '-Dsonar.qualitygate.wait=true' || '') }}
+          args: ${{ !inputs.reusable-analysis && format('-Dsonar.projectBaseDir={0}/protected-sonar-analysis -Dsonar.qualitygate.wait=true -Dsonar.sca.enabled=false', runner.temp) || (inputs.require-quality-gate && '-Dsonar.qualitygate.wait=true' || '') }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
