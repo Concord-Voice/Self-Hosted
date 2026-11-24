@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"errors"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // lookupStored is the replay lookup (D-90, D-151, D-184): one key, (account_id,

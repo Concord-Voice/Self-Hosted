@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	protocol "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voiceauthprotocol"
+	protocol "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voiceauthprotocol"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
