@@ -187,9 +187,20 @@ func (a *AuditLog) emitAuditWriteFailure(ctx context.Context) {
 // cap as "N or more".
 const MaxAdminsAddedNotice = 100
 
-// AdminsAddedSinceLastSignIn counts console-created admins (admin_created
+// AdminsAddedSinceLastSignIn counts the console-created admins (admin_created
 // successes, by any admin) recorded since this admin's previous successful
-// sign-in, capped at MaxAdminsAddedNotice. It is 0 on a first sign-in.
+// sign-in that still exist, capped at MaxAdminsAddedNotice. It is 0 on a
+// first sign-in.
+//
+// A success row does not prove an admin was added: when the enrollment-token
+// mint fails, CreateAdmin removes the pending admin but its committed success
+// row stays (the log is append-only), and a retry writes another success row
+// for the same username. So the count joins each success row to admin_users
+// and counts distinct usernames: a removed admin is not counted, a retried
+// one is counted once, and an admin whose removal failed
+// (token_mint_failed_row_kept) is counted because it still exists. The audit
+// row names the created admin only by username (actor), not by id, so the
+// match is by username; an admin removed later by any path is also left out.
 //
 // The window opens ten seconds before the previous sign-in's row, so a
 // creation that committed while that sign-in was being recorded is counted
@@ -197,10 +208,11 @@ const MaxAdminsAddedNotice = 100
 // lost login_success row widens the window, which also only over-reports.
 func (a *AuditLog) AdminsAddedSinceLastSignIn(ctx context.Context, adminID string) (int, error) {
 	const q = `
-		SELECT LEAST(COUNT(*), $4)::int
-		FROM admin_audit_log
-		WHERE event_type = $2 AND result = $5
-		  AND ts > (
+		SELECT LEAST(COUNT(DISTINCT u.id), $4)::int
+		FROM admin_audit_log l
+		JOIN admin_users u ON u.username = l.actor
+		WHERE l.event_type = $2 AND l.result = $5
+		  AND l.ts > (
 		    SELECT ts FROM admin_audit_log
 		    WHERE admin_id = $1 AND event_type = $3 AND result = $5
 		    ORDER BY ts DESC

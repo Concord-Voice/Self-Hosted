@@ -906,7 +906,8 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		// enroll it. Remove it, while it is still unenrolled, so a retry
 		// with a fresh step-up can create the same username. The committed
 		// admin_created success row stays (the log is append-only); the
-		// failure row below records that the creation did not complete.
+		// failure row below records that the creation did not complete, and
+		// the sign-in notice skips the success row because the admin is gone.
 		// The cleanup runs detached from the request, so a client that
 		// hangs up cannot leave the row behind.
 		h.log.Error("admin mint enrollment token failed", "error", err)
