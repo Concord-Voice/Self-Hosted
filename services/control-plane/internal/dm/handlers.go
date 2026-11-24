@@ -5319,6 +5319,12 @@ func (h *Handler) AuthorizeDMVoiceForMediaPlane(c *gin.Context) {
 		return
 	}
 	committed = true
+	c.JSON(http.StatusOK, dmVoiceAuthorizeResponse(identity, mediaEnt, lease, hasLease))
+}
+
+// dmVoiceAuthorizeResponse builds the media-plane authorization body from the
+// identity re-read under the DM topology transaction.
+func dmVoiceAuthorizeResponse(identity dmVoiceAuthorizeIdentity, mediaEnt entitlements.MediaEntitlements, lease VoiceCallLease, hasLease bool) gin.H {
 	response := gin.H{
 		"authorized":             true,
 		"is_group":               identity.isGroup,
@@ -5338,7 +5344,7 @@ func (h *Handler) AuthorizeDMVoiceForMediaPlane(c *gin.Context) {
 			response["call_ring_id"] = lease.RingID.String()
 		}
 	}
-	c.JSON(http.StatusOK, response)
+	return response
 }
 
 // authorizeDMVoiceMediaLease resolves and marks an existing lease after the
@@ -5412,11 +5418,7 @@ func (h *Handler) AbortDMVoiceMediaAuthorization(c *gin.Context) {
 		[]uuid.UUID{userUUID}, dmblock.LockShare,
 	)
 	if err != nil {
-		if errors.Is(err, credepoch.ErrEpochMismatch) || errors.Is(err, credepoch.ErrBlocked) {
-			h.respondGuardTxError(c, err, errMsgFailedAuthorize)
-		} else {
-			c.JSON(http.StatusForbidden, gin.H{"error": "dm_unavailable"})
-		}
+		h.respondDMVoiceAbortBeginError(c, err)
 		return
 	}
 	defer func() {
@@ -5461,6 +5463,16 @@ func (h *Handler) AbortDMVoiceMediaAuthorization(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// respondDMVoiceAbortBeginError maps a failed DM topology begin: a credential
+// fence refusal keeps its guard response, anything else reads as unavailable.
+func (h *Handler) respondDMVoiceAbortBeginError(c *gin.Context, err error) {
+	if errors.Is(err, credepoch.ErrEpochMismatch) || errors.Is(err, credepoch.ErrBlocked) {
+		h.respondGuardTxError(c, err, errMsgFailedAuthorize)
+		return
+	}
+	c.JSON(http.StatusForbidden, gin.H{"error": "dm_unavailable"})
 }
 
 // HandleUserDisconnect cleans up DM voice rings the user has initiated
