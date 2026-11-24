@@ -1,6 +1,7 @@
 package mfa
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -22,16 +23,16 @@ func TestVerifyBackupCodeReadsBareV1AndV2(t *testing.T) {
 		base64.RawURLEncoding.EncodeToString(argon2.IDKey([]byte(code), salt, 2, 19456, 1, 32))
 
 	for _, stored := range []string{bare, "v1$" + bare, v2} {
-		idx, matched, err := VerifyBackupCode("  abcd1234  ", []string{stored}, []bool{false})
+		idx, matched, err := VerifyBackupCode(context.Background(), "  abcd1234  ", []string{stored}, []bool{false})
 		require.NoError(t, err)
 		require.True(t, matched, stored)
 		require.Zero(t, idx)
-		_, matched, err = VerifyBackupCode(code, []string{stored}, []bool{true})
+		_, matched, err = VerifyBackupCode(context.Background(), code, []string{stored}, []bool{true})
 		require.NoError(t, err)
 		require.False(t, matched, "a used code must not match")
 	}
 
-	idx, matched, err := VerifyBackupCode(code, []string{"v1$" + bare, v2}, []bool{true, false})
+	idx, matched, err := VerifyBackupCode(context.Background(), code, []string{"v1$" + bare, v2}, []bool{true, false})
 	require.NoError(t, err)
 	require.True(t, matched, "a v2 entry remains usable after a v1 entry is consumed")
 	require.Equal(t, 1, idx)
@@ -56,7 +57,7 @@ func TestVerifyBackupCodeRejectsMalformedStoredHashesBeforeMatching(t *testing.T
 		"unknown version":  "v3$unknown",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, matched, err := VerifyBackupCode(code, []string{bare, bad}, []bool{false, false})
+			_, matched, err := VerifyBackupCode(context.Background(), code, []string{bare, bad}, []bool{false, false})
 			require.Error(t, err, "all entries must validate before an earlier entry matches")
 			require.False(t, matched)
 		})
@@ -64,12 +65,12 @@ func TestVerifyBackupCodeRejectsMalformedStoredHashesBeforeMatching(t *testing.T
 }
 
 // A row can hold every format at once during the B1/B2 overlap: bare codes a
-// B1 replica generated, v1 codes the 000201 migration prefixed, and v2 codes a
+// B1 replica generated, v1 codes the 000202 migration prefixed, and v2 codes a
 // B2 replica generated. The verifier is the B1 reader (only its Argon2id call
 // moved into backuphash.DeriveV2), so this matrix is also what a B1 binary
 // answers after an application rollback from B2.
 func TestVerifyBackupCodeMixedB1AndB2Row(t *testing.T) {
-	b2Codes, b2Hashes, err := GenerateBackupCodes()
+	b2Codes, b2Hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	legacy := func(code string) string {
 		sum := sha256.Sum256([]byte(code))
@@ -80,17 +81,17 @@ func TestVerifyBackupCodeMixedB1AndB2Row(t *testing.T) {
 	used := []bool{false, false, false}
 
 	for want, code := range codes {
-		idx, matched, err := VerifyBackupCode(strings.ToLower(code), hashes, used)
+		idx, matched, err := VerifyBackupCode(context.Background(), strings.ToLower(code), hashes, used)
 		require.NoError(t, err)
 		require.True(t, matched, "format %d must verify", want)
 		require.Equal(t, want, idx)
 		used[idx] = true
-		_, matched, err = VerifyBackupCode(code, hashes, used)
+		_, matched, err = VerifyBackupCode(context.Background(), code, hashes, used)
 		require.NoError(t, err)
 		require.False(t, matched, "format %d must verify only once", want)
 	}
 
-	_, matched, err := VerifyBackupCode(b2Codes[1], []string{b2Hashes[0]}, []bool{false})
+	_, matched, err := VerifyBackupCode(context.Background(), b2Codes[1], []string{b2Hashes[0]}, []bool{false})
 	require.NoError(t, err)
 	require.False(t, matched, "a v2 hash must not accept another code")
 }
@@ -99,7 +100,7 @@ func TestVerifyBackupCodeMixedB1AndB2Row(t *testing.T) {
 // parameter string costs no memory even when a valid v2 entry precedes it. A
 // verifier that derived the valid entry first would allocate its 19 MiB.
 func TestVerifyBackupCodeRefusesHostileParametersWithoutArgon2(t *testing.T) {
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	hostile := "v2$argon2id$v=19$m=4194304,t=64,p=255$" +
 		base64.RawURLEncoding.EncodeToString(make([]byte, 16)) + "$" +
@@ -108,7 +109,7 @@ func TestVerifyBackupCodeRefusesHostileParametersWithoutArgon2(t *testing.T) {
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	_, matched, err := VerifyBackupCode(codes[1], stored, []bool{false, false})
+	_, matched, err := VerifyBackupCode(context.Background(), codes[1], stored, []bool{false, false})
 	runtime.ReadMemStats(&after)
 
 	require.Error(t, err)
@@ -117,7 +118,7 @@ func TestVerifyBackupCodeRefusesHostileParametersWithoutArgon2(t *testing.T) {
 		"a malformed entry must be refused before any Argon2id allocation")
 
 	runtime.ReadMemStats(&before)
-	_, matched, err = VerifyBackupCode(codes[1], stored[:1], []bool{false})
+	_, matched, err = VerifyBackupCode(context.Background(), codes[1], stored[:1], []bool{false})
 	runtime.ReadMemStats(&after)
 	require.NoError(t, err)
 	require.False(t, matched)

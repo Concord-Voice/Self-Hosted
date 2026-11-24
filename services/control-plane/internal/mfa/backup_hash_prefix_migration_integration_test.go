@@ -3,6 +3,7 @@
 package mfa_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -50,7 +51,7 @@ func TestBackupHashPrefixMigrationRoundTrip(t *testing.T) {
 	require.Equal(t, []string{"v1$" + bare[0], "v1$" + bare[1], "v1$" + bare[2]}, hashes, "order is kept and each digest is unchanged")
 	require.Equal(t, used, gotUsed, "used flags are untouched")
 	for i, code := range codes {
-		idx, matched, err := mfa.VerifyBackupCode(strings.ToLower(code), hashes, gotUsed)
+		idx, matched, err := mfa.VerifyBackupCode(context.Background(), strings.ToLower(code), hashes, gotUsed)
 		require.NoError(t, err, "the deployed reader accepts every migrated element")
 		require.Equal(t, !used[i], matched, "code %d", i)
 		if matched {
@@ -67,7 +68,7 @@ func TestBackupHashPrefixMigrationRoundTrip(t *testing.T) {
 
 	// A row written during the rollout: a bare code, a v2 code and a value no
 	// reader accepts. Up prefixes only the bare element.
-	_, v2Hashes, err := mfa.GenerateBackupCodes()
+	_, v2Hashes, err := mfa.GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	unreadable := strings.ToUpper(sha256Hex("upper"))
 	mixedBare := sha256Hex("mixedaa1")
@@ -95,7 +96,7 @@ func TestBackupHashPrefixMigrationRoundTrip(t *testing.T) {
 	}
 	refuseDown("a v2 code has no bare form")
 
-	newHash, err := backuphash.NewV2("onlyv2aa")
+	newHash, err := backuphash.NewV2(context.Background(), "onlyv2aa")
 	require.NoError(t, err)
 	_, err = db.Exec(`UPDATE user_mfa_totp SET backup_codes_hash = $1 WHERE user_id = $2`, pq.Array([]string{newHash}), mixedUser)
 	require.NoError(t, err)

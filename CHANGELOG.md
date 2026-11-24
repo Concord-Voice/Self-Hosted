@@ -36,6 +36,7 @@ backup-code hashes move to an explicit versioned format.
 ### Security
 
 - **MFA:** New backup codes are stored as salted Argon2id hashes, one random salt per code, so a database read no longer yields unsalted SHA-256 digests of them. Migration 000202 marks each existing hash with an explicit `v1$` prefix. Upgrade only from a release that already reads the versioned formats, or stop every older control-plane process before migrating. Rolling the schema back refuses once any new code has been generated.
+- **MFA:** At most four backup-code Argon2id hashes run at once across the control plane, so a burst of TOTP setup, backup-code regeneration or backup-code sign-in requests can no longer exhaust its memory. A request that cannot get a slot within 5 seconds gets 503 with `Retry-After: 1`, and nothing is spent.
 - **MFA:** `POST /mfa/email-sms/setup` and `PUT /mfa/recovery-only` accept only their known methods, at most two and four entries, and refuse a longer list or another method with 400 before the step-up check. A repeated method is sent, coded and stored once.
 
 ## [0.4.0] - 2026-11-23

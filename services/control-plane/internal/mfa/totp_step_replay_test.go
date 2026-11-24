@@ -326,7 +326,7 @@ func TestTOTPStepReplay_VerifySetupDoubleSubmitPersistsOnlyOneWinner(t *testing.
 		for _, c := range codes {
 			codeStr, isString := c.(string)
 			require.True(t, isString, "each backup code must be a string")
-			_, matched, verifyErr := mfa.VerifyBackupCode(codeStr, storedHashes, make([]bool, len(storedHashes)))
+			_, matched, verifyErr := mfa.VerifyBackupCode(context.Background(), codeStr, storedHashes, make([]bool, len(storedHashes)))
 			require.NoError(t, verifyErr)
 			assert.True(t, matched,
 				"TOTPStepReplay: a 200 TOTPVerifySetup response's backup codes must match what is actually stored in user_mfa_totp.backup_codes_hash")

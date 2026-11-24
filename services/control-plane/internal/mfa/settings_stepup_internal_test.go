@@ -254,7 +254,7 @@ func TestRegenerateBackupCodesRejectsBackupCode(t *testing.T) {
 	h := iuHandler(db, rdb, kr)
 	userID := iuCreateUser(t, db, iuPassword)
 	iuEnrollTOTP(t, db, kr, userID)
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	require.NoError(t, db.QueryRow(`UPDATE user_mfa_totp
 		SET backup_codes_hash = $1, backup_codes_used = $2 WHERE user_id = $3

@@ -3,6 +3,7 @@
 package backuphash
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -58,22 +60,62 @@ func Parse(stored string) (salt, digest []byte, err error) {
 }
 
 // NewV2 hashes one normalized backup code with a fresh random 16-byte salt.
-func NewV2(code string) (string, error) {
-	return newV2(code, rand.Reader)
+// It shares DeriveV2's slots and returns ErrBusy when none frees in time.
+func NewV2(ctx context.Context, code string) (string, error) {
+	return newV2(ctx, code, rand.Reader)
 }
 
-func newV2(code string, random io.Reader) (string, error) {
+func newV2(ctx context.Context, code string, random io.Reader) (string, error) {
 	salt := make([]byte, v2SaltLen)
 	if _, err := io.ReadFull(random, salt); err != nil {
 		return "", fmt.Errorf("read backup-code salt: %w", err)
 	}
+	digest, err := DeriveV2(ctx, code, salt)
+	if err != nil {
+		return "", err
+	}
 	return V2Prefix + base64.RawURLEncoding.EncodeToString(salt) + "$" +
-		base64.RawURLEncoding.EncodeToString(DeriveV2(code, salt)), nil
+		base64.RawURLEncoding.EncodeToString(digest), nil
 }
 
-// DeriveV2 computes the v2 digest of a normalized code under a parsed salt.
-func DeriveV2(code string, salt []byte) []byte {
+// MaxConcurrentDerivations caps Argon2id backup-code derivations across the
+// process, writer and verifier alike. Each derivation holds 19 MiB, so four
+// bound the peak near 76 MiB however many setup, regenerate or verify requests
+// arrive at once; one TOTP setup's eight derivations still finish in well under
+// a second.
+const MaxConcurrentDerivations = 4
+
+// maxDerivationWait bounds how long a caller whose context has no earlier
+// deadline queues for a slot, so a flood is answered rather than parked.
+const maxDerivationWait = 5 * time.Second
+
+// ErrBusy reports that no derivation slot freed before the caller's context
+// ended or maxDerivationWait passed. HTTP callers answer it with 503.
+var ErrBusy = errors.New("backup-code hashing is busy")
+
+var derivationSlots = make(chan struct{}, MaxConcurrentDerivations)
+
+// deriveKey is the Argon2id call; tests swap it to observe the semaphore.
+var deriveKey = func(code string, salt []byte) []byte {
 	return argon2.IDKey([]byte(code), salt, v2Time, v2MemoryKiB, v2Threads, v2DigestLen)
+}
+
+// DeriveV2 computes the v2 digest of a normalized code under a parsed salt. It
+// waits for one of MaxConcurrentDerivations slots and returns ErrBusy, without
+// deriving, if the context ends first.
+func DeriveV2(ctx context.Context, code string, salt []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBusy, err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, maxDerivationWait)
+	defer cancel()
+	select {
+	case derivationSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w: %w", ErrBusy, ctx.Err())
+	}
+	defer func() { <-derivationSlots }()
+	return deriveKey(code, salt), nil
 }
 
 func parseSHA256(encoded string) ([]byte, []byte, error) {

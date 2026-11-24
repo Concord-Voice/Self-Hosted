@@ -2,6 +2,7 @@
 package mfa
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -153,8 +154,9 @@ func ParseEncryptionKey(hexKey string) ([]byte, error) {
 // code gets its own random salt and the bounded Argon2id tuple the reader
 // accepts. Only a release whose every serving replica reads v2 may run this
 // writer; see the "Backup-code storage" entry under Security Architecture in
-// docs/architecture.md.
-func GenerateBackupCodes() (codes []string, hashes []string, err error) {
+// docs/architecture.md. Hashing shares backuphash's process-wide slots, so a
+// saturated process returns backuphash.ErrBusy.
+func GenerateBackupCodes(ctx context.Context) (codes []string, hashes []string, err error) {
 	codes = make([]string, backupCount)
 	hashes = make([]string, backupCount)
 	alphabetLen := big.NewInt(int64(len(backupAlphabet)))
@@ -169,7 +171,7 @@ func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 			sb.WriteByte(backupAlphabet[idx.Int64()])
 		}
 		codes[i] = sb.String()
-		if hashes[i], err = backuphash.NewV2(codes[i]); err != nil {
+		if hashes[i], err = backuphash.NewV2(ctx, codes[i]); err != nil {
 			return nil, nil, fmt.Errorf("hash backup code: %w", err)
 		}
 	}
@@ -179,8 +181,9 @@ func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 
 // VerifyBackupCode checks a code against stored hashes using timing-safe comparison.
 // Returns the index of the matched code, whether it matched, and a storage error.
-// The caller marks a match used through its conditional database update.
-func VerifyBackupCode(code string, hashes []string, used []bool) (index int, matched bool, err error) {
+// The caller marks a match used through its conditional database update. A v2
+// derivation that gets no slot returns backuphash.ErrBusy and spends nothing.
+func VerifyBackupCode(ctx context.Context, code string, hashes []string, used []bool) (index int, matched bool, err error) {
 	type parsedHash struct{ salt, digest []byte }
 	parsed := make([]parsedHash, len(hashes))
 	for i, stored := range hashes {
@@ -206,7 +209,9 @@ func VerifyBackupCode(code string, hashes []string, used []bool) (index int, mat
 		stored := parsed[i]
 		candidate := codeHash[:]
 		if stored.salt != nil {
-			candidate = backuphash.DeriveV2(normalized, stored.salt)
+			if candidate, err = backuphash.DeriveV2(ctx, normalized, stored.salt); err != nil {
+				return -1, false, err
+			}
 		}
 		if subtle.ConstantTimeCompare(candidate, stored.digest) == 1 {
 			return i, true, nil

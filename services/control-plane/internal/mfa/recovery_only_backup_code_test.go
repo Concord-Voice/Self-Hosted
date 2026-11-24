@@ -1,6 +1,7 @@
 package mfa
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ import (
 // never on the restricted list. Found as C50 of the MFA factor picker design
 // ([internal]specs/2026-09-26-mfa-factor-picker-design.md, PR #3540).
 func TestVerifyRefusesTOTPFamilyCodesWhenTOTPIsRecoveryOnly(t *testing.T) {
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	used := "{" + strings.TrimSuffix(strings.Repeat("f,", len(hashes)), ",") + "}"
 
@@ -84,7 +85,7 @@ func TestVerifyRefusesTOTPFamilyCodesWhenTOTPIsRecoveryOnly(t *testing.T) {
 // A refused restricted code is a failed attempt like any wrong code: it counts
 // toward the lockout, so restricted backup codes cannot be tried without limit.
 func TestVerifyRestrictedBackupCodesArmTheLockout(t *testing.T) {
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	f := newVerifyFixture(t)
 	f.state.recoveryOnly = "{totp}"

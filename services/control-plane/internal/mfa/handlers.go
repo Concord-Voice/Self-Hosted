@@ -464,7 +464,7 @@ func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID,
 		return false, fmt.Errorf("read backup codes: %w", err)
 	}
 
-	idx, matched, err := VerifyBackupCode(code, hashes, used)
+	idx, matched, err := VerifyBackupCode(ctx, code, hashes, used)
 	if err != nil {
 		return false, fmt.Errorf("verify stored backup code: %w", err)
 	}
@@ -1258,10 +1258,10 @@ func (h *Handler) TOTPVerifySetup(c *gin.Context) {
 	}
 
 	// Code valid — generate backup codes
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(ctx)
 	if err != nil {
 		h.log.Error(errMsgFailedBackupCodes, "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBackupCodes})
+		writeBackupHashFailure(c, err, errMsgFailedBackupCodes)
 		return
 	}
 
@@ -1635,10 +1635,10 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 	}
 
 	// Generate new backup codes
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(ctx)
 	if err != nil {
 		h.log.Error(errMsgFailedBackupCodes, "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBackupCodes})
+		writeBackupHashFailure(c, err, errMsgFailedBackupCodes)
 		return
 	}
 
@@ -2325,7 +2325,19 @@ func (h *Handler) challengeRefused(ctx context.Context, c *gin.Context, claims *
 func (h *Handler) verifyDependencyFailed(c *gin.Context, userID string, err error) {
 	h.log.Error("MFA verification could not reach a dependency", "user_id", userID, "error", err)
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventDependency, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonDependencyUnavailable, RouteTemplate: securityevent.RouteAuthMFAVerify})
-	c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationUnavailable})
+	writeBackupHashFailure(c, err, errMsgMFAVerificationUnavailable)
+}
+
+// writeBackupHashFailure answers a failure that may come from backup-code
+// hashing. A saturated hasher (backuphash.ErrBusy) is a 503 the client can
+// retry; anything else is a 500. Both carry the same body.
+func writeBackupHashFailure(c *gin.Context, err error, body string) {
+	if errors.Is(err, backuphash.ErrBusy) {
+		c.Header("Retry-After", "1")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": body})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": body})
 }
 
 // completeVerifiedChallenge records only the outcome of a completed challenge
