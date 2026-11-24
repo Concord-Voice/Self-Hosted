@@ -1100,6 +1100,45 @@ func (h *Handler) locateMediaForDeletion(c *gin.Context, tx *sql.Tx, fileID, use
 	return conversationID, true
 }
 
+type mediaDeletionTarget struct {
+	storageKey     string
+	storageBackend *string
+}
+
+func (h *Handler) loadAuthorizedMediaDeletion(c *gin.Context, tx *sql.Tx, fileID, userID string, expectedConversationID sql.NullString) (mediaDeletionTarget, bool) {
+	var target mediaDeletionTarget
+	var channelID, conversationID sql.NullString
+	err := tx.QueryRowContext(c.Request.Context(), `SELECT storage_key, storage_backend, channel_id, conversation_id FROM media_files WHERE id = $1 AND uploader_id = $2 AND media_tier = 2 AND deleted_at IS NULL FOR UPDATE`, fileID, userID).Scan(&target.storageKey, &target.storageBackend, &channelID, &conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		return mediaDeletionTarget{}, false
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch file for deletion", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+		return mediaDeletionTarget{}, false
+	}
+	if conversationID != expectedConversationID {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		return mediaDeletionTarget{}, false
+	}
+	if channelID.Valid == conversationID.Valid {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
+		return mediaDeletionTarget{}, false
+	}
+	err = lockMediaMembership(c.Request.Context(), tx, channelID, conversationID, userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
+		return mediaDeletionTarget{}, false
+	}
+	if err != nil {
+		h.log.Error("Failed to lock media membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
+		return mediaDeletionTarget{}, false
+	}
+	return target, true
+}
+
 // DeleteMedia soft-deletes a media file and removes it from object storage.
 // DELETE /api/v1/media/:file_id
 // Only the uploader can delete their own Tier 2 (attachment) files while they
@@ -1151,43 +1190,15 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	// The backend rides along on the row we are already reading (ADR-0038 /
 	// #2759 unit B2) — deleting from the wrong bucket would SUCCEED and erase
 	// nothing. NULLable permanently: NULL is the legacy backend.
-	var storageKey string
-	var storageBackend *string
-	var channelID, conversationID sql.NullString
-	query := `SELECT storage_key, storage_backend, channel_id, conversation_id FROM media_files WHERE id = $1 AND uploader_id = $2 AND media_tier = 2 AND deleted_at IS NULL FOR UPDATE`
-	err = tx.QueryRowContext(c.Request.Context(), query, fileID, userID).Scan(&storageKey, &storageBackend, &channelID, &conversationID)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
-		return
-	} else if err != nil {
-		h.log.Error("Failed to fetch file for deletion", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
-		return
-	}
-	if conversationID != expectedConversationID {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
-		return
-	}
-	if channelID.Valid == conversationID.Valid {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
-		return
-	}
-
-	err = lockMediaMembership(c.Request.Context(), tx, channelID, conversationID, userID)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to lock media membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
+	target, ok := h.loadAuthorizedMediaDeletion(c, tx, fileID, userID, expectedConversationID)
+	if !ok {
 		return
 	}
 
 	// Resolve BEFORE the soft-delete and 503 if the row's backend is unknown:
 	// nothing is recorded, so the client retries against a state that never
 	// claimed the file was gone. Identical body to the unconfigured-store 503.
-	store, ok := h.requireObjectStoreForRow(c, storageBackend)
+	store, ok := h.requireObjectStoreForRow(c, target.storageBackend)
 	if !ok {
 		return
 	}
@@ -1218,9 +1229,9 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	// argument holds ONLY for tier 2: the sweep is bounded to media_tier = 2,
 	// which is why media.CleanupObject (tier 1, no retry behind it) refuses
 	// instead of warning.
-	if err := store.DeleteObject(c.Request.Context(), storageKey); err != nil {
+	if err := store.DeleteObject(c.Request.Context(), target.storageKey); err != nil {
 		h.log.Warn("Failed to delete object from storage (orphaned, left for the straggler sweep)",
-			"error", err, "key", storageKey, "storage_backend", describeBackend(storageBackend))
+			"error", err, "key", target.storageKey, "storage_backend", describeBackend(target.storageBackend))
 	}
 
 	h.log.Info("Media file deleted", "file_id", fileID, "user_id", userID)
