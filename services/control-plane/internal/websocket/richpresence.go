@@ -19,6 +19,7 @@ var (
 	ErrRichPresenceDeliveryPlan = errors.New("invalid rich-presence delivery plan")
 	// ErrRichPresenceDeliveryMarshal identifies frame construction failures.
 	ErrRichPresenceDeliveryMarshal = errors.New("rich-presence delivery marshal failed")
+	errRichPresenceDeliveryQueue   = errors.New("invalid rich-presence delivery queue state")
 )
 
 type richPresenceFrameMarshaler func(
@@ -28,6 +29,16 @@ type richPresenceFrameMarshaler func(
 	json.RawMessage,
 	int64,
 ) ([]byte, error)
+
+type richPresenceDeliveryKey struct {
+	senderID uuid.UUID
+	category presence.Category
+}
+
+type richPresenceDeliveryTransition struct {
+	key     richPresenceDeliveryKey
+	present bool
+}
 
 // DeliverRichPresence synchronously enqueues an authorized Rich Presence
 // delta to every connected device, clearing revoked viewers before updates.
@@ -73,28 +84,181 @@ func (h *Hub) DeliverRichPresence(ctx context.Context, plan presence.DeliveryPla
 		if err := h.disconnectLegacyRichPresenceClients(ctx, plan.ClearRecipients); err != nil {
 			return err
 		}
-		if err := h.deliverPrivacyCriticalToUsersWhere(
+		if err := h.deliverRichPresenceToUsers(
 			ctx,
 			plan.ClearRecipients,
 			clearData,
 			disconnected,
-			activityRichPresenceClient,
+			richPresenceDeliveryTransition{
+				key: richPresenceDeliveryKey{senderID: plan.SenderID, category: plan.Category},
+			},
 		); err != nil {
 			return err
 		}
 	}
 	if len(updateData) > 0 {
-		if err := h.deliverPrivacyCriticalToUsersWhere(
+		if err := h.deliverRichPresenceToUsers(
 			ctx,
 			plan.UpdateRecipients,
 			updateData,
 			disconnected,
-			activityRichPresenceClient,
+			richPresenceDeliveryTransition{
+				key:     richPresenceDeliveryKey{senderID: plan.SenderID, category: plan.Category},
+				present: true,
+			},
 		); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (h *Hub) deliverRichPresenceToUsers(
+	ctx context.Context,
+	recipients map[uuid.UUID]bool,
+	data []byte,
+	disconnected map[*Client]bool,
+	transition richPresenceDeliveryTransition,
+) error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for userID, included := range recipients {
+		if !included {
+			continue
+		}
+		for clientID := range h.userClients[userID] {
+			client, connected := h.clients[clientID]
+			if !connected || disconnected[client] || !activityRichPresenceClient(client) {
+				continue
+			}
+			wasDisconnected, err := h.deliverRichPresenceToClient(ctx, client, data, transition)
+			if err != nil {
+				return err
+			}
+			if wasDisconnected {
+				disconnected[client] = true
+			}
+		}
+	}
+	return nil
+}
+
+func (h *Hub) deliverRichPresenceToClient(
+	ctx context.Context,
+	client *Client,
+	data []byte,
+	transition richPresenceDeliveryTransition,
+) (bool, error) {
+	if h.customTextDeliveryBeforeEnqueue != nil {
+		h.customTextDeliveryBeforeEnqueue()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	outcome, delivered := client.enqueueRichPresence(data, transition)
+	switch outcome {
+	case bootstrapBufferEnqueued:
+		return false, nil
+	case bootstrapBufferOverflow:
+		if err := h.disconnectPrivacyCriticalClient(client); err != nil {
+			return false, err
+		}
+		return true, nil
+	case bootstrapBufferCanceled:
+		return true, nil
+	case bootstrapBufferInactive:
+		if delivered {
+			return false, nil
+		}
+		if err := h.disconnectPrivacyCriticalClient(client); err != nil {
+			return false, err
+		}
+		return true, nil
+	default:
+		return false, errRichPresenceDeliveryQueue
+	}
+}
+
+func (c *Client) enqueueRichPresence(
+	data []byte,
+	transition richPresenceDeliveryTransition,
+) (bootstrapBufferOutcome, bool) {
+	if c.securityTerminal.Load() {
+		return bootstrapBufferCanceled, false
+	}
+	c.bootstrapMu.Lock()
+	if c.bootstrapActive || c.bootstrapCanceled {
+		outcome := c.appendBootstrapRichPresenceLocked(data, transition)
+		c.bootstrapMu.Unlock()
+		return outcome, outcome == bootstrapBufferEnqueued
+	}
+	c.bootstrapMu.Unlock()
+
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	c.bootstrapMu.Lock()
+	if c.bootstrapActive || c.bootstrapCanceled {
+		outcome := c.appendBootstrapRichPresenceLocked(data, transition)
+		c.bootstrapMu.Unlock()
+		return outcome, outcome == bootstrapBufferEnqueued
+	}
+	c.bootstrapMu.Unlock()
+	if c.securityTerminal.Load() || c.sendClosed || c.Send == nil {
+		return bootstrapBufferInactive, false
+	}
+	select {
+	case c.Send <- data:
+		c.applyRichPresenceTransitionLocked(transition)
+		return bootstrapBufferInactive, true
+	default:
+		return bootstrapBufferInactive, false
+	}
+}
+
+func (c *Client) appendBootstrapRichPresenceLocked(
+	data []byte,
+	transition richPresenceDeliveryTransition,
+) bootstrapBufferOutcome {
+	if c.bootstrapCanceled {
+		return bootstrapBufferCanceled
+	}
+	if c.bootstrapFailed || len(c.bootstrapReplay)+len(c.bootstrapLive) >= clientBootstrapBufferedFrameLimit {
+		c.bootstrapFailed = true
+		return bootstrapBufferOverflow
+	}
+	c.bootstrapLive = append(c.bootstrapLive, append([]byte(nil), data...))
+	c.bootstrapRichPresenceLive = append(c.bootstrapRichPresenceLive, transition)
+	return bootstrapBufferEnqueued
+}
+
+func (c *Client) applyRichPresenceTransitionLocked(transition richPresenceDeliveryTransition) {
+	if transition.present {
+		if c.richPresenceDelivered == nil {
+			c.richPresenceDelivered = make(map[richPresenceDeliveryKey]struct{})
+		}
+		c.richPresenceDelivered[transition.key] = struct{}{}
+		return
+	}
+	delete(c.richPresenceDelivered, transition.key)
+}
+
+func (c *Client) setRichPresenceSnapshot(activity map[richPresenceDeliveryKey]struct{}) {
+	c.bootstrapMu.Lock()
+	defer c.bootstrapMu.Unlock()
+	c.bootstrapRichPresenceSnapshot = activity
+	c.bootstrapRichPresenceSnapshotSet = true
+}
+
+// applyBootstrapRichPresenceLocked publishes the snapshot baseline followed by
+// every activity delta queued behind it. The caller holds sendMu and
+// bootstrapMu, matching the frame order completeClientBootstrap just enqueued.
+func (c *Client) applyBootstrapRichPresenceLocked() {
+	if c.bootstrapRichPresenceSnapshotSet {
+		c.richPresenceDelivered = c.bootstrapRichPresenceSnapshot
+	}
+	for _, transition := range c.bootstrapRichPresenceLive {
+		c.applyRichPresenceTransitionLocked(transition)
+	}
 }
 
 // Legacy clients can hold activity from bootstrap, but cannot consume its live
