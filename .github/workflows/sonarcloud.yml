@@ -183,6 +183,10 @@ jobs:
             exit 1
           fi
 
+      - name: Export CI Pip pins for Sonar SCA
+        if: ${{ inputs.reusable-analysis }}
+        run: python3 scripts/sonar/ci-pip-sbom.py
+
       - name: Mark protected analysis start
         id: analysis-start
         if: ${{ !inputs.reusable-analysis }}

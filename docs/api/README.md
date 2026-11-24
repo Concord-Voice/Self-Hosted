@@ -50,12 +50,19 @@ Selected-session revocation uses the selected SID's server-owned family. Revoke
 all-other preserves the entire validated current family; delayed delivery uses
 the captured frontier and cannot revoke a later fresh login. Family identity is
 resolved from signed SID membership, not a new client/JWT family claim. Terminal
-state denies new productive authority. Before revoke-one, revoke-all, logout,
-recovery reset or account erasure responds, the server synchronously fences and
-closes the control WebSockets of every family that commit made terminal; other
-families stay connected. That close is bounded, and a failure never turns the
-committed revocation into an error: the durable owner retries it. Native media
-closes through the same durable exact delivery, so success does not promise
+state denies new productive authority. Before revoke-one or revoke-all reports
+success, the handling process synchronously fences and closes its control
+WebSockets for the revoked families; other families stay connected. If that
+bounded fence cannot be confirmed after commit, these endpoints return 503 and
+report that revocation already occurred; a still-pending durable owner can retry
+disconnection. If a commit outcome is unknown, the endpoints return 503 and
+conservatively close the captured local target sockets even if the transaction
+ultimately rolled back; that transaction did not revoke the sessions in that
+case. Logout, recovery reset and account erasure attempt the same close but
+retain their existing best-effort response behavior. Fences
+are process-local and do not guarantee closure on another control-plane process
+during an overlap; see the [overlap analysis](../superpowers/specs/2026-11-14-253-control-plane-overlap-analysis.md).
+Native media closes through durable exact delivery, so success does not promise
 instantaneous media packet cessation. Suspected refresh-token theft disconnects
 every socket of the user immediately, even while its revocation is deferred. Redis-dependent auth fences still apply and may
 return 503 before the handler during an outage; #2271's separate budget and

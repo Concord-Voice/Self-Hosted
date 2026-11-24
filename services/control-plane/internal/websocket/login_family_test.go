@@ -140,6 +140,73 @@ func TestLoginFamilyPostRunAdmissionRejectsFamilyTerminatedWhilePending(t *testi
 	}
 }
 
+func TestLoginFamilyPostRegistrationRecheckWaitsForUserMutation(t *testing.T) {
+	r := loginFamilyRig(t)
+	tx, err := r.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	var locked uuid.UUID
+	require.NoError(t, tx.QueryRow(`SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE`, r.user).Scan(&locked))
+	var blockerPID int
+	require.NoError(t, tx.QueryRow(`SELECT pg_backend_pid()`).Scan(&blockerPID))
+	t.Cleanup(func() { _ = tx.Rollback() })
+	client := &Client{
+		UserID:         r.user,
+		FamilyID:       r.family,
+		SessionID:      r.sid.String(),
+		TokenExpiresAt: r.expiry,
+	}
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { done <- r.h.recheckClientFamily(ctx, client) }()
+
+	var pollErr error
+	require.Eventually(t, func() bool {
+		var blocked bool
+		pollErr = r.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+ WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))`, blockerPID).Scan(&blocked)
+		return pollErr == nil && blocked
+	}, 5*time.Second, 20*time.Millisecond, "post-registration recheck must wait on the active user mutation")
+	require.NoError(t, pollErr)
+	require.NoError(t, tx.Rollback())
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(8 * time.Second):
+		t.Fatal("post-registration recheck did not resume after rollback")
+	}
+}
+
+func TestLoginFamilyPostRegistrationRecheckRejectsInvalidClientBinding(t *testing.T) {
+	r := loginFamilyRig(t)
+	client := &Client{
+		UserID:         r.user,
+		FamilyID:       r.family,
+		SessionID:      r.sid.String(),
+		TokenExpiresAt: r.expiry,
+	}
+
+	invalidSession := &Client{
+		UserID:         client.UserID,
+		FamilyID:       client.FamilyID,
+		SessionID:      "not-a-session-id",
+		TokenExpiresAt: client.TokenExpiresAt,
+	}
+	require.Error(t, r.h.recheckClientFamily(context.Background(), invalidSession))
+
+	mismatchedFamily := &Client{
+		UserID:         client.UserID,
+		FamilyID:       uuid.New(),
+		SessionID:      client.SessionID,
+		TokenExpiresAt: client.TokenExpiresAt,
+	}
+	require.Error(t, r.h.recheckClientFamily(context.Background(), mismatchedFamily))
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Error(t, r.h.recheckClientFamily(canceled, client))
+}
+
 type familyRenewalAuthority struct {
 	verified     accessTokenAuth
 	calls        atomic.Int32

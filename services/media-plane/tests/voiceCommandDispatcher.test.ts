@@ -159,7 +159,7 @@ function fixture() {
       },
     ],
   ]);
-  const io = { to: vi.fn(() => ({ emit: roomEmit })), sockets: { sockets } };
+  const io = { to: vi.fn(() => ({ emit: roomEmit })), sockets: { sockets, adapter: { rooms: new Map() } } };
   const legacy = vi.fn(async (_data: Record<string, unknown>) => undefined);
   const ensureAuthority = vi.fn();
   const dispatcher = new VoiceCommandDispatcher({
@@ -903,6 +903,7 @@ describe('durable dispatcher with actual RoomManager admission state', () => {
             },
           ],
         ]),
+        adapter: { rooms: new Map() },
       },
     };
     const dispatcher = new VoiceCommandDispatcher({

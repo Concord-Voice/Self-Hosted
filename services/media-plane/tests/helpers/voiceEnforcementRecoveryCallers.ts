@@ -104,7 +104,7 @@ export async function createRecoveryCallerFixture(externalNats?: NatsService) {
     VoiceEnforcementExpiryFence, EnforcementAvailability, VoiceCommandDispatcher,
     voiceEnforcementLease: lease, voiceAuthConnections: owners,
     voiceEnforcementNodeBootId: boot, roomManager, natsService,
-    io: { sockets: { sockets } }, snapshotVoiceEnforcementSessions: () => [],
+    io: { sockets: { sockets, adapter: { rooms: new Map() } } }, snapshotVoiceEnforcementSessions: () => [],
     voiceEnforcementReleaseQueue: { holdAll: () => {} },
     mediasoupService: { isReady: () => true }, shuttingDown: false,
     securityEvents: { emit: () => {} }, logger: { error: () => {} },
