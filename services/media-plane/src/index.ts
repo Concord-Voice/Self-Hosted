@@ -46,6 +46,8 @@ import {
   resolveParticipantIdentity,
 } from './middleware/auth.js';
 import type { AuthenticatedSocketData } from './middleware/auth.js';
+import { commitChannelAdmission, commitDMAdmission } from './lib/roomAdmissionCommit.js';
+import { parseConsumeRequest } from './lib/wireBounds.js';
 import { NatsService } from './lib/nats.js';
 import { EnforcementAvailability } from './lib/enforcementAvailability.js';
 import { VoiceCommandDispatcher } from './lib/voiceCommandDispatcher.js';
@@ -69,7 +71,7 @@ import {
   renewVoiceEnforcementSession,
   pollVoiceEnforcementHealth,
 } from './lib/voiceEnforcementSession.js';
-import { readVoiceAuthResponse, VoiceAuthConnections } from './lib/voiceAuthConnection.js';
+import { IDLE_SWEEP_INTERVAL_MS, readVoiceAuthResponse, VoiceAuthConnections } from './lib/voiceAuthConnection.js';
 import { newRequestContext, signHttpRequest, verifyHttpResponse } from './lib/voiceAuthProtocol.js';
 import type { VoiceEnforcementSession } from './lib/voiceEnforcementSession.js';
 import { voiceEnforcementNodeBootId } from './lib/voiceEnforcementIdentity.js';
@@ -395,97 +397,6 @@ function getExpectedKeyframeRequestError(error: unknown): string | undefined {
   }
 
   return expectedKeyframeRequestErrors.has(error.message) ? error.message : undefined;
-}
-
-type RoomJoinValue = {
-  authorizedCallId: string | undefined;
-  identity: ReturnType<typeof resolveParticipantIdentity>;
-  promotion: ChannelParticipantPromotion | DMParticipantPromotion | undefined;
-  result: JoinRoomResult;
-};
-
-function rollbackSocketMembership(
-  socket: Socket,
-  data: AuthenticatedSocketData,
-  roomId: string
-): void {
-  data.roomId = undefined;
-  try {
-    socket.leave(roomId);
-  } catch (leaveError) {
-    logger.error('Failed to roll back Socket.IO room membership', {
-      error: leaveError,
-      roomId,
-      userId: data.userId,
-    });
-  }
-}
-
-function commitChannelAdmission(
-  roomManager: RoomManager,
-  socket: Socket,
-  data: AuthenticatedSocketData,
-  roomId: string,
-  value: RoomJoinValue,
-  commitSocketMembership: () => void
-): RoomJoinValue {
-  if (!value.promotion) {
-    throw new Error('Room admission is missing its A2 promotion state');
-  }
-  if (!('permissions' in value.promotion)) {
-    throw new Error('Channel admission is missing its A2 promotion state');
-  }
-  try {
-    const displacedSocketId = roomManager.getParticipant(roomId, data.userId)?.socketId;
-    value.result = roomManager.promoteChannelParticipant(
-      roomId,
-      data.userId,
-      socket.id,
-      value.promotion,
-      commitSocketMembership
-    );
-    if (displacedSocketId && displacedSocketId !== socket.id) {
-      socket.nsp.sockets.get(displacedSocketId)?.disconnect(true);
-    }
-  } catch (error) {
-    // A custom/failed adapter must not strand Socket.IO membership or socket.data
-    // when its synchronous join boundary throws.
-    rollbackSocketMembership(socket, data, roomId);
-    throw error;
-  }
-  return value;
-}
-
-function commitDMAdmission(
-  roomManager: RoomManager,
-  socket: Socket,
-  data: AuthenticatedSocketData,
-  roomId: string,
-  value: RoomJoinValue,
-  commitSocketMembership: () => void
-): RoomJoinValue {
-  if (!value.promotion) {
-    throw new Error('Room admission is missing its A2 promotion state');
-  }
-  if (!value.authorizedCallId || !('callId' in value.promotion)) {
-    throw new Error('DM admission is missing its A2 promotion state');
-  }
-  try {
-    value.result = roomManager.promoteDMParticipant(
-      roomId,
-      data.userId,
-      socket.id,
-      value.authorizedCallId,
-      value.promotion,
-      commitSocketMembership
-    );
-  } catch (error) {
-    // A custom/failed adapter must not strand Socket.IO membership or socket.data
-    // when its synchronous join boundary throws.
-    rollbackSocketMembership(socket, data, roomId);
-    throw error;
-  }
-  return value;
 }
 
 async function rollbackRegisteredRoomJoin({
@@ -1659,6 +1570,10 @@ async function main() {
     // The fence keeps ownership; avoid adding one reaction per tick while hung.
     if (!voiceEnforcementExpiryFence.pending()) enforceLeaseObserved();
   }, 1_000);
+  // VULN-146: release voice identities of sockets idle outside an attached room.
+  const voiceAuthIdleInterval = setInterval(() => {
+    voiceAuthConnections.terminateIdle();
+  }, IDLE_SWEEP_INTERVAL_MS);
 
   natsService.subscribeRequest(
     'voice.admission.activate',
@@ -1768,7 +1683,6 @@ async function main() {
     logger.info('Client connected', {
       socketId: socket.id,
       userId: data.userId,
-      username: data.username,
     });
 
     // ── join-room ────────────────────────────────────────────────────
@@ -1962,7 +1876,11 @@ async function main() {
     );
 
     // ── consume ──────────────────────────────────────────────────────
-    withRateLimit(socket, 'consume', async ({ producerId, transportId }, callback) => {
+    withRateLimit(socket, 'consume', async (payload: unknown, callback) => {
+      // Refuse a malformed payload before any log line can carry it.
+      const request = parseConsumeRequest(payload);
+      if (!request) return callback({ error: 'invalid_payload' });
+      const { producerId, transportId } = request;
       try {
         const roomId = data.roomId;
         if (!roomId) {
@@ -2626,6 +2544,9 @@ async function main() {
       const shutdownRecovery = voiceEnforcementHealth.fenceRecoveryAndJoin();
       const shutdownLegacySessions = snapshotVoiceEnforcementSessions(io.sockets.sockets.values(), voiceAuthConnections);
       voiceEnforcementReleaseQueue.enqueueAll(shutdownLegacySessions);
+      // Before the drain: terminateAll() clears `draining` when it settles, and a live
+      // sweep would then start new terminal work during the rest of shutdown.
+      clearInterval(voiceAuthIdleInterval);
       shutdownTerminalWork = voiceAuthConnections.terminateAll();
       enforcementAvailability.stop();
       stopObservingRequiredSubscriptions();

@@ -1,14 +1,14 @@
 /**
  * Codec-neutral media mini-header plus AV1's per-OBU IV builder.
  *
- * Layout (cleartext, unauthenticated — same trust posture as the v3 trailer;
- * used ONLY for key selection + IV, spec §5.2):
+ * Layout (cleartext for key selection; authenticated in v6 frame AAD):
  *   offset size field        notes
  *     0     2   magic        0xDE 0xAD — leads, cheap reject before any crypto
  *     2    12   IV           fresh 96-bit CSPRNG value
  *    14     2   keyId        BE — ratchet keyId within (sender, keyVersion)
  *    16     4   keyVersion   BE — channel CSK version → getChannelKeyByVersion
- *    20     2   reserved     zero — reserved for future flags (spec §5.2 OQ-4)
+ *    20     1   version      6
+ *    21     1   scheme       codec-specific v6 scheme byte
  *                            → total 22 bytes
  *
  * No explicit length field: the ciphertext length is derived by the receiver as
@@ -20,16 +20,18 @@ const MAGIC_0 = 0xde;
 const MAGIC_1 = 0xad;
 
 export const MEDIA_FRAME_MINI_HEADER_SIZE = 22;
-/** AV1 v4 compatibility alias; the wire layout remains byte-identical in v5. */
+export const MEDIA_FRAME_VERSION = 6;
+/** AV1 caller alias for the same fixed-size mini-header. */
 export const OBU_MINI_HEADER_SIZE = MEDIA_FRAME_MINI_HEADER_SIZE;
 
 export interface MediaFrameMiniHeader {
   iv: Uint8Array; // 12 bytes
   keyId: number; // 0..65535
   keyVersion: number; // 0..2^32-1
+  scheme: number;
 }
 
-/** AV1 v4 compatibility alias. */
+/** AV1 caller alias. */
 export type ObuMiniHeader = MediaFrameMiniHeader;
 
 /**
@@ -52,12 +54,12 @@ export function encodeMediaFrameMiniHeader(h: MediaFrameMiniHeader): Uint8Array 
   const view = new DataView(out.buffer);
   view.setUint16(14, h.keyId & 0xffff, false); // [14..16) keyId BE
   view.setUint32(16, h.keyVersion >>> 0, false); // [16..20) keyVersion BE
-  // bytes [20..22) reserved (zero) — keeps the header a fixed 22 and leaves room
-  // for a future version/flags pair without a wire break (spec §5.2 OQ-4).
+  out[20] = MEDIA_FRAME_VERSION;
+  out[21] = h.scheme;
   return out;
 }
 
-/** AV1 v4 compatibility alias. */
+/** AV1 caller alias. */
 export const encodeObuMiniHeader = encodeMediaFrameMiniHeader;
 
 /**
@@ -68,12 +70,13 @@ export const encodeObuMiniHeader = encodeMediaFrameMiniHeader;
 export function decodeMediaFrameMiniHeader(buf: Uint8Array): MediaFrameMiniHeader | null {
   if (buf.length < MEDIA_FRAME_MINI_HEADER_SIZE) return null;
   if (buf[0] !== MAGIC_0 || buf[1] !== MAGIC_1) return null;
+  if (buf[20] !== MEDIA_FRAME_VERSION) return null;
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const iv = buf.slice(2, 14);
   const keyId = view.getUint16(14, false);
   const keyVersion = view.getUint32(16, false);
-  return { iv, keyId, keyVersion };
+  return { iv, keyId, keyVersion, scheme: buf[21] };
 }
 
-/** AV1 v4 compatibility alias. */
+/** AV1 caller alias. */
 export const decodeObuMiniHeader = decodeMediaFrameMiniHeader;
