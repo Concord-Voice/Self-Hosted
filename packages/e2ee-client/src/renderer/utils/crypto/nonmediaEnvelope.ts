@@ -1,4 +1,5 @@
 import { encodeNonmediaContext, type NonmediaContext } from './nonmediaContext';
+import { decryptNonmediaAesGcm } from './crypto';
 
 // Stored format is chosen by trusted provenance at a future call site. This
 // dormant reader deliberately has no legacy trial-decryption path.
@@ -58,16 +59,7 @@ export async function openNonmediaTextEnvelope<F extends NonmediaTextFormat>(
   )
     throw new Error(INVALID_ENVELOPE);
   try {
-    const plaintext = await crypto.subtle.decrypt(
-      {
-        name: 'AES-GCM',
-        iv: new Uint8Array(payload.slice(0, 12)),
-        additionalData: new Uint8Array(aad),
-        tagLength: 128,
-      },
-      key,
-      new Uint8Array(payload.slice(12))
-    );
+    const plaintext = await decryptNonmediaAesGcm(key, payload, aad);
     return new Uint8Array(plaintext);
   } catch {
     throw new Error('Invalid non-media ciphertext');
