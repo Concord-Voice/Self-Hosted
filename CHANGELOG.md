@@ -30,15 +30,22 @@ belongs in it, and write it if the section has none. Do not edit the
 
 ## [Prerelease]
 
+New backup codes are stored as salted Argon2id hashes, and existing
+backup-code hashes move to an explicit versioned format.
+
+### Security
+
+- **MFA:** New backup codes are stored as salted Argon2id hashes, one random salt per code, so a database read no longer yields unsalted SHA-256 digests of them. Migration 000202 marks each existing hash with an explicit `v1$` prefix. Upgrade only from a release that already reads the versioned formats, or stop every older control-plane process before migrating. Rolling the schema back refuses once any new code has been generated.
+- **MFA:** `POST /mfa/email-sms/setup` and `PUT /mfa/recovery-only` accept only their known methods, at most two and four entries, and refuse a longer list or another method with 400 before the step-up check. A repeated method is sent, coded and stored once.
+
 ## [0.4.0] - 2026-11-23
 
 WebSocket event budgets are ready for self-hosted operators and stay off
 until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
 Android. SSO account linking now requires current account policy and MFA,
-SSO initiation is bound to the Desktop flow that started it, new backup codes
-are stored as salted Argon2id hashes, and existing backup-code hashes move to
-an explicit versioned format.
+SSO initiation is bound to the Desktop flow that started it, and backup-code
+readers accept the versioned formats needed for a later storage migration.
 The media plane now admits encrypted media format v6 alongside earlier room versions, while keeping each active call on one version.
 
 **99 Total Changes** | 29 Added | 9 Changed | 1 Deprecated | 2 Removed | 16 Fixed | 42 Security
@@ -141,8 +148,6 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 - **Sessions:** Concurrent revocation requests can use only one free session revocation per rolling 24-hour window ([#306](https://github.com/Concord-Voice/Self-Hosted/pull/306)).
 - **Servers:** MFA policy-change notifications now reach only the server owner and Administrators who can read the setting; ordinary members no longer see when it changes ([#304](https://github.com/Concord-Voice/Self-Hosted/pull/304)).
 - **Recovery:** Starting account recovery returns before account lookup and email delivery. Authentication and ownership-transfer logs no longer include email addresses, SMTP error text, or device identifiers ([#307](https://github.com/Concord-Voice/Self-Hosted/pull/307)).
-- **MFA:** New backup codes are stored as salted Argon2id hashes, one random salt per code, so a database read no longer yields unsalted SHA-256 digests of them. Migration 000202 marks each existing hash with an explicit `v1$` prefix. Upgrade only from a release that already reads the versioned formats, or stop every older control-plane process before migrating. Rolling the schema back refuses once any new code has been generated.
-- **MFA:** `POST /mfa/email-sms/setup` and `PUT /mfa/recovery-only` accept only their known methods, at most two and four entries, and refuse a longer list or another method with 400 before the step-up check. A repeated method is sent, coded and stored once.
 - **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
 - **Voice:** Frames Picture-in-Picture can now receive every active microphone and camera while participant consumer limits still block clone-everything egress exhaustion ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
