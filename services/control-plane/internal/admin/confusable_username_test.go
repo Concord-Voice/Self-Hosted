@@ -123,17 +123,23 @@ func TestCreatePending_RefusesConfusableOfExisting(t *testing.T) {
 
 	for i, p := range confusablePairs {
 		sfx := fmt.Sprintf("-cf%d-%d", time.Now().UnixNano(), i)
-		existing, fresh := p[0]+sfx, p[1]+sfx
-		t.Run(existing+"/"+fresh, func(t *testing.T) {
-			legacyAdminNamed(t, db, existing)
-			created, err := repo.CreatePending(t.Context(), fresh, "unused-hash")
-			if err == nil {
-				registerAdminCleanup(t, db, created.ID)
-			}
-			require.ErrorIs(t, err, admin.ErrConfusableUsername)
-			assert.ErrorIs(t, repo.CheckUsernameAvailable(t.Context(), fresh), admin.ErrConfusableUsername)
-			assertNoAdmin(t, db, fresh)
-		})
+		requireConfusableRefused(t, db, repo, p[0]+sfx, p[1]+sfx)
+	}
+
+	// The suffix above puts a trailing separator inside the stored name, so
+	// "dave." tests the collapse of a separator run, not the trim at the end.
+	// Here the separator is the stored legacy name's true last character
+	// (the prefix goes first), or its true first one. A new name cannot hold
+	// an edge separator, so the separator is only ever on the legacy side.
+	for i, p := range [][2]string{
+		{"dave.", "dave"}, {"erin-", "erin"}, {"carol ", "carol"}, {"gina_", "gina"}, {"ivan\u2212", "ivan"},
+	} {
+		pfx := fmt.Sprintf("cf%d-%d-", time.Now().UnixNano(), i)
+		requireConfusableRefused(t, db, repo, pfx+p[0], pfx+p[1])
+	}
+	for i, p := range [][2]string{{"-judy", "judy"}, {".kurt", "kurt"}, {" liam", "liam"}} {
+		sfx := fmt.Sprintf("-cf%d-%d", time.Now().UnixNano(), i)
+		requireConfusableRefused(t, db, repo, p[0]+sfx, p[1]+sfx)
 	}
 
 	sfx := fmt.Sprintf("-cf%d", time.Now().UnixNano())
@@ -141,6 +147,24 @@ func TestCreatePending_RefusesConfusableOfExisting(t *testing.T) {
 	_, err := repo.CreatePending(t.Context(), "bob"+sfx, "unused-hash")
 	require.ErrorIs(t, err, admin.ErrDuplicateUsername, "an exact match is still a duplicate")
 	pendingAdminNamed(t, db, "rob"+sfx)
+}
+
+// requireConfusableRefused inserts existing as a legacy admin and requires
+// that fresh, which reads like it, is refused by CreatePending and
+// CheckUsernameAvailable and not created.
+func requireConfusableRefused(t *testing.T, db *sql.DB, repo *admin.AdminRepo, existing, fresh string) {
+	t.Helper()
+	t.Run(existing+"/"+fresh, func(t *testing.T) {
+		require.NoError(t, admin.ValidateAdminUsername(fresh), "the new name itself is valid")
+		legacyAdminNamed(t, db, existing)
+		created, err := repo.CreatePending(t.Context(), fresh, "unused-hash")
+		if err == nil {
+			registerAdminCleanup(t, db, created.ID)
+		}
+		require.ErrorIs(t, err, admin.ErrConfusableUsername)
+		assert.ErrorIs(t, repo.CheckUsernameAvailable(t.Context(), fresh), admin.ErrConfusableUsername)
+		assertNoAdmin(t, db, fresh)
+	})
 }
 
 // Two creations of lookalike names cannot both pass the check: the second
