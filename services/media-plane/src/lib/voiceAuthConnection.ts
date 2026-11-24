@@ -40,6 +40,9 @@ interface ConnectionState {
   registration?: Promise<void>;
   rooms: Map<string, RoomState>;
   terminal?: Completion;
+  // Injected-clock time since which the connection has had no attached, non-terminal
+  // room; undefined while it has one. Read only by the idle sweep and reserveRoom().
+  idleSince?: number;
 }
 interface RoomState {
   connection: ConnectionState;
@@ -56,11 +59,22 @@ interface LegacyRoomState {
   terminal: Completion;
   started: boolean;
 }
-const CAPACITY = 1000;
-// Connection identities one account may hold, so a few accounts cannot fill CAPACITY
-// with idle sockets. Twice the control plane's 8-per-user WebSocket admission, so
-// reconnect overlap fits. ponytail: fixed cap; make it configurable if real multi-device use nears it.
-const PER_USER_CONNECTIONS = 16;
+export const CAPACITY = 1000;
+// Connection identities one account may hold on this node, counted until the signed
+// release lands. One live socket plus three reconnects whose releases are still in flight.
+export const PER_USER_CONNECTIONS = 4;
+// Slots above the general pool (CAPACITY - NEW_USER_RESERVE) that only a user holding
+// no identity may take, with that user's first room. No separate counter: eligibility is
+// derived from `retained` and `userConnections`, which only the signed release decrements.
+export const NEW_USER_RESERVE = 200;
+const GENERAL_POOL = CAPACITY - NEW_USER_RESERVE;
+// A connection outside an attached room for this long is released (VULN-146).
+export const IDLE_RELEASE_MS = 30_000;
+// Extra time an unattached room in flight may hold an idle connection. The join fence
+// awaits without a timeout, so without this bound a held join would pin the identity.
+export const IDLE_JOIN_GRACE_MS = 30_000;
+// Cadence of the index.ts sweep: a socket that never joins goes within 30 to 35 s.
+export const IDLE_SWEEP_INTERVAL_MS = 5_000;
 // Three signed-release timeouts: an ordinary leave finishes well inside this.
 const TERMINATION_STALL_MS = 15_000;
 const bytes = (value: unknown): Uint8Array => Buffer.from(JSON.stringify(value), 'utf8');
@@ -199,6 +213,8 @@ export class VoiceAuthConnections {
     if (this.retained >= CAPACITY) throw new Error('Voice identity capacity exhausted');
     const held = this.userConnections.get(input.userId) ?? 0;
     if (held >= PER_USER_CONNECTIONS) throw new Error('Voice identity capacity exhausted for user');
+    // A terminal identity awaiting release still counts, so a reconnect is not "new".
+    if (this.retained >= GENERAL_POOL && held !== 0) throw new Error('Voice identity capacity exhausted');
     if (!Number.isSafeInteger(input.tokenExpiresAt) || input.tokenExpiresAt <= this.now())
       throw new Error('Expired voice connection');
     const target: Target = {
@@ -215,7 +231,7 @@ export class VoiceAuthConnections {
       relayHeaders: input.relayHeaders ?? (() => ({})),
       tokenDigest: digest(input.token), bodyDigest: digest(body),
       tokenExpiresAt: input.tokenExpiresAt, disconnect: input.disconnect,
-      state: 'provisional', rooms: new Map(),
+      state: 'provisional', rooms: new Map(), idleSince: this.now(),
     };
     this.retained++;
     this.userConnections.set(input.userId, held + 1);
@@ -287,6 +303,11 @@ export class VoiceAuthConnections {
     this.assertProductive(handle);
     const state = this.owned(handle);
     if (this.retained >= CAPACITY) throw new Error('Voice identity capacity exhausted');
+    if (this.overdue(state)) throw new Error('Voice connection idle');
+    // The reserve covers only a user's first room on its only connection.
+    if (this.retained >= GENERAL_POOL &&
+        (this.userConnections.get(state.userId) !== 1 || state.rooms.size !== 0))
+      throw new Error('Voice identity capacity exhausted');
     if (this.rooms.has(session.sessionGeneration) || this.legacyRooms.has(session.sessionGeneration) ||
         session.userId !== state.userId || session.socketId !== state.target.socketId ||
         session.nodeBootId !== state.target.nodeBootId || session.credentialEpoch !== state.target.credentialEpoch ||
@@ -352,6 +373,8 @@ export class VoiceAuthConnections {
     await this.roomRequest(room, token, 'attach');
     this.assertRoomProductive(session.sessionGeneration);
     room.attached = true;
+    // Only a completed attach stops the clock; a failed join leaves it running.
+    room.connection.idleSince = undefined;
   }
 
   async renewRoom(handle: ConnectionHandle, session: VoiceEnforcementSession, token: string,
@@ -385,7 +408,14 @@ export class VoiceAuthConnections {
 
   releaseRoom(session: VoiceEnforcementSession): Promise<void> {
     const room = this.roomOwned(session);
-    room.terminal ??= completion();
+    if (!room.terminal) {
+      room.terminal = completion();
+      // The first release of the last attached, live room restarts the idle clock.
+      // A retry, or a room that never attached, leaves it alone.
+      const state = room.connection;
+      if (room.attached && ![...state.rooms.values()].some((other) => other.attached && !other.terminal))
+        state.idleSince = this.now();
+    }
     this.start(room.terminal, () => this.closeRoom(room));
     return room.terminal.promise;
   }
@@ -479,6 +509,31 @@ export class VoiceAuthConnections {
       if (state.terminal) this.start(state.terminal, () => this.closeConnection(state));
     }
     return Promise.resolve();
+  }
+
+  private overdue(state: ConnectionState): boolean {
+    return state.idleSince !== undefined && this.now() - state.idleSince >= IDLE_RELEASE_MS;
+  }
+
+  /**
+   * Idle release (VULN-146): terminate every live connection that has been outside an
+   * attached room for IDLE_RELEASE_MS once its rooms are all terminal, or for a further
+   * IDLE_JOIN_GRACE_MS whatever its unattached rooms are doing. Release still runs
+   * through terminate() and its signed release, so no counter moves here. Candidates
+   * are collected first: terminate() runs Socket.IO listeners synchronously, and they
+   * may re-enter the ledger. Inert while draining.
+   */
+  terminateIdle(): void {
+    if (this.draining) return;
+    const now = this.now();
+    const idle = [...this.connections.values()].filter((state) => {
+      if (state.terminal || state.idleSince === undefined ||
+          (state.state !== 'provisional' && state.state !== 'registered')) return false;
+      const age = now - state.idleSince;
+      return age >= IDLE_RELEASE_MS + IDLE_JOIN_GRACE_MS ||
+        (age >= IDLE_RELEASE_MS && [...state.rooms.values()].every((room) => !!room.terminal));
+    });
+    for (const state of idle) void this.terminate(state.handle);
   }
 
   terminateAll(): Promise<void> {

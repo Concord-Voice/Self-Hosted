@@ -1091,6 +1091,7 @@ func NewRouter(
 	authHandler.SetSecurityEvents(securityEvents)
 	authHandler.SetPresenceHistory(presenceHistoryService)
 	authHandler.SetEmailService(emailSvc)
+	authHandler.SetRecoveryLegacyCode(!cfg.RecoveryLegacyCodeDisabled)
 	authHandler.SetCredentialFence(credFence)
 	authHandler.SetKeyRevocationBroadcaster(websocket.KeyRevocationBroadcaster(hub))
 	authHandler.SetInitialDistributorChecker(rbacResolver.CanDistributeChannelKeyTx)
@@ -1450,6 +1451,7 @@ func NewRouter(
 		// Auth routes with rate limiting + IP-based auth failure ban check
 		authRoutes := v1.Group("/auth")
 		authRoutes.Use(middleware.AuthBanCheck(redis))
+		authRoutes.Use(middleware.LoginCSRF(cfg.AllowedOrigins))
 		{
 			// Register: 5 attempts per 15 minutes in production (prevent spam
 			// account creation). Relaxed under CONCORD_ENV=test so the Playwright
@@ -2763,10 +2765,6 @@ func NewRouter(
 					middleware.RateLimitChannelVoiceJoin(redis),
 					voiceEnforcementSessionHandler.RequireMediaCapability,
 					voiceHandler.AuthorizeJoin,
-				)
-				channelRoutes.POST("/:id/voice/authorize-action",
-					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
-					voiceHandler.AuthorizeVoiceAction,
 				)
 
 				// Rotate channel encryption key (admin/owner only)

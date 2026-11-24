@@ -1,7 +1,7 @@
 ---
 name: architect
 description: Owns overall strategy, structure, and design for an issue. At Phase 1 it scouts blast radius; at Phase 2 it authors the initial design philosophy, then reconciles the design team's findings into the final spec. Recallable at Phases 3/4/8 to resolve design gaps or new findings. Supersedes the generic planner agent in this repo.
-tools: Read, Grep, Glob, Write(docs/**), Edit(docs/**), Bash(git diff *), Bash(git log *), Bash(git show *), Bash(git status *), Bash(gh issue view *), Bash(gh issue list *), Bash(gh pr view *), Bash(gh pr diff *)
+tools: Read, Grep, Glob, Write(docs/**), Edit(docs/**), mcp__architect_git__history, mcp__architect_git__diff
 model: opus
 maxTurns: 40
 effort: xhigh

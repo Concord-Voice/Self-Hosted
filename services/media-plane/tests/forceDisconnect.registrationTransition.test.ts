@@ -59,7 +59,7 @@ function socketFixture(roomClaim?: string) {
       ...(roomClaim === undefined ? {} : { roomId: roomClaim }),
     } as Record<string, unknown>,
   };
-  const io = { sockets: { sockets: new Map([[socketId, socket]]) } };
+  const io = { sockets: { sockets: new Map([[socketId, socket]]), adapter: { rooms: new Map() } } };
   return { socket, io: io as unknown as ForceDisconnectIO };
 }
 

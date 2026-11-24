@@ -54,7 +54,7 @@ func TestDeleteTemporaryGrantWithCapture_DoesNotFencePreparation(t *testing.T) {
 
 	go func() {
 		_, _, _, err := manager.deleteTemporaryGrantWithCapture(
-			context.Background(), uuid.NewString(), uuid.NewString(), uuid.NewString(), temporaryGrantAuthorization{},
+			context.Background(), uuid.NewString(), uuid.NewString(), uuid.NewString(), allowAllTemporaryGrantAuthorityForTest(),
 		)
 		result <- err
 	}()
