@@ -1084,6 +1084,22 @@ func (h *Handler) lockMediaDeletionUploader(c *gin.Context, tx *sql.Tx, userID s
 	return true
 }
 
+func (h *Handler) locateMediaForDeletion(c *gin.Context, tx *sql.Tx, fileID, userID string) (sql.NullString, bool) {
+	var conversationID sql.NullString
+	err := tx.QueryRowContext(c.Request.Context(), `SELECT conversation_id FROM media_files
+		WHERE id = $1 AND uploader_id = $2 AND media_tier = 2 AND deleted_at IS NULL`, fileID, userID).Scan(&conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		return sql.NullString{}, false
+	}
+	if err != nil {
+		h.log.Error("Failed to locate file for deletion", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+		return sql.NullString{}, false
+	}
+	return conversationID, true
+}
+
 // DeleteMedia soft-deletes a media file and removes it from object storage.
 // DELETE /api/v1/media/:file_id
 // Only the uploader can delete their own Tier 2 (attachment) files while they
@@ -1116,16 +1132,8 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	}
 	// DM retirement locks the conversation before cascading to participants and
 	// media. Read its ID without taking the media row lock, then share that order.
-	var expectedConversationID sql.NullString
-	err = tx.QueryRowContext(c.Request.Context(), `SELECT conversation_id FROM media_files
-		WHERE id = $1 AND uploader_id = $2 AND media_tier = 2 AND deleted_at IS NULL`, fileID, userID).Scan(&expectedConversationID)
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to locate file for deletion", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+	expectedConversationID, ok := h.locateMediaForDeletion(c, tx, fileID, userID)
+	if !ok {
 		return
 	}
 	err = lockMediaConversation(c.Request.Context(), tx, expectedConversationID)
