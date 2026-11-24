@@ -218,6 +218,9 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 	if *username == "" {
 		return errors.New("--username is required")
 	}
+	if err := ValidateAdminUsername(*username); err != nil {
+		return fmt.Errorf("%w: it must be printable characters only, with no leading or trailing space", err)
+	}
 
 	password, err := readPassword(deps.stdin, deps.stdout, *passwordStdin)
 	if err != nil {

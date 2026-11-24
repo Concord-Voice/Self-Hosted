@@ -852,6 +852,10 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username is required"})
 		return
 	}
+	if ValidateAdminUsername(req.Username) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid username"})
+		return
+	}
 	if err := auth.ValidatePasswordStrength(req.Password); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "password too weak"})
 		return
@@ -875,11 +879,17 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	// and a retry with a fresh step-up can create the same username.
 	acting := actingAdminID
 	var created AdminUser
+	// The success row names the created admin by id, which the sign-in notice
+	// counts by: the actor is sanitized on write, so it need not equal the
+	// stored username.
 	err = h.audit.WriteWith(ctx, AuditEvent{
 		AdminID: &acting, Actor: req.Username, EventType: EventAdminCreated, Result: AuditSuccess,
-	}, func(tx *sql.Tx) error {
+	}, func(tx *sql.Tx, ev *AuditEvent) error {
 		var cerr error
 		created, cerr = h.repo.CreatePendingTx(ctx, tx, req.Username, hash)
+		if cerr == nil {
+			ev.Detail = map[string]any{detailCreatedAdminID: created.ID}
+		}
 		return cerr
 	})
 	switch {

@@ -89,20 +89,12 @@ var errAuditWrite = errors.New("admin audit write failed")
 
 // WriteWith runs before (when not nil) and then inserts ev in ONE transaction,
 // so the rows before writes and the audit row commit together or not at all.
-// An error from before is returned as is and writes no audit row; an error in
-// the audit step wraps errAuditWrite. before runs under the connecting role;
-// the audit INSERT then runs under the restricted role.
-func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sql.Tx) error) error {
-	var detailJSON []byte
-	if ev.Detail != nil {
-		b, err := json.Marshal(ev.Detail)
-		if err != nil {
-			a.emitAuditWriteFailure(ctx)
-			return fmt.Errorf("%w: marshal audit detail: %w", errAuditWrite, err)
-		}
-		detailJSON = b
-	}
-
+// before gets the event and may fill it in from what it wrote (CreateAdmin
+// records the created admin's id); the detail is encoded after before
+// returns. An error from before is returned as is and writes no audit row; an
+// error in the audit step wraps errAuditWrite. before runs under the
+// connecting role; the audit INSERT then runs under the restricted role.
+func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sql.Tx, *AuditEvent) error) error {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		a.emitAuditWriteFailure(ctx)
@@ -112,9 +104,19 @@ func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sq
 	defer func() { _ = tx.Rollback() }()
 
 	if before != nil {
-		if err := before(tx); err != nil {
+		if err := before(tx, &ev); err != nil {
 			return err
 		}
+	}
+
+	var detailJSON []byte
+	if ev.Detail != nil {
+		b, err := json.Marshal(ev.Detail)
+		if err != nil {
+			a.emitAuditWriteFailure(ctx)
+			return fmt.Errorf("%w: marshal audit detail: %w", errAuditWrite, err)
+		}
+		detailJSON = b
 	}
 
 	// Adopt the restricted role for the rest of this transaction. SET ROLE
@@ -187,6 +189,15 @@ func (a *AuditLog) emitAuditWriteFailure(ctx context.Context) {
 // cap as "N or more".
 const MaxAdminsAddedNotice = 100
 
+// detailCreatedAdminID is the detail key of an admin_created success row that
+// holds the created admin's id. The id stays in admin_audit_log: no export or
+// security event carries the detail.
+const detailCreatedAdminID = "created_admin_id"
+
+// canonicalUUIDPattern matches the lowercase hyphenated id CreateAdmin writes.
+// Any other value is treated as no id.
+const canonicalUUIDPattern = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+
 // AdminsAddedSinceLastSignIn counts the console-created admins (admin_created
 // successes, by any admin) recorded since this admin's previous successful
 // sign-in that still exist, capped at MaxAdminsAddedNotice. It is 0 on a
@@ -195,12 +206,18 @@ const MaxAdminsAddedNotice = 100
 // A success row does not prove an admin was added: when the enrollment-token
 // mint fails, CreateAdmin removes the pending admin but its committed success
 // row stays (the log is append-only), and a retry writes another success row
-// for the same username. So the count joins each success row to admin_users
-// and counts distinct usernames: a removed admin is not counted, a retried
-// one is counted once, and an admin whose removal failed
-// (token_mint_failed_row_kept) is counted because it still exists. The audit
-// row names the created admin only by username (actor), not by id, so the
-// match is by username; an admin removed later by any path is also left out.
+// for the same username. So the count matches each success row to admin_users
+// by the created admin's id (detail.created_admin_id, written in the same
+// transaction as the admin) and counts distinct admins: a removed admin is not
+// counted, a retried one is counted once, and an admin whose removal failed
+// (token_mint_failed_row_kept) is counted because it still exists. An admin
+// removed later by any path is also left out. The match is never by username:
+// the actor is sanitized on write, so a username holding control characters
+// would not match its own row.
+//
+// A row with no well-formed id (written before the id was recorded, or
+// malformed) cannot be matched, so each such row counts as one: it can only
+// over-count, never hide an admin.
 //
 // The window opens ten seconds before the previous sign-in's row, so a
 // creation that committed while that sign-in was being recorded is counted
@@ -208,20 +225,26 @@ const MaxAdminsAddedNotice = 100
 // lost login_success row widens the window, which also only over-reports.
 func (a *AuditLog) AdminsAddedSinceLastSignIn(ctx context.Context, adminID string) (int, error) {
 	const q = `
-		SELECT LEAST(COUNT(DISTINCT u.id), $4)::int
-		FROM admin_audit_log l
-		JOIN admin_users u ON u.username = l.actor
-		WHERE l.event_type = $2 AND l.result = $5
-		  AND l.ts > (
-		    SELECT ts FROM admin_audit_log
-		    WHERE admin_id = $1 AND event_type = $3 AND result = $5
-		    ORDER BY ts DESC
-		    LIMIT 1
-		  ) - interval '10 seconds'
+		WITH created AS (
+		  SELECT CASE WHEN l.detail->>'created_admin_id' ~ $6
+		              THEN (l.detail->>'created_admin_id')::uuid END AS id
+		  FROM admin_audit_log l
+		  WHERE l.event_type = $2 AND l.result = $5
+		    AND l.ts > (
+		      SELECT ts FROM admin_audit_log
+		      WHERE admin_id = $1 AND event_type = $3 AND result = $5
+		      ORDER BY ts DESC
+		      LIMIT 1
+		    ) - interval '10 seconds'
+		)
+		SELECT LEAST(
+		  (SELECT COUNT(DISTINCT u.id) FROM created c JOIN admin_users u ON u.id = c.id)
+		  + (SELECT COUNT(*) FROM created WHERE id IS NULL),
+		  $4)::int
 	`
 	var n int
 	if err := a.db.QueryRowContext(ctx, q,
-		adminID, EventAdminCreated, EventLoginSuccess, MaxAdminsAddedNotice, AuditSuccess,
+		adminID, EventAdminCreated, EventLoginSuccess, MaxAdminsAddedNotice, AuditSuccess, canonicalUUIDPattern,
 	).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count admins added since sign-in: %w", err)
 	}

@@ -28,17 +28,27 @@ func insertAuditRow(t *testing.T, db *sql.DB, adminID *string, actor, event, res
 // insertAuditRowDetail is insertAuditRow with a detail reason ("" for none).
 func insertAuditRowDetail(t *testing.T, db *sql.DB, adminID *string, actor, event, result, offset, reason string) {
 	t.Helper()
-	var detail any
+	var detail map[string]any
 	if reason != "" {
-		b, err := json.Marshal(map[string]string{"reason": reason})
+		detail = map[string]any{"reason": reason}
+	}
+	insertAuditRowJSON(t, db, adminID, actor, event, result, offset, detail)
+}
+
+// insertAuditRowJSON is insertAuditRow with any detail object (nil for none).
+func insertAuditRowJSON(t *testing.T, db *sql.DB, adminID *string, actor, event, result, offset string, detail map[string]any) {
+	t.Helper()
+	var raw any
+	if detail != nil {
+		b, err := json.Marshal(detail)
 		require.NoError(t, err)
-		detail = b
+		raw = b
 	}
 	var id int64
 	require.NoError(t, db.QueryRow(
 		`INSERT INTO admin_audit_log (ts, admin_id, actor, event_type, result, detail)
 		 VALUES (now() + $1::interval, $2, $3, $4, $5, $6) RETURNING id`,
-		offset, adminID, actor, event, result, detail,
+		offset, adminID, actor, event, result, raw,
 	).Scan(&id))
 	t.Cleanup(func() {
 		_, err := db.Exec(`DELETE FROM admin_audit_log WHERE id = $1`, id)
@@ -46,13 +56,26 @@ func insertAuditRowDetail(t *testing.T, db *sql.DB, adminID *string, actor, even
 	})
 }
 
+// createdRow writes an admin_created success row as CreateAdmin now does: it
+// carries the created admin's id in detail.created_admin_id.
+func createdRow(t *testing.T, db *sql.DB, actingID, createdID, username, offset string) {
+	t.Helper()
+	insertAuditRowJSON(t, db, &actingID, username, admin.EventAdminCreated, admin.AuditSuccess, offset,
+		map[string]any{"created_admin_id": createdID})
+}
+
+// goneAdminID is a well-formed id that names no admin: the admin a mint
+// failure removed.
+const goneAdminID = "00000000-0000-4000-8000-000000000394"
+
 // pendingAdminNamed creates a pending admin row with this username, as
-// CreateAdmin does, and removes it when the test ends.
-func pendingAdminNamed(t *testing.T, db *sql.DB, username string) {
+// CreateAdmin does, removes it when the test ends, and returns its id.
+func pendingAdminNamed(t *testing.T, db *sql.DB, username string) string {
 	t.Helper()
 	created, err := admin.NewAdminRepo(db).CreatePending(t.Context(), username, "unused-hash")
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, created.ID)
+	return created.ID
 }
 
 // existingAdmin creates a pending admin with a unique username and returns it.
@@ -112,17 +135,17 @@ func TestAdminsAddedSinceLastSignIn_IsCapped(t *testing.T) {
 }
 
 // mintFailureRows writes the rows CreateAdmin leaves when the enrollment-token
-// mint fails: the committed admin_created success, then the failure that
-// records why the creation did not complete.
-func mintFailureRows(t *testing.T, db *sql.DB, actingID, username, offset, reason string) {
+// mint fails: the committed admin_created success naming the created admin's
+// id, then the failure that records why the creation did not complete.
+func mintFailureRows(t *testing.T, db *sql.DB, actingID, createdID, username, offset, reason string) {
 	t.Helper()
-	insertAuditRow(t, db, &actingID, username, admin.EventAdminCreated, admin.AuditSuccess, offset)
+	createdRow(t, db, actingID, createdID, username, offset)
 	insertAuditRowDetail(t, db, &actingID, username, admin.EventAdminCreated, admin.AuditFailure, offset+" 1 second", reason)
 }
 
 // A mint failure removes the pending admin, so its committed success row is
 // not counted, and the successful retry of the same username is one admin,
-// not two. The previous count reported 2 here.
+// not two.
 func TestAdminsAddedSinceLastSignIn_MintFailureThenRetry_CountsOnce(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
@@ -133,18 +156,16 @@ func TestAdminsAddedSinceLastSignIn_MintFailureThenRetry_CountsOnce(t *testing.T
 	actingID, _, _ := enrolledAdmin(t, db, rdb)
 	insertAuditRow(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "5 hours")
 	username := uniqueAdminUsername("notice-retry")
-	mintFailureRows(t, db, actingID, username, "5 hours 1 minute", "token_mint_failed")
+	mintFailureRows(t, db, actingID, goneAdminID, username, "5 hours 1 minute", "token_mint_failed")
 	// The retry commits the same username again, and this time the row stays.
-	pendingAdminNamed(t, db, username)
-	insertAuditRow(t, db, &actingID, username, admin.EventAdminCreated, admin.AuditSuccess, "5 hours 2 minutes")
+	createdRow(t, db, actingID, pendingAdminNamed(t, db, username), username, "5 hours 2 minutes")
 
 	n, err := admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 }
 
-// A mint failure with no retry leaves no admin, so nothing was added. The
-// previous count reported 1 here.
+// A mint failure with no retry leaves no admin, so nothing was added.
 func TestAdminsAddedSinceLastSignIn_MintFailureNoRetry_CountsNothing(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
@@ -154,7 +175,7 @@ func TestAdminsAddedSinceLastSignIn_MintFailureNoRetry_CountsNothing(t *testing.
 	viewerID, _, _ := enrolledAdmin(t, db, rdb)
 	actingID, _, _ := enrolledAdmin(t, db, rdb)
 	insertAuditRow(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "6 hours")
-	mintFailureRows(t, db, actingID, uniqueAdminUsername("notice-gone"), "6 hours 1 minute", "token_mint_failed")
+	mintFailureRows(t, db, actingID, goneAdminID, uniqueAdminUsername("notice-gone"), "6 hours 1 minute", "token_mint_failed")
 
 	n, err := admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
 	require.NoError(t, err)
@@ -172,11 +193,60 @@ func TestAdminsAddedSinceLastSignIn_MintFailureRowKept_CountsTheAdmin(t *testing
 	viewerID, _, _ := enrolledAdmin(t, db, rdb)
 	actingID, _, _ := enrolledAdmin(t, db, rdb)
 	insertAuditRow(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "7 hours")
-	mintFailureRows(t, db, actingID, existingAdmin(t, db, "notice-kept"), "7 hours 1 minute", "token_mint_failed_row_kept")
+	username := uniqueAdminUsername("notice-kept")
+	mintFailureRows(t, db, actingID, pendingAdminNamed(t, db, username), username, "7 hours 1 minute", "token_mint_failed_row_kept")
 
 	n, err := admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
+}
+
+// Two success rows naming the same created admin are one admin.
+func TestAdminsAddedSinceLastSignIn_SameCreatedAdminCountsOnce(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	viewerID, _, _ := enrolledAdmin(t, db, rdb)
+	actingID, _, _ := enrolledAdmin(t, db, rdb)
+	insertAuditRow(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "8 hours")
+	username := uniqueAdminUsername("notice-dup")
+	createdID := pendingAdminNamed(t, db, username)
+	createdRow(t, db, actingID, createdID, username, "8 hours 1 minute")
+	createdRow(t, db, actingID, createdID, username, "8 hours 2 minutes")
+
+	n, err := admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+}
+
+// A success row written before the created admin's id was recorded, or one
+// whose id is not a well-formed admin id, cannot be matched to an admin, so
+// each counts as one: an old or malformed row can over-count but never hide
+// an admin. Its actor (here a name that matches no admin) is not consulted.
+func TestAdminsAddedSinceLastSignIn_RowWithoutCreatedIDCountsOne(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	viewerID, _, _ := enrolledAdmin(t, db, rdb)
+	actingID, _, _ := enrolledAdmin(t, db, rdb)
+	insertAuditRow(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "9 hours")
+	insertAuditRow(t, db, &actingID, uniqueAdminUsername("notice-old"), admin.EventAdminCreated, admin.AuditSuccess, "9 hours 1 minute")
+
+	n, err := admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "a pre-change row without an id")
+
+	insertAuditRowJSON(t, db, &actingID, "", admin.EventAdminCreated, admin.AuditSuccess, "9 hours 2 minutes",
+		map[string]any{"created_admin_id": "not-an-id"})
+	insertAuditRowJSON(t, db, &actingID, "", admin.EventAdminCreated, admin.AuditSuccess, "9 hours 3 minutes",
+		map[string]any{"created_admin_id": 7})
+	n, err = admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, n, "malformed ids count one each")
 }
 
 func TestAdminsAddedSinceLastSignIn_DBErrorIsReturned(t *testing.T) {

@@ -44,6 +44,7 @@ func NewAdminRepo(db *sql.DB) *AdminRepo {
 }
 
 // CreatePending inserts a new admin in the pending_enrollment state. It returns
+// ErrInvalidUsername if ValidateAdminUsername refuses the username and
 // ErrDuplicateUsername if the username is already taken.
 func (r *AdminRepo) CreatePending(ctx context.Context, username, passwordHash string) (AdminUser, error) {
 	return createPending(ctx, r.db, username, passwordHash)
@@ -60,6 +61,9 @@ type rowQueryer interface {
 }
 
 func createPending(ctx context.Context, db rowQueryer, username, passwordHash string) (AdminUser, error) {
+	if err := ValidateAdminUsername(username); err != nil {
+		return AdminUser{}, err
+	}
 	const q = `
 		INSERT INTO admin_users (username, password_hash, status)
 		VALUES ($1, $2, $3)
