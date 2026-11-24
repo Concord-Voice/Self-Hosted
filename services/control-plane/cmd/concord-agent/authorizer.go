@@ -251,8 +251,10 @@ func revokeAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 			_, err = fmt.Fprintf(stderr, "Admin %s was already revoked; nothing more to revoke\n", *adminID)
 			return err
 		}
-		// A mistyped or never-imported admin must not be reported as revoked.
-		return fmt.Errorf("no active authorizer credentials for admin %s; nothing was revoked", *adminID)
+		// Never imported: the host holds no trust for this admin, so there is
+		// nothing to revoke and the caller must still be able to reset enrollment.
+		_, err = fmt.Fprintf(stderr, "Warning: admin %s has no Host Agent credentials; nothing to revoke\n", *adminID)
+		return err
 	}
 	_, err = fmt.Fprintf(stdout, "Revoked %d authorizer credentials for admin %s\n", removed, *adminID)
 	return err

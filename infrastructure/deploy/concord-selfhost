@@ -176,7 +176,7 @@ verb_admin() {
       echo 'concord-selfhost: Host Agent revocation failed or revoked nothing; enrollment unchanged' >&2
       return 1
     fi
-    echo "concord-selfhost: Host Agent trust revoked for admin ${admin_id}" >&2
+    echo "concord-selfhost: Host Agent revoke step finished for admin ${admin_id}" >&2
   fi
   if ! compose exec -T control-plane ./main admin reset-enrollment --username "$username"; then
     echo 'concord-selfhost: enrollment reset failed AFTER Host Agent trust was revoked; fix the cause and run the same command again' >&2
