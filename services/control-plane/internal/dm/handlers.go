@@ -258,17 +258,16 @@ type dmMessageResponse struct {
 	// nil on an ordinary message, so it genuinely is omitted.
 	ExpirationEventPayload json.RawMessage `json:"expiration_event_payload,omitempty"`
 	KeyVersion             int             `json:"key_version"`
-	// Passive S1 metadata. The handler never accepts or writes these fields.
-	E2EEFormat         *string                    `json:"e2ee_format,omitempty"`
-	RequestFingerprint []byte                     `json:"request_fingerprint,omitempty"`
-	EditedAt           *string                    `json:"edited_at,omitempty"`
-	ExpiresAt          *string                    `json:"expires_at"`
-	CreatedAt          string                     `json:"created_at"`
-	Username           string                     `json:"username"`
-	DisplayName        *string                    `json:"display_name,omitempty"`
-	AvatarURL          *string                    `json:"avatar_url,omitempty"`
-	Attachments        []models.AttachmentSummary `json:"attachments,omitempty"`
-	Reactions          []models.ReactionSummary   `json:"reactions,omitempty"`
+	// Passive S1 metadata. The handler never accepts or writes this field.
+	E2EEFormat  *string                    `json:"e2ee_format,omitempty"`
+	EditedAt    *string                    `json:"edited_at,omitempty"`
+	ExpiresAt   *string                    `json:"expires_at"`
+	CreatedAt   string                     `json:"created_at"`
+	Username    string                     `json:"username"`
+	DisplayName *string                    `json:"display_name,omitempty"`
+	AvatarURL   *string                    `json:"avatar_url,omitempty"`
+	Attachments []models.AttachmentSummary `json:"attachments,omitempty"`
+	Reactions   []models.ReactionSummary   `json:"reactions,omitempty"`
 }
 
 func (h *Handler) enrichDMReactions(messages []dmMessageResponse, userID string) {
@@ -2384,7 +2383,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		//nolint:gosec // G202: concatenated fragment is a compile-time constant; all values parameterized
 		// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query,concord-go-sql-sprintf
 		rows, err = h.db.Query(`
-			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, m.call_event_payload, m.expiration_event_payload, m.key_version, m.e2ee_format, m.request_fingerprint,
+			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, m.call_event_payload, m.expiration_event_payload, m.key_version, m.e2ee_format,
 			       m.edited_at, m.expires_at, m.created_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM dm_messages m
@@ -2401,7 +2400,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		//nolint:gosec // G202: concatenated fragment is a compile-time constant; all values parameterized
 		// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query,concord-go-sql-sprintf
 		rows, err = h.db.Query(`
-			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, m.call_event_payload, m.expiration_event_payload, m.key_version, m.e2ee_format, m.request_fingerprint,
+			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, m.call_event_payload, m.expiration_event_payload, m.key_version, m.e2ee_format,
 			       m.edited_at, m.expires_at, m.created_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM dm_messages m
@@ -2428,7 +2427,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		var callEventRaw []byte
 		var expirationEventRaw []byte
 		if err := rows.Scan(
-			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.Type, &callEventRaw, &expirationEventRaw, &m.KeyVersion, &m.E2EEFormat, &m.RequestFingerprint,
+			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.Type, &callEventRaw, &expirationEventRaw, &m.KeyVersion, &m.E2EEFormat,
 			&m.EditedAt, &m.ExpiresAt, &m.CreatedAt,
 			&m.Username, &m.DisplayName, &m.AvatarURL,
 		); err != nil {

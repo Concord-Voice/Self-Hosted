@@ -415,7 +415,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 // by hand.
 func (h *Handler) queryMessages(channelID, before string, since time.Time, limit int) ([]models.MessageWithUser, error) {
 	query := `
-		SELECT m.id, m.channel_id, m.user_id, m.content, m.key_version, m.e2ee_format, m.request_fingerprint,
+		SELECT m.id, m.channel_id, m.user_id, m.content, m.key_version, m.e2ee_format,
 		       m.embeds_suppressed, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_at, m.expires_at, m.created_at, m.updated_at,
 		       m.type, m.expiration_event_payload,
 		       u.username, u.display_name, u.avatar_url
@@ -467,7 +467,6 @@ func (h *Handler) queryMessages(channelID, before string, since time.Time, limit
 			&msg.Content,
 			&msg.KeyVersion,
 			&msg.E2EEFormat,
-			&msg.RequestFingerprint,
 			&msg.EmbedsSuppressed,
 			&msg.ReplyToID,
 			&msg.PinnedAt,
