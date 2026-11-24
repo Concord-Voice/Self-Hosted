@@ -132,7 +132,10 @@ canonicalize_path() {
     candidate=$raw_path
     if [[ "$candidate" != /* ]]; then
         # Only a relative path needs the session cwd; it must be an existing absolute directory.
-        [[ "$REL_BASE" = /* && -d "$REL_BASE" ]] || return 1
+        if [[ "$REL_BASE" != /* || ! -d "$REL_BASE" ]]; then
+            echo "BLOCKED: Session cwd '$REL_BASE' is not an existing absolute directory, so the relative path cannot be resolved." >&2
+            return 1
+        fi
         candidate="$REL_BASE/$candidate"
     fi
 

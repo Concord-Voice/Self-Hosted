@@ -213,7 +213,7 @@ Keep this commit free of fix code. It is the regression guard future contributor
 
 Maximum **5 hypothesis-test iterations**. Track the count explicitly.
 
-> This budget is *hypothesis iterations* and is distinct from the orchestrator's per-failure retry budget (`/dev-lifecycle` § No model gate: 2 local pre-commit remediation cycles per failure). They are different scopes; neither caps the other.
+> This budget is *hypothesis iterations* and is distinct from the orchestrator's per-failure retry budget (the pre-commit local remediation cycles per failure that `/dev-lifecycle` allows before it surfaces the failure). They are different scopes; neither caps the other.
 
 ### Who applies the fix
 
