@@ -556,7 +556,32 @@ describe('ADR-0051 shared byte vectors', () => {
         const d = JSON.parse(bytes.toString()) as unknown[];
         expect(d.length, v.name).toBe(8);
         expect([d[0], d[5], d[6], d[7]], v.name).toEqual(['split-auth-wrap-v1', 65536, 3, 4]);
-        expect(bytes.includes(utf8(get(v, 'probe_public_account_uuid'))), v.name).toBe(false);
+        const probeId = get(v, 'probe_public_account_uuid');
+        const probeBytes = Buffer.from(probeId.replace(/-/g, ''), 'hex');
+        expect(probeBytes.length, v.name).toBe(16);
+        const probeEncodings = [
+          utf8(probeId),
+          probeBytes,
+          utf8(probeBytes.toString('base64')),
+          utf8(probeBytes.toString('base64url')),
+        ];
+        const decodedBinaryFields = [d[2], d[4]].map((value) => {
+          expect(typeof value, v.name).toBe('string');
+          return unb64(value as string);
+        });
+        expect(
+          decodedBinaryFields.map((field) => field.length),
+          v.name
+        ).toEqual([32, 16]);
+        for (const field of [
+          bytes,
+          ...d.filter((value): value is string => typeof value === 'string').map(utf8),
+          ...decodedBinaryFields,
+        ]) {
+          for (const encoding of probeEncodings) {
+            expect(field.includes(encoding), v.name).toBe(false);
+          }
+        }
         uniform.push(out as Record<string, unknown>);
       }
     }
