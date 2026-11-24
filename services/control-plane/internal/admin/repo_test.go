@@ -446,3 +446,25 @@ func TestAdminRepo_DeleteUnenrolledPendingGuards(t *testing.T) {
 		assertKept(t, other)
 	})
 }
+
+// The repository insert applies the username rule itself, so a caller that
+// skips its own check (CreateAdmin and adminctl bootstrap both have one)
+// still cannot store a name the audit writer would rewrite.
+func TestAdminRepo_CreatePending_RejectsInvalidUsername(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	repo := admin.NewAdminRepo(db)
+
+	for _, username := range []string{uniqueAdminUsername("repo") + "\x01", "\x01\x02", uniqueAdminUsername("repo") + " "} {
+		cleanupAdminNamed(t, db, username)
+		_, err := repo.CreatePending(t.Context(), username, "hash")
+		require.ErrorIs(t, err, admin.ErrInvalidUsername, "%q", username)
+
+		tx, err := db.BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		_, err = repo.CreatePendingTx(t.Context(), tx, username, "hash")
+		require.ErrorIs(t, err, admin.ErrInvalidUsername, "%q", username)
+		require.NoError(t, tx.Rollback())
+		assertNoAdmin(t, db, username)
+	}
+}
