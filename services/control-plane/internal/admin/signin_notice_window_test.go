@@ -290,3 +290,38 @@ func TestRecordSignIn_UncountedFirstSignIn_CountsFromViewerCreation(t *testing.T
 	assert.Equal(t, 2, requireCounted(t, audit, viewerID),
 		"the admin added between the viewer's creation and the failed sign-in, and the one after it")
 }
+
+// A viewer with no creation row (one created before the rows carried the new
+// admin's id) has only their own first sign-in to start from. When that sign-in
+// recorded no count, the next window opens above it: an admin added before it
+// is not counted, and one added after it, by id or anonymously, is. With no
+// lower bound from the sign-in, the window held nothing.
+func TestRecordSignIn_UncountedFirstSignIn_NoCreationRow_CountsFromThatSignIn(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+	audit := admin.NewAuditLog(db)
+
+	actingID, _, _ := enrolledAdmin(t, db, rdb)
+	viewerID, _, _ := enrolledAdmin(t, db, rdb)
+	before := uniqueAdminUsername("pre-signin")
+	createdRow(t, db, actingID, pendingAdminNamed(t, db, before), before, "0 seconds")
+
+	// Another connection holds the notice lock past the 5 s lock timeout.
+	tx, err := db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.Exec(`SELECT pg_advisory_xact_lock($1)`, admin.SignInNoticeLockKeyForTest)
+	require.NoError(t, err)
+	first := recordSignIn(t.Context(), audit, viewerID, "uncounted-first-no-creation")
+	require.NoError(t, first.err, "the sign-in is still recorded")
+	require.False(t, first.read, "the count timed out on the lock")
+	require.NoError(t, tx.Rollback())
+
+	byID := uniqueAdminUsername("post-by-id")
+	createdRow(t, db, actingID, pendingAdminNamed(t, db, byID), byID, "0 seconds")
+	insertAuditRow(t, db, &actingID, existingAdmin(t, db, "post-anonymous"), admin.EventAdminCreated, admin.AuditSuccess, "0 seconds")
+	assert.Equal(t, 2, requireCounted(t, audit, viewerID),
+		"the admin added by id after the uncounted sign-in and the anonymous one, not the one before it")
+}
