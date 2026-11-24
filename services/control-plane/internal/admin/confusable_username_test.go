@@ -32,6 +32,22 @@ var confusablePairs = [][2]string{
 	{"first.last", "first_last"},
 	{"first_last", "first-last"},
 	{"first-last", "first.last"},
+	{"kim", "klm"},
+	// Non-ASCII legacy names: an accent, another script, an invisible
+	// character, a space and case.
+	{"Zoë", "zoe"},
+	{"José", "jose"},
+	{"\u0430lice", "alice"}, // Cyrillic a
+	{"bob\u200b", "bob"},    // zero-width space
+	{"Ops Team", "ops-team"},
+	{"carol ", "carol"},
+	// Separator runs and separators at either end.
+	{"dave.", "dave"},
+	{"erin-", "erin"},
+	{"_frank", "frank"},
+	{"gina..h", "gina.h"},
+	// The pair rules reach one skeleton from either side.
+	{"wvhank", "vwhank"},
 }
 
 func TestUsernameSkeleton_FoldsLookalikes(t *testing.T) {
