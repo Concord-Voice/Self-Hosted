@@ -40,7 +40,7 @@ SSO initiation is bound to the Desktop flow that started it, and backup-code
 readers accept the versioned formats needed for a later storage migration.
 The media plane now admits encrypted media format v6 alongside earlier room versions, while keeping each active call on one version.
 
-**96 Total Changes** | 29 Added | 6 Changed | 1 Deprecated | 1 Removed | 17 Fixed | 42 Security
+**96 Total Changes** | 29 Added | 6 Changed | 1 Deprecated | 2 Removed | 16 Fixed | 42 Security
 
 ### Added
 
@@ -74,6 +74,44 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 - **Self-hosting:** Each self-host release now carries a CycloneDX JSON SBOM, `concord-selfhost-v<version>.cdx.json`, as an attested release asset. It lists every npm package and Go module the bundle's lockfiles and `go.mod` files pin, dev dependencies included.
 - **Self-hosting:** Pushing a `v<VERSION>` tag now builds the self-host bundle (`concord-selfhost-<version>.tar.gz`, its manifest and `SHA256SUMS`) from the tagged tree in this repository and attests each file's build provenance. The release pipeline verifies the attestations and opens an unsigned draft. A release is not a supported install until it passes fresh-host acceptance.
 
+### Changed
+
+- **Operations:** `ATTESTATION_OIDC_SUBJECT_PREFIX` now defaults to `repo:Concord-Voice@264583090/Self-Hosted@1359565266:`, the immutable subject form this repository's GitHub OIDC tokens carry. Set it to bind attestation to a different repository. The self-hosted acceptance runner checks now admit this repository too.
+- **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.
+- **Self-hosted setup:** Fresh installs now write `WS_EVENT_BUDGET_ENABLED=false`, so budgets stay off until an operator sets `true`. The `concord-selfhost`, `concord-ctl.sh` and installer entrypoints, and the TLS helper's reader shell, start Bash in privileged mode, so shell functions and `BASH_ENV` from the calling environment cannot bypass their environment cleanup. Run the wrapper directly, not as `bash concord-selfhost`.
+- **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
+- **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
+- **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
+
+### Deprecated
+
+- **Recovery:** The 6-digit email recovery code is deprecated. It still works for clients that do not ask for a recovery key, and operators can turn it off with `RECOVERY_LEGACY_CODE=false` once every client accepts recovery keys ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
+
+### Removed
+
+- **Voice:** Removed the unused `POST /channels/{id}/voice/authorize-action` route. No client or service called it, and it now returns 404.
+
+- **Authentication:** Removed the compiled `authority-ceremony` binary that was committed with the tool's source. Build the tool from source; build outputs are now ignored.
+
+### Fixed
+
+- **Authentication:** Packaged Desktop clients can again sign in to an explicitly configured self-hosted server when Chromium marks the exact `app://concord` request as cross-site; other cross-site origins remain rejected.
+- **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
+- **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
+- **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
+- **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.
+- **Voice:** `concord-ctl.sh media-legacy-pause` and `media-legacy-resume` now work with managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`). The Redis credential controller used to refuse every read and write of the voice-join pause, so a pause could not be set, given a test user or lifted.
+- **Voice:** Voice room presence writes to Redis now time out like the other media-plane Redis calls, and clearing an empty room no longer removes a user who joined during the clear.
+- **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
+- **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
+- **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
+- **Operations:** Required PR builds now use the reviewed CI producer with exact-revision scanner checks, four control-plane test shards, and synthetic Compose build inputs.
+- **Operations:** The production-image build job now supplies synthetic WebSocket event-budget settings when it renders Compose, without changing deployment settings.
+- **Connections:** WebSocket input waiting on pacing or a full server queue now stops when its connection is canceled or the server shuts down.
+- **Operations:** Protected PR Semgrep, ESLint, and govulncheck scans now check out the exact merge revision selected by required CI; same-repository SARIF uploads use that revision even if GitHub regenerates another merge commit.
+- **Admin Console:** A database error while saving a new hardware key at enrollment now returns 500 and logs an error, not a 401 "authentication failed" with no error log. A key that is already registered is still refused with the 401 and an audit row.
+- **Admin Console:** A database error while looking up the admin on sign-in or on the enrollment page now returns 500 and logs an error. It used to return the 401 for an unknown user, which counted as a wrong password and wrote a failure audit row. Those two routes also refuse request bodies over 8 KiB.
+
 ### Security
 
 - **Recovery:** Email account recovery can now send a single-use recovery key that cannot be guessed, so wrong attempts by others can no longer block the account owner's email recovery. A client asks for one with `format: "token"` on `/auth/recovery/begin` and submits it as `token` on `/auth/recovery/verify-code`. Each account has one live recovery email at a time, valid until the resend wait ends (15 minutes for the first three emails in a day, then 60 minutes); a key request replaces a live 6-digit code ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
@@ -98,46 +136,6 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 - **Voice:** Frames Picture-in-Picture can now receive every active microphone and camera while participant consumer limits still block clone-everything egress exhaustion ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
 - **Voice:** Voice moderation now checks the moderator before it reveals anything about the target's voice state, and a refused caller gets the same answer whatever the target is doing. User-mute, user-deafen, disconnect and temporary-access revoke now honour channel denies of Mute Members, Deafen Members and Move Members, and a moderator can no longer act on someone in a channel the moderator cannot see. Moving a member now needs Move Members on both channels and the mover's own access to the destination, including Speak when the move gives temporary access, and every such move is audited. Server mute and server deafen stay server-wide. Several of these routes now answer 403 where they answered 400.
-
-### Changed
-
-- **Operations:** `ATTESTATION_OIDC_SUBJECT_PREFIX` now defaults to `repo:Concord-Voice@264583090/Self-Hosted@1359565266:`, the immutable subject form this repository's GitHub OIDC tokens carry. Set it to bind attestation to a different repository. The self-hosted acceptance runner checks now admit this repository too.
-- **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.
-- **Self-hosted setup:** Fresh installs now write `WS_EVENT_BUDGET_ENABLED=false`, so budgets stay off until an operator sets `true`. The `concord-selfhost`, `concord-ctl.sh` and installer entrypoints, and the TLS helper's reader shell, start Bash in privileged mode, so shell functions and `BASH_ENV` from the calling environment cannot bypass their environment cleanup. Run the wrapper directly, not as `bash concord-selfhost`.
-- **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
-- **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
-- **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
-
-### Deprecated
-
-- **Recovery:** The 6-digit email recovery code is deprecated. It still works for clients that do not ask for a recovery key, and operators can turn it off with `RECOVERY_LEGACY_CODE=false` once every client accepts recovery keys ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
-
-### Removed
-
-- **Voice:** Removed the unused `POST /channels/{id}/voice/authorize-action` route. No client or service called it, and it now returns 404.
-
-### Fixed
-
-- **Authentication:** Packaged Desktop clients can again sign in to an explicitly configured self-hosted server when Chromium marks the exact `app://concord` request as cross-site; other cross-site origins remain rejected.
-- **Authentication:** MFA backup-code claims now consume only the matched code, so concurrent sign-ins using different codes do not invalidate each other.
-- **Voice:** A Server Voice join delivered twice, for example to both control planes during a blue-green cutover, no longer disconnects the user who just joined. The participant row now records the admission and socket it consumed, so the second delivery is treated as a replay of the committed join even when the two control planes stamped it differently.
-- **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
-- **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.
-
-- **Authentication:** Removed the compiled `authority-ceremony` binary that was committed with the tool's source. Build the tool from source; build outputs are now ignored.
-- **Voice:** `concord-ctl.sh media-legacy-pause` and `media-legacy-resume` now work with managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`). The Redis credential controller used to refuse every read and write of the voice-join pause, so a pause could not be set, given a test user or lifted.
-- **Voice:** Voice room presence writes to Redis now time out like the other media-plane Redis calls, and clearing an empty room no longer removes a user who joined during the clear.
-- **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
-- **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
-- **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
-- **Operations:** Required PR builds now use the reviewed CI producer with exact-revision scanner checks, four control-plane test shards, and synthetic Compose build inputs.
-- **Operations:** The production-image build job now supplies synthetic WebSocket event-budget settings when it renders Compose, without changing deployment settings.
-- **Connections:** WebSocket input waiting on pacing or a full server queue now stops when its connection is canceled or the server shuts down.
-- **Operations:** Protected PR Semgrep, ESLint, and govulncheck scans now check out the exact merge revision selected by required CI; same-repository SARIF uploads use that revision even if GitHub regenerates another merge commit.
-- **Admin Console:** A database error while saving a new hardware key at enrollment now returns 500 and logs an error, not a 401 "authentication failed" with no error log. A key that is already registered is still refused with the 401 and an audit row.
-- **Admin Console:** A database error while looking up the admin on sign-in or on the enrollment page now returns 500 and logs an error. It used to return the 401 for an unknown user, which counted as a wrong password and wrote a failure audit row. Those two routes also refuse request bodies over 8 KiB.
-
-### Security
 
 - **Self-host:** Restore now rotates the JWT signing secret, revokes restored refresh tokens, and clears old opaque authorization state from Redis before startup, invalidating captured credentials that an older backup could otherwise revive ([#308](https://github.com/Concord-Voice/Self-Hosted/pull/308)).
 - **Privacy:** Invisible presence now stays indistinguishable from offline in server counts, member timestamps, and group-DM calls. Member `last_seen` is available only on your own row. Profile and transfer details reach only people allowed to see them, and blocking a stranger no longer notifies them.
