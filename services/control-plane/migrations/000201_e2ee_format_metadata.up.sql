@@ -15,7 +15,8 @@ ALTER TABLE media_files
 ALTER TABLE messages
     ADD CONSTRAINT messages_e2ee_format_check
         CHECK ((e2ee_format IS NULL AND request_fingerprint IS NULL)
-            OR (type = 'user'
+            OR (e2ee_format IS NOT NULL
+                AND type = 'user'
                 AND e2ee_format = 'message-v1'
                 AND request_fingerprint IS NOT NULL
                 AND octet_length(request_fingerprint) = 32)) NOT VALID;
@@ -25,7 +26,8 @@ ALTER TABLE dm_messages
         CHECK (
             (e2ee_format IS NULL AND request_fingerprint IS NULL)
             OR (
-                type = 'user'
+                e2ee_format IS NOT NULL
+                AND type = 'user'
                 AND e2ee_format = 'message-v1'
                 AND request_fingerprint IS NOT NULL
                 AND octet_length(request_fingerprint) = 32
@@ -35,7 +37,10 @@ ALTER TABLE dm_messages
 ALTER TABLE media_files
     ADD CONSTRAINT media_files_e2ee_format_check
         CHECK (e2ee_format IS NULL
-            OR (media_tier = 2 AND e2ee_format = 'attachment-v4')) NOT VALID;
+            OR (e2ee_format IS NOT NULL
+                AND media_tier IS NOT NULL
+                AND media_tier = 2
+                AND e2ee_format = 'attachment-v4')) NOT VALID;
 
 COMMENT ON COLUMN messages.e2ee_format IS
     'Stored E2EE envelope format; NULL preserves the legacy reader family.';
