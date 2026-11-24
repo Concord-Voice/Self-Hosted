@@ -139,13 +139,13 @@ func (b *reservationBackfill) run(ctx context.Context) error {
 	if updated != 1 {
 		return fmt.Errorf("message ID reservation rollout state changed unexpectedly")
 	}
-	if err := dropDeleteCapture(ctx, tx); err != nil {
-		return err
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit message ID reservation baseline: %w", err)
 	}
-	return nil
+	// The gate is durable once its verification and update commit. Trigger
+	// cleanup is retried separately: a short lock timeout must not roll this
+	// committed baseline back and force another full keyset scan.
+	return b.removeDeleteCapture(ctx, conn)
 }
 
 func (b *reservationBackfill) backfillComplete(ctx context.Context, q queryRower) (bool, error) {

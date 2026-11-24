@@ -1513,7 +1513,7 @@ func TestGetMessages_MessageFields(t *testing.T) {
 	assert.Equal(t, float64(2), msg["key_version"])
 	assert.Equal(t, "user", msg["type"])
 	assert.Equal(t, "message-v1", msg["e2ee_format"])
-	assert.Equal(t, base64.StdEncoding.EncodeToString(fingerprint), msg["request_fingerprint"])
+	assert.NotContains(t, msg, "request_fingerprint")
 	assert.NotEmpty(t, msg["created_at"])
 	assert.NotEmpty(t, msg["username"])
 }

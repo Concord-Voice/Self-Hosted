@@ -30,10 +30,16 @@ belongs in it, and write it if the section has none. Do not edit the
 
 ## [Prerelease]
 
+The server now returns stored E2EE format metadata for message and attachment reads as groundwork for a later client migration. Its internal create-request fingerprints stay out of history responses; no new writer or decrypt path is active.
+
+### Added
+
+- **Encryption:** Added passive stored-format metadata to channel and DM history responses and attachment reads. The reserved create-request fingerprint remains internal and is never returned in message history.
+
 ### Security
 
 - **Encryption:** Added a dormant canonical message-v1 create fingerprint codec and vectors. No message writer, replay classifier, or client behavior is enabled ([#404](https://github.com/Concord-Voice/Self-Hosted/pull/404)).
-- **Encryption:** Added a dormant, permanent global reservation namespace and verified online-baseline gate for future message-v1 identifiers. No message writer or client behavior is enabled.
+- **Encryption:** Added a dormant, permanent global reservation namespace and verified online-baseline gate for future message-v1 identifiers. No message writer or client behavior is enabled ([#403](https://github.com/Concord-Voice/Self-Hosted/pull/403)).
 
 ## [0.4.0] - 2026-11-23
 

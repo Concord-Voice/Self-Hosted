@@ -23750,14 +23750,6 @@ components:
           description: >-
             Stored E2EE envelope format. Null selects the legacy reader family.
             This passive metadata does not enable a writer.
-        request_fingerprint:
-          type: string
-          format: byte
-          nullable: true
-          description: >-
-            Base64-encoded SHA-256 create-request fingerprint for message-v1.
-            Present only with e2ee_format=message-v1; readers do not treat it as
-            authenticated message context.
         edited_at:
           type: string
           format: date-time
@@ -24358,14 +24350,6 @@ components:
           description: >-
             Stored E2EE envelope format. Null selects the legacy reader family.
             This passive metadata does not enable a writer.
-        request_fingerprint:
-          type: string
-          format: byte
-          nullable: true
-          description: >-
-            Base64-encoded SHA-256 create-request fingerprint for message-v1.
-            Present only with e2ee_format=message-v1; readers do not treat it as
-            authenticated message context.
         type:
           type: string
           description: >-
