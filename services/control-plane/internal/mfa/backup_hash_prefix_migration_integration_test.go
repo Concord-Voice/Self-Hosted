@@ -20,9 +20,9 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 )
 
 // The migration under test. Renumber here if it moves at merge time.
