@@ -565,9 +565,18 @@ describe('ADR-0051 shared byte vectors', () => {
           utf8(probeBytes.toString('base64')),
           utf8(probeBytes.toString('base64url')),
         ];
+        const decodedBinaryFields = [d[2], d[4]].map((value) => {
+          expect(typeof value, v.name).toBe('string');
+          return unb64(value as string);
+        });
+        expect(
+          decodedBinaryFields.map((field) => field.length),
+          v.name
+        ).toEqual([32, 16]);
         for (const field of [
           bytes,
           ...d.filter((value): value is string => typeof value === 'string').map(utf8),
+          ...decodedBinaryFields,
         ]) {
           for (const encoding of probeEncodings) {
             expect(field.includes(encoding), v.name).toBe(false);
