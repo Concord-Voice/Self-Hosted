@@ -25,6 +25,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
@@ -149,9 +150,7 @@ func ssoProofEnrollingHandler(t *testing.T, ts *testhelpers.TestServer, userID s
 	t.Helper()
 	h := users.NewHandler(ts.DB, logger.NewWithWriter(io.Discard), nil, krMFAHandler(t, ts.DB, ts.Redis), nil, testCredFence(t, ts.DB), nil)
 	h.SetPasswordVerifier(testhelpers.HashVerifier{DB: ts.DB})
-	shared := ts.Redis.Options()
-	rdb := redis.NewClient(&redis.Options{Addr: shared.Addr, Username: shared.Username, Password: shared.Password, DB: shared.DB})
-	t.Cleanup(func() { _ = rdb.Close() })
+	rdb := redistest.Client(t) // same per-process database as ts.Redis, with its own hook
 	rdb.AddHook(kpEnrollOnFenceHook{once: &sync.Once{}, enroll: func() {
 		_, err := ts.DB.Exec(`INSERT INTO user_mfa_webauthn (id, user_id, credential_id, credential_name, credential_type, public_key, sign_count, created_at)
 			VALUES (gen_random_uuid(), $1, $2, 'Key', 'hardware', '\x00', 0, NOW())`, userID, []byte("sso-cred-"+userID))
