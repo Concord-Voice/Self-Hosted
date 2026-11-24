@@ -80,3 +80,7 @@ func UseServerAgentForTest(h *Handler, sock string) {
 
 // ServerStepUpPrefix exposes the step-up handle key prefix for the ACL manifest test.
 const ServerStepUpPrefix = serverStepUpPrefix
+
+// AdminsAddedQueryForTest is the sign-in notice count query, so a test can
+// EXPLAIN exactly what production runs.
+const AdminsAddedQueryForTest = adminsAddedQuery

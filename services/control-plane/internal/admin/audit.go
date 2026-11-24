@@ -211,6 +211,34 @@ const detailCreatedAdminID = "created_admin_id"
 // Any other value is treated as no id.
 const canonicalUUIDPattern = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 
+// lastSignInSubquery selects the ts of admin $1's latest successful sign-in.
+// Its predicate is spelled exactly as migration 000202's partial index.
+const lastSignInSubquery = `SELECT ts FROM admin_audit_log
+		      WHERE admin_id = $1 AND event_type = '` + EventLoginSuccess + `' AND result = '` + AuditSuccess + `'
+		      ORDER BY ts DESC
+		      LIMIT 1`
+
+// adminsAddedQuery is the AdminsAddedSinceLastSignIn count. Its inner lookup
+// names the event and result as literals, not bind parameters, so the
+// planner matches migration 000202's partial index (WHERE event_type =
+// 'login_success' AND result = 'success') under a generic plan too. Both are
+// compile-time constants, never input. The outer filter uses 000203.
+const adminsAddedQuery = `
+	WITH created AS (
+	  SELECT CASE WHEN l.detail->>'created_admin_id' ~ $5
+	              THEN (l.detail->>'created_admin_id')::uuid END AS id
+	  FROM admin_audit_log l
+	  WHERE l.event_type = $2 AND l.result = $4
+	    AND l.ts > (
+	      ` + lastSignInSubquery + `
+	    ) - interval '10 seconds'
+	)
+	SELECT LEAST(
+	  (SELECT COUNT(DISTINCT u.id) FROM created c JOIN admin_users u ON u.id = c.id)
+	  + (SELECT COUNT(*) FROM created WHERE id IS NULL),
+	  $3)::int
+`
+
 // AdminsAddedSinceLastSignIn counts the console-created admins (admin_created
 // successes, by any admin) recorded since this admin's previous successful
 // sign-in that still exist, capped at MaxAdminsAddedNotice. It is 0 on a
@@ -237,27 +265,9 @@ const canonicalUUIDPattern = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 // at the next one. Such a creation can be reported twice; none is missed. A
 // lost login_success row widens the window, which also only over-reports.
 func (a *AuditLog) AdminsAddedSinceLastSignIn(ctx context.Context, adminID string) (int, error) {
-	const q = `
-		WITH created AS (
-		  SELECT CASE WHEN l.detail->>'created_admin_id' ~ $6
-		              THEN (l.detail->>'created_admin_id')::uuid END AS id
-		  FROM admin_audit_log l
-		  WHERE l.event_type = $2 AND l.result = $5
-		    AND l.ts > (
-		      SELECT ts FROM admin_audit_log
-		      WHERE admin_id = $1 AND event_type = $3 AND result = $5
-		      ORDER BY ts DESC
-		      LIMIT 1
-		    ) - interval '10 seconds'
-		)
-		SELECT LEAST(
-		  (SELECT COUNT(DISTINCT u.id) FROM created c JOIN admin_users u ON u.id = c.id)
-		  + (SELECT COUNT(*) FROM created WHERE id IS NULL),
-		  $4)::int
-	`
 	var n int
-	if err := a.db.QueryRowContext(ctx, q,
-		adminID, EventAdminCreated, EventLoginSuccess, MaxAdminsAddedNotice, AuditSuccess, canonicalUUIDPattern,
+	if err := a.db.QueryRowContext(ctx, adminsAddedQuery,
+		adminID, EventAdminCreated, MaxAdminsAddedNotice, AuditSuccess, canonicalUUIDPattern,
 	).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count admins added since sign-in: %w", err)
 	}
