@@ -519,7 +519,7 @@ func makeEnvelope(t *testing.T, format string, nonce, sealed, context []byte) []
 			t.Fatal("invalid attachment context")
 		}
 		fileNonce := mustBase64(t, fields[6])
-		header := make([]byte, 28)
+		header := make([]byte, 28, 28+len(nonce)+len(sealed))
 		copy(header, "CV")
 		header[2] = 4
 		binary.BigEndian.PutUint32(header[4:8], 8388608)
@@ -635,6 +635,7 @@ func repositoryRoot(t *testing.T) string {
 
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
+	// #nosec G304 -- test callers pass only repository paths built from constants.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -966,14 +967,14 @@ func assertNamedPolicyPredicates(t *testing.T, vectors map[string]vector) {
 }
 
 func policyInput(base, changes map[string]any) map[string]any {
-	copy := make(map[string]any, len(base))
+	cloned := make(map[string]any, len(base))
 	for key, value := range base {
-		copy[key] = value
+		cloned[key] = value
 	}
 	for key, value := range changes {
-		copy[key] = value
+		cloned[key] = value
 	}
-	return copy
+	return cloned
 }
 
 func mustEqualPolicyInput(t *testing.T, got, want map[string]any) {
@@ -1144,7 +1145,8 @@ func assertClosedOperationShape(t *testing.T, v vector) {
 	assertCanonicalBase64Input(t, v)
 	var expect map[string]any
 	decodeCorpus(t, v.Expect, &expect)
-	if expect["verdict"] == "accept" {
+	switch expect["verdict"] {
+	case "accept":
 		if got := objectKeys(t, v.Expect); !sameStrings(got, []string{"verdict", "outputs"}) {
 			t.Fatalf("vector %q accepts with invalid expect keys %v", v.Name, got)
 		}
@@ -1155,11 +1157,11 @@ func assertClosedOperationShape(t *testing.T, v vector) {
 		if got := objectKeys(t, rawExpect.Outputs); !sameStrings(got, outputKeys[v.Suite+"/"+v.Operation]) {
 			t.Fatalf("vector %q output keys got %v want %v", v.Name, got, outputKeys[v.Suite+"/"+v.Operation])
 		}
-	} else if expect["verdict"] == "reject" {
+	case "reject":
 		if got := objectKeys(t, v.Expect); !sameStrings(got, []string{"verdict", "stage", "reason"}) {
 			t.Fatalf("vector %q rejects with invalid expect keys %v", v.Name, got)
 		}
-	} else {
+	default:
 		t.Fatalf("vector %q has invalid verdict %#v", v.Name, expect["verdict"])
 	}
 }

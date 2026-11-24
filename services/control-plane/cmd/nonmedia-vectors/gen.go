@@ -143,7 +143,7 @@ func seal(key, nonce, aad, plain []byte) []byte {
 }
 func envelope(format string, nonce, sealed, fileNonce []byte) []byte {
 	if format == "attachment-v4" {
-		h := make([]byte, 28)
+		h := make([]byte, 28, 28+len(nonce)+len(sealed))
 		copy(h, []byte("CV"))
 		h[2] = 4
 		binary.BigEndian.PutUint32(h[4:8], 8388608)
@@ -636,6 +636,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// #nosec G304 -- generatorPath is a compile-time repository-relative constant.
 	source, err := os.ReadFile(filepath.Join(r, generatorPath))
 	if err != nil {
 		return err
@@ -646,12 +647,13 @@ func run() error {
 	}
 	path := filepath.Join(r, corpusPath)
 	if os.Args[1] == "--write" {
-		if err := os.WriteFile(path, generated, 0644); err != nil {
+		if err := os.WriteFile(path, generated, 0600); err != nil {
 			return err
 		}
 		fmt.Printf("corpus SHA-384: %s (%d vectors, %d bytes)\n", sha384Of(generated), len(cases), len(generated))
 		return nil
 	}
+	// #nosec G304 -- corpusPath is a compile-time repository-relative constant.
 	committed, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -659,6 +661,7 @@ func run() error {
 	if !bytes.Equal(committed, generated) {
 		return errors.New("committed corpus differs from deterministic generation")
 	}
+	// #nosec G304 -- adrPath is a compile-time repository-relative constant.
 	adr, err := os.ReadFile(filepath.Join(r, adrPath))
 	if err != nil {
 		return err
