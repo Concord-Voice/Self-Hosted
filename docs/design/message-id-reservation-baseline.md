@@ -27,12 +27,18 @@ turn reservation state into an oracle.
    the migration if the timeout is reached.
 2. During a normal maintenance window, run `message-id-reservation-backfill`
    with the intended database URL and a bounded `--batch-size` (default 1,000).
-   The command takes a dedicated advisory lock, first rejects any pre-existing
-   cross-table UUID collision, then keyset-scans each table in bounded batches.
+   No total runtime deadline is imposed by default, so a large table can finish
+   its keyset scan; `--timeout` supplies an explicit total deadline when an
+   operator needs one. A timed-out or cancelled command leaves the gate closed
+   and may be rerun, but begins its keyset scan again. The command takes a
+   dedicated advisory lock, first rejects any pre-existing cross-table UUID
+   collision, then keyset-scans each table in bounded batches.
 3. The command rechecks the cross-table collision condition and both
    table-to-reservation anti-joins. Only after they pass does one transaction
    set `message_id_reservation_rollout.backfill_complete = true` and remove the
-   temporary delete-capture triggers. It is safe to rerun; a completed run
+   temporary delete-capture triggers. Trigger removal uses a transaction-local
+   five-second lock timeout, so it fails rather than queueing an exclusive lock
+   behind ordinary message traffic. It is safe to rerun; a completed run
    revalidates before ensuring the temporary triggers are absent.
 
 The operation never deletes rows to resolve a collision or make an anti-join
