@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/gin-gonic/gin"
 )
 

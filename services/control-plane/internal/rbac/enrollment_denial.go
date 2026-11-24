@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 )
 
 // EnrollmentDenial is the RS5 refusal (#3454): it decides whether a permission

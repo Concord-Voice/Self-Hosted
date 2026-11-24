@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/authoritytest"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/authoritydb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/authoritytest"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/authoritydb"
 )
 
 // fakeProbe answers a fixed value and counts its calls.

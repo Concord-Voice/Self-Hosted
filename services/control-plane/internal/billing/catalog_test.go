@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // Plans endpoint and purchase gate tests (#2033 PR-3, plan Tasks 2 and 3).

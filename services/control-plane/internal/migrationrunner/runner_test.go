@@ -14,9 +14,9 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/migrationrunner"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 )
 
 // controlPlaneMigrations returns the control plane's migrations directory as a

@@ -19,10 +19,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // The boundary vocabulary. Every step WithGatedTx crosses records one of these

@@ -6,9 +6,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // I-1 of #3453 (T8): extends T0's golden table (mfa_mask_golden_test.go,

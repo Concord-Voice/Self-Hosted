@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // clear-held (§3.4 DoR:1731, LD-46, D-268, D-146, D-286; B3-D1): the owner verb

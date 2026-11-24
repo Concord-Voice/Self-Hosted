@@ -27,10 +27,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/server"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/server"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/store"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 const usage = "usage: account-authority serve | migrate --realm <uuid> | keygen --out <path> | restore-begin | " +

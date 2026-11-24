@@ -5,8 +5,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/authoritytest"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/authoritytest"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 func (e *env) deviceOK(a *authoritytest.Account, b []byte) ac.DeviceBundle {

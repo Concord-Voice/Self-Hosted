@@ -23,11 +23,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // The submissions the per-route table sends.

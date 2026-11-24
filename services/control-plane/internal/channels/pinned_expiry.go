@@ -3,7 +3,7 @@ package channels
 import (
 	"context"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/expiration"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/expiration"
 )
 
 // SetPinnedExpirer wires the terminal that deletes a channel's already-due

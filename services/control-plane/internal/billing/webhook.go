@@ -13,7 +13,7 @@ import (
 	"github.com/stripe/stripe-go/v87"
 	"github.com/stripe/stripe-go/v87/webhook"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 // Stripe webhook (#2033 spec §7, plan Task 5).

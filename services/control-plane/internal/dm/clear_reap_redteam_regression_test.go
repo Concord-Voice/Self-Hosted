@@ -21,11 +21,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 var redteamUUID = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)

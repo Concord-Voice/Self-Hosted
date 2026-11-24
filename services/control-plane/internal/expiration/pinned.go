@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
 )
 
 // Pin-aware expiry: the held-stamp state machine (#3459, migration 000168).

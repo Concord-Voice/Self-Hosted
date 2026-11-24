@@ -7,8 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 )
 
 // TestBuildPrivacyHandler_ConstructsHandler verifies the slim, Sentry-free

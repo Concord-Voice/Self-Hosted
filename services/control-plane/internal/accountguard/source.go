@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/accountguard/decide"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/accountguard/decide"
 )
 
 // Source is the decision policy's auth-change source, without conversion.

@@ -15,8 +15,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/permgen"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/permgen"
 )
 
 // The grace store runs on miniredis for the same reason the soft-lock does
