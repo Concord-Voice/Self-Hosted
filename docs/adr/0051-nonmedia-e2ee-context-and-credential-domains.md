@@ -43,7 +43,7 @@ The credential descriptor is one canonical UTF-8 JSON array, with no whitespace,
 
 #### Proposed legacy-credential authority proof
 
-This subsection is **Proposed**, not part of the frozen account-authority protocol and not authority to activate a legacy fallback. Its eight security-owner decisions remain pending below. Implementations may build passive parsers and vectors against an approved follow-on decision, but no client may submit a raw password on the strength of this text alone.
+This subsection is **Proposed**, not part of the frozen account-authority protocol and not authority to activate a legacy fallback. The security owner approved its protocol core for passive codecs, parsers and vectors only; the activation profile remains pending below. No client may submit a raw password on the strength of this text alone.
 
 **Frozen existing protocol boundary.** Account-authority protocol v1 keeps its existing canonical layouts unchanged. In particular, the RSK-signed `status` object remains an account-root status, its array position 10 remains `active_root_digest`, its signed-type registry remains closed, and the existing `status` delegation scope does not authorize credential assertions. The private `cp-evidence.credential_epoch_digest` is operation evidence, not credential-protocol state. The proposed proof therefore does not append fields to `status`, reinterpret position 10, or widen the meaning of an existing delegation.
 
@@ -102,7 +102,7 @@ On a fresh device, independently restored identity means an account ID and autho
 
 Existing legacy accounts require a sealed initial import before any proof could become eligible. The proposed import consumes an independently audited source manifest binding at least the authority realm and account, `legacy`, the credential generation, the credential-epoch state, the authenticated authority-chain head and an import digest. The manifest itself is SHA-384 digested, and an owner-only authority transaction creates the account's sequence-1 publication exactly once. Re-import is forbidden. Eligibility begins only after the selected #10 checkpoint and observer policy independently covers that publication. New split accounts instead begin with a sequence-1 `split-auth-wrap-v1` publication. The authoritative legacy source, manifest codec, auditor identity and independence requirements, reconciliation procedure and owner-only ceremony remain unresolved; the existing legacy encryption-key population is not a credential-generation source and cannot fill those gaps.
 
-**Pending security-owner decisions.** The protocol core can be reviewed and vectorized before an evidence profile is selected. None of these conditions has sign-off merely because it appears in this Proposed ADR:
+**Security-owner protocol-core decision (passive only).** The security owner [approved the following conditions](https://github.com/Concord-Voice/Security/issues/177#issuecomment-7121848284) for passive codecs, parsers and cross-runtime vectors. This decision does not approve the activation profile or change this ADR's Proposed status:
 
 1. Approve separate authority protocol v2, its `credential-signed` envelope and the distinct `credential-publication` and `credential-status` scopes, preserving frozen v1 byte-for-byte.
 2. Approve the exact publication, status and evidence arrays, exact-inner-byte SHA-384 digests, P-384/SHA-384 P1363 signatures, strict canonical decoding, publication chain and compare-and-swap semantics.
