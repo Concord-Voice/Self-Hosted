@@ -39,6 +39,14 @@ func TestMigration000202_ReservationNamespaceAndGuards(t *testing.T) {
 		INSERT INTO messages (id, channel_id, user_id, content, key_version)
 		VALUES ($1, $2, $3, 'collision', 1)`, dmMessageID, channelID, userID)
 	migrationRequirePQError(t, err, "23505", "message_id_reservations_pkey")
+	result, err := db.Exec(`
+		INSERT INTO dm_messages (id, conversation_id, user_id, content, key_version)
+		VALUES ($1, $2, $3, 'idempotent retry', 1)
+		ON CONFLICT (id) DO NOTHING`, dmMessageID, conversationID, userID)
+	require.NoError(t, err, "same-table legacy idempotency must reach ON CONFLICT")
+	affected, err := result.RowsAffected()
+	require.NoError(t, err)
+	assert.Zero(t, affected, "idempotent retry must not insert a second message")
 
 	_, err = db.Exec(`UPDATE messages SET id = $1 WHERE id = $2`, uuid.New(), messageID)
 	migrationRequirePQError(t, err, "23514", "message_id_reservations_message_id_immutable")

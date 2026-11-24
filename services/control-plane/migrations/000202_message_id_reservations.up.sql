@@ -89,6 +89,20 @@ BEGIN
     ON CONFLICT (message_id) DO NOTHING;
 
     IF NOT FOUND THEN
+        -- Existing legacy writers use INSERT ... ON CONFLICT (id) for their
+        -- same-table idempotency. Lock that row so a concurrent delete cannot
+        -- turn this permitted retry into an ID reuse, then let the statement's
+        -- existing conflict clause decide the same-row outcome. An ID retained
+        -- without that row remains a uniform reservation conflict.
+        IF TG_TABLE_NAME = 'messages' THEN
+            PERFORM 1 FROM messages WHERE id = NEW.id FOR KEY SHARE;
+        ELSE
+            PERFORM 1 FROM dm_messages WHERE id = NEW.id FOR KEY SHARE;
+        END IF;
+        IF FOUND THEN
+            RETURN NEW;
+        END IF;
+
         RAISE EXCEPTION USING
             ERRCODE = 'unique_violation',
             CONSTRAINT = 'message_id_reservations_pkey',
