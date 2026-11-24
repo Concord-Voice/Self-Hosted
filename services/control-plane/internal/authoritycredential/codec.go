@@ -18,6 +18,7 @@ const (
 	version          = uint64(2)
 	maxSafeInt       = uint64(9_007_199_254_740_991)
 	statusLifetimeMs = uint64(300_000)
+	reencodeRule     = "re-encode"
 )
 
 // ErrMalformed means an input is not a canonical credential-proof v2 value.
@@ -161,7 +162,7 @@ func DecodePublication(raw []byte) (CredentialPublication, error) {
 	}
 	encoded, _ := v.Encode()
 	if !bytes.Equal(encoded, raw) {
-		return CredentialPublication{}, malformed("re-encode")
+		return CredentialPublication{}, malformed(reencodeRule)
 	}
 	return v, nil
 }
@@ -226,7 +227,7 @@ func DecodeLegacyStatus(raw []byte) (LegacyCredentialStatus, error) {
 	}
 	encoded, _ := v.Encode()
 	if !bytes.Equal(encoded, raw) {
-		return LegacyCredentialStatus{}, malformed("re-encode")
+		return LegacyCredentialStatus{}, malformed(reencodeRule)
 	}
 	return v, nil
 }
@@ -287,7 +288,7 @@ func DecodeEvidenceCarrier(raw []byte) (CredentialPublicationEvidence, error) {
 	}
 	encoded, _ := v.Encode()
 	if !bytes.Equal(encoded, raw) {
-		return CredentialPublicationEvidence{}, malformed("re-encode")
+		return CredentialPublicationEvidence{}, malformed(reencodeRule)
 	}
 	return v, nil
 }
@@ -325,7 +326,7 @@ func DecodeSignedEnvelope(raw []byte) (SignedCredential, error) {
 	}
 	encoded, _ := v.Encode()
 	if !bytes.Equal(encoded, raw) {
-		return SignedCredential{}, malformed("re-encode")
+		return SignedCredential{}, malformed(reencodeRule)
 	}
 	return v, nil
 }

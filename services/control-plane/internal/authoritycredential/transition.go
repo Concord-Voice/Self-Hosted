@@ -9,12 +9,36 @@ func CheckPublicationSuccessor(previous, next CredentialPublication) error {
 	if err := validatePublication(next); err != nil {
 		return err
 	}
+	if err := checkSuccessorIdentity(previous, next); err != nil {
+		return err
+	}
+	if err := checkSuccessorSequence(previous, next); err != nil {
+		return err
+	}
+	if err := checkSuccessorPredecessor(previous, next); err != nil {
+		return err
+	}
+	if err := checkAuthorityChain(previous, next); err != nil {
+		return err
+	}
+	return checkProtocolTransition(previous, next)
+}
+
+func checkSuccessorIdentity(previous, next CredentialPublication) error {
 	if previous.RealmID != next.RealmID || previous.AccountID != next.AccountID {
 		return malformed("successor identity")
 	}
+	return nil
+}
+
+func checkSuccessorSequence(previous, next CredentialPublication) error {
 	if previous.PublicationSequence == maxSafeInt || next.PublicationSequence != previous.PublicationSequence+1 {
 		return malformed("successor sequence")
 	}
+	return nil
+}
+
+func checkSuccessorPredecessor(previous, next CredentialPublication) error {
 	previousDigest, err := PublicationDigest(previous)
 	if err != nil {
 		return err
@@ -22,9 +46,17 @@ func CheckPublicationSuccessor(previous, next CredentialPublication) error {
 	if !next.PreviousPublicationDigest.Present || !equalDigest(next.PreviousPublicationDigest.Value, previousDigest) {
 		return malformed("successor predecessor")
 	}
+	return nil
+}
+
+func checkAuthorityChain(previous, next CredentialPublication) error {
 	if next.AuthorityChainSequence < previous.AuthorityChainSequence || (next.AuthorityChainSequence == previous.AuthorityChainSequence && !equalDigest(next.AuthorityChainHeadDigest, previous.AuthorityChainHeadDigest)) {
 		return malformed("authority chain")
 	}
+	return nil
+}
+
+func checkProtocolTransition(previous, next CredentialPublication) error {
 	switch previous.Protocol {
 	case ProtocolLegacy:
 		if next.Protocol == ProtocolLegacy && next.CredentialGeneration <= previous.CredentialGeneration {
