@@ -94,7 +94,8 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 			assert.Equal(t, mimeImagePNG, msg.Attachments[0].MimeType)
 			assert.Equal(t, int64(12345), msg.Attachments[0].FileSize)
 			assert.Equal(t, user.ID, msg.Attachments[0].UploaderID)
-			assert.Equal(t, 1, msg.Attachments[0].KeyVersion)
+			require.NotNil(t, msg.Attachments[0].KeyVersion)
+			assert.Equal(t, 1, *msg.Attachments[0].KeyVersion)
 			require.NotNil(t, msg.Attachments[0].ChannelID)
 			assert.Equal(t, channelID, *msg.Attachments[0].ChannelID)
 			assert.Nil(t, msg.Attachments[0].ConversationID)
@@ -104,6 +105,48 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "Message with attachment not found")
+}
+
+func TestGetMessagesReturnsLegacyAttachmentWithoutKeyVersion(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "legacyattachuser")
+	serverID := ts.CreateTestServer(t, user.ID, "LegacyAttachServer")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+	messageID := insertChannelMessage(t, ts, channelID, user.ID, "legacy attachment")
+
+	var fileID string
+	err := ts.DB.QueryRow(
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, created_at)
+		 VALUES (gen_random_uuid(), $1, 'photo', 1, $2, 99, 'legacy/' || gen_random_uuid(), NOW())
+		 RETURNING id`,
+		user.ID, mimeImagePNG,
+	).Scan(&fileID)
+	require.NoError(t, err)
+	insertMessageAttachment(t, ts, messageID, fileID, 0)
+
+	w := ts.DoRequest("GET", channelMessagesURL(channelID), nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Messages []struct {
+			ID          string                     `json:"id"`
+			Attachments []models.AttachmentSummary `json:"attachments"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	for _, message := range body.Messages {
+		if message.ID != messageID {
+			continue
+		}
+		require.Len(t, message.Attachments, 1)
+		assert.Equal(t, fileID, message.Attachments[0].ID)
+		assert.Nil(t, message.Attachments[0].KeyVersion)
+		assert.Nil(t, message.Attachments[0].ChannelID)
+		assert.Nil(t, message.Attachments[0].ConversationID)
+		assert.Nil(t, message.Attachments[0].E2EEFormat)
+		return
+	}
+	t.Fatal("Message not found")
 }
 
 func TestGetMessagesNoAttachments(t *testing.T) {

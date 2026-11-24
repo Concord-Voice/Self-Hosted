@@ -23805,6 +23805,8 @@ components:
                 key_version:
                   type: integer
                   minimum: 1
+                  nullable: true
+                  description: Stored key epoch when the attachment row carries one; omitted for legacy rows.
                 channel_id:
                   type: string
                   format: uuid
@@ -24412,6 +24414,8 @@ components:
               key_version:
                 type: integer
                 minimum: 1
+                nullable: true
+                description: Stored key epoch when the attachment row carries one; omitted for legacy rows.
               channel_id:
                 type: string
                 format: uuid

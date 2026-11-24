@@ -7,7 +7,7 @@ type AttachmentSummary struct {
 	MimeType       string  `json:"mime_type"`
 	FileSize       int64   `json:"file_size"`
 	UploaderID     string  `json:"uploader_id"`
-	KeyVersion     int     `json:"key_version"`
+	KeyVersion     *int    `json:"key_version,omitempty"`
 	ChannelID      *string `json:"channel_id,omitempty"`
 	ConversationID *string `json:"conversation_id,omitempty"`
 	E2EEFormat     *string `json:"e2ee_format,omitempty"`
