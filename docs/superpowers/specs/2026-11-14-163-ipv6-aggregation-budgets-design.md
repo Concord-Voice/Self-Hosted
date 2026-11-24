@@ -128,7 +128,8 @@ The shared identity reaches `ratelimit:ip:*`, `auth_ban:ip:*`, `auth_failures:ip
 ### Fixed backend-unavailable response
 
 - Status: 503.
-- Header: `Retry-After: 1`.
+- Header: `Retry-After`, jittered over 2 to 4 seconds on the public auth routes so a Redis blip does not
+  synchronise client retries. Admin routes keep `Retry-After: 1`.
 - Body: the existing fixed `service unavailable` / `rate-limit backend unavailable; please retry shortly` JSON.
 - Handler side effects: none.
 - Logs/events: fixed failure class and Nightwatch degraded outcome; never the address or Redis key.

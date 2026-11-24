@@ -1950,7 +1950,7 @@ uses the same binary source key for request and connection limits; the control
 plane and media plane use it for Redis and handshake counters. Missing or
 malformed control-plane addresses share an `unattributed` bucket. Public auth
 admission and failure recording fail closed with the fixed 503 plus
-`Retry-After: 1` when Redis cannot count; production media configuration fails
+a jittered `Retry-After` of 2 to 4 seconds when Redis cannot count; production media configuration fails
 startup if its trusted-proxy source is unusable.
 
 - Email + password with **Argon2id** hashing (t=3, m=64MB, p=4). Username validation applies profanity and leetspeak filtering. Login authenticates by **email**.

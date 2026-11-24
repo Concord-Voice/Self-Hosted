@@ -162,7 +162,7 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 - **Accounts:** WebAuthn sign-in and inline confirmation now atomically advance authenticator counters and reject clone warnings before granting access, while credential registration enforces the ten-key limit again when the final write commits ([#288](https://github.com/Concord-Voice/Self-Hosted/pull/288)).
 - **Authentication:** Pre-auth source budgets now aggregate native IPv6 by `/64`
   (while IPv4 remains `/32`) across nginx, control-plane, Admin Console, and
-  media admission. Authentication returns 503 with `Retry-After: 1` when Redis
+  media admission. Authentication returns 503 with a jittered `Retry-After` of 2 to 4 seconds when Redis
   cannot count an attempt; production media refuses to start without a valid
   trusted-proxy source ([#294](https://github.com/Concord-Voice/Self-Hosted/pull/294)).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).

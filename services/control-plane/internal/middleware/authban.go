@@ -3,7 +3,9 @@ package middleware
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
@@ -95,7 +97,14 @@ func AuthBanCheck(redisClient *redis.Client) gin.HandlerFunc {
 
 func abortAuthBudgetBackendUnavailable(c *gin.Context) {
 	MarkNightwatchVerdict(c, NightwatchVerdict{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityMedium, Reason: securityevent.ReasonRateLimitBackendUnavailable})
-	abortBackendUnavailable(c)
+	abortBackendUnavailable(c, authBudgetRetryAfter())
+}
+
+// authBudgetRetryAfter spreads client retries after an auth source-budget
+// outage over 2-4 seconds, so a brief Redis outage does not synchronise every
+// client (session refresh included) into one retry wave.
+func authBudgetRetryAfter() string {
+	return strconv.Itoa(2 + rand.IntN(3)) //nolint:gosec // retry jitter, not a security value
 }
 
 // RecordAuthFailure increments the cumulative failure counter for an IP.

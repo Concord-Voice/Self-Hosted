@@ -21,6 +21,13 @@ const (
 	testIPClearAuth = "10.0.0.15"
 )
 
+// assertAuthBudgetRetryAfter checks the jittered 2-4 second delay the public
+// auth source-budget 503 carries.
+func assertAuthBudgetRetryAfter(t *testing.T, got string) {
+	t.Helper()
+	assert.Contains(t, []string{"2", "3", "4"}, got)
+}
+
 var testBanConfig = middleware.AuthBanConfig{
 	Threshold: 3,
 	Window:    1 * time.Minute,
@@ -129,7 +136,7 @@ func TestAuthBanCheckFailsClosedOnRedisDown(t *testing.T) {
 
 	w := doAuthBanRequest(router, "10.0.0.4")
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+	assertAuthBudgetRetryAfter(t, w.Header().Get("Retry-After"))
 	assert.False(t, handlerCalled)
 }
 
@@ -147,7 +154,7 @@ func TestAuthBanCheckNilRedisFailsClosed(t *testing.T) {
 
 	w := doAuthBanRequest(router, "10.0.0.5")
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+	assertAuthBudgetRetryAfter(t, w.Header().Get("Retry-After"))
 	assert.False(t, handlerCalled)
 }
 
@@ -174,7 +181,7 @@ func TestRecordAuthFailureBackendErrorFailsClosedWith503(t *testing.T) {
 
 	assert.False(t, middleware.RecordAuthFailure(c, dead, testBanConfig))
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+	assertAuthBudgetRetryAfter(t, w.Header().Get("Retry-After"))
 }
 
 func TestClearAuthFailuresReturnsBackendError(t *testing.T) {

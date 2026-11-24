@@ -299,14 +299,14 @@ func abortOnRateLimitBackendError(c *gin.Context, config RateLimitConfig) bool {
 	}
 	// Privileged route: the limiter is a required control, so a Redis outage
 	// must not open the floodgate. Reject with the shared fixed response.
-	abortBackendUnavailable(c)
+	abortBackendUnavailable(c, "1")
 	return true
 }
 
 // abortBackendUnavailable writes the one fixed fail-closed response shared by
 // the rate limiters and the auth source budget.
-func abortBackendUnavailable(c *gin.Context) {
-	c.Header("Retry-After", "1")
+func abortBackendUnavailable(c *gin.Context, retryAfter string) {
+	c.Header("Retry-After", retryAfter)
 	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 		"error":   "service unavailable",
 		"message": "rate-limit backend unavailable; please retry shortly",

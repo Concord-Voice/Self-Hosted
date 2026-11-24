@@ -45,7 +45,7 @@ info:
 
     - Rate limits are documented per-endpoint; exceeded limits return 429.
       Public `/auth` source-budget checks return the fixed 503 response with
-      `Retry-After: 1` when Redis is unavailable, rather than admitting an
+      a jittered `Retry-After` of 2 to 4 seconds when Redis is unavailable, rather than admitting an
       uncounted authentication attempt.
 
 
@@ -1231,7 +1231,7 @@ paths:
         After the AuthBanCheck parent gate, always returns the exact Recovery Circle pause
         response without reading the body or recovery token. Does not create a request or access
         recovery data. Runs before the route-specific limiter, whose counter is not advanced.
-        AuthBanCheck can still access Redis and return 429 with Retry-After, or 503 with Retry-After: 1 when Redis is unavailable. The pause itself sets no
+        AuthBanCheck can still access Redis and return 429 with Retry-After, or 503 with a Retry-After of 2 to 4 seconds when Redis is unavailable. The pause itself sets no
         Retry-After. Request definitions remain for dormant compatibility; no success response is reachable.
       operationId: createSocialRecoveryRequest
       security: []
@@ -1255,7 +1255,7 @@ paths:
         After the AuthBanCheck parent gate, always returns the exact Recovery Circle pause
         response, regardless of request existence, status or recovery token. No shares are returned,
         including for complete requests. Runs before the route-specific limiter, whose counter is not
-        advanced. AuthBanCheck can still access Redis and return 429 with Retry-After, or 503 with Retry-After: 1 when Redis is unavailable. The pause itself
+        advanced. AuthBanCheck can still access Redis and return 429 with Retry-After, or 503 with a Retry-After of 2 to 4 seconds when Redis is unavailable. The pause itself
         sets no Retry-After. Stored requests remain unchanged; no success response is reachable.
       operationId: pollSocialRecoveryRequest
       security: []

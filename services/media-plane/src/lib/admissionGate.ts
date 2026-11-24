@@ -18,6 +18,8 @@ export const HANDSHAKE_BURST = 60;
 export const HANDSHAKE_WINDOW_MS = 10_000;
 /** Hard cap on tracked IPs — the store must not become the DoS it prevents. */
 export const MAX_TRACKED_IPS = 10_000;
+/** Most entries one eviction inspects, so a full store costs O(1) per request. */
+export const EVICTION_SCAN_LIMIT = 64;
 /** Minimum spacing of the "trusted proxy sent no client address" warning. */
 export const PROXY_FALLBACK_WARN_INTERVAL_MS = 60_000;
 
@@ -320,15 +322,20 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
       // IPv6-source flood. Prefer the oldest bucket that is NOT over budget, so
       // cycling through many buckets cannot evict (and so reset) a bucket that is
       // currently being limited. Only when every tracked bucket is over budget
-      // does the oldest one go, which keeps the store bounded.
+      // does the oldest one go, which keeps the store bounded. The scan is capped
+      // so a store full of limited buckets cannot make every new bucket pay for
+      // a full pass.
       if (counters.size >= MAX_TRACKED_IPS) {
         let victim: string | undefined;
+        let scanned = 0;
         for (const [key, candidate] of counters) {
           victim ??= key;
           if (!isOverBudget(candidate, nowMs)) {
             victim = key;
             break;
           }
+          scanned += 1;
+          if (scanned >= EVICTION_SCAN_LIMIT) break;
         }
         if (victim !== undefined) counters.delete(victim);
       }
