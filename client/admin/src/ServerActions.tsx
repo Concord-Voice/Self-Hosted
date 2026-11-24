@@ -65,6 +65,10 @@ const REFUSALS: Record<string, string> = {
   rate_limited: "Too many requests. Wait a minute, then try again.",
   invalid_tag: "Enter a release tag such as v0.3.1.",
   invalid_archive: "Choose a backup from the list.",
+  writes_disabled:
+    "Host writes are switched off because the agent has no audit log or no trusted authorizer. Ask a host-root operator to check the agent log and import this admin's authorizer.",
+  stepup_binding_mismatch:
+    "The request changed after your security key was requested. Start the action again.",
 };
 
 interface ServerActionsProps {

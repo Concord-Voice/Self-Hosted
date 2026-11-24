@@ -43,7 +43,7 @@ The current control-plane session middleware resolves an opaque Redis session an
 - A second signer service, a new database table, a general admin RBAC model, or a new cryptography implementation.
 - Automatically trusting every credential in `admin_webauthn_credentials`.
 - Automatically deleting old backups.
-- Protecting an operator from a fully malicious admin SPA that lies about the action being approved. The assertion is cryptographically bound to the action and arguments, but WebAuthn authenticators display RP identity, not Concord's semantic action text.
+- Protecting an operator from a fully malicious admin SPA that lies about the action being approved. The assertion is bound to the agent's own record of the action and arguments, not to what the user approves; action and login ceremonies currently share credentials and RP ID. Also, WebAuthn authenticators display RP identity, not Concord's semantic action text.
 - Solving the attestation-provenance gap.
 
 ## 4. Governing constraints
@@ -159,7 +159,7 @@ The control-plane container receives a read-only mount of the directory only so 
 - `import` accepts one bounded JSON export from `control-plane admin export-agent-authorizer --username <handle>`, prints the SHA-256 fingerprint, and requires an exact `--confirm-sha256` value before changing the file.
 - Import is explicit and idempotent by credential ID. Enrolling or creating an admin does not auto-trust it for host writes.
 - `revoke --admin-id` removes every credential for that admin. The supported reset wrapper invokes it before the database reset.
-- Existing installations require an explicit one-time import. Until then, host-agent reads continue but all writes return `authorizer_unavailable`.
+- Existing installations require an explicit one-time import. Until then, host-agent reads continue, all writes return `authorizer_unavailable`, and admin WebAuthn login also fails closed (503) when the overlay sets `HOST_AGENT_AUTHORIZER_PROJECTION=1`.
 
 The root confirmation is an operational trust decision. It prevents a compromised container from silently adding a key; it does not claim independent attestation provenance.
 
@@ -212,7 +212,7 @@ After every successful `FinishLoginWithBytes` in admin login and control-plane c
 
 ### 10.3 Setup listener
 
-Retain the global 16-connection cap and add a listener wrapper allowing at most 4 concurrent TCP connections per canonical source IP. Set `WriteTimeout=30s` alongside the existing 5s header, 30s read, and 60s idle timeouts. Closing a connection always releases both counters.
+Retain the global 16-connection cap and add a listener wrapper allowing at most 4 concurrent TCP connections per canonical source IP. Keep `WriteTimeout=30s` for other routes alongside the existing 5s header, 30s read, and 60s idle timeouts; the install response replaces it with an 11-minute deadline (`setupInstallWriteTimeout`: the 10-minute install budget plus serialization). Closing a connection always releases both counters.
 
 ### 10.4 Backup bounds
 
@@ -292,7 +292,7 @@ No migration reviewer should fire because this design adds no SQL migration. The
 | New agent and old control plane roll out separately | Medium | Writes remain unavailable until both support the ceremony; forward-only recovery. |
 | Per-request DB status check adds latency/outage coupling | Medium | It is the durable authority check; failures intentionally return 401. Measure but do not cache away the invariant. |
 | Backup estimate is conservative | Medium | Clear refusal with measured required/available bytes; operator may move backups or free space. |
-| Admin SPA compromise mislabels a signed action | Residual | Action/args are cryptographically bound and audited; a trusted display or separate signer is future work. |
+| Admin SPA compromise mislabels a signed action | Residual | Action/args are bound to the agent's own record and audited; a trusted display or separate signer is future work. |
 
 ## 17. References
 

@@ -90,7 +90,7 @@ type jobs struct {
 // can hold off restarting the agent mid-restore; a marker left by an
 // earlier run is removed.
 func (s *Server) EnableWrites(r Runner, backups, marker string) {
-	_ = os.Remove(marker) // that run's job died with it
+	removeMarker(marker, "") // that run's job died with it
 	s.writes = &jobs{
 		run: r, backups: backups, marker: marker,
 		admission: filepath.Join(filepath.Dir(marker), "backup-last-admitted"),
@@ -107,6 +107,16 @@ func (s *Server) EnableWrites(r Runner, backups, marker string) {
 type refusal struct {
 	code   int
 	reason string
+}
+
+func (r *refusal) Error() string { return r.reason }
+
+// removeMarker deletes the write marker, logging any failure other than its
+// absence: a marker left behind holds off package restarts of the agent.
+func removeMarker(marker, jobID string) {
+	if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("concord-agent: write marker removal failed job=%s: %v", jobID, err)
+	}
 }
 
 // actionName returns the fixed name of a known write action, so nothing the
@@ -189,8 +199,14 @@ func newJobID() (string, error) {
 }
 
 // start records a job and runs it in the background. It returns nil when a
-// write is already running.
-func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Duration) (*Job, error) {
+// write is already running. req is the validated request the commands were
+// built from; its tag or archive name is recorded in the audit.
+//
+// The admitted event is written before the marker and backup admission state
+// so a job never runs unaudited. If either of those then fails, the job is
+// rolled back and a terminal failed/admission_failed event is written for the
+// same job id, so every admitted record in the stream has a terminal record.
+func (j *jobs) start(action, adminID string, req actionRequest, cmds [][]string, budget time.Duration) (*Job, error) {
 	id, err := newJobID()
 	if err != nil {
 		return nil, err
@@ -207,18 +223,34 @@ func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Durati
 			return nil, err
 		}
 	}
-	if j.audit == nil || j.audit.Write(AuditEvent{Action: action, Outcome: "admitted", Reason: "admission_approved", AdminID: adminID, JobID: id}) != nil {
+	event := AuditEvent{Action: action, AdminID: adminID, JobID: id, Tag: req.Tag, Archive: req.Archive}
+	if j.audit == nil {
 		return nil, errors.New("host-agent admission audit unavailable")
 	}
+	admitted := event
+	admitted.Outcome, admitted.Reason = "admitted", "admission_approved"
+	if err := j.audit.Write(admitted); err != nil {
+		log.Printf("concord-agent: host-agent audit admission event failed job=%s: %v", id, err)
+		return nil, errors.New("host-agent admission audit unavailable")
+	}
+	rollback := func(cause error) (*Job, error) {
+		failed := event
+		failed.Outcome, failed.Reason = "failed", "admission_failed"
+		if err := j.audit.Write(failed); err != nil {
+			log.Printf("concord-agent: host-agent audit admission rollback event failed job=%s: %v", id, err)
+		}
+		return nil, cause
+	}
 	if err := os.WriteFile(j.marker, []byte(id+"\n"), 0o600); err != nil {
-		return nil, err
+		return rollback(err)
 	}
 	if action == "backup" {
 		if err := j.writeBackupAdmission(filepath.Dir(j.admission), backupAt); err != nil {
 			if removeErr := os.Remove(j.marker); removeErr != nil {
-				return nil, errors.Join(err, fmt.Errorf("remove job marker: %w", removeErr))
+				log.Printf("concord-agent: write marker removal failed job=%s: %v", id, removeErr)
+				return rollback(errors.Join(err, fmt.Errorf("remove job marker: %w", removeErr)))
 			}
-			return nil, err
+			return rollback(err)
 		}
 	}
 	job := &Job{ID: id, Action: action, State: "running", Started: time.Now().UTC(), adminID: adminID}
@@ -230,8 +262,10 @@ func (j *jobs) start(action, adminID string, cmds [][]string, budget time.Durati
 		j.list = append([]*Job(nil), j.list[len(j.list)-maxJobs:]...)
 	}
 	go j.execute(job, cmds, budget)
-	if err := j.audit.Write(AuditEvent{Action: action, Outcome: "started", Reason: "job_started", AdminID: adminID, JobID: id}); err != nil {
-		log.Print("concord-agent: host-agent audit start event unavailable")
+	startedEvent := event
+	startedEvent.Outcome, startedEvent.Reason = "started", "job_started"
+	if err := j.audit.Write(startedEvent); err != nil {
+		log.Printf("concord-agent: host-agent audit start event failed job=%s: %v", id, err)
 	}
 	return job, nil
 }
@@ -347,15 +381,15 @@ func (j *jobs) execute(job *Job, cmds [][]string, budget time.Duration) {
 	if job.Action == "backup" && err == nil {
 		job.Archive = backupArchive(job.out.String())
 	}
-	_ = os.Remove(j.marker)
+	removeMarker(j.marker, job.ID)
 	j.running = false
 	if j.audit != nil {
 		outcome, reason := "succeeded", "job_succeeded"
 		if err != nil {
 			outcome, reason = "failed", "job_failed"
 		}
-		if j.audit.Write(AuditEvent{Action: job.Action, Outcome: outcome, Reason: reason, AdminID: job.adminID, JobID: job.ID}) != nil {
-			log.Print("concord-agent: host-agent audit completion event unavailable")
+		if auditErr := j.audit.Write(AuditEvent{Action: job.Action, Outcome: outcome, Reason: reason, AdminID: job.adminID, JobID: job.ID}); auditErr != nil {
+			log.Printf("concord-agent: host-agent audit completion event failed job=%s: %v", job.ID, auditErr)
 		}
 	}
 	log.Printf("concord-agent: job action=%s state=%s", job.Action, job.State)
@@ -433,8 +467,13 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 	req, adminID, err := s.authorizations.consume(proof.Handle, name, proof.Assertion)
 	if err != nil {
 		reason := "assertion_denied"
-		if errors.Is(err, ErrAuthorizationReplay) {
+		switch {
+		case errors.Is(err, ErrAuthorizationReplay):
 			reason = "replay_denied"
+		case errors.Is(err, errCloneDetected):
+			reason = "clone_detected"
+		case errors.Is(err, errCounterStale):
+			reason = "counter_stale"
 		}
 		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: reason, AdminID: adminID})
 		if errors.Is(err, ErrAuthorizerUnavailable) {
@@ -452,7 +491,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 		log.Printf("concord-agent: action=%s outcome=refused reason=%s", name, no.reason)
 		return
 	}
-	job, err := s.writes.start(name, adminID, cmds, budget)
+	job, err := s.writes.start(name, adminID, req, cmds, budget)
 	if err != nil {
 		if errors.Is(err, errBackupLimited) {
 			if s.audit.Write(AuditEvent{Action: name, Outcome: "denied", Reason: "backup_rate_limited", AdminID: adminID}) != nil {

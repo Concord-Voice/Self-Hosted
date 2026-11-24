@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 type fakeAuthorizerStore struct {
 	entries   []hostagent.AuthorizerListing
 	imported  hostagent.AuthorizerImport
+	reinstate bool
 	listErr   error
 	importErr error
 	revokeErr error
@@ -25,8 +27,13 @@ func (s *fakeAuthorizerStore) List() ([]hostagent.AuthorizerListing, error) {
 	return s.entries, s.listErr
 }
 
-func (s *fakeAuthorizerStore) ImportMany(doc hostagent.AuthorizerImport) (int, error) {
-	s.imported = doc
+func (s *fakeAuthorizerStore) ImportMany(doc hostagent.AuthorizerImport, reinstate bool) (int, error) {
+	s.imported, s.reinstate = doc, reinstate
+	if s.importErr == nil && !slices.ContainsFunc(s.entries, func(e hostagent.AuthorizerListing) bool { return e.AdminID == doc.AdminID && !e.Revoked }) {
+		for _, c := range doc.Credentials {
+			s.entries = append(s.entries, hostagent.AuthorizerListing{AdminID: doc.AdminID, Label: c.Label, SignCount: c.SignCount, CredentialSHA256: "hash"})
+		}
+	}
 	return len(doc.Credentials), s.importErr
 }
 
@@ -150,7 +157,7 @@ func TestAuthorizerCLIImportsListsAndRevokesRootConfirmedCredential(t *testing.T
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(data)
-	store := &fakeAuthorizerStore{entries: []hostagent.AuthorizerListing{{AdminID: doc.AdminID, Label: "primary key", SignCount: 2, CredentialSHA256: "hash"}}}
+	store := &fakeAuthorizerStore{}
 	loader := fakeAuthorizerStoreLoader{store: store}
 	storePath := t.TempDir() + "/authorizers.json"
 
@@ -238,5 +245,82 @@ func TestIsLowerHex(t *testing.T) {
 		if got := isLowerHex(value); got != want {
 			t.Errorf("isLowerHex(%q) = %t, want %t", value, got, want)
 		}
+	}
+}
+
+func writeTestExport(t *testing.T) (string, string, hostagent.AuthorizerImport) {
+	t.Helper()
+	doc := hostagent.AuthorizerImport{
+		Schema: 1, RPID: "admin.example.org", Origins: []string{"https://admin.example.org"},
+		AdminID:     "3e7138e5-6eb9-4a79-8133-5eab67b7f2b6",
+		Credentials: []hostagent.AuthorizerCredentialImport{{CredentialID: "AQID", PublicKey: "BAUG", SignCount: 2, Label: "primary key"}},
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	export := t.TempDir() + "/export.json"
+	if err := os.WriteFile(export, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	return export, hex.EncodeToString(digest[:]), doc
+}
+
+func TestAuthorizerImportHintsRestartWhenNoCredentialWasActive(t *testing.T) {
+	export, digest, doc := writeTestExport(t)
+	// The trust file exists, but every credential in it is revoked: a running
+	// agent has nothing active, so the operator must be told to restart.
+	store := &fakeAuthorizerStore{entries: []hostagent.AuthorizerListing{{AdminID: "11111111-2222-4333-8444-555555555555", Revoked: true}}}
+	storePath := t.TempDir() + "/authorizers.json"
+	if err := os.WriteFile(storePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runAuthorizerCLIWith(storePath, []string{"import", "--file", export, "--confirm-sha256", digest}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store}); code != 0 {
+		t.Fatalf("import exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "sudo systemctl restart concord-agent") {
+		t.Fatalf("no restart hint with zero active credentials: %q", stdout.String())
+	}
+	if store.imported.AdminID != doc.AdminID {
+		t.Fatalf("imported %+v", store.imported)
+	}
+}
+
+func TestAuthorizerImportPassesReinstateOnlyWhenAsked(t *testing.T) {
+	export, digest, _ := writeTestExport(t)
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"import", "--file", export, "--confirm-sha256", digest}, false},
+		{[]string{"import", "--file", export, "--confirm-sha256", digest, "--reinstate"}, true},
+	} {
+		store := &fakeAuthorizerStore{}
+		var stdout, stderr bytes.Buffer
+		if code := runAuthorizerCLIWith(t.TempDir()+"/a.json", tc.args, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store}); code != 0 {
+			t.Fatalf("%v: exit %d: %s", tc.args, code, stderr.String())
+		}
+		if store.reinstate != tc.want {
+			t.Fatalf("%v: reinstate=%t, want %t", tc.args, store.reinstate, tc.want)
+		}
+	}
+	store := &fakeAuthorizerStore{importErr: hostagent.ErrAuthorizerRevokedImport}
+	var stdout, stderr bytes.Buffer
+	if code := runAuthorizerCLIWith(t.TempDir()+"/a.json", []string{"import", "--file", export, "--confirm-sha256", digest}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store}); code != 1 || !strings.Contains(stderr.String(), "--reinstate") {
+		t.Fatalf("revoked import: exit %d stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(authorizerUsage, "--reinstate") {
+		t.Fatal("usage does not document --reinstate")
+	}
+}
+
+func TestAuthorizerRevokeOfNothingExitsNonZero(t *testing.T) {
+	store := &fakeAuthorizerStore{}
+	var stdout, stderr bytes.Buffer
+	code := runAuthorizerCLIWith("/authorizers.json", []string{"revoke", "--admin-id", "3e7138e5-6eb9-4a79-8133-5eab67b7f2b6"}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store})
+	if code != 1 || !strings.Contains(stderr.String(), "nothing was revoked") || strings.Contains(stdout.String(), "Revoked") {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 	}
 }

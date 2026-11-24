@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -71,6 +72,13 @@ func loadTestAuthorizers(t *testing.T, path, root string) *AuthorizerStore {
 	return store
 }
 
+func testCredentials(t *testing.T, store *AuthorizerStore, adminID string) []webauthn.Credential {
+	t.Helper()
+	credentials, err := store.Credentials(adminID)
+	require.NoError(t, err)
+	return credentials
+}
+
 func testOwnerUID() uint32 {
 	return uint32(os.Geteuid()) //nolint:gosec // test process UIDs fit uint32 on supported hosts
 }
@@ -81,13 +89,13 @@ func TestAuthorizerStoreValidAndCounterAdvance(t *testing.T) {
 	path := writeAuthorizerDoc(t, root, doc)
 	store := loadTestAuthorizers(t, path, root)
 	adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
-	creds := store.Credentials(adminID)
+	creds := testCredentials(t, store, adminID)
 	require.Len(t, creds, 1)
 	require.Equal(t, uint32(4), creds[0].Authenticator.SignCount)
 	require.NoError(t, store.AdvanceCounter(creds[0].ID, 5))
-	require.Equal(t, uint32(5), store.Credentials(adminID)[0].Authenticator.SignCount)
+	require.Equal(t, uint32(5), testCredentials(t, store, adminID)[0].Authenticator.SignCount)
 	require.Error(t, store.AdvanceCounter(creds[0].ID, 4))
-	require.Empty(t, store.Credentials(uuid.NewString()))
+	require.Empty(t, testCredentials(t, store, uuid.NewString()))
 }
 
 func TestAuthorizerStoreRPConfigReturnsCloneAndFailsClosed(t *testing.T) {
@@ -209,7 +217,7 @@ func TestAuthorizerStoreAtomicWriteFailurePreservesFile(t *testing.T) {
 				store.renameFile = func(string, string) error { return errors.New("injected rename failure") }
 			}
 			adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
-			id := store.Credentials(adminID)[0].ID
+			id := testCredentials(t, store, adminID)[0].ID
 			require.Error(t, store.AdvanceCounter(id, 5))
 			after, err := os.ReadFile(path) //nolint:gosec // path is this test's temporary fixture
 			require.NoError(t, err)
@@ -240,34 +248,34 @@ func TestAuthorizerStoreCreateImportRevoke(t *testing.T) {
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o644), info.Mode().Perm(), "the nonroot read-only projection needs world-read, never world-write")
-	require.Empty(t, store.Credentials(uuid.NewString()))
+	require.Empty(t, testCredentials(t, store, uuid.NewString()))
 
 	doc := testAuthorizerImport(t)
 	adminID := doc.AdminID
 	second := doc.Credentials[0]
 	second.CredentialID = base64.RawURLEncoding.EncodeToString([]byte("credential-2"))
 	doc.Credentials = append(doc.Credentials, second)
-	created, err := store.ImportMany(doc)
+	created, err := store.ImportMany(doc, false)
 	require.NoError(t, err)
 	require.Equal(t, 2, created)
-	require.Len(t, store.Credentials(doc.AdminID), 2)
+	require.Len(t, testCredentials(t, store, doc.AdminID), 2)
 	id, err := base64.RawURLEncoding.DecodeString(doc.Credentials[0].CredentialID)
 	require.NoError(t, err)
 	require.NoError(t, store.AdvanceCounter(id, 5))
-	created, err = store.ImportMany(doc)
+	created, err = store.ImportMany(doc, false)
 	require.NoError(t, err)
 	require.Zero(t, created)
-	require.Equal(t, uint32(5), store.Credentials(doc.AdminID)[0].Authenticator.SignCount)
+	require.Equal(t, uint32(5), testCredentials(t, store, doc.AdminID)[0].Authenticator.SignCount)
 	doc.AdminID = uuid.NewString()
-	created, err = store.ImportMany(doc)
+	created, err = store.ImportMany(doc, false)
 	require.Error(t, err)
 	require.Zero(t, created)
-	require.Equal(t, uint32(5), store.Credentials(adminID)[0].Authenticator.SignCount)
+	require.Equal(t, uint32(5), testCredentials(t, store, adminID)[0].Authenticator.SignCount)
 
 	removed, err := store.Revoke(adminID)
 	require.NoError(t, err)
 	require.Equal(t, 2, removed)
-	require.Empty(t, store.Credentials(adminID))
+	require.Empty(t, testCredentials(t, store, adminID))
 	removed, err = store.Revoke(adminID)
 	require.NoError(t, err)
 	require.Zero(t, removed)
@@ -283,20 +291,20 @@ func TestAuthorizerStoreImportBatchRejectsAllOnMalformedEntry(t *testing.T) {
 	bad.CredentialID = base64.RawURLEncoding.EncodeToString([]byte("different-credential"))
 	bad.Label = strings.Repeat("x", maxAuthorizerLabel+1)
 	doc.Credentials = append(doc.Credentials, bad)
-	created, err := store.ImportMany(doc)
+	created, err := store.ImportMany(doc, false)
 	require.Error(t, err)
 	require.Zero(t, created)
-	require.Empty(t, store.Credentials(doc.AdminID))
+	require.Empty(t, testCredentials(t, store, doc.AdminID))
 
 	doc.Credentials[1] = doc.Credentials[0]
-	created, err = store.ImportMany(doc)
+	created, err = store.ImportMany(doc, false)
 	require.Error(t, err)
 	require.Zero(t, created)
-	require.Empty(t, store.Credentials(doc.AdminID))
+	require.Empty(t, testCredentials(t, store, doc.AdminID))
 
 	badAdmin := testAuthorizerImport(t)
 	badAdmin.AdminID = "not-a-uuid"
-	created, err = store.ImportMany(badAdmin)
+	created, err = store.ImportMany(badAdmin, false)
 	require.Error(t, err)
 	require.Zero(t, created)
 }
@@ -307,7 +315,7 @@ func TestAuthorizerStoreImportDoesNotReplaceTrustedCredential(t *testing.T) {
 	store, err := loadOrCreateAuthorizersAt(path, testOwnerUID(), root, "admin.example.test", []string{"https://admin.example.test"})
 	require.NoError(t, err)
 	imp := testAuthorizerImport(t)
-	_, err = store.ImportMany(imp)
+	_, err = store.ImportMany(imp, false)
 	require.NoError(t, err)
 	id, err := base64.RawURLEncoding.DecodeString(imp.Credentials[0].CredentialID)
 	require.NoError(t, err)
@@ -317,7 +325,7 @@ func TestAuthorizerStoreImportDoesNotReplaceTrustedCredential(t *testing.T) {
 	stale.Credentials = append([]AuthorizerCredentialImport(nil), imp.Credentials...)
 	stale.Credentials[0].SignCount = 1
 	stale.Credentials[0].Label = "stale label"
-	created, err := store.ImportMany(stale)
+	created, err := store.ImportMany(stale, false)
 	require.NoError(t, err)
 	require.Zero(t, created)
 	list, err := store.List()
@@ -329,7 +337,7 @@ func TestAuthorizerStoreImportDoesNotReplaceTrustedCredential(t *testing.T) {
 	conflict.AdminID = uuid.NewString()
 	before, err := os.ReadFile(path) //nolint:gosec // test-created trust file
 	require.NoError(t, err)
-	created, err = store.ImportMany(conflict)
+	created, err = store.ImportMany(conflict, false)
 	require.Error(t, err)
 	require.Zero(t, created)
 	after, err := os.ReadFile(path) //nolint:gosec // test-created trust file
@@ -343,7 +351,7 @@ func TestAuthorizerStoreListExposesOnlyBoundedMetadata(t *testing.T) {
 	store, err := loadOrCreateAuthorizersAt(path, testOwnerUID(), root, "admin.example.test", []string{"https://admin.example.test"})
 	require.NoError(t, err)
 	doc := testAuthorizerImport(t)
-	_, err = store.ImportMany(doc)
+	_, err = store.ImportMany(doc, false)
 	require.NoError(t, err)
 	list, err := store.List()
 	require.NoError(t, err)
@@ -410,7 +418,7 @@ func TestAuthorizerStoreImportFailurePreservesPriorFile(t *testing.T) {
 			} else {
 				store.renameFile = func(string, string) error { return errors.New("injected rename failure") }
 			}
-			created, err := store.ImportMany(testAuthorizerImport(t))
+			created, err := store.ImportMany(testAuthorizerImport(t), false)
 			require.Error(t, err)
 			require.Zero(t, created)
 			after, err := os.ReadFile(path) //nolint:gosec // path is this test's temporary fixture
@@ -469,7 +477,7 @@ func TestAuthorizerStoreCounterAndRevocationRefusals(t *testing.T) {
 	removed, err := store.Revoke(testAuthorizerString(t, entry, "admin_id"))
 	require.NoError(t, err)
 	require.Equal(t, 1, removed)
-	require.Len(t, store.Credentials(testAuthorizerString(t, other, "admin_id")), 1)
+	require.Len(t, testCredentials(t, store, testAuthorizerString(t, other, "admin_id")), 1)
 }
 
 func TestAuthorizerStoreRefusesGenerationExhaustion(t *testing.T) {
@@ -493,7 +501,9 @@ func TestAuthorizerStoreMalformedFileFailsClosedAfterLoad(t *testing.T) {
 	store := loadTestAuthorizers(t, path, root)
 	adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
 	require.NoError(t, os.WriteFile(path, []byte{0xff}, 0o644)) //nolint:gosec // invalid UTF-8 in test-owned trust file
-	require.Empty(t, store.Credentials(adminID))
+	credentials, err := store.Credentials(adminID)
+	require.Error(t, err, "an unreadable trust file is an error, never an empty credential set")
+	require.Empty(t, credentials)
 	require.Error(t, store.AdvanceCounter([]byte("credential-1"), 5))
 }
 

@@ -321,3 +321,88 @@ func TestServerActionOutlivesTheClient(t *testing.T) {
 		t.Fatalf("audit %+v", ev)
 	}
 }
+
+func TestServerStepUpBeginPassesAgentRefusalsThrough(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		code   string
+		result string
+	}{
+		{http.StatusConflict, "appliance_managed", AuditFailure},
+		{http.StatusConflict, "unknown_archive", AuditFailure},
+		{http.StatusConflict, "untrusted_backups", AuditFailure},
+		{http.StatusBadRequest, "invalid_authorization", AuditFailure},
+		{http.StatusTooManyRequests, "authorization_busy", AuditFailure},
+		{http.StatusForbidden, "writes_disabled", AuditFailure},
+		{http.StatusForbidden, "authorization_denied", AuditDenied},
+		{http.StatusServiceUnavailable, "authorizer_unavailable", AuditFailure},
+		{http.StatusTooManyRequests, "backup_rate_limited", AuditFailure},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			sock, calls := recordingAgent(t, tc.status, `{"error":"`+tc.code+`"}`)
+			audit := &fakeAudit{}
+			rec := send(writeEngine(sock, audit), "/server/stepup", `{"action":"backup"}`)
+			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), `"error":"`+tc.code+`"`) {
+				t.Fatalf("got %d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.code)
+			}
+			if strings.Contains(rec.Body.String(), "stepup_failed") || strings.Contains(rec.Body.String(), "stepup_unavailable") {
+				t.Fatalf("refusal shown as a key failure: %s", rec.Body)
+			}
+			if len(calls()) != 1 || len(audit.events) != 1 || audit.events[0].Result != tc.result || audit.events[0].Detail["reason"] != tc.code {
+				t.Fatalf("audit: %+v", audit.events)
+			}
+		})
+	}
+}
+
+func TestServerStepUpBeginRelaysOnlyKnownApplianceName(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"error":"appliance_managed","appliance":"truenas"}`, `"appliance":"truenas"`},
+		{`{"error":"appliance_managed","appliance":"<script>"}`, `appliance_managed`},
+	} {
+		sock, _ := recordingAgent(t, http.StatusConflict, tc.body)
+		rec := send(writeEngine(sock, &fakeAudit{}), "/server/stepup", `{"action":"start"}`)
+		if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), "<script>") || !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("%s: %d %s", tc.body, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestServerActionRejectsArgumentsDifferentFromBegin(t *testing.T) {
+	var calls []agentCall
+	sock := fakeAgent(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		calls = append(calls, agentCall{r.Method + " " + r.URL.Path, string(b)})
+		if r.URL.Path == "/v1/authorizations" {
+			_, _ = w.Write([]byte(`{"handle":"` + testAuthorizationHandle + `","options":{}}`))
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"` + testJobID + `"}`))
+	})
+	audit := &fakeAudit{}
+	r := writeEngine(sock, audit)
+	step := `"stepup":{"handle":"` + testAuthorizationHandle + `","assertion":{}}`
+	if rec := send(r, "/server/stepup", `{"action":"update","tag":"v1.2.3"}`); rec.Code != http.StatusOK {
+		t.Fatalf("begin: %d %s", rec.Code, rec.Body)
+	}
+	for _, body := range []string{`{"tag":"v9.9.9",` + step + `}`, `{"tag":"v1.2.3-rc1",` + step + `}`} {
+		rec := send(r, "/server/actions/update", body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "stepup_binding_mismatch") {
+			t.Fatalf("%s: %d %s", body, rec.Code, rec.Body)
+		}
+	}
+	if rec := send(r, "/server/actions/restart", `{`+step+`}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("other action: %d %s", rec.Code, rec.Body)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("agent called for a mismatch: %+v", calls)
+	}
+	mismatch := audit.events[len(audit.events)-2]
+	if mismatch.Result != AuditDenied || mismatch.Detail["reason"] != "stepup_binding_mismatch" || mismatch.Detail["sent_tag"] != "v1.2.3-rc1" {
+		t.Fatalf("audit: %+v", mismatch)
+	}
+	if rec := send(r, "/server/actions/update", `{"tag":"v1.2.3",`+step+`}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("matching action: %d %s", rec.Code, rec.Body)
+	}
+}

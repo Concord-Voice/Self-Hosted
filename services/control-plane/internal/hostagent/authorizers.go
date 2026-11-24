@@ -79,7 +79,13 @@ type AuthorizerListing struct {
 	Revoked          bool   `json:"revoked"`
 }
 
-var errAuthorizerCounterStale = errors.New("authorizer counter did not advance")
+var (
+	errAuthorizerCounterStale = errors.New("authorizer counter did not advance")
+	errAuthorizerRevoked      = errors.New("authorizer credential revoked")
+	// ErrAuthorizerRevokedImport refuses an import that would silently restore
+	// a revoked credential; the root operator must ask for it explicitly.
+	ErrAuthorizerRevokedImport = errors.New("export contains a revoked credential; pass --reinstate to restore it")
+)
 
 // AuthorizerStore reads root-owned public credentials. Every lookup re-reads the
 // file so a root operator's revocation takes effect without restarting the agent.
@@ -284,12 +290,13 @@ func validAuthorizerRPID(value string) bool {
 	return true
 }
 
-// Credentials returns a copy of the current trusted credentials for one admin.
-// A malformed or revoked file fails closed to an empty result.
-func (s *AuthorizerStore) Credentials(adminID string) []webauthn.Credential {
+// Credentials returns a copy of the current trusted, unrevoked credentials for
+// one admin. An unreadable or malformed file returns an error, which callers
+// treat as ErrAuthorizerUnavailable rather than as "no credentials".
+func (s *AuthorizerStore) Credentials(adminID string) ([]webauthn.Credential, error) {
 	doc, err := s.read()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var credentials []webauthn.Credential
 	for _, entry := range doc.Authorizers {
@@ -300,7 +307,7 @@ func (s *AuthorizerStore) Credentials(adminID string) []webauthn.Credential {
 		key, _ := decodeAuthorizerField(entry.PublicKey, maxAuthorizerKeyBytes)
 		credentials = append(credentials, webauthn.Credential{ID: id, PublicKey: key, Authenticator: webauthn.Authenticator{SignCount: entry.SignCount}})
 	}
-	return credentials
+	return credentials, nil
 }
 
 // RPConfig returns the validated relying-party configuration for the agent's
@@ -381,14 +388,30 @@ func (s *AuthorizerStore) mutate(fn func(*authorizerFile) (bool, error)) error {
 	return s.writeAtomic(data)
 }
 
-// AdvanceCounter refuses stale counters and writes a new root-owned snapshot.
+// AdvanceCounter refuses stale counters and revoked credentials, and writes a
+// new root-owned snapshot. The revocation check runs under the file lock, so a
+// revoke that lands after Credentials() but before this write still wins.
 func (s *AuthorizerStore) AdvanceCounter(credentialID []byte, count uint32) error {
+	return s.advanceCounter(credentialID, count, false)
+}
+
+// advanceLoginCounter also advances a revoked credential: an admin login is
+// not root authority, and the durable counter must keep moving so a clone of a
+// revoked key stays detectable.
+func (s *AuthorizerStore) advanceLoginCounter(credentialID []byte, count uint32) error {
+	return s.advanceCounter(credentialID, count, true)
+}
+
+func (s *AuthorizerStore) advanceCounter(credentialID []byte, count uint32, allowRevoked bool) error {
 	return s.mutate(func(doc *authorizerFile) (bool, error) {
 		found := false
 		for i := range doc.Authorizers {
 			id, _ := decodeAuthorizerField(doc.Authorizers[i].CredentialID, maxAuthorizerIDBytes)
 			if !bytes.Equal(id, credentialID) {
 				continue
+			}
+			if doc.Authorizers[i].Revoked && !allowRevoked {
+				return false, errAuthorizerRevoked
 			}
 			old := doc.Authorizers[i].SignCount
 			if count <= old && (count != 0 || old != 0) {
@@ -410,8 +433,9 @@ func (s *AuthorizerStore) AdvanceCounter(credentialID []byte, count uint32) erro
 
 // ImportMany validates and installs one root-confirmed document atomically.
 // A credential already trusted for the same admin/key is left unchanged, so a
-// stale export cannot lower its durable sign counter.
-func (s *AuthorizerStore) ImportMany(in AuthorizerImport) (int, error) {
+// stale export cannot lower its durable sign counter. A revoked credential is
+// restored only when reinstate is set; otherwise the whole import is refused.
+func (s *AuthorizerStore) ImportMany(in AuthorizerImport, reinstate bool) (int, error) {
 	added := 0
 	err := s.mutate(func(doc *authorizerFile) (bool, error) {
 		if err := validateAuthorizerImport(in, *doc); err != nil {
@@ -423,7 +447,7 @@ func (s *AuthorizerStore) ImportMany(in AuthorizerImport) (int, error) {
 			if err != nil {
 				return false, err
 			}
-			created, err := addAuthorizerRecord(doc, candidate)
+			created, err := addAuthorizerRecord(doc, candidate, reinstate)
 			if err != nil {
 				return false, err
 			}
@@ -461,7 +485,7 @@ func importAuthorizerRecord(adminID string, input AuthorizerCredentialImport, se
 	return record, nil
 }
 
-func addAuthorizerRecord(doc *authorizerFile, candidate authorizerRecord) (bool, error) {
+func addAuthorizerRecord(doc *authorizerFile, candidate authorizerRecord, reinstate bool) (bool, error) {
 	for i := range doc.Authorizers {
 		existing := &doc.Authorizers[i]
 		if existing.CredentialID != candidate.CredentialID {
@@ -471,6 +495,9 @@ func addAuthorizerRecord(doc *authorizerFile, candidate authorizerRecord) (bool,
 			return false, errors.New("conflicting import credential")
 		}
 		if existing.Revoked {
+			if !reinstate {
+				return false, ErrAuthorizerRevokedImport
+			}
 			existing.Revoked = false
 			return true, nil
 		}

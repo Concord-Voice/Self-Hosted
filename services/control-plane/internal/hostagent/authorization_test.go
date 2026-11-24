@@ -9,16 +9,19 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
@@ -31,6 +34,9 @@ type fakeAgentWebAuthn struct {
 	begins, finishes    int
 	gotSession          webauthn.SessionData
 	gotOptions          protocol.PublicKeyCredentialRequestOptions
+	// repeatCount reports the stored counter unchanged, as a clone would.
+	repeatCount bool
+	onFinish    func()
 }
 
 func (f *fakeAgentWebAuthn) BeginLogin(_ *mfa.WebAuthnUser, opts ...webauthn.LoginOption) (*protocol.CredentialAssertion, *webauthn.SessionData, error) {
@@ -51,12 +57,18 @@ func (f *fakeAgentWebAuthn) BeginLogin(_ *mfa.WebAuthnUser, opts ...webauthn.Log
 func (f *fakeAgentWebAuthn) FinishLoginWithBytes(user *mfa.WebAuthnUser, session webauthn.SessionData, _ []byte) (*webauthn.Credential, error) {
 	f.finishes++
 	f.gotSession = session
+	if f.onFinish != nil {
+		f.onFinish()
+	}
 	if f.credential == nil {
 		return nil, f.finishErr
 	}
 	credential := *f.credential
 	if len(user.Credentials) > 0 {
 		credential.Authenticator.SignCount = user.Credentials[0].Authenticator.SignCount + 1
+		if f.repeatCount {
+			credential.Authenticator.SignCount--
+		}
 	}
 	return &credential, f.finishErr
 }
@@ -68,7 +80,7 @@ func newAuthorizationFixture(t *testing.T) (*AuthorizationStore, *fakeAgentWebAu
 	path := writeAuthorizerDoc(t, root, doc)
 	authorizers := loadTestAuthorizers(t, path, root)
 	adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
-	credential := authorizers.Credentials(adminID)[0]
+	credential := testCredentials(t, authorizers, adminID)[0]
 	credential.Authenticator.SignCount = 5
 	verifier := &fakeAgentWebAuthn{
 		credential: &credential,
@@ -86,15 +98,22 @@ func newAuthorizationFixture(t *testing.T) (*AuthorizationStore, *fakeAgentWebAu
 
 func TestAuthorizationBeginIsBoundedAndRequiresTrustedAdminAndArgs(t *testing.T) {
 	store, verifier, adminID, _, now := newAuthorizationFixture(t)
+	var no *refusal
 	_, _, err := store.Begin("unknown", "start", actionRequest{})
-	require.Error(t, err)
+	require.ErrorAs(t, err, &no)
+	require.Equal(t, refusal{http.StatusBadRequest, "invalid_authorization"}, *no)
 	_, _, err = store.Begin(adminID, "unknown", actionRequest{})
-	require.Error(t, err)
+	require.ErrorAs(t, err, &no)
+	require.Equal(t, "invalid_authorization", no.reason)
 	_, _, err = store.Begin(adminID, "start", actionRequest{Tag: "v1.2.3"})
-	require.Error(t, err)
+	require.ErrorAs(t, err, &no)
+	require.Equal(t, refusal{http.StatusBadRequest, "unexpected_argument"}, *no)
+	_, _, err = store.Begin(adminID, "update", actionRequest{Tag: "v1.2.3-" + strings.Repeat("a", 122)})
+	require.ErrorAs(t, err, &no, "a 129-byte tag is refused before the parser")
+	require.Equal(t, "invalid_authorization", no.reason)
 	require.Zero(t, verifier.begins)
 
-	for range 64 {
+	for range authorizationsPerAdmin {
 		handle, options, err := store.Begin(adminID, "start", actionRequest{})
 		require.NoError(t, err)
 		require.Len(t, handle, 43)
@@ -102,11 +121,75 @@ func TestAuthorizationBeginIsBoundedAndRequiresTrustedAdminAndArgs(t *testing.T)
 	}
 	require.Equal(t, protocol.VerificationRequired, verifier.gotOptions.UserVerification)
 	_, _, err = store.Begin(adminID, "start", actionRequest{})
-	require.Error(t, err)
-	require.Equal(t, 64, verifier.begins)
-	*now = now.Add(authorizationTTL)
+	require.ErrorIs(t, err, ErrAuthorizationBusy, "one admin cannot hold more than its share of ceremonies")
+	require.Equal(t, authorizationsPerAdmin, verifier.begins)
+
+	// This admin's handles expire while other admins' ceremonies leave one
+	// free slot in the shared store.
+	*now = now.Add(authorizationTTL / 2)
+	for handle, pending := range store.pending {
+		if pending.adminID == adminID {
+			pending.expires = *now
+			store.pending[handle] = pending
+		}
+	}
+	for i := range authorizationCapacity - 1 {
+		store.pending[fmt.Sprintf("other-%d", i)] = pendingAuthorization{adminID: uuid.NewString(), action: "start", expires: now.Add(authorizationTTL)}
+	}
+	// Begin sweeps the expired handles, takes the last slot, then is full.
 	_, _, err = store.Begin(adminID, "start", actionRequest{})
 	require.NoError(t, err, "expired handles must release capacity")
+	_, _, err = store.Begin(adminID, "start", actionRequest{})
+	require.ErrorIs(t, err, ErrAuthorizationBusy, "the global bound still applies")
+	*now = now.Add(authorizationTTL)
+	_, _, err = store.Begin(adminID, "start", actionRequest{})
+	require.NoError(t, err, "expired handles must release global capacity")
+}
+
+func TestAuthorizationBeginArgumentsRoundTripAndAssertionBoundary(t *testing.T) {
+	store, verifier, adminID, _, _ := newAuthorizationFixture(t)
+	tag := "v1.2.3-" + strings.Repeat("a", 121) // exactly 128 bytes
+	require.Len(t, tag, 128)
+	handle, _, err := store.Begin(adminID, "update", actionRequest{Tag: tag})
+	require.NoError(t, err)
+	req, err := store.Consume(handle, "update", make([]byte, maxAssertionBytes))
+	require.NoError(t, err, "an assertion of exactly maxAssertionBytes is accepted")
+	require.Equal(t, actionRequest{Tag: tag}, req)
+
+	name := "concord-backup-20261106T071500Z.tar.gz"
+	require.NoError(t, os.WriteFile(filepath.Join(store.jobs.backups, name), []byte("x"), 0o600))
+	handle, _, err = store.Begin(adminID, "restore", actionRequest{Archive: name})
+	require.NoError(t, err)
+	req, err = store.Consume(handle, "restore", []byte(`{"assertion":true}`))
+	require.NoError(t, err)
+	require.Equal(t, actionRequest{Archive: name}, req)
+
+	finishes := verifier.finishes
+	handle, _, err = store.Begin(adminID, "update", actionRequest{Tag: tag})
+	require.NoError(t, err)
+	_, err = store.Consume(handle, "update", make([]byte, maxAssertionBytes+1))
+	require.ErrorIs(t, err, ErrAuthorizationDenied, "one byte over the bound is refused")
+	require.Equal(t, finishes, verifier.finishes, "an oversized assertion never reaches the verifier")
+}
+
+func TestAuthorizationCloneAndStaleCounterAreDistinctDenials(t *testing.T) {
+	store, verifier, adminID, _, _ := newAuthorizationFixture(t)
+	handle, _, err := store.Begin(adminID, "start", actionRequest{})
+	require.NoError(t, err)
+	verifier.credential.Authenticator.CloneWarning = true
+	_, err = store.Consume(handle, "start", []byte(`{"assertion":true}`))
+	require.ErrorIs(t, err, errCloneDetected)
+	require.ErrorIs(t, err, ErrAuthorizationDenied)
+	verifier.credential.Authenticator.CloneWarning = false
+
+	// The verifier reports the counter the root store already holds.
+	verifier.repeatCount = true
+	handle, _, err = store.Begin(adminID, "start", actionRequest{})
+	require.NoError(t, err)
+	_, err = store.Consume(handle, "start", []byte(`{"assertion":true}`))
+	require.ErrorIs(t, err, errCounterStale)
+	require.ErrorIs(t, err, ErrAuthorizationDenied, "a stale counter is an authorization denial, not an unavailable authorizer")
+	require.NotErrorIs(t, err, ErrAuthorizerUnavailable)
 }
 
 func TestAuthorizationConsumeUsesStoredActionAndCompleteSessionOnce(t *testing.T) {
@@ -125,7 +208,7 @@ func TestAuthorizationConsumeUsesStoredActionAndCompleteSessionOnce(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, actionRequest{}, req)
 	require.True(t, reflect.DeepEqual(verifier.session, verifier.gotSession), "SessionData must round-trip unchanged")
-	require.Equal(t, uint32(5), authorizers.Credentials(adminID)[0].Authenticator.SignCount)
+	require.Equal(t, uint32(5), testCredentials(t, authorizers, adminID)[0].Authenticator.SignCount)
 	_, err = store.Consume(handle, "start", []byte(`{"assertion":true}`))
 	require.Error(t, err, "successful handle is spent")
 }
@@ -150,7 +233,7 @@ func TestAuthorizationExpiryCloneAndCounterFaultFailClosed(t *testing.T) {
 			require.Error(t, err)
 			_, err = store.Consume(handle, "backup", []byte(`{"assertion":true}`))
 			require.Error(t, err, "failed ceremony cannot be replayed")
-			require.Equal(t, uint32(4), authorizers.Credentials(adminID)[0].Authenticator.SignCount)
+			require.Equal(t, uint32(4), testCredentials(t, authorizers, adminID)[0].Authenticator.SignCount)
 		})
 	}
 }
@@ -247,10 +330,10 @@ func TestAuthorizationRealWebAuthnVerifierRejectsWrongTrustClaims(t *testing.T) 
 			if scenario == "valid" {
 				require.NoError(t, err)
 				require.Equal(t, adminID, boundAdminID)
-				require.Equal(t, uint32(5), authorizers.Credentials(adminID)[0].Authenticator.SignCount)
+				require.Equal(t, uint32(5), testCredentials(t, authorizers, adminID)[0].Authenticator.SignCount)
 			} else {
 				require.Error(t, err)
-				require.Equal(t, uint32(4), authorizers.Credentials(adminID)[0].Authenticator.SignCount)
+				require.Equal(t, uint32(4), testCredentials(t, authorizers, adminID)[0].Authenticator.SignCount)
 			}
 		})
 	}
@@ -290,7 +373,7 @@ func TestAuthorizationRealVerifierRejectsRepeatedOrLowerCounters(t *testing.T) {
 		_, consumeErr := store.Consume(handle, "update", assertion)
 		return consumeErr
 	}
-	stored := func() uint32 { return authorizers.Credentials(adminID)[0].Authenticator.SignCount }
+	stored := func() uint32 { return testCredentials(t, authorizers, adminID)[0].Authenticator.SignCount }
 
 	require.NoError(t, authorize(0), "a zero-counter key remains usable")
 	require.NoError(t, authorize(0), "a zero-counter key may repeat zero")

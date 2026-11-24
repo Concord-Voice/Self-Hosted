@@ -19,12 +19,18 @@ import (
 const (
 	authorizerPath      = "/etc/concord-voice/agent-authorizers/authorizers.json"
 	maxAuthorizerImport = 1 << 20
-	authorizerUsage     = "usage: concord-agent authorizer <list|import|revoke> [flags]"
+	authorizerUsage     = `usage: concord-agent authorizer <command> [flags]
+  list
+  import --file <export.json> --confirm-sha256 <sha256> [--reinstate]
+         --reinstate restores a credential that was revoked; without it an
+         export holding a revoked credential is refused
+  revoke --admin-id <uuid>
+         exits non-zero when the admin has no active credential to revoke`
 )
 
 type authorizerStore interface {
 	List() ([]hostagent.AuthorizerListing, error)
-	ImportMany(hostagent.AuthorizerImport) (int, error)
+	ImportMany(hostagent.AuthorizerImport, bool) (int, error)
 	Revoke(string) (int, error)
 }
 
@@ -99,6 +105,7 @@ func importAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 	fs.SetOutput(stderr)
 	file := fs.String("file", "", "path to the admin export JSON")
 	confirm := fs.String("confirm-sha256", "", "exact SHA-256 fingerprint of the export")
+	reinstate := fs.Bool("reinstate", false, "restore credentials in the export that were revoked")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -129,13 +136,24 @@ func importAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 		subtle.ConstantTimeCompare([]byte(*confirm), []byte(fingerprint)) != 1 {
 		return errors.New("--confirm-sha256 must exactly match the export fingerprint")
 	}
-	_, statErr := os.Lstat(path)
-	firstImport := os.IsNotExist(statErr)
 	store, err := stores.LoadOrCreate(path, doc.RPID, doc.Origins)
 	if err != nil {
 		return err
 	}
-	added, err := store.ImportMany(doc)
+	// A running agent that found no usable trust at startup keeps writes off
+	// until it restarts, so hint whenever nothing was active before.
+	before, err := store.List()
+	if err != nil {
+		return err
+	}
+	firstImport := true
+	for _, entry := range before {
+		if !entry.Revoked {
+			firstImport = false
+			break
+		}
+	}
+	added, err := store.ImportMany(doc, *reinstate)
 	if err != nil {
 		return err
 	}
@@ -165,6 +183,11 @@ func revokeAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 	removed, err := store.Revoke(*adminID)
 	if err != nil {
 		return err
+	}
+	if removed == 0 {
+		// Callers (concord-selfhost admin reset-enrollment) rely on a non-zero
+		// exit so a mistyped or never-imported admin is not reported as revoked.
+		return fmt.Errorf("no active authorizer credentials for admin %s; nothing was revoked", *adminID)
 	}
 	_, err = fmt.Fprintf(stdout, "Revoked %d authorizer credentials for admin %s\n", removed, *adminID)
 	return err

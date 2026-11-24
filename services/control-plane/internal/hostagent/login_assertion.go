@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
+	"slices"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -34,11 +36,17 @@ func (s *AuthorizationStore) verifyLoginAssertion(adminID string, session webaut
 	}
 	doc, err := s.authorizers.read()
 	if err != nil {
+		log.Printf("concord-agent: authorizer trust unreadable at login: %v", err)
 		return ErrAuthorizerUnavailable
 	}
 	selected, err := selectLoginAuthorizer(doc, session, parsed.RawID, adminID)
 	if err != nil {
 		return err
+	}
+	// The verifier's origins were fixed at startup and BeginLogin leaves
+	// session.Origin empty, so hold the asserted origin to root's current file.
+	if !slices.Contains(doc.Origins, parsed.Response.CollectedClientData.Origin) {
+		return ErrAuthorizationDenied
 	}
 	key, _ := decodeAuthorizerField(selected.PublicKey, maxAuthorizerKeyBytes)
 	user := &mfa.WebAuthnUser{
@@ -52,10 +60,11 @@ func (s *AuthorizationStore) verifyLoginAssertion(adminID string, session webaut
 	if err != nil || credential == nil || credential.Authenticator.CloneWarning {
 		return ErrAuthorizationDenied
 	}
-	if err := s.authorizers.AdvanceCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
+	if err := s.authorizers.advanceLoginCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
 		if errors.Is(err, errAuthorizerCounterStale) {
 			return ErrAuthorizationDenied
 		}
+		log.Printf("concord-agent: authorizer counter update failed at login: %v", err)
 		return ErrAuthorizerUnavailable
 	}
 	return nil

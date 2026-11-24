@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -49,6 +50,9 @@ type ServerArea struct {
 	agent *http.Client
 	audit auditWriter
 	log   *logger.Logger
+
+	bindMu   sync.Mutex
+	bindings map[string]stepUpBinding
 }
 
 // NewServerArea returns a ServerArea that talks to the agent on its socket.

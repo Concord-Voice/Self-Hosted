@@ -2,6 +2,7 @@ package hostagent
 
 import (
 	"context"
+	"log"
 	"net"
 )
 
@@ -33,6 +34,9 @@ func peerConnContextWith(reader func(net.Conn) (Peer, error)) func(context.Conte
 	return func(ctx context.Context, conn net.Conn) context.Context {
 		peer, err := reader(conn)
 		if err != nil {
+			// ConnContext runs once per accepted connection, so this logs once
+			// per connection; every request on it is then denied.
+			log.Printf("concord-agent: peer credentials unavailable: %v", err)
 			return ctx
 		}
 		return withPeer(ctx, peer)
