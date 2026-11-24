@@ -38,7 +38,7 @@ SSO initiation is bound to the Desktop flow that started it, and backup-code
 readers accept the versioned formats needed for a later storage migration.
 The media plane now admits encrypted media format v6 alongside earlier room versions, while keeping each active call on one version.
 
-**23 Total Changes** | 8 Added | 6 Changed | 7 Fixed | 2 Security
+**24 Total Changes** | 8 Added | 7 Changed | 7 Fixed | 2 Security
 
 ### Added
 
@@ -100,6 +100,7 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 
 ### Changed
 
+- **Operations:** The control plane's Go module path is now `github.com/Concord-Voice/Self-Hosted/services/control-plane`. Code that imports a control-plane package must use the new path.
 - **Server:** Control-plane request handlers were restructured into smaller functions to clear code-quality findings. Responses, error messages and permission checks are unchanged.
 - **Server:** The pending key-request reader checks each server's channel permissions in a separate function. Which requests a member sees is unchanged.
 - **Operations:** `ATTESTATION_OIDC_SUBJECT_PREFIX` now defaults to `repo:Concord-Voice@264583090/Self-Hosted@1359565266:`, the immutable subject form this repository's GitHub OIDC tokens carry. Set it to bind attestation to a different repository. The self-hosted acceptance runner checks now admit this repository too.

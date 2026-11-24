@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"

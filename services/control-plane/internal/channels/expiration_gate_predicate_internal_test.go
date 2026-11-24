@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/expiration"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/expiration"
 )
 
 func gatePredicateBool(v bool) *bool { return &v }

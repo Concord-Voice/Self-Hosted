@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
 )
 
 // Regression for the accept-time eligibility gap in Wing +1 seats (follow-up to

@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/stmthook"
 )
 
 var retirementConsumerBirth = time.Date(2026, 10, 14, 0, 0, 0, 123456789, time.UTC)

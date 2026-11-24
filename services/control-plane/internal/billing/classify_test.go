@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stripe/stripe-go/v87"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
 )
 
 // classifyPeriodEnd is the unix second every valid fixture subscription ends on.

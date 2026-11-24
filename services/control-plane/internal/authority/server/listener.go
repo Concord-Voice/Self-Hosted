@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/tlspin"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/store"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/tlspin"
 )
 
 // The listener budgets (DoR:1621, D-98, D-107), the handshake deadline
