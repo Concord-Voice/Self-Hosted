@@ -114,7 +114,7 @@
 - [ ] **Step 3: Run red.** `go test -race ./internal/auth -run 'TestRecoveryTokenRejectedAfter|TestSiblingRecoveryToken|TestNeverRotated' -count=1`. Expected: the reset rows fail on the used-marker assertion (the marker is reserved before the locked check refuses).
 - [ ] **Step 4: Implement.** The unlocked policy read used by `ValidateRecoveryToken` also returns `COALESCE(credential_epoch, '')` (one query, no added round trip; `GetRecoveryMethods` keeps its signature and drops the value). `ValidateRecoveryToken` compares, then returns claims with both new fields set.
 - [ ] **Step 5: Run green**, then `go test -race ./internal/mfa ./internal/auth -count=1`. Expected: PASS.
-- [ ] **Step 6: Run the original exploit** where the Security checkout provides `exploit_tests/recovery_vuln018_test.go` and its overlay. Expected: FAIL. Record the output for the PR. If the overlay is unavailable, record that and cite Step 1's regression.
+- [ ] **Step 6: Run the original exploit** where the original `recovery_vuln018_test.go` and its overlay are available. Expected: FAIL. Record the output for the PR. If the overlay is unavailable, record that and cite Step 1's regression.
 - [ ] **Step 7: Commit.** `git commit -m "test: prove stale recovery tokens fail on every consumer"`
 
 ### Task 4: Spent-`jti` read on the device routes

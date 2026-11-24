@@ -1,6 +1,6 @@
 # Recovery token epoch binding and responder restriction
 
-**Tracker:** Security issue 161 (findings VULN-018, VULN-203, VULN-019).
+**Findings:** VULN-018, VULN-203, VULN-019.
 **Status:** Phase 2 design, ready for implementation.
 **Plan:** `docs/superpowers/plans/2026-11-18-161-recovery-epoch-binding.md`
 
@@ -264,8 +264,8 @@ must fail, and an in-repository regression asserts the opposite.
 | VULN-019 | Static: any session answers and lists | 403 on respond, empty list | `TestRespondRequiresTrustedDevice`, `TestListHidesRequestsFromUntrustedSession` (`internal/devicerecovery`), route tests in `internal/mfa` |
 
 The VULN-018 exploit test uses a machine-specific overlay path and a fake SQL
-driver, so it is re-authored in the repository, not copied. Where the Security
-checkout provides the overlay, run the original once and record that it fails.
+driver, so it is re-authored in the repository, not copied. Where the original
+test and its overlay are available, run it once and record that it fails.
 
 ## 8. Acceptance criteria
 
