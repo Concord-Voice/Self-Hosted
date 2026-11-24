@@ -1,6 +1,6 @@
 # WebSocket event budgets
 
-Normative contract for `Hosted issue 2270`.
+Normative contract for WebSocket event budgets.
 Source now includes the policy registry, typed validation/scaling, dedicated
 Redis account engine, socket lifetimes and complete enabled dispatch/renewal
 integration, validated process construction and Unit E canonical error-schema
