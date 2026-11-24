@@ -209,6 +209,7 @@ build_conf() {
     map $host $validated_host { default $host; }  # nosemgrep: generic.nginx.security.request-host-used.request-host-used -- test stand-in, loopback only
     map $http_user_agent $is_scanner { default 0; }
     map $binary_remote_addr $source_addr_bucket {
+        "~^\x00{10}\xff\xff(\C{4})$" $1;
         "~^(\C{8})" $1;
         default $binary_remote_addr;
     }

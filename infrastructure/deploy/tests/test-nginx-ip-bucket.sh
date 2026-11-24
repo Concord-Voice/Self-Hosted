@@ -18,6 +18,18 @@ grep -qF 'map $binary_remote_addr $source_addr_bucket {' "$VHOST" || fail 'sourc
 # shellcheck disable=SC2016 # literal nginx regex capture
 grep -qF '"~^(\C{8})" $1;' "$VHOST" || fail 'source bucket /64 binary capture missing'
 
+# The mapped-IPv4 arm must exist in both copies and precede the /64 arm: nginx
+# evaluates regex map arms in order, and a mapped peer's first 8 bytes are zero.
+# shellcheck disable=SC2016 # literal nginx regex capture
+mapped='"~^\x00{10}\xff\xff(\C{4})$" $1;'
+for file in "$VHOST" "$BLUEGREEN"; do
+  grep -qF "$mapped" "$file" || fail "mapped-IPv4 unmap arm missing in ${file##*/}"
+  mapped_line=$(grep -nF "$mapped" "$file" | head -1 | cut -d: -f1)
+  # shellcheck disable=SC2016 # literal nginx regex capture
+  prefix_line=$(grep -nF '"~^(\C{8})" $1;' "$file" | head -1 | cut -d: -f1)
+  [ "$mapped_line" -lt "$prefix_line" ] || fail "mapped-IPv4 arm must precede the /64 arm in ${file##*/}"
+done
+
 for zone in api auth ws_handshake; do
   grep -qE "^limit_req_zone \\\$source_addr_bucket zone=${zone}:" "$VHOST" \
     || fail "request zone ${zone} does not use source bucket"
