@@ -443,6 +443,9 @@ func (h *Handler) challengeFailure(c *gin.Context, err error, event string) {
 	c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 }
 
+// errNoAdminCredentials reports an admin with no registered WebAuthn key.
+var errNoAdminCredentials = errors.New("admin has no registered credentials")
+
 // webAuthnUserForAdmin reconstructs the WebAuthnUser (with all registered
 // credentials) for an admin so BeginLogin/FinishLogin can operate on the stored
 // keys. It returns an error when the admin has no credentials (cannot 2FA).
@@ -452,7 +455,7 @@ func (h *Handler) webAuthnUserForAdmin(ctx context.Context, adminID string) (*mf
 		return nil, fmt.Errorf("list admin credentials: %w", err)
 	}
 	if len(stored) == 0 {
-		return nil, errors.New("admin has no registered credentials")
+		return nil, errNoAdminCredentials
 	}
 	creds := make([]webauthn.Credential, 0, len(stored))
 	for _, s := range stored {
@@ -825,26 +828,35 @@ type createAdminRequest struct {
 	StepUp *adminStepUpProof `json:"stepup,omitempty"`
 }
 
+// maxCreateAdminBody bounds the create body: a username, a password of at
+// most 128 bytes and one WebAuthn assertion fit well inside it.
+const maxCreateAdminBody = 16 << 10
+
 // CreateAdmin provisions a pending admin and mints a one-time enrollment token,
 // returned ONCE in the response body. The acting admin id comes from the session
-// (set by AdminAuthRequired). The password set here is a temporary credential the
-// new operator changes is out-of-scope; it is hashed with Argon2id and never
-// echoed back.
+// (set by AdminAuthRequired). The password set here is a temporary credential;
+// changing it is out of scope. It is hashed with Argon2id and never echoed
+// back.
 //
-// The request must carry a fresh create_admin step-up from the acting admin,
-// redeemed before any row is written, so a session alone cannot mint a new
-// step-up-capable identity (VULN-139). The admin_created audit row commits with
-// the pending row, before the token is minted, and neither exists when the
-// audit row cannot be written, so
-// every live enrollment token has a durable record other admins are told about
-// at their next sign-in. When the token cannot be minted, the still-unenrolled
-// pending row is removed and a failure row is written, so a retry succeeds.
+// The body is decoded strictly (no unknown fields, at most
+// maxCreateAdminBody) and the username and password are validated before the
+// step-up is checked, so malformed input spends no proof and writes no audit
+// row. The request must carry a fresh create_admin step-up from the acting
+// admin, redeemed before any row is written, so a session alone cannot mint a
+// new step-up-capable identity (VULN-139). Every attempt that reaches the
+// step-up check is audited. The admin_created audit row commits with the
+// pending row, before the token is minted, and neither exists when the audit
+// row cannot be written, so every live enrollment token has a durable record
+// other admins are told about at their next sign-in. When the commit outcome
+// is unknown, or the token cannot be minted, the still-unenrolled pending row
+// is removed and a failure row is written, so a retry succeeds.
 func (h *Handler) CreateAdmin(c *gin.Context) {
 	ctx := c.Request.Context()
 	actingAdminID := c.GetString(adminIDContextKey)
 
 	var req createAdminRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := decodeStrict(c, &req, maxCreateAdminBody); err != nil {
+		h.log.Warn("admin create body refused", "admin_id", actingAdminID, "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": msgInvalidRequestBody})
 		return
 	}
@@ -895,17 +907,34 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrDuplicateUsername):
-		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_taken")
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_taken", "")
 		c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
 		return
+	case errors.Is(err, errAuditCommit):
+		// The server may have committed and lost only the reply, leaving a
+		// pending admin with no token and a success row. Remove the row if
+		// it is there, so a retry is not refused as a duplicate.
+		h.log.Error("admin create commit outcome unknown", "admin_id", actingAdminID, "created_admin_id", created.ID, "error", err)
+		reason := "audit_commit_failed"
+		switch h.removeUnfinishedPending(ctx, created) {
+		case pendingRemoved:
+			reason += "_row_removed"
+		case pendingNoMatch:
+			reason += "_no_row"
+		case pendingKept:
+			reason += "_row_kept"
+		}
+		h.auditCreateAdmin(context.WithoutCancel(ctx), actingAdminID, req.Username, AuditFailure, reason, created.ID)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "audit_unavailable"})
+		return
 	case errors.Is(err, errAuditWrite):
-		h.log.Error("admin create audit write failed", "error", err)
-		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "audit_unavailable")
+		h.log.Error("admin create audit write failed", "admin_id", actingAdminID, "error", err)
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "audit_unavailable", "")
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "audit_unavailable"})
 		return
 	default:
-		h.log.Error("admin create pending failed", "error", err)
-		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "create_failed")
+		h.log.Error("admin create pending failed", "admin_id", actingAdminID, "error", err)
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "create_failed", "")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
@@ -918,18 +947,18 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		// admin_created success row stays (the log is append-only); the
 		// failure row below records that the creation did not complete, and
 		// the sign-in notice skips the success row because the admin is gone.
-		// The cleanup runs detached from the request, so a client that
-		// hangs up cannot leave the row behind.
-		h.log.Error("admin mint enrollment token failed", "error", err)
+		h.log.Error("admin mint enrollment token failed", "admin_id", actingAdminID, "created_admin_id", created.ID, "error", err)
 		reason := "token_mint_failed"
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		if derr := h.repo.DeleteUnenrolledPending(cleanupCtx, created.ID, created.CredentialGeneration); derr != nil {
-			// The row stays; reset-enrollment can still recover it.
-			h.log.Error("admin remove unminted pending admin failed", "error", derr)
+		switch h.removeUnfinishedPending(ctx, created) {
+		case pendingRemoved:
+		case pendingNoMatch:
+			// Already gone, or enrolled or reset since: not removed here.
+			reason = "token_mint_failed_row_changed"
+		case pendingKept:
+			// The delete failed; reset-enrollment can still recover it.
 			reason = "token_mint_failed_row_kept"
 		}
-		cancel()
-		h.auditCreateAdmin(context.WithoutCancel(ctx), actingAdminID, req.Username, AuditFailure, reason)
+		h.auditCreateAdmin(context.WithoutCancel(ctx), actingAdminID, req.Username, AuditFailure, reason, created.ID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
@@ -941,4 +970,38 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		// never logged.
 		"enrollment_token": token,
 	})
+}
+
+// pendingCleanup is the outcome of removing a pending admin that CreateAdmin
+// committed but could not finish.
+type pendingCleanup int
+
+const (
+	// pendingRemoved: the unenrolled row was deleted.
+	pendingRemoved pendingCleanup = iota
+	// pendingNoMatch: no unenrolled row at that id and generation (never
+	// committed, already gone, or enrolled or reset since).
+	pendingNoMatch
+	// pendingKept: the delete failed, so the row may remain.
+	pendingKept
+)
+
+// removeUnfinishedPending deletes the pending admin CreateAdmin committed,
+// only while it is still unenrolled. It runs detached from the request, so a
+// client that hangs up cannot leave the row behind, and logs the outcome.
+func (h *Handler) removeUnfinishedPending(ctx context.Context, created AdminUser) pendingCleanup {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	err := h.repo.DeleteUnenrolledPending(cleanupCtx, created.ID, created.CredentialGeneration)
+	switch {
+	case err == nil:
+		h.log.Warn("admin unfinished pending admin removed", "created_admin_id", created.ID)
+		return pendingRemoved
+	case errors.Is(err, ErrAdminNotFound):
+		h.log.Warn("admin unfinished pending admin not removed: no unenrolled row", "created_admin_id", created.ID)
+		return pendingNoMatch
+	default:
+		h.log.Error("admin remove unfinished pending admin failed", "created_admin_id", created.ID, "error", err)
+		return pendingKept
+	}
 }

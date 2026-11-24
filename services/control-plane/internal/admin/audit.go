@@ -83,9 +83,15 @@ func (a *AuditLog) Write(ctx context.Context, ev AuditEvent) error {
 	return a.WriteWith(ctx, ev, nil)
 }
 
-// errAuditWrite marks a WriteWith failure in the audit step (begin, role,
-// insert or commit), as opposed to an error returned by its before function.
+// errAuditWrite marks a WriteWith failure in the audit step (encode, begin,
+// role or insert), as opposed to an error returned by its before function.
+// Nothing was committed.
 var errAuditWrite = errors.New("admin audit write failed")
+
+// errAuditCommit marks a failed Commit. Its outcome is unknown: the server may
+// have committed the transaction and lost only the acknowledgement, so the
+// rows before wrote and the audit row may exist.
+var errAuditCommit = errors.New("admin audit commit outcome unknown")
 
 // WriteWith runs before (when not nil) and then inserts ev in ONE transaction,
 // so the rows before writes and the audit row commit together or not at all.
@@ -93,10 +99,11 @@ var errAuditWrite = errors.New("admin audit write failed")
 // records the created admin's id). The detail is encoded before the
 // transaction opens, so a detail that cannot be encoded writes nothing, and
 // again after before returns. An error from before is returned as is and
-// writes no audit row; an error in the audit step wraps errAuditWrite.
-// before runs under the connecting role; the audit INSERT then runs under
-// the restricted role.
-func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sql.Tx, *AuditEvent) error) error {
+// writes no audit row; an error in the audit step wraps errAuditWrite, and a
+// failed Commit wraps errAuditCommit, after which the caller must not assume
+// the rows are absent. before runs under the connecting role; the audit
+// INSERT then runs under the restricted role.
+func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sql.Tx, *AuditEvent) error) (retErr error) {
 	detailJSON, err := a.marshalDetail(ctx, ev.Detail)
 	if err != nil {
 		return err
@@ -107,8 +114,13 @@ func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sq
 		a.emitAuditWriteFailure(ctx)
 		return fmt.Errorf("%w: begin audit tx: %w", errAuditWrite, err)
 	}
-	// Roll back on any error path; a successful Commit makes Rollback a no-op.
-	defer func() { _ = tx.Rollback() }()
+	// Roll back on any error path. After Commit, Rollback returns
+	// sql.ErrTxDone, which is not an error here.
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			retErr = errors.Join(retErr, fmt.Errorf("rollback audit tx: %w", rollbackErr))
+		}
+	}()
 
 	if before != nil {
 		if err := before(tx, &ev); err != nil {
@@ -145,7 +157,7 @@ func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sq
 
 	if err := tx.Commit(); err != nil {
 		a.emitAuditWriteFailure(ctx)
-		return fmt.Errorf("%w: commit audit row: %w", errAuditWrite, err)
+		return fmt.Errorf("%w: commit audit row: %w", errAuditCommit, err)
 	}
 	a.emitAuditCommitted(ctx, ev.EventType, ev.Result)
 	return nil
