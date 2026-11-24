@@ -91,8 +91,8 @@ func runVoiceEnforcementRollout(args []string) int {
 		fmt.Fprintln(os.Stderr, "load configuration failed")
 		return 1
 	}
-	inputs, code, ok := readFamilyRolloutInputs(args, cfg.RoomPlacementEnabled)
-	if !ok {
+	inputs, code := readFamilyRolloutInputs(args, cfg.RoomPlacementEnabled)
+	if code != 0 {
 		return code
 	}
 	db, err := database.New(cfg.DatabaseURL)
@@ -118,28 +118,28 @@ type familyRolloutInputs struct {
 }
 
 // readFamilyRolloutInputs parses retire-boot evidence and reads the activation
-// receipt. When ok is false the caller exits with code; any diagnostic has
-// already been written.
-func readFamilyRolloutInputs(args []string, placement bool) (inputs familyRolloutInputs, code int, ok bool) {
+// receipt. A non-zero code is the exit code; any diagnostic has already been
+// written.
+func readFamilyRolloutInputs(args []string, placement bool) (inputs familyRolloutInputs, code int) {
 	var err error
 	if args[0] == retireBootCommand {
 		inputs.retirement, err = parseVoiceBootRetirementArgs(args, placement)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "usage: invalid boot retirement evidence")
-			return inputs, 64, false
+			return inputs, 64
 		}
 	}
 	if args[0] == "activate" {
 		if len(args) < 4 {
-			return inputs, 64, false
+			return inputs, 64
 		}
 		inputs.receipt, err = readFamilyActivationReceipt(args[3], placement)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "invalid family activation receipt")
-			return inputs, 1, false
+			return inputs, 1
 		}
 	}
-	return inputs, 0, true
+	return inputs, 0
 }
 
 func runFamilyRolloutVerb(ctx context.Context, db *sql.DB, args []string, inputs familyRolloutInputs) int {
@@ -148,14 +148,15 @@ func runFamilyRolloutVerb(ctx context.Context, db *sql.DB, args []string, inputs
 		return runRetireVoiceBoot(ctx, db, inputs.retirement.NodeBootID)
 	case "verify-retired-boot":
 		return runVerifyRetiredVoiceBoot(ctx, db, args)
-	}
-	if args[0] != "status" {
+	case "status":
+		return printFamilyRolloutStatus(ctx, db, args)
+	default:
 		if err := mutateFamilyRollout(ctx, db, args[0], inputs.receipt); err != nil {
 			fmt.Fprintln(os.Stderr, "family rollout mutation refused")
 			return 1
 		}
+		return printFamilyRolloutStatus(ctx, db, args)
 	}
-	return printFamilyRolloutStatus(ctx, db, args)
 }
 
 func runRetireVoiceBoot(ctx context.Context, db *sql.DB, boot uuid.UUID) int {

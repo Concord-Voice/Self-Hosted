@@ -1643,9 +1643,9 @@ func (h *Hub) handleRegister(client *Client) {
 	if isFirstConnection {
 		// Presence persistence must not be cancelled with the client's async
 		// work, so detach from that context's cancellation.
-		ctx := context.WithoutCancel(ctx)
+		presenceCtx := context.WithoutCancel(ctx)
 		recovery := presenceRecoveryState{status: statusOnline}
-		if err := h.redis.Set(ctx, presence.StatusRedisKey(client.UserID), statusOnline, presence.StatusTTL).Err(); err != nil {
+		if err := h.redis.Set(presenceCtx, presence.StatusRedisKey(client.UserID), statusOnline, presence.StatusTTL).Err(); err != nil {
 			log.Printf("[hub] failed to persist initial presence for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
 			recovery.pending = true
 			h.setPresenceRecovery(client.UserID, recovery)
@@ -1654,7 +1654,7 @@ func (h *Hub) handleRegister(client *Client) {
 			// must not keep publishing.
 			h.failClosedPresenceHeartbeat(client.UserID)
 		} else {
-			if err := h.clearOfflinePresenceFence(ctx, client.UserID); err != nil {
+			if err := h.clearOfflinePresenceFence(presenceCtx, client.UserID); err != nil {
 				log.Printf("[hub] failed to clear offline presence fence for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
 				recovery.pending = true
 				h.setPresenceRecovery(client.UserID, recovery)

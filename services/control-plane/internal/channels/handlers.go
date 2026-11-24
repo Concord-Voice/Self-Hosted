@@ -3589,6 +3589,11 @@ func (h *Handler) dmPendingConversationAvailable(ctx context.Context, conversati
 			return false, err
 		}
 		available, err := readDMPendingParticipantTx(ctx, tx, conversationID, userID, caller)
+		if err == nil && available {
+			// A commit failure keeps available=true, and the Rollback below
+			// tolerates the finished transaction.
+			err = tx.Commit()
+		}
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			h.log.Error("Failed to rollback DM pending-read transaction", "error", rbErr)
 		}
@@ -3603,12 +3608,10 @@ func (h *Handler) dmPendingConversationAvailable(ctx context.Context, conversati
 	return false, dmblock.ErrMembershipChanged
 }
 
-// readDMPendingParticipantTx is one attempt's body inside the transaction its
-// caller opened and rolls back. It prepares the conversation under share
-// locks, then reads the caller's participant row FOR SHARE. A missing row is
-// (false, nil). On a present row it COMMITS and reports available=true even
-// when that commit fails, exactly as the inline closure did; the caller's
-// explicit Rollback that follows tolerates sql.ErrTxDone.
+// readDMPendingParticipantTx is one attempt's read inside the transaction its
+// caller opened, commits and rolls back. It prepares the conversation under
+// share locks, then reads the caller's participant row FOR SHARE. A missing
+// row is (false, nil); a present row is (true, nil).
 func readDMPendingParticipantTx(ctx context.Context, tx *sql.Tx, conversationID, userID string, caller uuid.UUID) (bool, error) {
 	if _, err := dmblock.PrepareConversationTx(ctx, tx, conversationID, []uuid.UUID{caller}, dmblock.LockShare, dmblock.LockShare); err != nil {
 		return false, err
@@ -3620,7 +3623,7 @@ func readDMPendingParticipantTx(ctx context.Context, tx *sql.Tx, conversationID,
 		}
 		return false, err
 	}
-	return true, tx.Commit()
+	return true, nil
 }
 
 // GetUnifiedKeys resolves a context_id to either a server channel or DM conversation

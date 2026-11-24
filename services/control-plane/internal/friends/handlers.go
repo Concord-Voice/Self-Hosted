@@ -1020,12 +1020,14 @@ func (h *Handler) BlockUser(c *gin.Context) {
 	gated, probeSkippedGate := h.blockPresenceGate(ctx, userID, targetUserID)
 
 	err := presencehook.WithGatedTx(ctx, gated, h.db, h.log, spec, func(tx *sql.Tx) error {
-		return h.blockUserTx(ctx, tx, gated, probeSkippedGate, blockTxParams{
+		accepted, txErr := h.blockUserTx(ctx, tx, gated, probeSkippedGate, blockTxParams{
 			userID:       userID,
 			targetUserID: targetUserID,
 			tokenEpoch:   tokenEpoch,
 			operationID:  operationID,
-		}, &wasAcceptedFriendship)
+		})
+		wasAcceptedFriendship = accepted
+		return txErr
 	})
 	if err != nil {
 		if errors.Is(err, credepoch.ErrEpochMismatch) || errors.Is(err, credepoch.ErrBlocked) {
@@ -1055,37 +1057,38 @@ type blockTxParams struct {
 // guards, the block itself, the durable DM reconciliation obligation, and the
 // Complete that owns the commit. `gated` is the ONE capture value that feeds
 // WithGatedTx, executeBlockTxWithAudience, both Abandons and Complete.
-// wasAcceptedFriendship is written at the same point the closure wrote it.
+// acceptedFriendship reports whether the block replaced an accepted
+// friendship; it is set on every path after the block itself succeeds, and
+// BlockUser reads it only when the whole transaction succeeded.
 func (h *Handler) blockUserTx(
 	ctx context.Context, tx *sql.Tx, gated presencecapture.GraphPresenceCapture,
-	probeSkippedGate bool, p blockTxParams, wasAcceptedFriendship *bool,
-) error {
+	probeSkippedGate bool, p blockTxParams,
+) (acceptedFriendship bool, err error) {
 	blocker, parseErr := uuid.Parse(p.userID)
 	if parseErr != nil {
-		return dmblock.ErrUnavailable
+		return false, dmblock.ErrUnavailable
 	}
 	blocked, parseErr := uuid.Parse(p.targetUserID)
 	if parseErr != nil {
-		return dmblock.ErrUnavailable
+		return false, dmblock.ErrUnavailable
 	}
 	if guardErr := dmblock.LockBlockSubjectsTx(ctx, tx, []uuid.UUID{blocker, blocked}); guardErr != nil {
-		return fmt.Errorf("guard block subjects: %w", guardErr)
+		return false, fmt.Errorf("guard block subjects: %w", guardErr)
 	}
 	if guardErr := credepoch.GuardFamilyTx(ctx, tx, p.userID, p.tokenEpoch); guardErr != nil {
-		return fmt.Errorf("guard block credential epoch: %w", guardErr)
+		return false, fmt.Errorf("guard block credential epoch: %w", guardErr)
 	}
 	plan, acceptedFriendship, blockErr := h.executeBlockTxWithAudience(ctx, gated, probeSkippedGate, tx, p.userID, p.targetUserID)
 	if blockErr != nil {
 		presencehook.Abandon(gated, plan, presencecapture.CauseWriteFailed)
-		return blockErr
+		return false, blockErr
 	}
-	*wasAcceptedFriendship = acceptedFriendship
 	if obligationErr := dmblock.RecordBlockTx(ctx, tx, p.userID, p.targetUserID, p.operationID); obligationErr != nil {
 		presencehook.Abandon(gated, plan, presencecapture.CauseWriteFailed)
-		return fmt.Errorf("record block DM reconciliation: %w", obligationErr)
+		return acceptedFriendship, fmt.Errorf("record block DM reconciliation: %w", obligationErr)
 	}
 
-	return presencehook.Complete(ctx, gated, tx, plan)
+	return acceptedFriendship, presencehook.Complete(ctx, gated, tx, plan)
 }
 
 // --- Friend Code types ---
