@@ -74,6 +74,7 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 
 ### Security
 
+- **Encryption:** Added a dormant canonical message-v1 create fingerprint codec and vectors. No message writer, replay classifier, or client behavior is enabled.
 - **Encryption:** Added a dormant, permanent global reservation namespace and verified online-baseline gate for future message-v1 identifiers. No message writer or client behavior is enabled.
 - **Encryption:** Added dormant stored-format and request-fingerprint metadata for the staged E2EE reader migration; no writer or fallback behavior is enabled.
 - **Recovery:** Email account recovery can now send a single-use recovery key that cannot be guessed, so wrong attempts by others can no longer block the account owner's email recovery. A client asks for one with `format: "token"` on `/auth/recovery/begin` and submits it as `token` on `/auth/recovery/verify-code`. Each account has one live recovery email at a time, valid until the resend wait ends (15 minutes for the first three emails in a day, then 60 minutes); a key request replaces a live 6-digit code ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
