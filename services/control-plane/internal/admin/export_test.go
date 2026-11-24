@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"io"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -85,4 +86,29 @@ func RunAdminCtlWithWriterForTest(ctx context.Context, db *sql.DB, rdb *redis.Cl
 // UseServerAgentForTest points the handler's Server area at a test socket.
 func UseServerAgentForTest(h *Handler, sock string) {
 	h.server.agent = unixClient(sock)
+}
+
+// RunAdminCtlWithStderrForTest is RunAdminCtlForTest with the operator-facing
+// stderr captured instead of discarded.
+func RunAdminCtlWithStderrForTest(ctx context.Context, db *sql.DB, rdb *redis.Client, stdout, stderr io.Writer, baseURL string, args []string) int {
+	u, _ := url.Parse(baseURL)
+	deps := adminCtlDeps{
+		repo:          NewAdminRepo(db),
+		audit:         NewAuditLog(db),
+		enroll:        NewEnrollmentStore(rdb),
+		lockout:       NewLockout(rdb, nil),
+		enrollBaseURL: baseURL,
+		rpID:          u.Hostname(),
+		rpOrigins:     []string{baseURL},
+		stdin:         strings.NewReader(""),
+		stdout:        stdout,
+		stderr:        stderr,
+	}
+	return runAdminCtl(ctx, deps, args)
+}
+
+// UseActionCredentialLoaderForTest replaces the Host Agent projection read
+// that names an admin's action-only credentials.
+func UseActionCredentialLoaderForTest(h *Handler, load func(adminID string) (map[string]struct{}, error)) {
+	h.loadActionCredentialIDs = load
 }

@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/hostagent"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
@@ -89,6 +92,13 @@ type Handler struct {
 	// allowedAAGUIDs is the resolved ADMIN_WEBAUTHN_ALLOWED_AAGUIDS list checked at
 	// enrollment.
 	allowedAAGUIDs []string
+
+	// loadActionCredentialIDs reads, from the root-owned Host Agent projection,
+	// the base64url IDs of an admin's action credentials. Host root assigns
+	// that purpose at import; such a key must never complete an admin login,
+	// or a compromised control plane could redeem a login touch as a root
+	// action.
+	loadActionCredentialIDs func(adminID string) (map[string]struct{}, error)
 }
 
 // SetSecurityEvents forwards bounded Nightwatch telemetry to this handler's
@@ -126,6 +136,9 @@ func NewHandler(db *sql.DB, rdb *redis.Client, log *logger.Logger, cfg *config.C
 		log:               log,
 		dummyPasswordHash: dummyHash,
 		allowedAAGUIDs:    cfg.AdminWebAuthnAllowedAAGUIDs,
+		loadActionCredentialIDs: func(adminID string) (map[string]struct{}, error) {
+			return hostagent.LoadActionCredentialIDs(agentAuthorizerProjectionPath, adminID)
+		},
 	}, nil
 }
 
@@ -208,6 +221,20 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 		return
 	}
 
+	// Read the action-credential projection before the password verdict, for
+	// known and unknown usernames alike, so an unreadable projection answers
+	// 503 whatever the password: the status never confirms a password.
+	probeAdminID := unknownAdminProbeID
+	if lookupErr == nil && admin != nil {
+		probeAdminID = admin.ID
+	}
+	actionIDs, actionErr := h.actionCredentialIDs(probeAdminID)
+	if actionErr != nil {
+		h.log.Warn("admin action credential projection unavailable", "event", EventLoginFailure)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": msgInternalError})
+		return
+	}
+
 	// Enumeration defense: when the username is unknown, still run a constant-time
 	// verify against the dummy hash so timing/response are uniform.
 	verifyHash := h.dummyPasswordHash
@@ -231,6 +258,15 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 		h.log.Error("admin webauthn user build failed", "error", err)
 		// A configured admin with no/unreadable credentials cannot 2FA; fail closed
 		// without leaking the cause.
+		h.failPassword(ctx, req.Username, ip, EventLoginFailure)
+		c.JSON(http.StatusUnauthorized, genericAuthError)
+		return
+	}
+	// Action credentials are never offered for login. An admin left with only
+	// action credentials cannot complete 2FA, exactly like one with none.
+	user.Credentials = withoutActionCredentials(user.Credentials, actionIDs)
+	if len(user.Credentials) == 0 {
+		h.log.Warn("admin has no login credential", "event", EventLoginFailure)
 		h.failPassword(ctx, req.Username, ip, EventLoginFailure)
 		c.JSON(http.StatusUnauthorized, genericAuthError)
 		return
@@ -302,6 +338,24 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		return
 	}
 
+	// Re-read the projection: root may have assigned a purpose since the
+	// options were issued, and the browser need not honour allowCredentials.
+	actionIDs, err := h.actionCredentialIDs(challenge.AdminID)
+	if err != nil {
+		h.log.Warn("admin action credential projection unavailable", "event", EventLoginFailure)
+		h.auditFailure(ctx, challenge.Username, EventLoginFailure)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": msgInternalError})
+		return
+	}
+	if parsed, perr := protocol.ParseCredentialRequestResponseBytes(req.Assertion); perr == nil {
+		if _, isAction := actionIDs[base64.RawURLEncoding.EncodeToString(parsed.RawID)]; isAction {
+			h.log.Warn("admin login with action credential refused", "event", EventLoginFailure)
+			h.auditDenied(ctx, challenge.Username, EventLoginFailure, errCodeActionCredentialNotForLogin)
+			c.JSON(http.StatusForbidden, gin.H{"error": errCodeActionCredentialNotForLogin})
+			return
+		}
+	}
+
 	user, err := h.webAuthnUserForAdmin(ctx, challenge.AdminID)
 	if err != nil {
 		h.log.Error("admin webauthn user build failed", "error", err)
@@ -309,6 +363,9 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, genericAuthError)
 		return
 	}
+	// An unparseable assertion skipped the check above; with the action keys
+	// removed here it can only fail verification.
+	user.Credentials = withoutActionCredentials(user.Credentials, actionIDs)
 
 	cred, err := h.webauthn.FinishLoginWithBytes(user, challenge.Session, []byte(req.Assertion))
 	if err != nil {
@@ -374,6 +431,46 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	adminID := challenge.AdminID
 	h.auditOK(ctx, &adminID, challenge.Username, EventLoginSuccess)
 	c.JSON(http.StatusOK, gin.H{"status": "authenticated"})
+}
+
+// errCodeActionCredentialNotForLogin is the stable 403 code for an assertion
+// made with a key host root imported for host actions only.
+const errCodeActionCredentialNotForLogin = "action_credential_not_for_login"
+
+// unknownAdminProbeID is the admin ID the projection is read for when the
+// username is unknown, so both cases do the same work.
+const unknownAdminProbeID = "00000000-0000-0000-0000-000000000000"
+
+// actionCredentialIDs returns adminID's action credential IDs, or nil when no
+// Host Agent projection is configured or its file is absent. Any other read
+// failure is returned so the caller can fail closed.
+func (h *Handler) actionCredentialIDs(adminID string) (map[string]struct{}, error) {
+	if !hostAgentProjectionEnabled(filepath.Dir(agentAuthorizerProjectionPath)) {
+		return nil, nil
+	}
+	ids, err := h.loadActionCredentialIDs(adminID)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errHostAgentUnavailable, err)
+	}
+	return ids, nil
+}
+
+// withoutActionCredentials drops every credential whose base64url ID is an
+// action credential.
+func withoutActionCredentials(creds []webauthn.Credential, actionIDs map[string]struct{}) []webauthn.Credential {
+	if len(actionIDs) == 0 {
+		return creds
+	}
+	kept := make([]webauthn.Credential, 0, len(creds))
+	for _, cred := range creds {
+		if _, isAction := actionIDs[base64.RawURLEncoding.EncodeToString(cred.ID)]; !isAction {
+			kept = append(kept, cred)
+		}
+	}
+	return kept
 }
 
 // verifyImportedCredential asks the Host Agent to verify the assertion against

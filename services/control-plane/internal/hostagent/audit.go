@@ -136,7 +136,7 @@ func validAuditEvent(e AuditEvent) bool {
 		return false
 	}
 	switch e.Reason {
-	case "peer_forbidden", "begin_denied", "assertion_denied", "replay_denied", "clone_detected", "counter_stale", "admission_approved", "admission_failed", "job_started", "job_succeeded", "job_failed", "write_in_progress", "job_unavailable", "backup_rate_limited":
+	case "peer_forbidden", "begin_denied", "assertion_denied", "replay_denied", "clone_detected", "counter_stale", "admission_approved", "admission_failed", "job_started", "job_succeeded", "job_failed", "write_in_progress", "job_unavailable", "backup_rate_limited", "no_action_credential", "action_credential_login":
 	default:
 		return false
 	}

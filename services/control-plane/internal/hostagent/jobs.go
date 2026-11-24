@@ -474,6 +474,8 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 			reason = "clone_detected"
 		case errors.Is(err, errCounterStale):
 			reason = "counter_stale"
+		case errors.Is(err, errNoActionCredential):
+			reason = "no_action_credential"
 		}
 		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: reason, AdminID: adminID})
 		if errors.Is(err, ErrAuthorizerUnavailable) {

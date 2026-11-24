@@ -43,7 +43,7 @@ The current control-plane session middleware resolves an opaque Redis session an
 - A second signer service, a new database table, a general admin RBAC model, or a new cryptography implementation.
 - Automatically trusting every credential in `admin_webauthn_credentials`.
 - Automatically deleting old backups.
-- Protecting an operator from a fully malicious admin SPA that lies about the action being approved. The assertion is bound to the agent's own record of the action and arguments, not to what the user approves; action and login ceremonies currently share credentials and RP ID. Also, WebAuthn authenticators display RP identity, not Concord's semantic action text.
+- Protecting an operator from a fully malicious admin SPA that lies about the action being approved. The assertion is bound to the agent's own record of the action and arguments, not to what the user approves. Login and action ceremonies share the RP ID, but not credentials (see 8.2). Also, WebAuthn authenticators display RP identity, not Concord's semantic action text.
 - Solving the attestation-provenance gap.
 
 ## 4. Governing constraints
@@ -161,6 +161,15 @@ The control-plane container receives a read-only mount of the directory only so 
 - `revoke --admin-id` removes every credential for that admin. The supported reset wrapper invokes it before the database reset.
 - Existing installations require an explicit one-time import. Until then, host-agent reads continue, all writes return `authorizer_unavailable`, and admin WebAuthn login also fails closed (503) when the overlay sets `HOST_AGENT_AUTHORIZER_PROJECTION=1`.
 
+Dedicated action credentials: at import, host root decides which of an admin's credentials may authorize root actions. `import --action-credential <base64url credential id>` is repeatable. Credentials not named are `login` credentials.
+
+- An action credential never satisfies an admin login. The control plane omits it from the login allow-list and rejects its login assertion with 403 `action_credential_not_for_login`; the agent also refuses it.
+- A login credential never authorizes a root action. The agent's action options contain only action credentials, and Consume rejects any other signer.
+- With no action credential imported, every host write is refused (`authorization_denied`, audit reason `no_action_credential`).
+- `control-plane admin export-agent-authorizer` prints `credential-id  label` for each key so the operator can choose.
+
+An operator therefore registers two keys per admin in the console, one for sign-in and one for host actions. A login gesture cannot authorize a root action: the signing key differs, and root, not the admin or the control plane, assigns each key's purpose.
+
 The root confirmation is an operational trust decision. It prevents a compromised container from silently adding a key; it does not claim independent attestation provenance.
 
 ## 9. Agent-local action authorization
@@ -208,7 +217,9 @@ After every successful `FinishLoginWithBytes` in admin login and control-plane c
 - `lastAttempt`, not only `fetchedAt`, enforces a one-second minimum refresh interval;
 - unknown KIDs are negatively cached for one minute, capped at 256 entries;
 - the response body is limited to 1 MiB and exactly one JSON document;
-- a failed refresh never discards a still-valid cached key, and an unknown KID never blocks readers of known keys.
+- a failed refresh keeps the cached keys, but only while the key set is younger than one hour. After that a cached key never verifies without a successful refresh (fail closed). Refresh-ahead starts in the last 10 minutes of that hour, at the one-second refresh interval;
+- an unknown KID never blocks readers of known keys;
+- a lookup that fails because no usable key set could be fetched returns 503 `jwks_unavailable` and is logged. This is distinct from the 403 returned when the key set is fresh and does not hold the KID. During a Cloudflare certs outage that outlasts the refresh-ahead window, Access-gated admin sign-in fails with `jwks_unavailable` until a refresh succeeds.
 
 ### 10.3 Setup listener
 
@@ -293,6 +304,7 @@ No migration reviewer should fire because this design adds no SQL migration. The
 | Per-request DB status check adds latency/outage coupling | Medium | It is the durable authority check; failures intentionally return 401. Measure but do not cache away the invariant. |
 | Backup estimate is conservative | Medium | Clear refusal with measured required/available bytes; operator may move backups or free space. |
 | Admin SPA compromise mislabels a signed action | Residual | Action/args are bound to the agent's own record and audited; a trusted display or separate signer is future work. |
+| A user touches their action key at a prompt that is not the action prompt | Residual | A login gesture cannot authorize an action, because the keys differ. A user who deliberately touches the action key at a sign-in prompt, or whose action key is also usable at another relying party's prompt for the same RP ID, can still be tricked into authorizing the action that prompt was minted for. The agent's record of what was authorized remains the authority. |
 
 ## 17. References
 

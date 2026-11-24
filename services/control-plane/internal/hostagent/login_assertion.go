@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -18,7 +19,12 @@ import (
 
 const maxLoginAssertionBody = 128 << 10
 
-var errAuthorizerNotImported = errors.New("authorizer not imported")
+var (
+	errAuthorizerNotImported = errors.New("authorizer not imported")
+	// errActionCredentialLogin refuses a login signed by a credential root
+	// designated for root actions; nothing is verified or advanced.
+	errActionCredentialLogin = fmt.Errorf("%w: action credential cannot log in", ErrAuthorizationDenied)
+)
 
 // verifyLoginAssertion checks a CP-validated login assertion against root's
 // current credential and durable counter. It creates no action authorization.
@@ -64,6 +70,10 @@ func (s *AuthorizationStore) verifyLoginAssertion(adminID string, session webaut
 		if errors.Is(err, errAuthorizerCounterStale) {
 			return ErrAuthorizationDenied
 		}
+		if errors.Is(err, errAuthorizerPurpose) {
+			// Re-imported as an action credential after the read above.
+			return errActionCredentialLogin
+		}
 		log.Printf("concord-agent: authorizer counter update failed at login: %v", err)
 		return ErrAuthorizerUnavailable
 	}
@@ -104,6 +114,9 @@ func selectLoginAuthorizer(doc authorizerFile, session webauthn.SessionData, cre
 	if selected.AdminID != adminID {
 		return nil, ErrAuthorizationDenied
 	}
+	if selected.Purpose != AuthorizerPurposeLogin {
+		return nil, errActionCredentialLogin
+	}
 	return selected, nil
 }
 
@@ -134,6 +147,9 @@ func (s *Server) handleLoginAssertion(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusNotFound, "authorizer_not_imported")
 	case errors.Is(err, ErrAuthorizerUnavailable):
 		refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
+	case errors.Is(err, errActionCredentialLogin):
+		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "action_credential_login", AdminID: canonicalAuditAdminID(body.AdminID)})
+		refuse(w, http.StatusForbidden, "authorization_denied")
 	default:
 		refuse(w, http.StatusForbidden, "authorization_denied")
 	}

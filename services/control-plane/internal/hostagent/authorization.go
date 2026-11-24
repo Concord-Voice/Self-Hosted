@@ -40,6 +40,9 @@ var (
 	// errCloneDetected and errCounterStale are denials the audit names apart.
 	errCloneDetected = fmt.Errorf("%w: authenticator clone warning", ErrAuthorizationDenied)
 	errCounterStale  = fmt.Errorf("%w: %w", ErrAuthorizationDenied, errAuthorizerCounterStale)
+	// errNoActionCredential means root designated no active action credential
+	// for this admin, so no root action can be authorized.
+	errNoActionCredential = fmt.Errorf("%w: no action credential", ErrAuthorizationDenied)
 )
 
 type agentWebAuthn interface {
@@ -76,7 +79,8 @@ func NewAuthorizationStore(authorizers *AuthorizerStore, verifier agentWebAuthn,
 // Begin validates the same closed action parser used by job creation before
 // allocating a WebAuthn challenge or an in-memory slot. A request the parser
 // refuses returns that *refusal, so its own status and reason reach the caller;
-// ErrAuthorizationDenied is kept for admins with no trusted credential.
+// ErrAuthorizationDenied (as errNoActionCredential) is kept for admins with no
+// active action credential: login credentials never enter this ceremony.
 func (s *AuthorizationStore) Begin(adminID, action string, req actionRequest) (string, *protocol.CredentialAssertion, error) {
 	if s == nil || s.authorizers == nil || s.webauthn == nil || s.jobs == nil {
 		return "", nil, ErrAuthorizerUnavailable
@@ -108,13 +112,13 @@ func (s *AuthorizationStore) Begin(adminID, action string, req actionRequest) (s
 	if held >= authorizationsPerAdmin {
 		return "", nil, ErrAuthorizationBusy
 	}
-	credentials, err := s.authorizers.Credentials(adminID)
+	credentials, err := s.authorizers.actionCredentials(adminID)
 	if err != nil {
 		log.Printf("concord-agent: authorizer trust unreadable at begin: %v", err)
 		return "", nil, ErrAuthorizerUnavailable
 	}
 	if len(credentials) == 0 {
-		return "", nil, ErrAuthorizationDenied
+		return "", nil, errNoActionCredential
 	}
 	user := &mfa.WebAuthnUser{ID: []byte(adminWebAuthnUserHandle), Name: adminID, DisplayName: adminID, Credentials: credentials}
 	options, session, err := s.webauthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
@@ -156,13 +160,13 @@ func (s *AuthorizationStore) consume(handle, action string, assertion []byte) (a
 	if !s.now().Before(pending.expires) || pending.action != action || len(assertion) == 0 || len(assertion) > maxAssertionBytes {
 		return actionRequest{}, pending.adminID, ErrAuthorizationDenied
 	}
-	credentials, err := s.authorizers.Credentials(pending.adminID)
+	credentials, err := s.authorizers.actionCredentials(pending.adminID)
 	if err != nil {
 		log.Printf("concord-agent: authorizer trust unreadable at consume: %v", err)
 		return actionRequest{}, pending.adminID, ErrAuthorizerUnavailable
 	}
 	if len(credentials) == 0 {
-		return actionRequest{}, pending.adminID, ErrAuthorizationDenied
+		return actionRequest{}, pending.adminID, errNoActionCredential
 	}
 	user := &mfa.WebAuthnUser{ID: []byte(adminWebAuthnUserHandle), Name: pending.adminID, DisplayName: pending.adminID, Credentials: credentials}
 	credential, err := s.webauthn.FinishLoginWithBytes(user, pending.session, assertion)
@@ -172,10 +176,14 @@ func (s *AuthorizationStore) consume(handle, action string, assertion []byte) (a
 	if credential.Authenticator.CloneWarning {
 		return actionRequest{}, pending.adminID, errCloneDetected
 	}
-	if err := s.authorizers.AdvanceCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
+	// The signing credential's ID, re-checked as an active action credential
+	// under the file lock, not the ID the client claimed.
+	if err := s.authorizers.advanceActionCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
 		switch {
 		case errors.Is(err, errAuthorizerCounterStale):
 			return actionRequest{}, pending.adminID, errCounterStale
+		case errors.Is(err, errAuthorizerPurpose):
+			return actionRequest{}, pending.adminID, errNoActionCredential
 		case errors.Is(err, errAuthorizerRevoked):
 			// Revoked between the credential read and the counter write.
 			return actionRequest{}, pending.adminID, ErrAuthorizationDenied

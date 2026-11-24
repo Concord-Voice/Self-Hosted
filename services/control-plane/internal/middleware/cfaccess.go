@@ -21,6 +21,7 @@ func RequireCloudflareAccess(v *accessVerifier, log *slog.Logger) gin.HandlerFun
 	if log == nil {
 		log = slog.Default()
 	}
+	v.log = log
 	return func(c *gin.Context) {
 		raw := c.GetHeader(accessHeader)
 		if raw == "" {
@@ -28,6 +29,13 @@ func RequireCloudflareAccess(v *accessVerifier, log *slog.Logger) gin.HandlerFun
 			return
 		}
 		claims, err := v.Verify(raw)
+		if errors.Is(err, errJWKSUnavailable) {
+			// An outage of the key source is not a rejected credential: report it
+			// as 503 so operators and clients can tell the two apart.
+			log.Warn("admin: cf-access keys unavailable", "reason", errJWKSUnavailable.Error())
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": errJWKSUnavailable.Error()})
+			return
+		}
 		if err != nil {
 			denyAccess(c, log, err)
 			return

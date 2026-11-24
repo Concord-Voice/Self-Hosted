@@ -328,7 +328,11 @@ func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request
 	}
 	handle, options, err := s.authorizations.Begin(body.AdminID, body.Action, body.Arguments)
 	if err != nil {
-		s.auditEvent(AuditEvent{Action: actionName(body.Action), Outcome: "denied", Reason: "begin_denied", AdminID: canonicalAuditAdminID(body.AdminID)})
+		reason := "begin_denied"
+		if errors.Is(err, errNoActionCredential) {
+			reason = "no_action_credential"
+		}
+		s.auditEvent(AuditEvent{Action: actionName(body.Action), Outcome: "denied", Reason: reason, AdminID: canonicalAuditAdminID(body.AdminID)})
 		var no *refusal
 		switch {
 		case errors.As(err, &no):

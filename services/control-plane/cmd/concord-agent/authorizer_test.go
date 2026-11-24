@@ -18,6 +18,8 @@ type fakeAuthorizerStore struct {
 	entries   []hostagent.AuthorizerListing
 	imported  hostagent.AuthorizerImport
 	reinstate bool
+	actionIDs []string
+	changes   []hostagent.AuthorizerPurposeChange
 	listErr   error
 	importErr error
 	revokeErr error
@@ -27,14 +29,18 @@ func (s *fakeAuthorizerStore) List() ([]hostagent.AuthorizerListing, error) {
 	return s.entries, s.listErr
 }
 
-func (s *fakeAuthorizerStore) ImportMany(doc hostagent.AuthorizerImport, reinstate bool) (int, error) {
-	s.imported, s.reinstate = doc, reinstate
+func (s *fakeAuthorizerStore) ImportWithPurposes(doc hostagent.AuthorizerImport, reinstate bool, actionIDs []string) (hostagent.AuthorizerImportResult, error) {
+	s.imported, s.reinstate, s.actionIDs = doc, reinstate, actionIDs
 	if s.importErr == nil && !slices.ContainsFunc(s.entries, func(e hostagent.AuthorizerListing) bool { return e.AdminID == doc.AdminID && !e.Revoked }) {
 		for _, c := range doc.Credentials {
-			s.entries = append(s.entries, hostagent.AuthorizerListing{AdminID: doc.AdminID, Label: c.Label, SignCount: c.SignCount, CredentialSHA256: "hash"})
+			purpose := hostagent.AuthorizerPurposeLogin
+			if slices.Contains(actionIDs, c.CredentialID) {
+				purpose = hostagent.AuthorizerPurposeAction
+			}
+			s.entries = append(s.entries, hostagent.AuthorizerListing{AdminID: doc.AdminID, Label: c.Label, SignCount: c.SignCount, CredentialSHA256: "hash", Purpose: purpose})
 		}
 	}
-	return len(doc.Credentials), s.importErr
+	return hostagent.AuthorizerImportResult{Added: len(doc.Credentials), PurposeChanges: s.changes}, s.importErr
 }
 
 func (s *fakeAuthorizerStore) Revoke(adminID string) (int, error) {
@@ -322,5 +328,67 @@ func TestAuthorizerRevokeOfNothingExitsNonZero(t *testing.T) {
 	code := runAuthorizerCLIWith("/authorizers.json", []string{"revoke", "--admin-id", "3e7138e5-6eb9-4a79-8133-5eab67b7f2b6"}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store})
 	if code != 1 || !strings.Contains(stderr.String(), "nothing was revoked") || strings.Contains(stdout.String(), "Revoked") {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestAuthorizerImportPassesActionCredentialsAndWarns(t *testing.T) {
+	export, digest, doc := writeTestExport(t)
+	base := []string{"import", "--file", export, "--confirm-sha256", digest}
+	for _, tc := range []struct {
+		name       string
+		extra      []string
+		wantIDs    []string
+		wantWarn   string
+		noWarnText string
+	}{
+		{"no designation is all login", nil, nil, "has no active action credential", "has no active login credential"},
+		{"designated key is action", []string{"--action-credential", "AQID"}, []string{"AQID"}, "has no active login credential", "has no active action credential"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeAuthorizerStore{}
+			var stdout, stderr bytes.Buffer
+			if code := runAuthorizerCLIWith(t.TempDir()+"/a.json", append(slices.Clone(base), tc.extra...), &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store}); code != 0 {
+				t.Fatalf("exit %d: %s", code, stderr.String())
+			}
+			if !slices.Equal(store.actionIDs, tc.wantIDs) {
+				t.Fatalf("action IDs %v, want %v", store.actionIDs, tc.wantIDs)
+			}
+			if !strings.Contains(stderr.String(), "Warning: admin "+doc.AdminID+" "+tc.wantWarn) || strings.Contains(stderr.String(), tc.noWarnText) {
+				t.Fatalf("stderr %q", stderr.String())
+			}
+			stdout.Reset()
+			if code := runAuthorizerCLIWith(t.TempDir()+"/a.json", []string{"list"}, &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store}); code != 0 {
+				t.Fatalf("list exit %d: %s", code, stderr.String())
+			}
+			want := `"purpose":"login"`
+			if tc.wantIDs != nil {
+				want = `"purpose":"action"`
+			}
+			if !strings.Contains(stdout.String(), want) {
+				t.Fatalf("list %q lacks %s", stdout.String(), want)
+			}
+		})
+	}
+	store := &fakeAuthorizerStore{
+		changes: []hostagent.AuthorizerPurposeChange{{AdminID: doc.AdminID, CredentialSHA256: "abc123", From: "login", To: "action"}},
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runAuthorizerCLIWith(t.TempDir()+"/a.json", append(slices.Clone(base), "--action-credential", "AQID", "--action-credential", "BBBB"), &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store}); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	if !slices.Equal(store.actionIDs, []string{"AQID", "BBBB"}) {
+		t.Fatalf("repeated flag not collected: %v", store.actionIDs)
+	}
+	if !strings.Contains(stdout.String(), "Changed purpose of credential sha256:abc123 for admin "+doc.AdminID+" from login to action") {
+		t.Fatalf("purpose change not printed: %q", stdout.String())
+	}
+	store = &fakeAuthorizerStore{importErr: hostagent.ErrAuthorizerActionCredentialUnknown}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runAuthorizerCLIWith(t.TempDir()+"/a.json", append(slices.Clone(base), "--action-credential", "nope"), &stdout, &stderr, 0, fakeAuthorizerStoreLoader{store: store}); code != 1 || !strings.Contains(stderr.String(), "not in the export") {
+		t.Fatalf("unknown ID: exit %d stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(authorizerUsage, "--action-credential") || !strings.Contains(authorizerUsage, "purpose") {
+		t.Fatal("usage does not document --action-credential")
 	}
 }

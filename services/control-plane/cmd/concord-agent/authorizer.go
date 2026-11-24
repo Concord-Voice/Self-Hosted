@@ -20,8 +20,14 @@ const (
 	authorizerPath      = "/etc/concord-voice/agent-authorizers/authorizers.json"
 	maxAuthorizerImport = 1 << 20
 	authorizerUsage     = `usage: concord-agent authorizer <command> [flags]
-  list
+  list   prints each credential with its purpose (login or action)
   import --file <export.json> --confirm-sha256 <sha256> [--reinstate]
+         [--action-credential <base64url credential id>]...
+         --action-credential marks that credential in the export as a root
+         action key; repeat it for each one. Every other credential in the
+         export is a login key. Action keys can never sign an admin login and
+         login keys can never authorize a root action. Re-importing changes a
+         credential's purpose to match, and prints each change
          --reinstate restores a credential that was revoked; without it an
          export holding a revoked credential is refused
   revoke --admin-id <uuid>
@@ -30,7 +36,7 @@ const (
 
 type authorizerStore interface {
 	List() ([]hostagent.AuthorizerListing, error)
-	ImportMany(hostagent.AuthorizerImport, bool) (int, error)
+	ImportWithPurposes(hostagent.AuthorizerImport, bool, []string) (hostagent.AuthorizerImportResult, error)
 	Revoke(string) (int, error)
 }
 
@@ -106,6 +112,8 @@ func importAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 	file := fs.String("file", "", "path to the admin export JSON")
 	confirm := fs.String("confirm-sha256", "", "exact SHA-256 fingerprint of the export")
 	reinstate := fs.Bool("reinstate", false, "restore credentials in the export that were revoked")
+	var actionIDs stringList
+	fs.Var(&actionIDs, "action-credential", "base64url ID of a credential in the export to trust for root actions (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -153,17 +161,64 @@ func importAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 			break
 		}
 	}
-	added, err := store.ImportMany(doc, *reinstate)
+	result, err := store.ImportWithPurposes(doc, *reinstate, actionIDs)
 	if err != nil {
 		return err
 	}
+	added := result.Added
 	if _, err := fmt.Fprintf(stdout, "Imported %d authorizer credentials for admin %s\n", added, doc.AdminID); err != nil {
+		return err
+	}
+	for _, change := range result.PurposeChanges {
+		if _, err := fmt.Fprintf(stdout, "Changed purpose of credential sha256:%s for admin %s from %s to %s\n", change.CredentialSHA256, change.AdminID, change.From, change.To); err != nil {
+			return err
+		}
+	}
+	if err := warnMissingPurposes(store, doc.AdminID, stderr); err != nil {
 		return err
 	}
 	if firstImport && added > 0 {
 		_, err = fmt.Fprintln(stdout, "Restart the running agent to enable newly imported authorizers: sudo systemctl restart concord-agent")
 	}
 	return err
+}
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(value string) error {
+	*l = append(*l, value)
+	return nil
+}
+
+// warnMissingPurposes allows any mix but tells root when the admin is left
+// unable to authorize root actions or unable to log in.
+func warnMissingPurposes(store authorizerStore, adminID string, stderr io.Writer) error {
+	entries, err := store.List()
+	if err != nil {
+		return err
+	}
+	login, action := false, false
+	for _, entry := range entries {
+		if entry.AdminID != adminID || entry.Revoked {
+			continue
+		}
+		login = login || entry.Purpose == hostagent.AuthorizerPurposeLogin
+		action = action || entry.Purpose == hostagent.AuthorizerPurposeAction
+	}
+	if !action {
+		if _, err := fmt.Fprintf(stderr, "Warning: admin %s has no active action credential and cannot authorize root actions; designate one with --action-credential\n", adminID); err != nil {
+			return err
+		}
+	}
+	if !login {
+		if _, err := fmt.Fprintf(stderr, "Warning: admin %s has no active login credential; host-agent login checks will refuse every key\n", adminID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func revokeAuthorizersWith(stores authorizerStoreLoader, path string, args []string, stdout, stderr io.Writer) error {

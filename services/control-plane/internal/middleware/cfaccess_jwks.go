@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -41,10 +43,14 @@ var (
 	errMalformed    = errors.New("malformed")
 	errBadSignature = errors.New("bad_signature")
 	errUnknownKID   = errors.New("unknown_kid")
-	errBadAlg       = errors.New("bad_alg")
-	errAudMismatch  = errors.New("aud_mismatch")
-	errExpired      = errors.New("expired")
-	errBadIssuer    = errors.New("bad_issuer")
+	// errJWKSUnavailable means the key set could not vouch for the KID: it is
+	// expired or unknown and the refresh failed or was throttled behind a
+	// failure. Callers map it to 503 jwks_unavailable, not to a rejected token.
+	errJWKSUnavailable = errors.New("jwks_unavailable")
+	errBadAlg          = errors.New("bad_alg")
+	errAudMismatch     = errors.New("aud_mismatch")
+	errExpired         = errors.New("expired")
+	errBadIssuer       = errors.New("bad_issuer")
 
 	nowFunc = time.Now
 )
@@ -79,6 +85,7 @@ type accessVerifier struct {
 	issuer  string
 	aud     string
 	client  *http.Client
+	log     *slog.Logger
 
 	mu             sync.RWMutex
 	keys           map[string]*rsa.PublicKey
@@ -105,6 +112,7 @@ func newAccessVerifier(teamDomain, aud string) *accessVerifier {
 		issuer:       td,
 		aud:          aud,
 		client:       &http.Client{Timeout: 5 * time.Second},
+		log:          slog.Default(),
 		keys:         map[string]*rsa.PublicKey{},
 		negativeKIDs: map[string]time.Time{},
 	}
@@ -196,9 +204,13 @@ func (v *accessVerifier) lookupKey(kid string) (*rsa.PublicKey, error) {
 	switch {
 	case c.known && c.age < jwksTTL:
 		return c.key, nil
-	case c.known || err != nil:
-		// The key set is still expired, or this KID's refresh failed: fail closed.
-		return nil, fmt.Errorf("%w: jwks unavailable", errUnknownKID)
+	case err != nil:
+		// The refresh failed, or was throttled behind a failure, and the cached
+		// set cannot vouch for this KID: fail closed, distinctly from a bad KID.
+		return nil, errors.Join(errJWKSUnavailable, err)
+	case c.known:
+		// The key set is still expired and nothing refreshed it: fail closed.
+		return nil, errors.Join(errJWKSUnavailable, errors.New("key set expired"))
 	case fetched:
 		// A completed fetch confirmed the issuer does not publish this KID.
 		v.cacheNegativeKID(kid, nowFunc())
@@ -253,6 +265,16 @@ func (v *accessVerifier) refreshOnce() (bool, error) {
 	defer v.mu.Unlock()
 	v.lastRefreshErr = err
 	if err != nil {
+		// One line per real attempt: throttled calls returned above and never log.
+		attrs := []any{"error_class", jwksErrorClass(err), "has_cached_set", !v.fetchedAt.IsZero()}
+		var statusErr *jwksStatusError
+		if errors.As(err, &statusErr) {
+			attrs = append(attrs, "http_status", statusErr.code)
+		}
+		if !v.fetchedAt.IsZero() {
+			attrs = append(attrs, "cached_set_age", nowFunc().Sub(v.fetchedAt).Round(time.Second).String())
+		}
+		v.log.Warn("cf-access: jwks refresh failed", attrs...)
 		return false, err
 	}
 	v.keys = next
@@ -267,7 +289,7 @@ func (v *accessVerifier) fetchKeys() (map[string]*rsa.PublicKey, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jwks status %d", resp.StatusCode)
+		return nil, &jwksStatusError{code: resp.StatusCode}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSBody+1))
@@ -297,14 +319,48 @@ func (v *accessVerifier) fetchKeys() (map[string]*rsa.PublicKey, error) {
 	next := make(map[string]*rsa.PublicKey, len(doc.Keys))
 	for _, jwk := range doc.Keys {
 		pub, ok := rsaPublicKeyFromJWK(jwk.Kty, jwk.Alg, jwk.N, jwk.E)
-		if ok {
+		if ok && jwk.Kid != "" {
 			next[jwk.Kid] = pub
+			continue
 		}
+		v.log.Warn("cf-access: jwks key skipped", "kid", logKID(jwk.Kid))
 	}
 	if len(next) == 0 {
 		return nil, errors.New("jwks empty")
 	}
 	return next, nil
+}
+
+type jwksStatusError struct{ code int }
+
+func (e *jwksStatusError) Error() string { return fmt.Sprintf("jwks status %d", e.code) }
+
+// jwksErrorClass names a failure without carrying URLs or response content.
+func jwksErrorClass(err error) string {
+	var statusErr *jwksStatusError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &statusErr):
+		return "http_status"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout"
+	case errors.As(err, &netErr):
+		return "network"
+	default:
+		return "invalid_response"
+	}
+}
+
+// logKID bounds an issuer-supplied KID before it reaches a log line.
+func logKID(kid string) string {
+	if kid == "" {
+		return "<none>"
+	}
+	const maxLen = 64
+	if len(kid) > maxLen {
+		return kid[:maxLen] + "..."
+	}
+	return kid
 }
 
 func (v *accessVerifier) cacheNegativeKID(kid string, now time.Time) {

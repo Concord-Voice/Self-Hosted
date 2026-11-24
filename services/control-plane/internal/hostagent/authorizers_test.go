@@ -52,6 +52,7 @@ func testAuthorizerDoc(t *testing.T) map[string]any {
 		"authorizers": []map[string]any{{
 			"admin_id": uuid.NewString(), "credential_id": base64.RawURLEncoding.EncodeToString([]byte("credential-1")),
 			"public_key": base64.RawURLEncoding.EncodeToString(key), "sign_count": 4, "label": "primary hardware key",
+			"purpose": AuthorizerPurposeAction,
 		}},
 	}
 }

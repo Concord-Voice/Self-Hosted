@@ -352,6 +352,11 @@ describe("ServerActions", () => {
 
   it.each([
     [403, "authorization_denied", "concord-agent authorizer import"],
+    [
+      403,
+      "authorization_denied",
+      "dedicated action key.*host-root operator.*--action-credential",
+    ],
     [503, "authorizer_unavailable", "cannot load its trusted authorizers"],
     [403, "peer_forbidden", "agent socket permissions"],
     [429, "authorization_busy", "Another host authorization is in progress"],

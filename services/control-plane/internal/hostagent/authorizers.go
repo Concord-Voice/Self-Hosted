@@ -41,7 +41,19 @@ type authorizerRecord struct {
 	SignCount    uint32 `json:"sign_count"`
 	Label        string `json:"label"`
 	Revoked      bool   `json:"revoked,omitempty"`
+	// Purpose is root's decision at import time: a login credential can never
+	// authorize a root action, and an action credential can never sign a login.
+	Purpose string `json:"purpose"`
 }
+
+const (
+	// AuthorizerPurposeLogin is the default: the credential may satisfy an
+	// admin login only.
+	AuthorizerPurposeLogin = "login"
+	// AuthorizerPurposeAction marks a credential root designated to authorize
+	// root actions only.
+	AuthorizerPurposeAction = "action"
+)
 
 type authorizerFile struct {
 	Schema      int                `json:"schema"`
@@ -77,11 +89,36 @@ type AuthorizerListing struct {
 	CredentialSHA256 string `json:"credential_sha256"`
 	SignCount        uint32 `json:"sign_count"`
 	Revoked          bool   `json:"revoked"`
+	Purpose          string `json:"purpose"`
+}
+
+// AuthorizerPurposeChange records a re-import that changed a credential's
+// purpose. Root's CLI prints each one so the change is never silent.
+type AuthorizerPurposeChange struct {
+	AdminID          string `json:"admin_id"`
+	CredentialSHA256 string `json:"credential_sha256"`
+	From             string `json:"from"`
+	To               string `json:"to"`
+}
+
+// AuthorizerImportResult reports what one root-confirmed import changed.
+type AuthorizerImportResult struct {
+	Added          int
+	PurposeChanges []AuthorizerPurposeChange
 }
 
 var (
 	errAuthorizerCounterStale = errors.New("authorizer counter did not advance")
 	errAuthorizerRevoked      = errors.New("authorizer credential revoked")
+	// errAuthorizerPurpose means the credential exists but root designated it
+	// for the other ceremony.
+	errAuthorizerPurpose = errors.New("authorizer credential purpose mismatch")
+	// ErrAuthorizerActionCredentialUnknown refuses --action-credential IDs the
+	// import document does not contain.
+	ErrAuthorizerActionCredentialUnknown = errors.New("--action-credential names a credential that is not in the export")
+	// ErrAuthorizerRevokedPurposeChange refuses changing the purpose of a
+	// revoked credential; it must be reinstated with its existing purpose first.
+	ErrAuthorizerRevokedPurposeChange = errors.New("cannot change the purpose of a revoked credential")
 	// ErrAuthorizerRevokedImport refuses an import that would silently restore
 	// a revoked credential; the root operator must ask for it explicitly.
 	ErrAuthorizerRevokedImport = errors.New("export contains a revoked credential; pass --reinstate to restore it")
@@ -257,6 +294,9 @@ func validateAuthorizerRecord(entry authorizerRecord, seenIDs map[string]bool) e
 	if err != nil || parsed.String() != entry.AdminID || !validAuthorizerLabel(entry.Label) {
 		return errors.New("invalid authorizer entry")
 	}
+	if entry.Purpose != AuthorizerPurposeLogin && entry.Purpose != AuthorizerPurposeAction {
+		return errors.New("invalid authorizer purpose")
+	}
 	id, err := decodeAuthorizerField(entry.CredentialID, maxAuthorizerIDBytes)
 	if err != nil || seenIDs[string(id)] {
 		return errors.New("duplicate or malformed authorizer credential")
@@ -310,6 +350,53 @@ func (s *AuthorizerStore) Credentials(adminID string) ([]webauthn.Credential, er
 	return credentials, nil
 }
 
+// actionCredentials returns only the admin's active credentials root
+// designated for root actions. Login credentials never reach an action
+// ceremony's allow-list.
+func (s *AuthorizerStore) actionCredentials(adminID string) ([]webauthn.Credential, error) {
+	doc, err := s.read()
+	if err != nil {
+		return nil, err
+	}
+	var credentials []webauthn.Credential
+	for _, entry := range doc.Authorizers {
+		if entry.AdminID != adminID || entry.Revoked || entry.Purpose != AuthorizerPurposeAction {
+			continue
+		}
+		id, _ := decodeAuthorizerField(entry.CredentialID, maxAuthorizerIDBytes)
+		key, _ := decodeAuthorizerField(entry.PublicKey, maxAuthorizerKeyBytes)
+		credentials = append(credentials, webauthn.Credential{ID: id, PublicKey: key, Authenticator: webauthn.Authenticator{SignCount: entry.SignCount}})
+	}
+	return credentials, nil
+}
+
+// LoadActionCredentialIDs returns the base64url IDs of adminID's active
+// action credentials in the root-owned projection at path, under the same
+// trust checks as LoadAuthorizers. An absent projection file returns
+// os.ErrNotExist itself.
+func LoadActionCredentialIDs(path, adminID string) (map[string]struct{}, error) {
+	store, err := LoadAuthorizers(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, os.ErrNotExist
+	}
+	if err != nil {
+		return nil, err
+	}
+	return store.actionCredentialIDs(adminID)
+}
+
+func (s *AuthorizerStore) actionCredentialIDs(adminID string) (map[string]struct{}, error) {
+	credentials, err := s.actionCredentials(adminID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]struct{}, len(credentials))
+	for _, credential := range credentials {
+		ids[base64.RawURLEncoding.EncodeToString(credential.ID)] = struct{}{}
+	}
+	return ids, nil
+}
+
 // RPConfig returns the validated relying-party configuration for the agent's
 // own WebAuthn verifier.
 func (s *AuthorizerStore) RPConfig() (string, []string, error) {
@@ -330,7 +417,7 @@ func (s *AuthorizerStore) List() ([]AuthorizerListing, error) {
 	for _, entry := range doc.Authorizers {
 		id, _ := decodeAuthorizerField(entry.CredentialID, maxAuthorizerIDBytes)
 		digest := sha256.Sum256(id)
-		list = append(list, AuthorizerListing{AdminID: entry.AdminID, Label: entry.Label, CredentialSHA256: hex.EncodeToString(digest[:]), SignCount: entry.SignCount, Revoked: entry.Revoked})
+		list = append(list, AuthorizerListing{AdminID: entry.AdminID, Label: entry.Label, CredentialSHA256: hex.EncodeToString(digest[:]), SignCount: entry.SignCount, Revoked: entry.Revoked, Purpose: entry.Purpose})
 	}
 	return list, nil
 }
@@ -392,23 +479,35 @@ func (s *AuthorizerStore) mutate(fn func(*authorizerFile) (bool, error)) error {
 // new root-owned snapshot. The revocation check runs under the file lock, so a
 // revoke that lands after Credentials() but before this write still wins.
 func (s *AuthorizerStore) AdvanceCounter(credentialID []byte, count uint32) error {
-	return s.advanceCounter(credentialID, count, false)
+	return s.advanceCounter(credentialID, count, false, "")
+}
+
+// advanceActionCounter also requires, under the file lock, that the credential
+// that signed is still an action credential: a re-import that changed its
+// purpose after Begin still wins.
+func (s *AuthorizerStore) advanceActionCounter(credentialID []byte, count uint32) error {
+	return s.advanceCounter(credentialID, count, false, AuthorizerPurposeAction)
 }
 
 // advanceLoginCounter also advances a revoked credential: an admin login is
 // not root authority, and the durable counter must keep moving so a clone of a
 // revoked key stays detectable.
 func (s *AuthorizerStore) advanceLoginCounter(credentialID []byte, count uint32) error {
-	return s.advanceCounter(credentialID, count, true)
+	return s.advanceCounter(credentialID, count, true, AuthorizerPurposeLogin)
 }
 
-func (s *AuthorizerStore) advanceCounter(credentialID []byte, count uint32, allowRevoked bool) error {
+// advanceCounter checks purpose (when set) before revocation and the counter,
+// so a credential of the other purpose changes nothing.
+func (s *AuthorizerStore) advanceCounter(credentialID []byte, count uint32, allowRevoked bool, purpose string) error {
 	return s.mutate(func(doc *authorizerFile) (bool, error) {
 		found := false
 		for i := range doc.Authorizers {
 			id, _ := decodeAuthorizerField(doc.Authorizers[i].CredentialID, maxAuthorizerIDBytes)
 			if !bytes.Equal(id, credentialID) {
 				continue
+			}
+			if purpose != "" && doc.Authorizers[i].Purpose != purpose {
+				return false, errAuthorizerPurpose
 			}
 			if doc.Authorizers[i].Revoked && !allowRevoked {
 				return false, errAuthorizerRevoked
@@ -431,39 +530,72 @@ func (s *AuthorizerStore) advanceCounter(credentialID []byte, count uint32, allo
 	})
 }
 
-// ImportMany validates and installs one root-confirmed document atomically.
-// A credential already trusted for the same admin/key is left unchanged, so a
-// stale export cannot lower its durable sign counter. A revoked credential is
-// restored only when reinstate is set; otherwise the whole import is refused.
+// ImportMany imports a document that designates no action credential, so
+// every credential in it is a login credential.
 func (s *AuthorizerStore) ImportMany(in AuthorizerImport, reinstate bool) (int, error) {
-	added := 0
+	result, err := s.ImportWithPurposes(in, reinstate, nil)
+	return result.Added, err
+}
+
+// ImportWithPurposes validates and installs one root-confirmed document
+// atomically. Credentials whose base64url ID is in actionIDs become action
+// credentials; every other credential in the document is a login credential.
+// A credential already trusted for the same admin/key keeps its counter, so a
+// stale export cannot lower it. A revoked credential is restored only when
+// reinstate is set, and never with a changed purpose; otherwise the whole
+// import is refused. Each purpose change is reported in the result.
+func (s *AuthorizerStore) ImportWithPurposes(in AuthorizerImport, reinstate bool, actionIDs []string) (AuthorizerImportResult, error) {
+	var result AuthorizerImportResult
 	err := s.mutate(func(doc *authorizerFile) (bool, error) {
+		result = AuthorizerImportResult{}
 		if err := validateAuthorizerImport(in, *doc); err != nil {
 			return false, err
 		}
-		seen := make(map[string]bool, len(in.Credentials))
+		action := make(map[string]bool, len(actionIDs))
+		for _, id := range actionIDs {
+			action[id] = true
+		}
 		for _, input := range in.Credentials {
-			candidate, err := importAuthorizerRecord(in.AdminID, input, seen)
+			delete(action, input.CredentialID)
+		}
+		if len(action) != 0 {
+			return false, ErrAuthorizerActionCredentialUnknown
+		}
+		for _, id := range actionIDs {
+			action[id] = true
+		}
+		seen := make(map[string]bool, len(in.Credentials))
+		changed := false
+		for _, input := range in.Credentials {
+			purpose := AuthorizerPurposeLogin
+			if action[input.CredentialID] {
+				purpose = AuthorizerPurposeAction
+			}
+			candidate, err := importAuthorizerRecord(in.AdminID, input, purpose, seen)
 			if err != nil {
 				return false, err
 			}
-			created, err := addAuthorizerRecord(doc, candidate, reinstate)
+			created, change, err := addAuthorizerRecord(doc, candidate, reinstate)
 			if err != nil {
 				return false, err
 			}
 			if created {
-				added++
+				result.Added++
 			}
+			if change != nil {
+				result.PurposeChanges = append(result.PurposeChanges, *change)
+			}
+			changed = changed || created || change != nil
 		}
 		if err := validateAuthorizerFile(*doc); err != nil {
 			return false, err
 		}
-		return added > 0, nil
+		return changed, nil
 	})
 	if err != nil {
-		return 0, err
+		return AuthorizerImportResult{}, err
 	}
-	return added, nil
+	return result, nil
 }
 
 func validateAuthorizerImport(in AuthorizerImport, doc authorizerFile) error {
@@ -477,34 +609,46 @@ func validateAuthorizerImport(in AuthorizerImport, doc authorizerFile) error {
 	return nil
 }
 
-func importAuthorizerRecord(adminID string, input AuthorizerCredentialImport, seen map[string]bool) (authorizerRecord, error) {
-	record := authorizerRecord{AdminID: adminID, CredentialID: input.CredentialID, PublicKey: input.PublicKey, SignCount: input.SignCount, Label: input.Label}
+func importAuthorizerRecord(adminID string, input AuthorizerCredentialImport, purpose string, seen map[string]bool) (authorizerRecord, error) {
+	record := authorizerRecord{AdminID: adminID, CredentialID: input.CredentialID, PublicKey: input.PublicKey, SignCount: input.SignCount, Label: input.Label, Purpose: purpose}
 	if err := validateAuthorizerRecord(record, seen); err != nil {
 		return authorizerRecord{}, err
 	}
 	return record, nil
 }
 
-func addAuthorizerRecord(doc *authorizerFile, candidate authorizerRecord, reinstate bool) (bool, error) {
+// addAuthorizerRecord never touches an existing credential's counter. It
+// reports a reinstatement as created and a purpose change separately.
+func addAuthorizerRecord(doc *authorizerFile, candidate authorizerRecord, reinstate bool) (bool, *AuthorizerPurposeChange, error) {
 	for i := range doc.Authorizers {
 		existing := &doc.Authorizers[i]
 		if existing.CredentialID != candidate.CredentialID {
 			continue
 		}
 		if existing.AdminID != candidate.AdminID || existing.PublicKey != candidate.PublicKey {
-			return false, errors.New("conflicting import credential")
+			return false, nil, errors.New("conflicting import credential")
 		}
 		if existing.Revoked {
 			if !reinstate {
-				return false, ErrAuthorizerRevokedImport
+				return false, nil, ErrAuthorizerRevokedImport
+			}
+			if existing.Purpose != candidate.Purpose {
+				return false, nil, ErrAuthorizerRevokedPurposeChange
 			}
 			existing.Revoked = false
-			return true, nil
+			return true, nil, nil
 		}
-		return false, nil
+		if existing.Purpose == candidate.Purpose {
+			return false, nil, nil
+		}
+		id, _ := decodeAuthorizerField(existing.CredentialID, maxAuthorizerIDBytes)
+		digest := sha256.Sum256(id)
+		change := &AuthorizerPurposeChange{AdminID: existing.AdminID, CredentialSHA256: hex.EncodeToString(digest[:]), From: existing.Purpose, To: candidate.Purpose}
+		existing.Purpose = candidate.Purpose
+		return false, change, nil
 	}
 	doc.Authorizers = append(doc.Authorizers, candidate)
-	return true, nil
+	return true, nil, nil
 }
 
 // Revoke disables every credential for root actions while retaining its

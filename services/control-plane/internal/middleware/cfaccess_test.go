@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -253,7 +254,7 @@ func TestAccessVerifierRejectsOversizedAndTrailingJWKS(t *testing.T) {
 			jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
 			t.Cleanup(jwks.Close)
 			_, err := newAccessVerifier(jwks.URL, "test-aud").Verify(signJWT(t, key, "known", claims(jwks.URL)))
-			require.ErrorIs(t, err, errUnknownKID)
+			require.ErrorIs(t, err, errJWKSUnavailable)
 		})
 	}
 }
@@ -278,7 +279,7 @@ func TestAccessVerifierFailedRefreshPreservesFreshKeys(t *testing.T) {
 	verifier.lastAttempt = time.Now().Add(-jwksRefreshInterval)
 	verifier.mu.Unlock()
 	failRefresh.Store(true)
-	require.ErrorIs(t, verifyAccessToken(verifier, signJWT(t, key, "unknown", claims)), errUnknownKID)
+	require.ErrorIs(t, verifyAccessToken(verifier, signJWT(t, key, "unknown", claims)), errJWKSUnavailable)
 	require.NoError(t, verifyAccessToken(verifier, known))
 }
 
@@ -404,7 +405,7 @@ func TestAccessVerifierFailsClosedWhenJWKSUnavailableOnEmptyCache(t *testing.T) 
 
 	token := signJWT(t, key, "k1", map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": jwks.URL})
 	_, err := newAccessVerifier(jwks.URL, "test-aud").Verify(token)
-	require.ErrorIs(t, err, errUnknownKID)
+	require.ErrorIs(t, err, errJWKSUnavailable)
 }
 
 func TestAccessVerifierRejectsStaleCachedKeyWhenRefreshFails(t *testing.T) {
@@ -430,7 +431,7 @@ func TestAccessVerifierRejectsStaleCachedKeyWhenRefreshFails(t *testing.T) {
 
 	nowFunc = func() time.Time { return fixedNow.Add(jwksTTL + time.Second) }
 	_, err = verifier.Verify(token)
-	require.ErrorIs(t, err, errUnknownKID)
+	require.ErrorIs(t, err, errJWKSUnavailable)
 }
 
 // TestAccessVerifierThrottledRefreshDoesNotServeExpiredKey is the Codex P2
@@ -462,8 +463,8 @@ func TestAccessVerifierThrottledRefreshDoesNotServeExpiredKey(t *testing.T) {
 
 	failRefresh.Store(true)
 	nowFunc = func() time.Time { return fixedNow.Add(jwksTTL + time.Second) }
-	require.ErrorIs(t, verifyAccessToken(verifier, token), errUnknownKID, "the failed refresh rejects the expired key")
-	require.ErrorIs(t, verifyAccessToken(verifier, token), errUnknownKID, "a throttled refresh must not serve the expired key")
+	require.ErrorIs(t, verifyAccessToken(verifier, token), errJWKSUnavailable, "the failed refresh rejects the expired key")
+	require.ErrorIs(t, verifyAccessToken(verifier, token), errJWKSUnavailable, "a throttled refresh must not serve the expired key")
 	require.Equal(t, int32(2), hits.Load(), "the throttled request fetches nothing")
 
 	failRefresh.Store(false)
@@ -520,7 +521,7 @@ func TestAccessVerifierRefreshesAheadOfExpiry(t *testing.T) {
 		wantFetchedAt bool
 	}{
 		{name: "refresh succeeds", wantFetchedAt: true},
-		{name: "refresh fails", fail: true, afterExpiry: errUnknownKID},
+		{name: "refresh fails", fail: true, afterExpiry: errJWKSUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixedNow := time.Unix(1_700_000_000, 0)
@@ -677,4 +678,206 @@ func jsonSegment(t *testing.T, v any) string {
 	b, err := json.Marshal(v)
 	require.NoError(t, err)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func recordingLogger() (*slog.Logger, *syncBuffer) {
+	buf := &syncBuffer{}
+	return slog.New(slog.NewTextHandler(buf, nil)), buf
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestAccessVerifierFreshSetMissingKIDIsUnknownNotUnavailable keeps a bad KID
+// distinct from an outage: a freshly fetched set that lacks the KID is a 401
+// class answer, never jwks_unavailable.
+func TestAccessVerifierFreshSetMissingKIDIsUnknownNotUnavailable(t *testing.T) {
+	key := newRSAKey(t)
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(jwksJSON(t, "k1", key))
+	}))
+	t.Cleanup(jwks.Close)
+	claims := map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": jwks.URL}
+	err := verifyAccessToken(newAccessVerifier(jwks.URL, "test-aud"), signJWT(t, key, "absent", claims))
+	require.ErrorIs(t, err, errUnknownKID)
+	require.NotErrorIs(t, err, errJWKSUnavailable)
+}
+
+// TestAccessVerifierExpiredSetFailuresAreUnavailableNotUnknown pins the two
+// fail-closed paths to the distinct sentinel: refresh failed, then throttled
+// behind that failure.
+func TestAccessVerifierExpiredSetFailuresAreUnavailableNotUnknown(t *testing.T) {
+	fixedNow := time.Unix(1_700_000_000, 0)
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return fixedNow }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	key := newRSAKey(t)
+	var fail atomic.Bool
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if fail.Load() {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write(jwksJSON(t, "k1", key))
+	}))
+	t.Cleanup(jwks.Close)
+	token := signJWT(t, key, "k1", map[string]any{"aud": "test-aud", "exp": fixedNow.Add(3 * jwksTTL).Unix(), "iss": jwks.URL})
+	verifier := newAccessVerifier(jwks.URL, "test-aud")
+	require.NoError(t, verifyAccessToken(verifier, token))
+
+	fail.Store(true)
+	nowFunc = func() time.Time { return fixedNow.Add(jwksTTL + time.Second) }
+	for _, phase := range []string{"refresh fails", "throttled behind failure"} {
+		err := verifyAccessToken(verifier, token)
+		require.ErrorIs(t, err, errJWKSUnavailable, phase)
+		require.NotErrorIs(t, err, errUnknownKID, phase)
+	}
+}
+
+func TestAccessVerifierLogsRefreshFailureOncePerAttemptWithoutKeyMaterial(t *testing.T) {
+	fixedNow := time.Unix(1_700_000_000, 0)
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return fixedNow }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	key := newRSAKey(t)
+	var fail atomic.Bool
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if fail.Load() {
+			http.Error(w, "SECRETBODY "+base64.RawURLEncoding.EncodeToString(key.N.Bytes()), http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write(jwksJSON(t, "k1", key))
+	}))
+	t.Cleanup(jwks.Close)
+	token := signJWT(t, key, "k1", map[string]any{"aud": "test-aud", "exp": fixedNow.Add(3 * jwksTTL).Unix(), "iss": jwks.URL})
+	logger, logs := recordingLogger()
+	verifier := newAccessVerifier(jwks.URL, "test-aud")
+	verifier.log = logger
+	require.NoError(t, verifyAccessToken(verifier, token))
+	require.NotContains(t, logs.String(), "refresh failed")
+
+	fail.Store(true)
+	nowFunc = func() time.Time { return fixedNow.Add(jwksTTL + time.Second) }
+	require.Error(t, verifyAccessToken(verifier, token)) // real attempt
+	require.Error(t, verifyAccessToken(verifier, token)) // throttled, no new fetch
+	out := logs.String()
+	require.Equal(t, 1, strings.Count(out, "jwks refresh failed"), "one line per failed attempt")
+	require.Contains(t, out, "http_status=503")
+	require.Contains(t, out, "cached_set_age=1h0m1s")
+	require.NotContains(t, out, "SECRETBODY")
+	require.NotContains(t, out, base64.RawURLEncoding.EncodeToString(key.N.Bytes()))
+	require.NotContains(t, out, token)
+}
+
+func TestAccessVerifierLogsSkippedMalformedJWKByKID(t *testing.T) {
+	key := newRSAKey(t)
+	good := jwksJSONMulti(t, map[string]*rsa.PrivateKey{"good": key})
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(good, &doc))
+	keys := doc["keys"].([]any)
+	keys = append(keys, map[string]string{"kid": "bad-kid", "kty": "RSA", "alg": "RS256", "n": "!!!notbase64", "e": "AQAB"})
+	doc["keys"] = keys
+	body, err := json.Marshal(doc)
+	require.NoError(t, err)
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	t.Cleanup(jwks.Close)
+
+	logger, logs := recordingLogger()
+	verifier := newAccessVerifier(jwks.URL, "test-aud")
+	verifier.log = logger
+	claims := map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": jwks.URL}
+	require.NoError(t, verifyAccessToken(verifier, signJWT(t, key, "good", claims)))
+	out := logs.String()
+	require.Contains(t, out, "jwks key skipped")
+	require.Contains(t, out, "kid=bad-kid")
+	require.NotContains(t, out, "notbase64")
+}
+
+// TestAccessVerifierRotatedKeyBurstFetchesOnce fails without singleflight:
+// callers arriving during the one in-flight fetch would otherwise be throttled
+// (lastAttempt is already set), fetch nothing and miss the new key.
+func TestAccessVerifierRotatedKeyBurstFetchesOnce(t *testing.T) {
+	oldKey, newKey := newRSAKey(t), newRSAKey(t)
+	var hits atomic.Int32
+	var rotated atomic.Bool
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFn)
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		if rotated.Load() {
+			close(started)
+			<-release
+			_, _ = w.Write(jwksJSONMulti(t, map[string]*rsa.PrivateKey{"old": oldKey, "new": newKey}))
+			return
+		}
+		_, _ = w.Write(jwksJSON(t, "old", oldKey))
+	}))
+	t.Cleanup(jwks.Close)
+
+	claims := map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": jwks.URL}
+	verifier := newAccessVerifier(jwks.URL, "test-aud")
+	require.NoError(t, verifyAccessToken(verifier, signJWT(t, oldKey, "old", claims)))
+	verifier.mu.Lock()
+	verifier.lastAttempt = time.Now().Add(-jwksRefreshInterval - time.Second)
+	verifier.mu.Unlock()
+	rotated.Store(true)
+
+	const callers = 24
+	token := signJWT(t, newKey, "new", claims)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- verifyAccessToken(verifier, token) }()
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rotation did not trigger a fetch")
+	}
+	time.Sleep(200 * time.Millisecond) // let the burst pile onto the in-flight fetch
+	releaseFn()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Equal(t, int32(2), hits.Load(), "one fetch for the whole burst")
+}
+
+func TestRequireCloudflareAccessMapsUnavailableJWKSTo503(t *testing.T) {
+	key := newRSAKey(t)
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	t.Cleanup(jwks.Close)
+	token := signJWT(t, key, "k1", map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": jwks.URL})
+	router := gin.New()
+	router.Use(RequireCloudflareAccess(newAccessVerifier(jwks.URL, "test-aud"), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))))
+	router.GET("/admin/x", func(c *gin.Context) { c.Status(http.StatusOK) })
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/x", nil)
+	req.Header.Set(accessHeader, token)
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.JSONEq(t, `{"error":"jwks_unavailable"}`, rec.Body.String())
 }
