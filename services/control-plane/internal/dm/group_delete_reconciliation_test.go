@@ -888,7 +888,10 @@ func TestUpdateDMMessageCiphertextRetriesLegacyMembershipDriftWithoutDuplicateWr
 	case result := <-resultCh:
 		require.True(t, result.ok)
 		require.Equal(t, "after", result.result.Content)
-	case <-time.After(3 * time.Second):
+	// A liveness bound, not a timing assertion: the retry runs after the
+	// removal commits, and a loaded full-package run can take seconds to
+	// schedule it. 3 s flaked under load; the bound only has to catch a hang.
+	case <-time.After(20 * time.Second):
 		t.Fatal("DM ciphertext edit did not retry after membership snapshot drift")
 	}
 

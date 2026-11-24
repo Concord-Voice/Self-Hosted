@@ -632,6 +632,7 @@ directory belong to the intended service.
 | `REDIS_URL` | `redis://:concord_dev_redis@localhost:6379` | Redis connection. Compose starts Redis with `--requirepass "$REDIS_PASSWORD"`, so the URL must carry that password (repo-root `.env`); an uncredentialed URL fails every Redis call with `NOAUTH` |
 | `JWT_SECRET` | (dev secret) | JWT signing key |
 | `INSTANCE_TYPE` | `saas` | Deployment/entitlement mode (`saas` or `self-hosted`) |
+| `RECOVERY_LEGACY_CODE` | `true` | `false` stops issuing and accepting the deprecated 6-digit email recovery code; recovery emails then always carry a recovery key. Clients that cannot accept a key cannot recover by email while it is `false`. Turning it off needs no wait: the next key request replaces any live code. It takes any boolean spelling (`false`, `0`, `FALSE`, …); a value that is not a boolean stops the control plane at startup. |
 | `SERVER_VERSION` | `dev` | Advertised server version for capability discovery |
 | `NATS_URL` | `nats://localhost:4222` | NATS connection |
 | `ACTIVITY_HISTORY_CLUSTER_ENABLED` | `false` | Global Activity History rollout gate. Keep false for ordinary development unless you test the guarded single-replica path |
@@ -840,12 +841,12 @@ Run focused server regressions from `services/control-plane` with an isolated
 `DATABASE_URL` and `REDIS_URL` (never the shared `concord` database):
 
 ```sh
-go test -p 1 ./internal/oauth ./internal/auth ./internal/mfa ./internal/middleware ./internal/api -run 'Test.*(SSOLink|CompletionKind|ClientBinding|JWKS|LoginCSRF|InitiateGlobalLimit|KeyMaterialLimit)' -count=1
+go test -p 1 ./internal/oauth ./internal/auth ./internal/mfa ./internal/middleware ./internal/api -run 'Test.*(SSOLink|CompletionKind|ClientBinding|JWKS|LoginCSRF|InitiatePerCallerLimit|KeyMaterialLimit)' -count=1
 go test -race -p 1 ./internal/oauth ./internal/auth ./internal/mfa -run 'Test.*(SSOLink|CompletionKind|JWKS)' -count=1
 ```
 
-SSO initiation keeps the per-IP 10/15-minute cap and adds a fail-closed
-600/minute budget per provider before state or Apple bridge allocation.
+SSO initiation keeps the per-IP 10/15-minute cap and a fail-closed
+600/minute budget per provider and trusted client IP before state or Apple bridge allocation.
 Password and SSO registration reject encoded wrapped keys above 43,692 characters
 or salts above 88 characters, and decoded values above 32 KiB or 64 bytes,
 respectively.

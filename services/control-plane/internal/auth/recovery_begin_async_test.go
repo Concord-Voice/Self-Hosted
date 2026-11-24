@@ -30,8 +30,8 @@ func TestRecoveryBeginReturnsBeforeAccountSpecificWork(t *testing.T) {
 		releaseWorker()
 		h.CloseRecoveryJobs()
 	})
-	h.recoveryProcess = func(addr string) {
-		started <- addr
+	h.recoveryProcess = func(job recoveryJob) {
+		started <- job.addr
 		<-release
 	}
 
@@ -58,7 +58,7 @@ func TestRecoveryBeginReturnsBeforeAccountSpecificWork(t *testing.T) {
 		t.Fatal("recovery response waited for account-specific work")
 	}
 	require.Equal(t, http.StatusOK, response.Code)
-	require.JSONEq(t, `{"message":"If an account exists with that email, a recovery code has been sent"}`, response.Body.String())
+	require.JSONEq(t, `{"message":"If an account exists with that email, a recovery email has been sent","format":"code"}`, response.Body.String())
 
 	releaseWorker()
 }
@@ -66,7 +66,7 @@ func TestRecoveryBeginReturnsBeforeAccountSpecificWork(t *testing.T) {
 func TestRecoveryBeginRejectsInvalidBodyWithoutQueueing(t *testing.T) {
 	h := NewHandler(nil, nil, logger.New("test"), "test", nil)
 	processed := make(chan struct{}, 1)
-	h.recoveryProcess = func(string) { processed <- struct{}{} }
+	h.recoveryProcess = func(recoveryJob) { processed <- struct{}{} }
 	t.Cleanup(h.CloseRecoveryJobs)
 
 	response := httptest.NewRecorder()
@@ -97,9 +97,9 @@ func TestRecoveryBeginQueueSaturationAndClose(t *testing.T) {
 	})
 	var processedMu sync.Mutex
 	processed := map[string]int{}
-	h.recoveryProcess = func(addr string) {
+	h.recoveryProcess = func(job recoveryJob) {
 		processedMu.Lock()
-		processed[addr]++
+		processed[job.addr]++
 		processedMu.Unlock()
 		select {
 		case started <- struct{}{}:
@@ -109,7 +109,7 @@ func TestRecoveryBeginQueueSaturationAndClose(t *testing.T) {
 	}
 
 	for range recoveryWorkerCount {
-		h.enqueueRecoveryBegin("worker@example.test")
+		h.enqueueRecoveryBegin(recoveryJob{addr: "worker@example.test", format: recoveryFormatCode})
 	}
 	for range recoveryWorkerCount {
 		select {
@@ -119,15 +119,15 @@ func TestRecoveryBeginQueueSaturationAndClose(t *testing.T) {
 		}
 	}
 	for range recoveryQueueCapacity {
-		h.enqueueRecoveryBegin("queued@example.test")
+		h.enqueueRecoveryBegin(recoveryJob{addr: "queued@example.test", format: recoveryFormatCode})
 	}
-	h.enqueueRecoveryBegin("overflow@example.test")
+	h.enqueueRecoveryBegin(recoveryJob{addr: "overflow@example.test", format: recoveryFormatCode})
 	require.Contains(t, logs.String(), "recovery_queue_saturated")
 
 	releaseOnce.Do(func() { close(release) })
 	h.CloseRecoveryJobs()
 	h.CloseRecoveryJobs()
-	h.enqueueRecoveryBegin("after-close@example.test")
+	h.enqueueRecoveryBegin(recoveryJob{addr: "after-close@example.test", format: recoveryFormatCode})
 
 	processedMu.Lock()
 	defer processedMu.Unlock()
@@ -149,14 +149,14 @@ func TestCloseRecoveryJobsAbandonsStalledDrain(t *testing.T) {
 	t.Cleanup(releaseWorkers)
 	started := make(chan struct{}, recoveryWorkerCount+1)
 	var processed atomic.Int32
-	h.recoveryProcess = func(string) {
+	h.recoveryProcess = func(recoveryJob) {
 		processed.Add(1)
 		started <- struct{}{}
 		<-release
 	}
 
 	for range recoveryWorkerCount + 1 {
-		h.enqueueRecoveryBegin("stalled@example.test")
+		h.enqueueRecoveryBegin(recoveryJob{addr: "stalled@example.test", format: recoveryFormatCode})
 	}
 	for range recoveryWorkerCount {
 		select {
@@ -203,22 +203,27 @@ func TestAbandonedRecoveryDrainClearsUnsentCodes(t *testing.T) {
 	releaseWorkers := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseWorkers)
 	started := make(chan struct{}, 1)
-	h.recoveryProcess = func(string) {
+	h.recoveryProcess = func(recoveryJob) {
 		started <- struct{}{}
 		<-release
 	}
 
 	const inflightAddr = "inflight@example.test"
 	const lateAddr = "late@example.test"
-	inflightData := []byte(`{"code_hash":"a","user_id":"u1","send_id":"s1","attempts":0}`)
-	lateData := []byte(`{"code_hash":"b","user_id":"u2","send_id":"s2","attempts":0}`)
-	require.NoError(t, mini.Set(recoveryRedisKey(inflightAddr), string(inflightData)))
-	require.NoError(t, mini.Set(recoveryRedisKey(lateAddr), string(lateData)))
+	inflight := &recoveryDelivery{addr: inflightAddr, secret: "123456", format: recoveryFormatToken, minutes: 15,
+		issue: testRecoveryIssue("u1", "s1", recoveryTokenKeyPrefix+"inflight")}
+	late := &recoveryDelivery{addr: lateAddr, secret: "654321", format: recoveryFormatCode, minutes: 15,
+		issue: testRecoveryIssue("u2", "s2", recoveryRedisKey(lateAddr))}
+	for _, d := range []*recoveryDelivery{inflight, late} {
+		_, held, err := h.issueRecoveryRecord(t.Context(), d.issue)
+		require.NoError(t, err)
+		require.False(t, held)
+	}
 	h.recoveryInflightMu.Lock()
-	h.recoveryInflight[&recoveryDelivery{addr: inflightAddr, data: inflightData}] = struct{}{}
+	h.recoveryInflight[inflight] = struct{}{}
 	h.recoveryInflightMu.Unlock()
 
-	h.enqueueRecoveryBegin("stalled@example.test")
+	h.enqueueRecoveryBegin(recoveryJob{addr: "stalled@example.test", format: recoveryFormatCode})
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -226,10 +231,15 @@ func TestAbandonedRecoveryDrainClearsUnsentCodes(t *testing.T) {
 	}
 	h.CloseRecoveryJobs()
 	require.Contains(t, logs.String(), "recovery_drain_abandoned")
-	require.False(t, mini.Exists(recoveryRedisKey(inflightAddr)), "an in-flight code must be cleared on abandonment")
+	require.False(t, mini.Exists(inflight.issue.RecordKey), "an in-flight key must be cleared on abandonment")
+	require.False(t, mini.Exists(inflight.issue.SlotKey), "an in-flight send must release its slot")
+	sends, err := mini.Get(inflight.issue.SendsKey)
+	require.NoError(t, err)
+	require.Equal(t, "0", sends, "an unsent email is refunded")
 
-	h.deliverRecoveryCode(lateAddr, "123456", lateData)
-	require.False(t, mini.Exists(recoveryRedisKey(lateAddr)), "a delivery after abandonment must clear its code")
+	h.deliverRecoveryCode(late)
+	require.False(t, mini.Exists(late.issue.RecordKey), "a delivery after abandonment must clear its code")
+	require.False(t, mini.Exists(late.issue.SlotKey))
 	require.NotContains(t, logs.String(), "Failed to send recovery code email", "a delivery after abandonment must not try SMTP")
 }
 
@@ -244,13 +254,13 @@ func TestRecoveryFailureLogsOmitAddress(t *testing.T) {
 	h := NewHandler(broken, rdb, logger.NewWithWriter(&logs), "test", nil)
 	t.Cleanup(h.CloseRecoveryJobs)
 
-	h.processRecoveryBegin(addr)
+	h.processRecoveryBegin(recoveryJob{addr: addr, format: recoveryFormatToken})
 	mini.Close()
-	h.deliverRecoveryCode(addr, "123456", []byte(`{"send_id":"s"}`))
+	h.deliverRecoveryCode(&recoveryDelivery{addr: addr, secret: "123456", format: recoveryFormatToken, issue: testRecoveryIssue("u", "s", recoveryTokenKeyPrefix+"x")})
 
 	out := logs.String()
 	require.Contains(t, out, "failure_class=recovery_account_lookup")
-	require.Contains(t, out, "failure_class=recovery_email_delivery")
-	require.Contains(t, out, "failure_class=recovery_unsent_code_cleanup")
+	require.Contains(t, out, "failure_class=recovery_delivery_not_configured")
+	require.Contains(t, out, "failure_class=recovery_unsent_code_cleanup_redis")
 	require.NotContains(t, out, addr)
 }

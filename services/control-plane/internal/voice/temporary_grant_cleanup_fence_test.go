@@ -171,7 +171,7 @@ func TestExplicitTemporaryGrantRevokeFenceProbeControl(t *testing.T) {
 	mgr := &tempGrantManager{db: db, hub: hub}
 
 	_, _, _, err := mgr.deleteTemporaryGrantWithCapture(
-		context.Background(), uuid.NewString(), uuid.NewString(), uuid.NewString(), temporaryGrantAuthorization{},
+		context.Background(), uuid.NewString(), uuid.NewString(), uuid.NewString(), allowAllTemporaryGrantAuthorityForTest(),
 	)
 	require.ErrorIs(t, err, errFenceProbeStopped)
 	require.NotZero(t, probe.seen,

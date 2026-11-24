@@ -113,6 +113,33 @@ func TestLoginCSRFRejectsMixedFetchMetadataAndDuplicateContentType(t *testing.T)
 	})
 }
 
+func TestLoginCSRFAllowsAllowlistedDesktopOriginAcrossFetchMetadata(t *testing.T) {
+	r := gin.New()
+	r.Use(middleware.LoginCSRF([]string{"app://concord", "app://concord-mobile", "https://app.example.test"}))
+	r.POST("/api/v1/auth/login", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	cases := []struct {
+		name   string
+		origin string
+		want   int
+	}{
+		{"allowlisted desktop origin", "app://concord", http.StatusNoContent},
+		{"allowlisted HTTPS origin", "https://app.example.test", http.StatusForbidden},
+		{"other allowlisted app origin", "app://concord-mobile", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Sec-Fetch-Site", "cross-site")
+			req.Header.Set("Origin", tc.origin)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			require.Equal(t, tc.want, w.Code, w.Body.String())
+		})
+	}
+}
+
 func TestLoginCSRFPreflightStaysWithCORS(t *testing.T) {
 	r := gin.New()
 	r.Use(middleware.CORS([]string{"https://app.example.test"}))

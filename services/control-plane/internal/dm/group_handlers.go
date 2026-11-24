@@ -368,10 +368,8 @@ func (h *Handler) respondDMRoleChangeError(c *gin.Context, err error) {
 // DeleteGroup permanently deletes a group DM conversation and all associated data.
 func (h *Handler) DeleteGroup(c *gin.Context) {
 	userID := c.GetString("user_id")
-	convID := c.Param("id")
-
-	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+	convID, ok := conversationIDParam(c)
+	if !ok {
 		return
 	}
 

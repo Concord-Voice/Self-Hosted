@@ -400,7 +400,7 @@ func (h *Handler) Initiate(c *gin.Context) {
 		return
 	}
 	allowed, err := middleware.AllowUserAction(c.Request.Context(), h.deps.Redis,
-		"ratelimit:sso:initiate:"+providerName, 600, time.Minute)
+		"ratelimit:sso:initiate:"+providerName+":"+c.ClientIP(), 600, time.Minute)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error_code": "redis_unavailable"})
 		return
