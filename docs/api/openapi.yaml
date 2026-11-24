@@ -521,6 +521,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Cross-site Fetch Metadata or an Origin outside the configured allowlist (`cross_site_request` / `invalid_origin`).
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '423':
           description: Account locked due to too many failed attempts
           content:
@@ -663,7 +667,9 @@ paths:
       description: 'Validate a TOTP, backup code, WebAuthn assertion, or email code against an MFA challenge
         token issued at login or after recovery email verification.
 
-        Identity comes from the challenge token (single-use). Per-user lockout after 5 failed attempts
+        Identity and completion kind come from the signed challenge token (single-use). A `sso_link`
+        challenge consumes its pending provider identity before the locked final transaction; missing,
+        expired, malformed and replayed pending records cannot complete ordinary login. Per-user lockout after 5 failed attempts
         (15 minutes).
 
         Rate limit: 10 requests per 15 minutes (IP-based).
@@ -679,8 +685,9 @@ paths:
               $ref: '#/components/schemas/MFAVerifyRequest'
       responses:
         '200':
-          description: 'MFA verified. For a login-purpose challenge the full login response is returned
-            (with refresh cookie);
+          description: 'MFA verified. An ordinary login challenge returns the full login response;
+            an SSO-link challenge returns access and refresh credentials only after the identity and
+            session commit. Both successful session branches set the refresh cookie.
 
             a recovery_challenge returns the recovery_token and recovery key metadata described
             by /auth/recovery/verify-code after a currently reserved TOTP/backup code or WebAuthn
@@ -691,7 +698,7 @@ paths:
           content:
             application/json:
               schema:
-                oneOf:
+                anyOf:
                 - type: object
                   description: Login completion (purpose = login)
                   required:
@@ -718,6 +725,20 @@ paths:
                       $ref: '#/components/schemas/User'
                     e2ee_keys:
                       $ref: '#/components/schemas/E2EEKeys'
+                - type: object
+                  description: SSO account-link completion after verified MFA
+                  required: [access_token, refresh_token, session_id, remember_me]
+                  properties:
+                    access_token:
+                      type: string
+                    refresh_token:
+                      type: string
+                    session_id:
+                      type: string
+                      format: uuid
+                    remember_me:
+                      type: boolean
+                      enum: [true]
                 - type: object
                   description: Recovery completion (purpose = recovery_challenge)
                   required:
@@ -762,34 +783,36 @@ paths:
                       format: uuid
           headers:
             Set-Cookie:
-              description: HttpOnly refresh token cookie (login purpose only)
+              description: HttpOnly refresh token cookie for login or SSO account-link MFA completion
               schema:
                 type: string
             X-Concord-Session-Issued:
-              description: Present with value true for login-purpose MFA completion only
+              description: Present with value true for ordinary login MFA completion only
               schema:
                 type: string
                 enum:
                 - 'true'
             X-Concord-Session-ID:
-              description: Refresh-session UUID for login-purpose MFA completion only
+              description: Refresh-session UUID for login or SSO account-link MFA completion
               schema:
                 type: string
                 format: uuid
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
-          description: Invalid, expired, or already-used MFA challenge token
+          description: Invalid, expired, or already-used MFA challenge token, or missing/mismatched/replayed SSO-link pending state (`sso_link_invalid`).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Invalid MFA code
+          description: Invalid MFA code, cross-site Fetch Metadata, or Origin outside the configured allowlist.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '429':
           description: Too many failed attempts (per-user lockout) or IP rate limit exceeded
           content:
@@ -803,7 +826,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Recovery completion could not confirm current policy or commit after a reserved factor was accepted. The recovery challenge is spent; restart at email verification.
+          description: Recovery completion could not confirm current policy or commit, or SSO-link pending state was unavailable after accepted MFA. The challenge is spent; restart the appropriate flow.
           content:
             application/json:
               schema:
@@ -813,10 +836,19 @@ paths:
       tags:
       - Auth
       summary: Begin account recovery
-      description: 'Queue a 6-digit recovery code for delivery to the account email. Returns before account
-        resolution or delivery and always uses the same 200 response to prevent email enumeration. A live
-        ten-minute recovery record is retained unchanged: a later begin neither replaces its code nor resets
-        its attempts, and sends no second email.
+      description: 'Queue a recovery email for the account address. With format "token" the email
+        carries a single-use recovery key (43 base64url characters, 256 random bits); without it, or with
+        format "code", it carries the deprecated 6-digit code. Returns before account resolution or delivery
+        and always uses the same 200 response for an address, to prevent email enumeration. The response
+        format field names what the server will email; it depends only on the request and the server''s
+        RECOVERY_LEGACY_CODE setting. A client that sent format "token" and gets no format back is talking
+        to an older server and must offer 6-digit entry.
+
+        One recovery email per account is live at a time, in either format. While it is live a later begin
+        sends nothing, except that a begin with format "token" replaces a live 6-digit code once and makes
+        that code invalid. Its secret expires when the resend wait ends: 15 minutes for the first three emails
+        in 24 hours, then 60 minutes. Redeeming the secret, or spending a code''s five attempts, ends the
+        wait at once.
 
         Rate limit: 3 requests per 15 minutes (IP-based).
 
@@ -835,13 +867,26 @@ paths:
                 email:
                   type: string
                   format: email
+                format:
+                  type: string
+                  enum: [token, code]
+                  description: What the recovery email should carry. Omitted means code (deprecated).
       responses:
         '200':
           description: Generic acknowledgement (sent whether or not the account exists)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SuccessMessage'
+                type: object
+                required: [message, format]
+                properties:
+                  message:
+                    type: string
+                  format:
+                    type: string
+                    enum: [token, code]
+                    description: What the server emails for this request when an account exists and no
+                      recovery email is already live. It depends only on the request and RECOVERY_LEGACY_CODE.
         '400':
           $ref: '#/components/responses/BadRequest'
         '429':
@@ -1234,10 +1279,14 @@ paths:
     post:
       tags:
       - Auth
-      summary: Verify a recovery code
-      description: 'Validate the emailed recovery code (single-use, max 5 attempts). Wrong submissions
-        also consume a separate per-normalized-email budget of 10 attempts per 24 hours; it is not
-        reset by beginning recovery again and a correctly consumed code clears it. When a reserved
+      summary: Verify a recovery key or code
+      description: 'Send exactly one of token (a recovery key from the email) or email plus code
+        (deprecated 6-digit code). A key is single use and has no attempt limit, because it cannot
+        be guessed; a wrong, expired or used key gets the same 401, and wrong keys never count
+        against the account. A code is single use with 5 attempts per code, and wrong codes also
+        consume a separate per-normalized-email budget of 10 attempts per 24 hours; that budget is
+        not reset by beginning recovery again and a completed recovery clears it. When the server
+        sets RECOVERY_LEGACY_CODE=false, a code submission gets 400. When a reserved
         authenticator app or security key is enabled, return a five-minute recovery_challenge MFA
         token and offered methods, without recovery authority or key material. Complete that challenge
         through /auth/mfa/verify. Backup codes satisfy a reserved authenticator app. Email ownership
@@ -1262,15 +1311,22 @@ paths:
           application/json:
             schema:
               type: object
-              required:
-              - email
-              - code
+              oneOf:
+              - required: [token]
+              - required: [email, code]
               properties:
+                token:
+                  type: string
+                  minLength: 43
+                  maxLength: 43
+                  description: Recovery key from the email (base64url). Surrounding whitespace is ignored.
                 email:
                   type: string
                   format: email
+                  description: Required with code; ignored with token.
                 code:
                   type: string
+                  deprecated: true
                   description: 6-digit recovery code
       responses:
         '200':
@@ -1345,7 +1401,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
-          description: Invalid or expired recovery code
+          description: Invalid or expired recovery key or code
           content:
             application/json:
               schema:
@@ -1355,11 +1411,13 @@ paths:
                     type: string
                   attempts_remaining:
                     type: integer
+                    description: Code submissions only; always 0.
         '429':
           $ref: '#/components/responses/RecoveryAttemptsExhausted'
         '503':
           description: Recovery policy unavailable, unsupported, or no reserved factor can be challenged;
-            the recovery attempt budget also fails closed when Redis is unavailable, before the code is checked.
+            for code submissions the recovery attempt budget also fails closed when Redis is unavailable,
+            before the code is checked.
           content:
             application/json:
               schema:
@@ -1650,6 +1708,10 @@ paths:
                     example: invalid_code
                   attempts_remaining:
                     type: integer
+        '403':
+          description: Cross-site Fetch Metadata or an Origin outside the configured allowlist (`cross_site_request` / `invalid_origin`).
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '404':
           description: Pending registration not found
           content:
@@ -1762,11 +1824,13 @@ paths:
       tags:
       - Auth
       summary: Initiate an SSO flow
-      description: 'Generate state, nonce, and PKCE verifier (10-minute TTL) and return the provider authorization
-        URL.
+      description: 'Validate the Desktop-supplied PKCE challenge and client binding, then generate
+        state and nonce (10-minute TTL) and return the provider authorization URL. The binding
+        must be the same canonical 43-character base64url value on this request and /session;
+        Redis stores only its digest. In-flight attempts created before this requirement must restart.
 
         redirect_uri must be an RFC 8252 loopback (http://127.0.0.1/oauth/callback). Rate limit: 10 requests
-        per 15 minutes (IP-based).
+        per 15 minutes per IP and 600 accepted requests per minute per provider and trusted client IP.
 
         '
       operationId: ssoInitiate
@@ -1788,6 +1852,22 @@ paths:
           type: string
         description: Loopback redirect URI (must be http://127.0.0.1 with path /oauth/callback; explicit
           port required for apple)
+      - name: code_challenge
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 43
+          maxLength: 128
+        description: Desktop-generated PKCE S256 challenge; the verifier remains in Desktop main.
+      - name: X-Concord-SSO-Client-Binding
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 43
+          maxLength: 43
+        description: Canonical unpadded base64url encoding of 32 random bytes, generated and held by Desktop main.
       responses:
         '200':
           description: Authorization URL issued
@@ -1801,7 +1881,7 @@ paths:
                   state:
                     type: string
         '400':
-          description: Invalid redirect_uri (`invalid_redirect_uri` with detail)
+          description: Invalid redirect URI, PKCE challenge, bridge port, or client binding (`invalid_redirect_uri`, `code_challenge_required`, or `invalid_request`).
           content:
             application/json:
               schema:
@@ -1819,7 +1899,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          description: Per-IP or per-caller provider initiation budget exhausted (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '503':
+          description: Per-caller provider initiation budget could not be checked (`redis_unavailable`); no state was allocated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
         '500':
           description: State store or apple-sso-bridge unavailable (`redis_unavailable` / `bridge_unavailable`)
           content:
@@ -1834,9 +1924,12 @@ paths:
       description: 'Prove ownership of the email-matched account with its password (shares the /auth/login
         lockout counter),
 
-        then atomically attach the SSO identity and issue a session. The password proof is bound to the
-        credential epoch it verified; an intervening credential reset refuses both the identity link and session.
-        Rate limit: 5 requests per 15 minutes (IP-based).
+        then check effective password policy and login MFA. If MFA is enrolled, the response is a signed
+        challenge and the identity/session are written only after /auth/mfa/verify. Otherwise the final
+        locked transaction rechecks policy and atomically attaches the identity and issues a session.
+        The password proof is bound to its credential epoch. JSON and same-site Origin/Fetch Metadata
+        rules apply. Request body maximum: 128 KiB; a larger body returns 413
+        (`request_too_large`). Rate limit: 5 requests per 15 minutes (IP-based).
 
         '
       operationId: ssoCompleteLink
@@ -1859,40 +1952,66 @@ paths:
               $ref: '#/components/schemas/SSOCompleteLinkRequest'
       responses:
         '200':
-          description: Account linked — session issued
+          description: >-
+            With no login MFA, the account is linked and a session is issued.
+            With login MFA, returns only an MFA challenge; identity and session
+            writes wait for /auth/mfa/verify. The challenge branch sets no
+            refresh cookie or session ID header.
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - access_token
-                - refresh_token
-                - session_id
-                - remember_me
-                properties:
-                  access_token:
-                    type: string
-                  refresh_token:
-                    type: string
-                  session_id:
-                    type: string
-                    format: uuid
-                  remember_me:
-                    type: boolean
-                    enum:
-                    - true
+                oneOf:
+                - type: object
+                  required: [access_token, refresh_token, session_id, remember_me]
+                  properties:
+                    access_token:
+                      type: string
+                    refresh_token:
+                      type: string
+                    session_id:
+                      type: string
+                      format: uuid
+                    remember_me:
+                      type: boolean
+                      enum: [true]
+                - type: object
+                  required: [mfa_required, mfa_challenge_token, methods]
+                  properties:
+                    mfa_required:
+                      type: boolean
+                      enum: [true]
+                    mfa_challenge_token:
+                      type: string
+                    methods:
+                      type: array
+                      items:
+                        type: string
+                    recovery_only_methods:
+                      type: array
+                      items:
+                        type: string
+                    default_method:
+                      type: string
+                    webauthn_options:
+                      type: object
           headers:
             Set-Cookie:
-              description: HttpOnly refresh token cookie
+              description: HttpOnly refresh token cookie, session branch only
               schema:
                 type: string
             X-Concord-Session-ID:
-              description: Refresh-session UUID corresponding to the Set-Cookie value
+              description: Refresh-session UUID corresponding to the Set-Cookie value, session branch only
               schema:
                 type: string
                 format: uuid
         '400':
           description: Invalid body (`invalid_request`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '413':
+          description: Request body exceeds 128 KiB (`request_too_large`)
           content:
             application/json:
               schema:
@@ -1904,11 +2023,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '403':
-          description: Self-hosted deployments reject requests reaching the SSO group (`sso_disabled_self_hosted`)
+          description: Effective password login disabled (`account_uses_sso`), account disabled, MFA enrolled during final no-proof mint (`mfa_required`), cross-site request, invalid Origin, or self-host SSO disabled.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '423':
           description: Account locked after repeated failed password attempts (`account_locked`)
           content:
@@ -1931,7 +2052,8 @@ paths:
       description: 'Create the user account (username + passphrase + E2EE key material) from a single-use
         new-user sso_token.
 
-        Rate limit: 5 requests per 15 minutes (IP-based).
+        Request body maximum: 128 KiB; a larger body returns 413
+        (`request_too_large`). Rate limit: 5 requests per 15 minutes (IP-based).
 
         '
       operationId: ssoCompleteRegistration
@@ -1993,6 +2115,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '413':
+          description: Request body exceeds 128 KiB (`request_too_large`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
         '401':
           description: Invalid, expired, or already-used sso_token (`sso_token_invalid`)
           content:
@@ -2000,11 +2128,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '403':
-          description: Self-hosted deployments reject requests reaching the SSO group (`sso_disabled_self_hosted`)
+          description: Cross-site request, invalid Origin, or self-host SSO disabled.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '409':
           description: Email or username already taken (`email_taken` / `username_taken`)
           content:
@@ -2023,7 +2153,11 @@ paths:
         id_token for server-side re-verification (signature via JWKS, iss/aud/exp/iat, nonce binding
         against the single-use state record) — the server never trusts client-side verification.
         Response shapes are identical across providers. Accepts apple or google; 404 for any other
-        provider. Rate limit: 10 requests per 15 minutes (IP-based).
+        provider. The X-Concord-SSO-Client-Binding header must exactly match the value sent at
+        initiation; missing, malformed, or mismatched values consume state and return the same
+        opaque `invalid_state` error before provider-token work. Rate limit: 10 requests per 15
+        minutes (IP-based). Request body maximum: 128 KiB; a larger body returns
+        413 (`request_too_large`).
 
         '
       operationId: ssoProviderSession
@@ -2038,6 +2172,14 @@ paths:
           - apple
           - google
         description: apple or google (404 for any other provider)
+      - name: X-Concord-SSO-Client-Binding
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 43
+          maxLength: 43
+        description: Exact canonical binding value used on the matching SSO initiation request.
       requestBody:
         required: true
         content:
@@ -2146,6 +2288,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '413':
+          description: Request body exceeds 128 KiB (`request_too_large`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
         '401':
           description: State validation failed (`invalid_state` — restart the flow) or id_token verification
             failed (`invalid_id_token` — never retry this token)
@@ -2155,11 +2303,13 @@ paths:
                 $ref: '#/components/schemas/SSOError'
         '403':
           description: Self-hosted deployments reject requests reaching the SSO group (`sso_disabled_self_hosted`),
-            or Apple reports the email as unverified (`oauth_email_unverified`)
+            Apple reports the email as unverified (`oauth_email_unverified`), cross-site request, or invalid Origin.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '404':
           description: Unknown provider (`unknown_provider`)
           content:
@@ -2178,7 +2328,8 @@ paths:
 
         Authorized by a valid, unconsumed sso_state (one-shot); only provider=apple is accepted.
 
-        Rate limit: 5 requests per minute (IP-based).
+        Request body maximum: 128 KiB; a larger body returns 413
+        (`request_too_large`). Rate limit: 5 requests per minute (IP-based).
 
         '
       operationId: ssoSignAppleClientSecret
@@ -2219,6 +2370,12 @@ paths:
                     description: Seconds until the minted client_secret expires
         '401':
           description: Uniform rejection for any invalid/expired/replayed state (`invalid_state`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '413':
+          description: Request body exceeds 128 KiB (`request_too_large`)
           content:
             application/json:
               schema:
@@ -3679,82 +3836,6 @@ paths:
                 $ref: '#/components/schemas/Error'
         '409':
           description: Initial epoch-1 distribution is incomplete
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /channels/{id}/voice/authorize-action:
-    post:
-      tags:
-      - Voice
-      summary: Authorize a voice moderation action
-      description: 'Check whether the caller may perform a voice moderation action (mute, deafen, move)
-        on a
-
-        target user in this channel. Enforces the action''s permission and role hierarchy; called
-
-        by clients before the media plane executes moderation commands.
-
-        Rate limit: 10 requests per minute.
-
-        '
-      operationId: authorizeVoiceAction
-      security:
-      - BearerAuth: []
-      parameters:
-      - $ref: '#/components/parameters/ChannelId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-              - action
-              - target_user_id
-              properties:
-                action:
-                  type: string
-                  enum:
-                  - mute
-                  - deafen
-                  - move
-                target_user_id:
-                  type: string
-                  format: uuid
-      responses:
-        '200':
-          description: Action authorized
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  allowed:
-                    type: boolean
-                    example: true
-                  action:
-                    type: string
-                    enum:
-                    - mute
-                    - deafen
-                    - move
-                  target_id:
-                    type: string
-                    format: uuid
-                  channel_id:
-                    type: string
-                    format: uuid
-        '400':
-          description: Invalid channel ID or body, or target user is not a member of this server
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Not a member, insufficient permissions, or target has equal/higher role position
           content:
             application/json:
               schema:
@@ -6866,7 +6947,7 @@ paths:
         - Voice
       summary: Request user-level mute of a DM voice participant
       description: >-
-        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
+        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself. Any participant of the conversation may soft-mute an in-call peer; no admin role is required; applies to 1:1 and group conversations. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
       operationId: dmVoiceUserMute
       security:
         - BearerAuth: []
@@ -7163,13 +7244,39 @@ paths:
       tags:
       - E2EE
       summary: Get pending key requests
-      description: 'List channels where the current user needs to distribute keys to new members.
+      description: 'List the channel and DM key requests the current user can fulfil,
+        one page at a time. Rows are ordered by creation time, then source (channel
+        before DM), then ID. Follow `next_cursor` until it is null. A page can hold
+        fewer than `limit` rows, or none, while `next_cursor` is still set: one
+        request examines a bounded number of rows, and only rows the caller may
+        see are returned. A full page always has a `next_cursor`, so the last
+        page can be empty.
 
         Rate limit: 30 requests per minute.
 
         '
       security:
       - BearerAuth: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        description: Maximum rows in the page. Defaults to 100.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 100
+      - name: cursor
+        in: query
+        required: false
+        description: Opaque `next_cursor` from the previous page. Omit it for the
+          first page. The server seals each cursor, so a cursor that was altered,
+          or issued before the server restarted, returns 400; start again from
+          the first page.
+        schema:
+          type: string
+          maxLength: 160
       responses:
         '200':
           description: Pending key requests
@@ -7177,11 +7284,24 @@ paths:
             application/json:
               schema:
                 type: object
+                required:
+                - pending_requests
+                - next_cursor
                 properties:
                   pending_requests:
                     type: array
                     items:
                       $ref: '#/components/schemas/PendingKeyRequest'
+                  next_cursor:
+                    type: string
+                    nullable: true
+                    description: Cursor for the next page, or null on the last page.
+        '400':
+          description: '`limit` is not an integer from 1 to 200, or `cursor` is malformed, altered or expired'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /e2ee/validate-epochs:
     post:
       tags:
@@ -17125,7 +17245,7 @@ paths:
         - Voice
       summary: Force-disconnect a member from voice
       description: >-
-        Durably queue disconnect commands for exact registered voice sessions in this server, including staged sessions. Requires Move Members and role hierarchy. No registered target returns 409. HTTP 202 with enforcement_status queued confirms durable acceptance, not transport closure. Applied disconnects emit voice.left, which drives temporary SBAC grant cleanup. Rate limit: 10 requests per minute per user.
+        Durably queue disconnect commands for exact registered voice sessions in this server, including staged sessions. Requires Move Members and role hierarchy. Move Members is also checked on each channel holding a target session: sessions in channels the caller cannot see are not touched, and a visible channel where the caller lacks Move Members refuses the whole request with 403. No registered target in a channel the caller can see returns 409. HTTP 202 with enforcement_status queued confirms durable acceptance, not transport closure. Applied disconnects emit voice.left, which drives temporary SBAC grant cleanup. Rate limit: 10 requests per minute per user.
       operationId: voiceServerDisconnect
       security:
         - BearerAuth: []
@@ -17162,14 +17282,15 @@ paths:
                 $ref: "#/components/schemas/Error"
         "403":
           description:
-            Not a member of this server, insufficient permissions (Move Members required),
-            or hierarchy violation (target has equal or higher role position)
+            Not a member of this server, insufficient permissions (Move Members required at
+            server scope and on every visible channel holding a target session), or hierarchy
+            violation (target has equal or higher role position)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: Target user is not currently in a voice channel
+          description: Target user is not in a voice channel the caller can see
           content:
             application/json:
               schema:
@@ -17193,11 +17314,15 @@ paths:
         destination, a temporary scoped SBAC grant (VIEW + CONNECT + SPEAK) is created before
         signalling and auto-revoked on departure (with channel-key rotation).
 
-        Authorization: a caller may always move themselves (no permission required). Moving
-        another member requires the Move Members permission and — by deliberate design
-        (ADR-0023) — does NOT enforce role hierarchy: a Move Members holder may move any member,
-        including higher roles and the server owner. Hierarchy-crossing moves are recorded in
-        the audit log.
+        Authorization: the caller is checked before the body is parsed or any voice state is
+        read. A self-move requires server membership and the caller''s own View and Join access
+        to the destination. Moving another member requires Move Members at server scope, on the
+        destination and on every source channel the caller can see, plus the caller''s own View
+        and Join access to the destination; when a temporary grant is needed the caller must
+        also hold Speak there. By deliberate design (ADR-0023) move does NOT enforce role
+        hierarchy: a Move Members holder may move any member, including higher roles and the
+        server owner. Every non-self move that crosses hierarchy or writes a temporary grant is
+        recorded in the audit log.
 
         Rate limit: 10 requests per minute (user-based).
 
@@ -17238,19 +17363,19 @@ paths:
                   moved:
                     type: boolean
         '400':
-          description: Invalid server/user/channel ID, target is not a voice channel in this server, or target equals the current channel
+          description: Invalid server/user ID, invalid target_channel_id in the body, or the member is already in the target channel
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Not a member of this server, or insufficient permissions (Move Members required to move another user)
+          description: Not a member of this server, or insufficient permissions (see Authorization above). A missing, non-voice, foreign or inaccessible destination answers the same 403.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: Target user is not currently in a voice channel
+          description: Target user is not in a voice channel the caller can see, the source channel changed before the temporary grant was written, or a permanent override blocks the target from the destination
           content:
             application/json:
               schema:
@@ -17394,7 +17519,9 @@ paths:
 
         Requires the Move Members permission; the target must be strictly lower in role hierarchy
         than the caller (this is a moderation action — it does NOT inherit the move endpoint''s
-        hierarchy exception).
+        hierarchy exception). `channel_id` must be a voice channel of this server on which the
+        caller holds View and Move Members; a missing, foreign, non-voice or inaccessible channel
+        answers 403.
 
         Rate limit: 10 requests per minute (user-based).
 
@@ -17442,8 +17569,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Not a member of this server, insufficient permissions (Move Members required),
-            or hierarchy violation (target has equal or higher role position)
+          description: Not a member of this server, insufficient permissions (Move Members required
+            at server scope and on channel_id, plus View on channel_id; a missing, foreign or
+            non-voice channel_id answers the same 403), or hierarchy violation (target has equal
+            or higher role position)
           content:
             application/json:
               schema:
@@ -17454,7 +17583,7 @@ paths:
         - Voice
       summary: Send a user-level deafen command
       description: >-
-        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
+        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The permission is also checked on each channel holding a target session: sessions in channels the caller cannot see are not touched, and a visible channel where the caller lacks the permission refuses the whole request with 403. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
       operationId: voiceUserDeafen
       security:
         - BearerAuth: []
@@ -17483,13 +17612,13 @@ paths:
                   message:
                     type: string
         "400":
-          description: Invalid IDs, self-target, or target is not in a voice channel
+          description: Invalid IDs, self-target, or target is not in a voice channel the caller can see
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: Not a member of this server or insufficient permissions
+          description: Not a member of this server, insufficient permissions at server scope or on a visible channel holding a target session, or hierarchy violation
           content:
             application/json:
               schema:
@@ -17508,7 +17637,7 @@ paths:
         - Voice
       summary: Send a user-level mute command
       description: >-
-        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
+        Durably queue user-level moderation for exact registered voice sessions in this scope. Cannot target yourself; existing membership, permission and hierarchy checks apply. The permission is also checked on each channel holding a target session: sessions in channels the caller cannot see are not touched, and a visible channel where the caller lacks the permission refuses the whole request with 403. The participant can undo this user-level action. HTTP 202 with enforcement_status queued confirms durable acceptance, not media application. Rate limit: 10 requests per minute per user.
       operationId: voiceUserMute
       security:
         - BearerAuth: []
@@ -17537,13 +17666,13 @@ paths:
                   message:
                     type: string
         "400":
-          description: Invalid IDs, self-target, or target is not in a voice channel
+          description: Invalid IDs, self-target, or target is not in a voice channel the caller can see
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: Not a member of this server or insufficient permissions
+          description: Not a member of this server, insufficient permissions at server scope or on a visible channel holding a target session, or hierarchy violation
           content:
             application/json:
               schema:
@@ -17597,11 +17726,13 @@ paths:
       tags:
       - Sessions
       summary: Set session revocation mode
-      description: 'Set the server-authoritative session revocation mode: `secure` asks for
+      description: 'Set the server-authoritative session revocation mode: `secure` requires
 
-        password AND MFA re-verification on every revoke when MFA is enrolled; `simple` opens a short window
+        password and enrolled MFA when the free allowance is unavailable; `simple` also opens
 
-        after one verified revoke. Changing the mode needs the same step-up as a revoke:
+        a five-minute window after an authenticated revoke. Changing the mode resets the
+
+        allowance and invalidates earlier simple-mode windows. The change needs step-up:
 
         a request with neither credential returns a 403 discovery response, and a
 
@@ -17693,7 +17824,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          $ref: '#/components/responses/StepUpBudgetUnavailable'
+          description: Family authority or persistence is temporarily unavailable, or the MFA attempt
+            budget could not be evaluated before verification; no success or postcommit grant is claimed.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/Error'
+                - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
   /sessions/revoke-all:
     post:
       tags:
@@ -17713,7 +17851,9 @@ paths:
 
         refresh-token cookie family is revoked. Set `include_current` to `true` to revoke the current
 
-        family too. Before success the control WebSockets of every revoked family are synchronously fenced and closed (a failed close is retried by the durable owner, never surfaced as an error); success also retains exact voice-disconnect delivery obligations. The count is changed refresh rows, not families or completed socket closures.
+        family too. A successful revoke-all resets the free allowance and invalidates
+
+        earlier simple-mode windows. Before success, control WebSockets of the revoked families on the handling process are synchronously fenced and closed; success also retains exact voice-disconnect delivery obligations. The fence does not cover sockets on other control-plane processes. The count is changed refresh rows, not families or completed socket closures.
 
         Rate limit: 5 requests per minute (user-based).
 
@@ -17801,8 +17941,12 @@ paths:
         '429':
           $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '503':
-          description: Family authority or persistence is temporarily unavailable, or the MFA attempt
-            budget could not be evaluated before verification; no success or postcommit grant is claimed.
+          description: Family authority or persistence is temporarily unavailable, the MFA attempt
+            budget could not be evaluated before verification, or revocation committed but a local
+            WebSocket fence could not be confirmed. In the last case the response reports that sessions
+            were revoked; a still-pending durable owner can retry disconnection. If the commit outcome
+            is unknown, captured local target sockets are conservatively closed even when the transaction
+            ultimately rolled back and did not revoke those sessions.
           content:
             application/json:
               schema:
@@ -17820,7 +17964,11 @@ paths:
       tags:
       - Sessions
       summary: Revoke a specific session
-      description: 'The owned SID selects its immutable logical login family. A successful revoke terminates the whole family, including other refresh rows and access tokens, synchronously fences and closes that family''s control WebSockets before responding (sibling families stay connected; a failed close is retried by the durable owner), and retains exact voice-disconnect delivery obligations. An already-terminal owned family is idempotent success. Rate limit: 10 requests per minute.'
+      description: 'The owned SID selects its immutable logical login family. A successful revoke terminates the whole family, including other refresh rows and access tokens, synchronously fences and closes that family''s control WebSockets on the handling process before responding (sibling families stay connected), and retains exact voice-disconnect delivery obligations. The fence does not cover sockets on other control-plane processes. An already-terminal owned family is idempotent success.
+
+        One password-free revoke is available when at least three unexpired, unrevoked refresh rows exist and no single-session revoke succeeded in the preceding 24 hours. In simple mode, an authenticated five-minute window can also authorize subsequent revokes. Otherwise password and any enrolled MFA are required. The allowance is stored in PostgreSQL; other authentication gates and the simple-mode window may still depend on Redis.
+
+        Rate limit: 10 requests per minute.'
       security:
       - BearerAuth: []
       parameters:
@@ -17870,8 +18018,12 @@ paths:
         '429':
           $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '503':
-          description: Family authority or persistence is temporarily unavailable, or the MFA attempt
-            budget could not be evaluated before verification; no success or postcommit grant is claimed.
+          description: Family authority or persistence is temporarily unavailable, the MFA attempt
+            budget could not be evaluated before verification, or revocation committed but the local
+            WebSocket fence could not be confirmed. In the last case the response reports that the
+            session was revoked; a still-pending durable owner can retry disconnection. If the commit
+            outcome is unknown, the target's local sockets are conservatively closed even when the
+            transaction ultimately rolled back and did not revoke the session.
           content:
             application/json:
               schema:
@@ -19920,7 +20072,9 @@ paths:
         | `rich_presence_clear` | `user_id`, `category` | Remove the exact `custom_text`, `server_voice`, or
         `private_call` category when it ends or the viewer leaves the sender''s effective audience.
         Activity-category clears are sent only to devices that opted in with exactly one
-        `activity_rich_presence=1` query value. |
+        `activity_rich_presence=1` query value. Best-effort terminal clears from
+        `ClearSenderActiveCategory` additionally require a previously delivered sender/category
+        projection on this connection. |
 
         | `server_updated` | `server_id`, `name`, `icon_url` | Server modified |
 
@@ -22537,9 +22691,11 @@ components:
           description: Base64-encoded SPKI RSA-4096 public key; at most 1 KiB decoded
         wrapped_private_key:
           type: string
+          maxLength: 43692
           description: Base64-encoded AES-GCM encrypted private key; at most 32 KiB decoded
         key_derivation_salt:
           type: string
+          maxLength: 88
           description: Base64-encoded key-derivation salt; at most 64 bytes decoded
     LoginRequest:
       type: object
@@ -23731,6 +23887,9 @@ components:
         user_id:
           type: string
           format: uuid
+        key_version:
+          type: integer
+          description: Present when the request names a key version.
         created_at:
           type: string
           format: date-time
@@ -24928,9 +25087,11 @@ components:
         wrapped_private_key:
           type: string
           format: byte
+          maxLength: 43692
         key_derivation_salt:
           type: string
           format: byte
+          maxLength: 88
         public_key:
           type: string
           format: byte

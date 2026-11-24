@@ -20,18 +20,18 @@ import (
 // route that records whether c.Next() was reached and what admin_id (if any) was
 // set on the context, so the middleware's behavior is observable from the
 // response.
-type staticSessionAuthority struct {
+type staticSessionGenerationResolver struct {
 	generation int64
 	err        error
 }
 
-func (a staticSessionAuthority) ActiveSessionGeneration(context.Context, string) (int64, error) {
+func (a staticSessionGenerationResolver) ActiveSessionGeneration(context.Context, string) (int64, error) {
 	return a.generation, a.err
 }
 
 func adminAuthTestEngine(
 	sessions *admin.SessionStore,
-	authority admin.SessionAuthority,
+	authority admin.SessionGenerationResolver,
 ) (*gin.Engine, *bool, *string) {
 	gin.SetMode(gin.TestMode)
 	reached := false
@@ -55,7 +55,7 @@ func TestAdminAuthRequired_NoCookie_401(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{})
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionGenerationResolver{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
@@ -71,7 +71,7 @@ func TestAdminAuthRequired_InvalidSid_401(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{})
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionGenerationResolver{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
@@ -99,7 +99,7 @@ func TestAdminAuthRequired_ExpiredSid_401(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	clock := now
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return clock })
-	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{})
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionGenerationResolver{})
 
 	sid, err := sessions.Mint(ctx, "admin-xyz", 0)
 	require.NoError(t, err)
@@ -123,7 +123,7 @@ func TestAdminAuthRequired_ValidSid_SetsAdminIDAndCallsNext(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, gotAdminID := adminAuthTestEngine(sessions, staticSessionAuthority{generation: 7})
+	engine, reached, gotAdminID := adminAuthTestEngine(sessions, staticSessionGenerationResolver{generation: 7})
 
 	sid, err := sessions.Mint(ctx, "admin-xyz", 7)
 	require.NoError(t, err)
@@ -145,7 +145,7 @@ func TestAdminAuthRequired_StaleGeneration_401(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{generation: 8})
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionGenerationResolver{generation: 8})
 
 	sid, err := sessions.Mint(ctx, "admin-xyz", 7)
 	require.NoError(t, err)
@@ -166,7 +166,7 @@ func TestAdminAuthRequired_InactiveAdmin_401(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{err: admin.ErrAdminNotFound})
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionGenerationResolver{err: admin.ErrAdminNotFound})
 
 	sid, err := sessions.Mint(ctx, "admin-xyz", 7)
 	require.NoError(t, err)
@@ -190,7 +190,7 @@ func TestAdminAuthRequired_IgnoresAuthorizationHeader(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{})
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionGenerationResolver{})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/protected", nil)
@@ -208,7 +208,7 @@ func TestAdminAuthRequired_AuthorityFault_401(t *testing.T) {
 
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	sessions := admin.NewSessionStore(rdb, func() time.Time { return now })
-	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionAuthority{err: errors.New("database unavailable")})
+	engine, reached, _ := adminAuthTestEngine(sessions, staticSessionGenerationResolver{err: errors.New("database unavailable")})
 
 	sid, err := sessions.Mint(ctx, "admin-xyz", 7)
 	require.NoError(t, err)

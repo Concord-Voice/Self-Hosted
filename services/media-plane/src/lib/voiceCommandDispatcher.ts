@@ -476,6 +476,9 @@ export class VoiceCommandDispatcher {
               ]
             : []
         ),
+        // The durable command names one exact session (`command.target`), so
+        // the user-wide stale-socket sweep must not widen it: no room members.
+        adapter: { rooms: new Map() },
       },
     };
     await handleForceDisconnect(
