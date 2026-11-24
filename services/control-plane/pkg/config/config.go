@@ -243,6 +243,13 @@ type Config struct {
 	TURNSecretFile string // Managed runtime key snapshot; mutually exclusive with TURNSecret
 	TURNRealm      string // TURN realm (e.g. "concordvoice.chat")
 
+	// RecoveryLegacyCodeDisabled stops issuing and accepting the 6-digit email
+	// recovery code (RECOVERY_LEGACY_CODE=false; any other value keeps it).
+	// The zero value keeps it, so a hand-built Config never strands old
+	// clients. Disabling it locks out the owner of every account whose client
+	// cannot accept a recovery key.
+	RecoveryLegacyCodeDisabled bool
+
 	// Client config (#155 Tier 2 + Tier 3)
 	ClientMinVersion string // Minimum desktop client version allowed (e.g. "0.1.3"); empty = no enforcement
 	// Minimum mobile versions, selected by the X-Concord-Client-Platform header
@@ -450,6 +457,21 @@ type Config struct {
 	RedemptionAdminToken string // #nosec G117 -- config field name, secret loaded from env
 }
 
+// recoveryLegacyCodeDisabled reads RECOVERY_LEGACY_CODE. Unset keeps the
+// 6-digit code on. A value that is not a boolean is an error, so a typo cannot
+// leave the code on while the operator believes it is off.
+func recoveryLegacyCodeDisabled(raw string) (bool, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return false, nil
+	}
+	on, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("RECOVERY_LEGACY_CODE=%q is not true or false", v)
+	}
+	return !on, nil
+}
+
 // Load reads configuration from environment variables
 func Load() (*Config, error) {
 	// Load .env file if it exists (development)
@@ -621,6 +643,9 @@ func Load() (*Config, error) {
 		// axis on job_workflow_ref, which carries the CALLED workflow.
 		OIDCBinaryWorkflow: getEnv("ATTESTATION_OIDC_BINARY_WORKFLOW", "build-desktop.yml"),
 		OIDCBinaryRef:      getEnv("ATTESTATION_OIDC_BINARY_REF", "refs/heads/main"),
+	}
+	if cfg.RecoveryLegacyCodeDisabled, err = recoveryLegacyCodeDisabled(os.Getenv("RECOVERY_LEGACY_CODE")); err != nil {
+		return nil, err
 	}
 
 	if err := loadActivityHistoryConfig(cfg); err != nil {

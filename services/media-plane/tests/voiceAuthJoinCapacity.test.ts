@@ -19,9 +19,13 @@ import { attestationRelayHeaders, resolveParticipantIdentity } from '../src/midd
 import { createMockRouter, createRtpCapabilities } from './mocks/mediasoup.js';
 import type { VoiceEnforcementSession } from '../src/lib/voiceEnforcementSession.js';
 import { mediaPolicyCooldownAck } from '../src/lib/mediaPolicyWire.js';
+import { commitChannelAdmission, commitDMAdmission } from '../src/lib/roomAdmissionCommit.js';
 
 const boot = '11111111-1111-4111-8111-111111111111';
 const user = '22222222-2222-4222-8222-222222222222';
+// Past the general pool a user's second connection cannot take the reserve (VULN-146),
+// so a race for the last reserve slot puts the second idle socket on another account.
+const rival = '27777777-2222-4222-8222-222222222222';
 const family = '33333333-3333-4333-8333-333333333333';
 const roomA = '44444444-4444-4444-8444-444444444444';
 const roomB = '55555555-5555-4555-8555-555555555555';
@@ -45,7 +49,7 @@ type JoinHandler = (request: JoinRequest, callback: (value: unknown) => void) =>
 function productionRegister(bindings: Record<string, unknown>) {
   const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const names = ['registerJoinRoomHandler', 'parseJoinMediaFrameCryptoVersion', 'joinErrorAck', 'emitJoinError', 'rollbackRegisteredRoomJoin', 'commitChannelAdmission', 'commitDMAdmission', 'rollbackSocketMembership'];
+  const names = ['registerJoinRoomHandler', 'parseJoinMediaFrameCryptoVersion', 'joinErrorAck', 'emitJoinError', 'rollbackRegisteredRoomJoin'];
   const declarations = names.map(name => {
     const matches = ast.statements.filter(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name);
     if (matches.length !== 1) throw new Error(`Expected one production function ${name}`);
@@ -60,7 +64,8 @@ function productionRegister(bindings: Record<string, unknown>) {
 
 // Distinct accounts, so filling the shared budget never trips the per-user cap.
 const filler = (index: number) => `${index.toString(16).padStart(8, '0')}-9999-4999-8999-999999999999`;
-async function fixture(identityCount: number) {
+async function fixture(identityCount: number, secondAccount = user) {
+  const accountOf = (socketId: string) => socketId === 'join-idle-b' ? secondAccount : user;
   const now = Date.now();
   const requests: protocol.Request[] = [];
   let roomReleaseMode: 'signed' | 'lost' | 'unsigned' = 'signed';
@@ -85,10 +90,10 @@ async function fixture(identityCount: number) {
     const room = request.roomRegister();
     const close = request.provisionalClose();
     const payload: protocol.ResponsePayload = registration ? { version: 1, voiceEnforcementProtocol: 4,
-      userId: user, familyId: family, target: { connectionGeneration: registration.connectionGeneration,
+      userId: accountOf(registration.socketId), familyId: family, target: { connectionGeneration: registration.connectionGeneration,
         nodeBootId: boot, socketId: registration.socketId, credentialEpoch: epoch } }
       : room ? { schema: 'concord.auth-room-binding', version: 1, voiceEnforcementProtocol: 4,
-        binding: { userId: user, familyId: family, target: { connectionGeneration: room.connectionGeneration,
+        binding: { userId: accountOf(room.socketId), familyId: family, target: { connectionGeneration: room.connectionGeneration,
           nodeBootId: room.nodeBootId, socketId: room.socketId, credentialEpoch: room.credentialEpoch } },
         room: { sessionGeneration: room.sessionGeneration, roomId: room.roomId, roomKind: room.roomKind } }
         : close ? { ...close, schema: 'concord.auth-connection-provisional-close-result', disposition: 'unregistered' } : null;
@@ -105,7 +110,7 @@ async function fixture(identityCount: number) {
   const reserve = (socketId: string, userId = user) => owners.reserve({ socketId, userId, credentialEpoch: epoch,
     token, tokenExpiresAt: now + 60_000, disconnect: () => {} });
   const first = reserve('join-idle-a'); await owners.register(first); handles.set('join-idle-a', first);
-  const second = reserve('join-idle-b'); await owners.register(second); handles.set('join-idle-b', second);
+  const second = reserve('join-idle-b', secondAccount); await owners.register(second); handles.set('join-idle-b', second);
   for (let index = 2; index < identityCount; index++) reserve(`retained-${index}`, filler(index));
   const authorization = deferred<Access>();
   const validateChannelAccess = vi.fn(() => authorization.promise);
@@ -130,16 +135,17 @@ async function fixture(identityCount: number) {
     },
     isCanonicalEnforcementUUID, parseMediaFrameCryptoVersion, resolveParticipantIdentity,
     RoomCreationRefusedError, CryptoVersionMismatchError, MediaPolicyCooldownError, mediaPolicyCooldownAck,
+    commitChannelAdmission, commitDMAdmission,
     logger: { info() {}, debug() {}, warn() {}, error() {} },
   });
   const dmJoinFence = new lifecycle.KeyedJoinFence();
   const channelAdmissionFence = new lifecycle.KeyedJoinFence();
   const makeJoin = (socketId: string, roomId: string) => {
     let handler: JoinHandler | undefined;
-    const data: AuthenticatedSocketData = { userId: user, username: 'join-capacity-test', tier: 'free', credentialEpoch: epoch, tokenExpiresAt: now + 60_000 };
+    const data: AuthenticatedSocketData = { userId: accountOf(socketId), username: 'join-capacity-test', tier: 'free', credentialEpoch: epoch, tokenExpiresAt: now + 60_000 };
     const broadcast = vi.fn();
     const socket = { id: socketId, connected: true, handshake: { auth: { token, room_kind: 'channel' } },
-      emit: vi.fn(), join: vi.fn(), leave: vi.fn(), to: () => ({ emit: broadcast }) };
+      emit: vi.fn(), join: vi.fn(), leave: vi.fn(), to: () => ({ emit: broadcast }), nsp: { sockets: new Map() } };
     register(socket, data, { roomManager: manager, dmJoinFence, channelAdmissionFence, voiceAuthConnections: owners,
       emitSecurityEvent: vi.fn(), isShuttingDown: () => !lease.valid(),
       withRateLimit: (_socket: unknown, event: string, listener: JoinHandler) => {
@@ -177,7 +183,7 @@ describe('actual join handler shared capacity reservation', () => {
   });
 
   it('reserves the last room slot at combined 999 before either competing idle join A1 completes', async () => {
-    const f = await fixture(999);
+    const f = await fixture(999, rival);
     expect(f.lease.valid()).toBe(true);
     const first = f.makeJoin('join-idle-a', roomA);
     const second = f.makeJoin('join-idle-b', roomB);

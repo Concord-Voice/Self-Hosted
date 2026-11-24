@@ -1090,6 +1090,7 @@ func NewRouter(
 	authHandler.SetSecurityEvents(securityEvents)
 	authHandler.SetPresenceHistory(presenceHistoryService)
 	authHandler.SetEmailService(emailSvc)
+	authHandler.SetRecoveryLegacyCode(!cfg.RecoveryLegacyCodeDisabled)
 	authHandler.SetCredentialFence(credFence)
 	authHandler.SetKeyRevocationBroadcaster(websocket.KeyRevocationBroadcaster(hub))
 	authHandler.SetInitialDistributorChecker(rbacResolver.CanDistributeChannelKeyTx)
@@ -2721,10 +2722,6 @@ func NewRouter(
 					middleware.RateLimitChannelVoiceJoin(redis),
 					voiceEnforcementSessionHandler.RequireMediaCapability,
 					voiceHandler.AuthorizeJoin,
-				)
-				channelRoutes.POST("/:id/voice/authorize-action",
-					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
-					voiceHandler.AuthorizeVoiceAction,
 				)
 
 				// Rotate channel encryption key (admin/owner only)

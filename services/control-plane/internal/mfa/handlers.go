@@ -471,13 +471,11 @@ func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID,
 		return false, nil
 	}
 
-	updatedUsed := append([]bool(nil), used...)
-	updatedUsed[idx] = true
 	result, err := store.ExecContext(ctx,
-		// Match the hashes read above too: a regeneration resets every used flag,
-		// so the flags alone cannot tell a revoked set from the current one.
-		`UPDATE user_mfa_totp SET backup_codes_used = $1, updated_at = NOW() WHERE user_id = $2 AND backup_codes_used = $3 AND backup_codes_hash = $4`,
-		pq.Array(updatedUsed), userID, pq.Array(used), pq.Array(hashes),
+		// Fence the matched set and factor state while allowing other codes in the
+		// same set to be claimed concurrently.
+		`UPDATE user_mfa_totp SET backup_codes_used[$2] = TRUE, updated_at = NOW() WHERE user_id = $1 AND enabled AND confirmed AND backup_codes_hash = $3 AND backup_codes_used[$2] = FALSE`,
+		userID, idx+1, pq.Array(hashes),
 	)
 	if err != nil {
 		return false, fmt.Errorf("consume backup code: %w", err)

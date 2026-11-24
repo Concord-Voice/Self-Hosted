@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const SOURCE = readFileSync(join(__dirname, '..', 'src', 'index.ts'), 'utf8')
+const SOURCE = readFileSync(join(__dirname, '..', 'src', 'lib', 'roomAdmissionCommit.ts'), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/\/\/[^\n]*/g, '');
 
@@ -17,9 +17,8 @@ describe('channel promotion rollback call-site contract', () => {
     const rollbackAt = channelCommit.indexOf('rollbackSocketMembership(socket, data, roomId);');
     const throwAt = channelCommit.indexOf('throw error;');
 
-    // The behavioural promotion/retry assertions live beside RoomManager's
-    // promotion tests; this guards the integration seam that those tests cannot
-    // reach because registerJoinRoomHandler is intentionally private.
+    // The behavioural promotion/rollback assertions live in
+    // roomAdmissionCommit.test.ts; this pins the shape of the seam.
     expect(channelCommit).toContain('try {');
     expect(promoteAt).toBeGreaterThanOrEqual(0);
     expect(rollbackAt).toBeGreaterThan(promoteAt);

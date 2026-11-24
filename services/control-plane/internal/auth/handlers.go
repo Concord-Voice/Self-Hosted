@@ -171,17 +171,21 @@ func SetRefreshCookie(c *gin.Context, value string, maxAge int) {
 
 // Handler handles authentication-related requests including registration and login.
 type Handler struct {
-	db                        *sql.DB
-	redis                     *redis.Client
-	recoveryWatchClient       func(context.Context) (*redis.Client, error)
-	log                       *logger.Logger
-	jwtSecret                 string
-	instanceType              string
-	hub                       SessionDisconnector
-	presenceHistory           *presencehistory.Service
-	mfaChecker                MFAChecker
-	defaultMethodReader       DefaultMethodReader
-	emailSvc                  *email.Service
+	db                  *sql.DB
+	redis               *redis.Client
+	recoveryWatchClient func(context.Context) (*redis.Client, error)
+	log                 *logger.Logger
+	jwtSecret           string
+	instanceType        string
+	hub                 SessionDisconnector
+	presenceHistory     *presencehistory.Service
+	mfaChecker          MFAChecker
+	defaultMethodReader DefaultMethodReader
+	emailSvc            *email.Service
+	recoveryMail        recoveryMailer
+	// recoveryLegacyCodeOff: every recovery email carries a key (RECOVERY_LEGACY_CODE=false).
+	// The zero value keeps the code, so a hand-built Handler cannot strand old clients.
+	recoveryLegacyCodeOff     bool
 	pending                   *PendingRepo
 	entCache                  *entitlements.Cache
 	credFence                 *credepoch.Fence
@@ -190,7 +194,7 @@ type Handler struct {
 	securityEvents            securityevent.Emitter
 	theftRetryMu              sync.Mutex
 	theftRetries              map[string][]*tokenTheftRetryTask
-	recoveryQueue             chan string
+	recoveryQueue             chan recoveryJob
 	recoveryQueueMu           sync.RWMutex
 	recoveryWorkers           sync.WaitGroup
 	recoveryDeliveries        sync.WaitGroup
@@ -201,7 +205,7 @@ type Handler struct {
 	recoveryDrainTimeout      time.Duration
 	recoveryWorkersOnce       sync.Once
 	recoveryQueueClosed       bool
-	recoveryProcess           func(string)
+	recoveryProcess           func(recoveryJob)
 }
 
 type tokenTheftRetryTask struct {
@@ -362,7 +366,7 @@ func NewHandlerForInstance(db *sql.DB, redisClient *redis.Client, log *logger.Lo
 		pending:        NewPendingRepo(db),
 		entCache:       entitlements.NewCacheForInstance(redisClient, db, instanceType),
 		securityEvents: securityevent.Discard,
-		recoveryQueue:  make(chan string, recoveryQueueCapacity),
+		recoveryQueue:  make(chan recoveryJob, recoveryQueueCapacity),
 	}
 	h.recoveryProcess = h.processRecoveryBegin
 	h.recoveryAbort = make(chan struct{})
@@ -377,9 +381,18 @@ func (h *Handler) SetPresenceHistory(service *presencehistory.Service) {
 	h.presenceHistory = service
 }
 
+// SetRecoveryLegacyCode sets whether clients may still request and submit a
+// 6-digit recovery code.
+func (h *Handler) SetRecoveryLegacyCode(enabled bool) {
+	h.recoveryLegacyCodeOff = !enabled
+}
+
 // SetEmailService sets the email service (called after initialization to avoid circular deps).
 func (h *Handler) SetEmailService(svc *email.Service) {
 	h.emailSvc = svc
+	if svc != nil {
+		h.recoveryMail = svc
+	}
 }
 
 // SetMFAChecker sets the MFA checker (called after both handlers are initialized to break circular init).
@@ -3238,16 +3251,15 @@ func (h *Handler) revokeLogoutSession(c *gin.Context, claims *Claims, refreshTok
 // ── Account Recovery Endpoints ──────────────────────────────────────────────
 
 const (
-	recoveryCodeTTL       = 10 * time.Minute // Recovery code expires after 10 minutes
-	recoveryMaxAttempts   = 5                // Max wrong-code attempts before invalidating
-	recoveryTokenUsedTTL  = 25 * time.Hour   // Must match or exceed mfa.recoveryTTL
-	recoveryFailureLimit  = 10
+	recoveryMaxAttempts   = 5              // Legacy code: max wrong-code attempts before invalidating
+	recoveryTokenUsedTTL  = 25 * time.Hour // Must match or exceed mfa.recoveryTTL
+	recoveryFailureLimit  = 10             // Legacy code: failures per address per window
 	recoveryFailureWindow = 24 * time.Hour
 )
 
 const recoveryFailureKeyPrefix = "recovery_fail:"
 
-// recoveryRecord is stored in Redis keyed by "recovery_code:{email}".
+// recoveryRecord is the legacy 6-digit code record, keyed by "recovery_code:{email}".
 type recoveryRecord struct {
 	CodeHash string `json:"code_hash"`
 	UserID   string `json:"user_id"`
@@ -3264,6 +3276,12 @@ const (
 	recoveryDrainTimeout = 5 * time.Second
 )
 
+// recoveryJob is one accepted begin request.
+type recoveryJob struct {
+	addr   string
+	format recoveryFormat
+}
+
 // generateRecoveryCode produces a cryptographically random 6-digit numeric code.
 func generateRecoveryCode() (string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
@@ -3279,15 +3297,18 @@ func hashRecoveryCode(code string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// recoveryRedisKey returns the Redis key for a pending recovery code.
+// recoveryRedisKey returns the Redis key for a pending legacy recovery code.
 func recoveryRedisKey(email string) string {
 	return fmt.Sprintf("recovery_code:%s", strings.ToLower(email))
 }
 
+const errValidEmailRequired = "Valid email is required"
+
 // RecoveryBegin accepts account recovery without waiting for account resolution or delivery.
 func (h *Handler) RecoveryBegin(c *gin.Context) {
 	var req struct {
-		Email string `json:"email" binding:"required"`
+		Email  string `json:"email" binding:"required"`
+		Format string `json:"format"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Email is required"})
@@ -3295,17 +3316,36 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 	}
 
 	addr := strings.ToLower(strings.TrimSpace(req.Email))
+	if !validRecoveryEmail(addr) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errValidEmailRequired})
+		return
+	}
+	format := recoveryFormatCode
+	switch req.Format {
+	case "", string(recoveryFormatCode):
+	case string(recoveryFormatToken):
+		format = recoveryFormatToken
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported recovery format"})
+		return
+	}
+	if h.recoveryLegacyCodeOff {
+		format = recoveryFormatToken
+	}
 
 	// Every accepted input takes the same bounded queue path. Account lookup,
 	// Redis, and SMTP happen only on a worker, so none can affect response timing.
-	h.enqueueRecoveryBegin(addr)
+	h.enqueueRecoveryBegin(recoveryJob{addr: addr, format: format})
 
-	// Always return 200 to prevent email enumeration.
-	successMsg := gin.H{"message": "If an account exists with that email, a recovery code has been sent"}
-	c.JSON(http.StatusOK, successMsg)
+	// Always the same 200 for an address: the format depends only on the
+	// request and the server's configuration, never on the account.
+	c.JSON(http.StatusOK, gin.H{
+		"message": "If an account exists with that email, a recovery email has been sent",
+		"format":  string(format),
+	})
 }
 
-func (h *Handler) enqueueRecoveryBegin(addr string) {
+func (h *Handler) enqueueRecoveryBegin(job recoveryJob) {
 	h.startRecoveryWorkers()
 
 	h.recoveryQueueMu.RLock()
@@ -3314,7 +3354,7 @@ func (h *Handler) enqueueRecoveryBegin(addr string) {
 		return
 	}
 	select {
-	case h.recoveryQueue <- addr:
+	case h.recoveryQueue <- job:
 	default:
 		h.log.Warn("Recovery queue saturated", "failure_class", "recovery_queue_saturated")
 	}
@@ -3331,11 +3371,11 @@ func (h *Handler) startRecoveryWorkers() {
 		for range recoveryWorkerCount {
 			go func() {
 				defer h.recoveryWorkers.Done()
-				for addr := range h.recoveryQueue {
+				for job := range h.recoveryQueue {
 					if h.recoveryAborted() {
 						continue // drain abandoned: skip what is still queued
 					}
-					h.recoveryProcess(addr)
+					h.recoveryProcess(job)
 				}
 			}()
 		}
@@ -3344,9 +3384,9 @@ func (h *Handler) startRecoveryWorkers() {
 
 // CloseRecoveryJobs stops new recovery dispatches and drains accepted jobs
 // and their deliveries for up to recoveryDrainTimeout. After that it cancels
-// in-flight lookups, skips jobs still queued, and clears the stored code of
+// in-flight lookups, skips jobs still queued, and clears the stored secret of
 // every delivery still in flight while Redis is open, so a send that fails
-// after shutdown cannot leave a code that was never sent. A delivery already
+// after shutdown cannot leave a secret that was never sent. A delivery already
 // talking to SMTP ends at its own connection deadline.
 // Call it after HTTP drain and before closing the handler's database or Redis.
 func (h *Handler) CloseRecoveryJobs() {
@@ -3371,10 +3411,13 @@ func (h *Handler) CloseRecoveryJobs() {
 	}
 }
 
-// recoveryDelivery is one stored code whose email is not yet confirmed sent.
+// recoveryDelivery is one stored secret whose email is not yet confirmed sent.
 type recoveryDelivery struct {
-	addr string
-	data []byte
+	addr    string
+	secret  string
+	format  recoveryFormat
+	minutes int
+	issue   recoveryIssue
 }
 
 func (h *Handler) abortRecoveryJobs() {
@@ -3417,28 +3460,29 @@ func (h *Handler) clearInflightRecoveryCodes() {
 	}
 	h.recoveryInflightMu.Unlock()
 	for _, d := range pending {
-		h.clearUnsentRecoveryCode(d.addr, d.data)
+		h.clearUnsentRecoveryCode(d)
 	}
 }
 
-// clearUnsentRecoveryCode deletes a stored code only if it is still the one
-// this delivery installed.
-func (h *Handler) clearUnsentRecoveryCode(addr string, data []byte) {
+// clearUnsentRecoveryCode deletes a delivery's record and slot and refunds its
+// send, only if the slot is still the one this delivery took.
+func (h *Handler) clearUnsentRecoveryCode(d *recoveryDelivery) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := h.deleteRecoveryRecordIfSameSend(ctx, recoveryRedisKey(addr), string(data)); err != nil {
-		h.log.Warn("Failed to clear unsent recovery code", "failure_class", "recovery_unsent_code_cleanup")
+	if err := h.clearUnsentRecovery(ctx, d.issue); err != nil {
+		// An uncleared slot blocks the owner's next recovery email until it
+		// expires, so this is an error, not a warning.
+		h.log.Error("Failed to clear unsent recovery code", "failure_class", recoveryRedisFailureClass("recovery_unsent_code_cleanup", err))
 	}
 }
 
-func (h *Handler) processRecoveryBegin(addr string) {
+func (h *Handler) processRecoveryBegin(job recoveryJob) {
 	ctx, cancel := h.recoveryJobContext()
 	defer cancel()
 
-	// Look up user by email
 	var userID string
 	err := h.db.QueryRowContext(ctx,
-		`SELECT id FROM users WHERE LOWER(email) = LOWER($1)`, addr,
+		`SELECT id FROM users WHERE LOWER(email) = LOWER($1)`, job.addr,
 	).Scan(&userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -3448,40 +3492,61 @@ func (h *Handler) processRecoveryBegin(addr string) {
 		h.log.Error("Failed to look up user for recovery", "failure_class", "recovery_account_lookup")
 		return
 	}
+	h.issueAndDeliverRecovery(ctx, job, userID)
+}
 
-	// Generate 6-digit code
-	code, err := generateRecoveryCode()
+// issueAndDeliverRecovery stores a new recovery secret for userID and emails it
+// to job.addr, unless the account already has a live recovery email in either
+// format.
+func (h *Handler) issueAndDeliverRecovery(ctx context.Context, job recoveryJob, userID string) {
+	var sendIDBytes [16]byte
+	if _, err := rand.Read(sendIDBytes[:]); err != nil {
+		h.log.Error("Failed to generate recovery send identity", "failure_class", "recovery_send_identity")
+		return
+	}
+	sendID := hex.EncodeToString(sendIDBytes[:])
+	codeKey := ""
+
+	var secret, recordKey string
+	var value any
+	var err error
+	if job.format == recoveryFormatToken {
+		secret, err = generateRecoveryEmailToken()
+		recordKey = recoveryEmailTokenKey(secret)
+		codeKey = recoveryRedisKey(job.addr)
+		value = recoveryEmailTokenRecord{UserID: userID, SendID: sendID, Addr: strings.ToLower(job.addr)}
+	} else {
+		sendID = recoveryCodeSendPrefix + sendID
+		secret, err = generateRecoveryCode()
+		recordKey = recoveryRedisKey(job.addr)
+		value = recoveryRecord{CodeHash: hashRecoveryCode(secret), UserID: userID, SendID: sendID}
+	}
 	if err != nil {
 		h.log.Error("Failed to generate recovery code", "failure_class", "recovery_code_generation")
 		return
 	}
-
-	// Store SHA-256 hash in Redis
-	var sendID [16]byte
-	if _, err := rand.Read(sendID[:]); err != nil {
-		h.log.Error("Failed to generate recovery send identity", "failure_class", "recovery_send_identity")
-		return
-	}
-	record := recoveryRecord{
-		CodeHash: hashRecoveryCode(code),
-		UserID:   userID,
-		SendID:   hex.EncodeToString(sendID[:]),
-		Attempts: 0,
-	}
-	data, err := json.Marshal(record)
+	record, err := json.Marshal(value)
 	if err != nil {
 		h.log.Error("Failed to marshal recovery record", "failure_class", "recovery_record_encoding")
 		return
 	}
 
-	installed, err := h.redis.SetNX(ctx, recoveryRedisKey(addr), data, recoveryCodeTTL).Result()
+	issue := recoveryIssue{
+		RecordKey: recordKey,
+		SlotKey:   recoverySlotKey(userID),
+		SendsKey:  recoverySendsKey(userID),
+		SendID:    sendID,
+		Record:    record,
+		CodeKey:   codeKey,
+	}
+	ttl, held, err := h.issueRecoveryRecord(ctx, issue)
 	if err != nil {
 		h.log.Error("Failed to store recovery code in Redis", "failure_class", "recovery_code_store")
 		return
 	}
-	if !installed {
-		// A live code already exists for this address: send nothing new. The
-		// caller already received the generic response. No PII is logged.
+	if held {
+		// A live recovery email already holds this account's slot: send
+		// nothing new. Its secret stays valid as long as the slot does.
 		h.log.Info("Recovery code already pending; no new code sent")
 		return
 	}
@@ -3490,11 +3555,7 @@ func (h *Handler) processRecoveryBegin(addr string) {
 	// so a worker held through delivery would delay the next queued address
 	// only when an earlier one has an account. The SMTP dial timeout and
 	// connection deadline bound each delivery, and CloseRecoveryJobs drains it.
-	//
-	// Delivery count is not capped: a cap would again make one address's
-	// outcome depend on how many other addresses have accounts. SetNX keeps
-	// it to one delivery per address per code lifetime.
-	d := &recoveryDelivery{addr: addr, data: data}
+	d := &recoveryDelivery{addr: job.addr, secret: secret, format: job.format, minutes: int(ttl / time.Minute), issue: issue}
 	h.recoveryInflightMu.Lock()
 	h.recoveryInflight[d] = struct{}{}
 	h.recoveryInflightMu.Unlock()
@@ -3506,50 +3567,46 @@ func (h *Handler) processRecoveryBegin(addr string) {
 			delete(h.recoveryInflight, d)
 			h.recoveryInflightMu.Unlock()
 		}()
-		h.deliverRecoveryCode(addr, code, data)
+		h.deliverRecoveryCode(d)
 	}()
 }
 
-// deliverRecoveryCode emails a stored recovery code and clears the code if the
-// send fails.
-func (h *Handler) deliverRecoveryCode(addr, code string, data []byte) {
+// deliverRecoveryCode emails a stored recovery secret and clears it, with its
+// slot and send count, if the send fails.
+func (h *Handler) deliverRecoveryCode(d *recoveryDelivery) {
 	if h.recoveryAborted() {
-		// Shutdown gave up on the drain: send nothing and leave no unsent code.
-		h.clearUnsentRecoveryCode(addr, data)
+		// Shutdown gave up on the drain: send nothing and leave no unsent secret.
+		h.clearUnsentRecoveryCode(d)
+		return
+	}
+	if !h.recoverySendStillCurrent(d) {
+		// A key replaced this code before it went out. Sending it now would
+		// make the newest email hold a code that no longer works.
+		h.log.Info("Recovery code replaced before delivery; not sent")
+		return
+	}
+	if h.recoveryMail == nil {
+		h.log.Error("Recovery email delivery is not configured", "failure_class", "recovery_delivery_not_configured", "format", d.format)
+		h.clearUnsentRecoveryCode(d)
 		return
 	}
 	var sendErr error
-	if h.emailSvc == nil {
-		sendErr = email.ErrDeliveryNotConfigured
+	if d.format == recoveryFormatToken {
+		sendErr = h.recoveryMail.SendRecoveryKey(d.addr, d.secret, d.minutes)
 	} else {
-		sendErr = h.emailSvc.SendRecoveryCode(addr, code)
+		sendErr = h.recoveryMail.SendRecoveryCode(d.addr, d.secret, d.minutes)
 	}
 	if sendErr != nil {
-		h.log.Error("Failed to send recovery code email", "failure_class", "recovery_email_delivery")
-		h.clearUnsentRecoveryCode(addr, data)
+		class := "recovery_email_delivery"
+		if errors.Is(sendErr, email.ErrDeliveryNotConfigured) {
+			class = "recovery_delivery_not_configured"
+		}
+		h.log.Error("Failed to send recovery code email", "failure_class", class, "format", d.format)
+		h.clearUnsentRecoveryCode(d)
 		return
 	}
 
 	h.log.Info("Recovery code sent")
-}
-
-var deleteRecoveryRecordIfSameSendLua = redis.NewScript(`
-local raw = redis.call("GET", KEYS[1])
-if not raw then return 0 end
-local current = cjson.decode(raw)
-local installed = cjson.decode(ARGV[1])
-if type(installed.send_id) == "string" and installed.send_id ~= ""
-  and current.send_id == installed.send_id
-  and current.user_id == installed.user_id
-  and current.code_hash == installed.code_hash then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
-`)
-
-func (h *Handler) deleteRecoveryRecordIfSameSend(ctx context.Context, key, value string) error {
-	_, err := deleteRecoveryRecordIfSameSendLua.Run(ctx, h.redis, []string{key}, value).Result()
-	return err
 }
 
 // validateRecoveryCodeFormat normalises and validates a 6-digit recovery code.
@@ -3611,6 +3668,27 @@ func (h *Handler) watchRecoveryCodeAttempt(ctx context.Context, redisKey, code s
 	return record, matched, err
 }
 
+// watchOwnRecoverySlot WATCHes the account's send slot and returns its key when
+// the slot still holds this code's send, or "" when it holds another send or
+// nothing. The WATCH makes the caller's transaction fail if the slot changes.
+func watchOwnRecoverySlot(ctx context.Context, tx *redis.Tx, record recoveryRecord) (string, error) {
+	if record.UserID == "" || record.SendID == "" {
+		return "", nil
+	}
+	slotKey := recoverySlotKey(record.UserID)
+	if err := tx.Watch(ctx, slotKey).Err(); err != nil {
+		return "", err
+	}
+	slot, err := tx.Get(ctx, slotKey).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return "", err
+	}
+	if slot != record.SendID {
+		return "", nil
+	}
+	return slotKey, nil
+}
+
 func commitRecoveryCodeAttempt(ctx context.Context, tx *redis.Tx, redisKey, code string) (recoveryRecord, bool, error) {
 	var record recoveryRecord
 	data, err := tx.Get(ctx, redisKey).Bytes()
@@ -3625,11 +3703,23 @@ func commitRecoveryCodeAttempt(ctx context.Context, tx *redis.Tx, redisKey, code
 	if !matched {
 		record.Attempts++
 	}
+	spent := matched || record.Attempts >= recoveryMaxAttempts
+	// A spent code also frees the account's send slot when the slot is still
+	// this code's, so a new recovery email can go out at once rather than the
+	// owner waiting out the cooldown with no live code.
+	slotKey := ""
+	if spent {
+		if slotKey, err = watchOwnRecoverySlot(ctx, tx, record); err != nil {
+			return record, false, err
+		}
+	}
 	_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		// The guess that spends the last attempt deletes the record rather
-		// than keeping a dead one: RecoveryBegin installs with SETNX, so a kept
-		// record would stop it sending a new code for the rest of its TTL.
-		if matched || record.Attempts >= recoveryMaxAttempts {
+		// than keeping a dead one, so a new code can be sent at once.
+		if spent {
+			if slotKey != "" {
+				pipe.Del(ctx, slotKey)
+			}
 			return pipe.Del(ctx, redisKey).Err()
 		}
 		updated, err := json.Marshal(record)
@@ -3690,21 +3780,27 @@ func (h *Handler) addVerifyCodeHints(resp gin.H, userID string) {
 
 }
 
-// RecoveryVerifyCode validates the recovery code and returns a recovery token plus recovery key data.
+// RecoveryVerifyCode validates a recovery key, or a legacy recovery code, and
+// returns a recovery token plus recovery key data.
 func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
-	email, code, ok := parseRecoveryVerifyCodeRequest(c)
+	req, ok := parseRecoveryVerifyRequest(c, !h.recoveryLegacyCodeOff)
 	if !ok {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	budgetKey := recoveryFailureKeyPrefix + email
+	if req.Token != "" {
+		h.verifyRecoveryEmailToken(ctx, c, req.Token)
+		return
+	}
+
+	budgetKey := recoveryFailureKeyPrefix + req.Email
 	if !h.allowRecoveryFailureAttempt(ctx, c, budgetKey) {
 		return
 	}
 
-	record, err := h.consumeRecoveryCode(ctx, recoveryRedisKey(email), code)
+	record, err := h.consumeRecoveryCode(ctx, recoveryRedisKey(req.Email), req.Code)
 	if errors.Is(err, redis.Nil) {
 		h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
 		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
@@ -3723,6 +3819,81 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	if h.recoveryPolicyAllowsEmailCompletion(ctx, c, record.UserID) && h.CompleteRecovery(c, record.UserID, "email") {
 		h.clearRecoveryFailureBudget(c, budgetKey)
 	}
+}
+
+// verifyRecoveryEmailToken completes email recovery with a recovery key. A
+// wrong, expired or used key gets one response, and nothing is counted against
+// the account, so nobody can spend the owner's attempts. Every check that can
+// fail for a server reason runs before the key is spent, so the owner can retry
+// the same key after an outage.
+func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, token string) {
+	if h.redis == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return
+	}
+	record, err := h.peekRecoveryEmailToken(ctx, token)
+	if errors.Is(err, redis.Nil) {
+		h.refuseRecoveryEmailToken(ctx, c)
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to read recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return
+	}
+	var addr string
+	err = h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, record.UserID).Scan(&addr)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		h.log.Error("Failed to read account for recovery key", "failure_class", "recovery_key_account_lookup")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return
+	}
+	if err != nil || addr != record.Addr {
+		// The account is gone or no longer uses the address the key was sent
+		// to. Discard the key and answer as for any other unusable key.
+		if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
+			h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+		}
+		h.refuseRecoveryEmailToken(ctx, c)
+		return
+	}
+	methods, ok := h.recoveryMethods(ctx, c, record.UserID)
+	if !ok {
+		return
+	}
+	if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil {
+		if errors.Is(err, redis.Nil) {
+			// A concurrent request redeemed the key first.
+			h.refuseRecoveryEmailToken(ctx, c)
+			return
+		}
+		h.log.Error("Failed to redeem recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return
+	}
+	if len(methods) > 0 {
+		h.issueRecoveryChallenge(ctx, c, record.UserID, methods)
+		return
+	}
+	if h.CompleteRecovery(c, record.UserID, "email") {
+		h.clearRecoveryFailureBudget(c, recoveryFailureKeyPrefix+addr)
+	}
+}
+
+// refuseRecoveryEmailToken answers an unusable recovery key. The client
+// address auth ban still counts it.
+func (h *Handler) refuseRecoveryEmailToken(ctx context.Context, c *gin.Context) {
+	h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
+	outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+	middleware.MarkAuthFailureOutcome(c, outcome)
+	c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode})
+}
+
+func recoveryKeyReadFailureClass(err error) string {
+	if errors.Is(err, errMalformedRecoveryKeyRecord) {
+		return "recovery_key_record_malformed"
+	}
+	return recoveryRedisFailureClass("recovery_key_read", err)
 }
 
 // clearRecoveryFailureBudget resets the address's recovery failure budget
@@ -3775,16 +3946,26 @@ func writeRecoveryBudgetUnavailable(c *gin.Context) {
 	c.JSON(http.StatusServiceUnavailable, gin.H{"error": stepUpBudgetUnavailableMessage, "step_up_budget_unavailable": true})
 }
 
-func (h *Handler) recoveryPolicyAllowsEmailCompletion(ctx context.Context, c *gin.Context, userID string) bool {
+// recoveryMethods reads the extra factors the account requires after email
+// proof. On failure it writes the response and returns false.
+func (h *Handler) recoveryMethods(ctx context.Context, c *gin.Context, userID string) ([]string, bool) {
 	if h.mfaChecker == nil {
 		h.log.Error("MFA checker not configured for recovery token generation")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
-		return false
+		return nil, false
 	}
 	methods, err := h.mfaChecker.GetRecoveryMethods(ctx, userID)
 	if err != nil {
 		h.log.Error("Failed to read recovery policy", "error_class", "recovery_policy")
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errRecoveryVerificationFailed})
+		return nil, false
+	}
+	return methods, true
+}
+
+func (h *Handler) recoveryPolicyAllowsEmailCompletion(ctx context.Context, c *gin.Context, userID string) bool {
+	methods, ok := h.recoveryMethods(ctx, c, userID)
+	if !ok {
 		return false
 	}
 	if len(methods) > 0 {
@@ -3794,21 +3975,57 @@ func (h *Handler) recoveryPolicyAllowsEmailCompletion(ctx context.Context, c *gi
 	return true
 }
 
-func parseRecoveryVerifyCodeRequest(c *gin.Context) (string, string, bool) {
-	var req struct {
-		Email string `json:"email" binding:"required"`
-		Code  string `json:"code" binding:"required"`
+// recoveryVerifyRequest is a parsed verify request: Token is set for the key
+// path, Email and Code for the legacy path.
+type recoveryVerifyRequest struct {
+	Email string
+	Code  string
+	Token string
+}
+
+const errRecoveryLegacyCodeOff = "This app version cannot complete recovery. Update the app."
+
+// parseRecoveryVerifyRequest checks the request shape only. Every refusal here
+// depends on the request and the server's configuration, never on an account.
+func parseRecoveryVerifyRequest(c *gin.Context, legacyEnabled bool) (recoveryVerifyRequest, bool) {
+	var body struct {
+		Email string  `json:"email"`
+		Code  *string `json:"code"`
+		Token *string `json:"token"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and code are required"})
-		return "", "", false
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "A recovery key or an email and code are required"})
+		return recoveryVerifyRequest{}, false
 	}
-	code, errMsg := validateRecoveryCodeFormat(req.Code)
+	if (body.Code == nil) == (body.Token == nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Send exactly one of a recovery key or a code"})
+		return recoveryVerifyRequest{}, false
+	}
+	if body.Token != nil {
+		// A key copied out of an email can carry line breaks inside it, and
+		// base64url never contains whitespace, so drop all of it.
+		token := strings.Join(strings.Fields(*body.Token), "")
+		if !validRecoveryEmailToken(token) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery key format"})
+			return recoveryVerifyRequest{}, false
+		}
+		return recoveryVerifyRequest{Token: token}, true
+	}
+	if !legacyEnabled {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errRecoveryLegacyCodeOff})
+		return recoveryVerifyRequest{}, false
+	}
+	addr := strings.ToLower(strings.TrimSpace(body.Email))
+	if !validRecoveryEmail(addr) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errValidEmailRequired})
+		return recoveryVerifyRequest{}, false
+	}
+	code, errMsg := validateRecoveryCodeFormat(*body.Code)
 	if errMsg != "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
-		return "", "", false
+		return recoveryVerifyRequest{}, false
 	}
-	return strings.ToLower(strings.TrimSpace(req.Email)), code, true
+	return recoveryVerifyRequest{Email: addr, Code: code}, true
 }
 
 // CompleteRecovery is called only after the recovery policy's required proofs.
