@@ -59,25 +59,39 @@ func checkAuthorityChain(previous, next CredentialPublication) error {
 func checkProtocolTransition(previous, next CredentialPublication) error {
 	switch previous.Protocol {
 	case ProtocolLegacy:
-		if next.Protocol == ProtocolLegacy && next.CredentialGeneration <= previous.CredentialGeneration {
-			return malformed("legacy generation")
-		}
-		if next.Protocol == ProtocolSplitPending && (previous.CredentialGeneration == maxSafeInt || next.CredentialGeneration != previous.CredentialGeneration+1) {
-			return malformed("split pending generation")
-		}
-		if next.Protocol != ProtocolLegacy && next.Protocol != ProtocolSplitPending {
-			return malformed("legacy transition")
-		}
+		return checkLegacyTransition(previous, next)
 	case ProtocolSplitPending:
-		if next.Protocol != ProtocolSplitAuthWrap || next.CredentialGeneration != previous.CredentialGeneration {
-			return malformed("split pending transition")
-		}
+		return checkSplitPendingTransition(previous, next)
 	case ProtocolSplitAuthWrap:
-		if next.Protocol != ProtocolSplitAuthWrap || next.CredentialGeneration <= previous.CredentialGeneration {
-			return malformed("split generation")
-		}
+		return checkSplitAuthWrapTransition(previous, next)
 	default:
 		return malformed("protocol")
+	}
+}
+
+func checkLegacyTransition(previous, next CredentialPublication) error {
+	if next.Protocol == ProtocolLegacy && next.CredentialGeneration <= previous.CredentialGeneration {
+		return malformed("legacy generation")
+	}
+	if next.Protocol == ProtocolSplitPending && (previous.CredentialGeneration == maxSafeInt || next.CredentialGeneration != previous.CredentialGeneration+1) {
+		return malformed("split pending generation")
+	}
+	if next.Protocol != ProtocolLegacy && next.Protocol != ProtocolSplitPending {
+		return malformed("legacy transition")
+	}
+	return nil
+}
+
+func checkSplitPendingTransition(previous, next CredentialPublication) error {
+	if next.Protocol != ProtocolSplitAuthWrap || next.CredentialGeneration != previous.CredentialGeneration {
+		return malformed("split pending transition")
+	}
+	return nil
+}
+
+func checkSplitAuthWrapTransition(previous, next CredentialPublication) error {
+	if next.Protocol != ProtocolSplitAuthWrap || next.CredentialGeneration <= previous.CredentialGeneration {
+		return malformed("split generation")
 	}
 	return nil
 }
