@@ -39,7 +39,64 @@ The credential descriptor is one canonical UTF-8 JSON array, with no whitespace,
 ["split-auth-wrap-v1","<realm-uuid>","<subject-b64>",<generation>,"<salt-b64>",65536,3,4]
 ```
 
-`realm-uuid` has the same lowercase 36-byte form as the authenticated profile realm. `subject-b64` is standard padded base64 of exactly 32 bytes (44 ASCII characters); `salt-b64` is standard padded base64 of exactly 16 bytes (24 ASCII characters). Decoding followed by re-encoding must reproduce each field byte for byte. `generation` is an unsigned decimal integer in `1..9007199254740991`, without leading zeroes. The complete descriptor is at most 256 bytes. A known split account receives its stored descriptor. Legacy and unknown identifiers receive deterministic synthetic descriptors from a dedicated, domain-separated server secret, with the same field shapes, allowed values, status, and rate-limit class. No pre-auth field reveals account state or its public UUID. The first login proof always uses `auth`. A failed proof gets an opaque continuation on the same response path for a wrong split proof, a legacy account, and an unknown account. The continuation is not permission to send the raw password: the client permits that only after verifying a current, anti-rollback legacy-status attestation under the independently authenticated account authority. Neither the control-plane response nor locally cached legacy state alone suffices, including on a fresh device. The attestation must bind the authority realm, authority-bound account identity, `credential_protocol = legacy`, authoritative credential generation, issuance and expiry, and a monotonic authority-chain freshness reference that prevents replay after upgrade. The exact signer and freshness mechanism remain to be frozen; no legacy fallback can activate until they are. Without that proof, including on a fresh device, the client refuses the raw-password path. The raw-password continuation succeeds only for a legacy verifier, under the normal MFA policy.
+`realm-uuid` has the same lowercase 36-byte form as the authenticated profile realm. `subject-b64` is standard padded base64 of exactly 32 bytes (44 ASCII characters); `salt-b64` is standard padded base64 of exactly 16 bytes (24 ASCII characters). Decoding followed by re-encoding must reproduce each field byte for byte. `generation` is an unsigned decimal integer in `1..9007199254740991`, without leading zeroes. The complete descriptor is at most 256 bytes. A known split account receives its stored descriptor. Legacy and unknown identifiers receive deterministic synthetic descriptors from a dedicated, domain-separated server secret, with the same field shapes, allowed values, status, and rate-limit class. No pre-auth field reveals account state or its public UUID. The first login proof always uses `auth`. A failed proof gets an opaque continuation on the same response path for a wrong split proof, a legacy account, and an unknown account. The continuation is not permission to send the raw password: the client permits that only after verifying a current, anti-rollback legacy-status attestation under the independently authenticated account authority. Neither the control-plane response nor locally cached legacy state alone suffices, including on a fresh device. The attestation must bind the authority realm, authority-bound account identity, `credential_protocol = legacy`, authoritative credential generation, issuance and expiry, and a monotonic authority-chain freshness reference that prevents replay after upgrade. The Proposed extension below defines the intended proof and the decisions that still block it. Without an accepted proof protocol, including on a fresh device, the client refuses the raw-password path. The raw-password continuation succeeds only for a legacy verifier, under the normal MFA policy.
+
+#### Proposed legacy-credential authority proof
+
+This subsection is **Proposed**, not part of the frozen account-authority protocol and not authority to activate a legacy fallback. Its eight security-owner decisions remain pending below. Implementations may build passive parsers and vectors against an approved follow-on decision, but no client may submit a raw password on the strength of this text alone.
+
+**Frozen existing protocol boundary.** Account-authority protocol v1 keeps its existing canonical layouts unchanged. In particular, the RSK-signed `status` object remains an account-root status, its array position 10 remains `active_root_digest`, its signed-type registry remains closed, and the existing `status` delegation scope does not authorize credential assertions. The private `cp-evidence.credential_epoch_digest` is operation evidence, not credential-protocol state. The proposed proof therefore does not append fields to `status`, reinterpret position 10, or widen the meaning of an existing delegation.
+
+**Proposed versioned extension.** A follow-on authority protocol version would add an explicit `credential-status` delegation scope and the RSK-signed `legacy-credential-status` layout below. Array positions are shown to prevent a future implementation from confusing its publication digest with v1 `status.active_root_digest`:
+
+| Position | Field | Proposed constraint |
+|---|---|---|
+| 0 | protocol discriminator | `concord-account-authority` |
+| 1 | protocol version | The approved extension version, distinct from frozen v1 |
+| 2 | tag | `legacy-credential-status` |
+| 3 | `realm_id` | Lowercase canonical authority-realm UUID |
+| 4 | `account_id` | Lowercase canonical authority-bound account UUID |
+| 5 | `credential_protocol` | Closed enum; only `legacy` authorizes fallback |
+| 6 | `credential_generation` | Integer in `1..9007199254740991` |
+| 7 | `publication_sequence` | Monotonic per-account integer in `1..9007199254740991` |
+| 8 | `issued_at_ms` | Authority database time in milliseconds |
+| 9 | `valid_until_ms` | Exactly `issued_at_ms + 300000`; overflow rejects |
+| 10 | `credential_publication_digest` | Standard padded base64 of the 48-byte SHA-384 digest of the separately frozen canonical publication bytes |
+| 11 | `challenge` | Standard padded base64 of exactly 32 client-generated CSPRNG bytes |
+| 12 | `delegation_gen` | Product-root generation selecting the signing delegation |
+| 13 | `delegation_serial` | Nonzero serial of a delegation carrying `credential-status` |
+
+The statement uses the authority's canonical signed envelope and the RSK's P-384 ECDSA/SHA-384 signature encoding for the approved extension version. The client verifies the independently authenticated realm trust, never-decreasing delegation high-water, exact restored account identity, `credential-status` signer scope, exact challenge, proof lifetime, credential publication high-water, protocol and generation before it releases the raw password. A parse, signature, scope, identity, freshness, persistence or high-water failure denies fallback. The 32-byte challenge is generated for one login attempt, held only in client memory and consumed when that attempt submits or terminates. The control plane may relay the challenge and signed statement, but it cannot choose the challenge or supply the account identity against which the client verifies it.
+
+The proposed proof is derived from an authority-owned, durable credential publication. Its separately frozen canonical bytes must bind at least the realm, account, credential protocol, credential generation, publication sequence, previous publication digest, credential-epoch digest, publication time and transition-request digest. The authority accepts a publication only by compare-and-swap from its durable per-account high-water. Exact duplicates may be idempotent; a lower sequence, a changed digest at the same sequence, a lower credential generation or any `split` to `legacy` transition is refused.
+
+The proposed state machine is:
+
+```text
+legacy(g, n) -> legacy(g'>g, n+1)
+legacy(g, n) -> split-pending(g+1, n+1)
+split-pending -> split
+split(g, n) -> split(g'>g, n+1)
+```
+
+`split-pending` is terminal for legacy-proof issuance. Upgrade ordering is authority fence first, control-plane credential transaction second, and authority finalization third. If any outcome after the fence is ambiguous, the account remains ineligible for a legacy proof until durable reconciliation; it never rolls back to `legacy`. This chooses migration availability loss over exposing a raw password after an upgrade that may already have committed.
+
+The client retains two separate high-waters. The existing realm value tracks product-root generation, delegation serial and `min_valid_serial`. A new per-account value tracks publication sequence, publication digest, credential generation and a terminal-nonlegacy-seen bit. Before raw-password release the client durably compare-and-advances the account value. A lower sequence, conflicting same-sequence digest, decreasing generation, a legacy proof after terminal nonlegacy state, or failure to persist denies fallback.
+
+On a fresh device, independently restored identity means an account ID and authority state recovered through an authenticated account-authority or recovery artifact whose verification does not depend on the current control-plane login response, a username-to-ID mapping from that control plane, the synthetic credential descriptor, cached `legacy` state alone, or the raw password under consideration. The restored state binds the realm, account, realm high-water and any previously established account publication high-water. A fresh device without that material remains deny-only. The current control-plane-mTLS authority transport may relay opaque proofs; this proposal does not authorize or require a new public client-to-authority endpoint.
+
+**Pending security-owner decisions.** None of the following has sign-off merely because it appears in this Proposed ADR:
+
+1. Approve a versioned authority extension with a distinct `credential-status` scope, rather than changing frozen v1 or widening its `status` scope.
+2. Approve the exact `legacy-credential-status` layout, RSK signature contract, 32-byte one-attempt challenge and five-minute lifetime above.
+3. Freeze the canonical credential-publication bytes, publication signer and scope, SHA-384 digest rule, previous-digest chain and authority compare-and-swap semantics.
+4. Approve terminal `split-pending` before the control-plane credential commit, including the fail-closed availability consequence after an ambiguous or failed later step.
+5. Approve the separate durable per-account client high-water and the requirement to persist it before raw-password release.
+6. Approve fresh-device eligibility only after independent restoration of the authority-bound account identity and high-water; ordinary username/password first contact remains ineligible.
+7. Approve a sealed, audited initial credential-publication import for existing legacy accounts and an initial split publication for new accounts; the existing legacy encryption-key population is not a credential-generation source.
+8. Approve clock handling: authority database time for issuance, strict expiry at five minutes, and either the existing authority future-skew tolerance or a newly frozen smaller bound.
+
+Until all eight decisions are recorded and the publication and proof vectors pass every client runtime, the existing rule remains unchanged: no authority proof means no raw-password continuation.
 
 Clients reject any descriptor whose Argon2id values differ from exactly `(65536 KiB, 3, 4)`; changing these values requires a new protocol discriminator. These values match the current client derivation constants, but security-owner approval of the new credential protocol remains an acceptance gate. The vector corpus includes a lower-parameter descriptor that every client rejects before KDF work.
 
