@@ -86,6 +86,14 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 		if h.writeDeleteAccountFailure(c, userID, err) {
 			return
 		}
+		// Returning here would be two separate failures. First it would answer
+		// 500 for an account that IS erased, and a client retry then gets 404 —
+		// the duplicate-action lie the post-commit classification exists to
+		// prevent. Second, and worse, it would skip revokeAccessTokens below, so
+		// the jti blacklist and the user_disabled:<id> key are never written and
+		// an already-issued access token keeps working against an erased
+		// account. [internal]rules/backend.md requires both to be set BEFORE
+		// returning success (code review, PR #2840).
 		deliveryFailed = true
 	}
 
@@ -146,14 +154,6 @@ func (h *Handler) writeDeleteAccountFailure(c *gin.Context, userID string, err e
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "account deletion failed"})
 		return true
 	}
-	// Returning here would be two separate failures. First it would answer
-	// 500 for an account that IS erased, and a client retry then gets 404 —
-	// the duplicate-action lie the post-commit classification exists to
-	// prevent. Second, and worse, it would skip revokeAccessTokens, so the
-	// jti blacklist and the user_disabled:<id> key are never written and an
-	// already-issued access token keeps working against an erased account.
-	// [internal]rules/backend.md requires both to be set BEFORE returning
-	// success (code review, PR #2840).
 	if h.log != nil {
 		h.log.Error("erase-account: presence delivery did not settle",
 			"user_id", userID,
