@@ -40,7 +40,7 @@ SSO initiation is bound to the Desktop flow that started it, and backup-code
 readers accept the versioned formats needed for a later storage migration.
 The media plane now admits encrypted media format v6 alongside earlier room versions, while keeping each active call on one version.
 
-**97 Total Changes** | 29 Added | 7 Changed | 1 Deprecated | 2 Removed | 16 Fixed | 42 Security
+**99 Total Changes** | 29 Added | 9 Changed | 1 Deprecated | 2 Removed | 16 Fixed | 42 Security
 
 ### Added
 
@@ -76,6 +76,8 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 
 ### Changed
 
+- **Operations:** The control plane's Go module path is now `github.com/Concord-Voice/Self-Hosted/services/control-plane`. Code that imports a control-plane package must use the new path.
+- **Server:** The pending key-request reader checks each server's channel permissions in a separate function. Which requests a member sees is unchanged.
 - **Server:** Control-plane request handlers were restructured into smaller functions to clear code-quality findings. Responses, error messages and permission checks are unchanged.
 - **Operations:** `ATTESTATION_OIDC_SUBJECT_PREFIX` now defaults to `repo:Concord-Voice@264583090/Self-Hosted@1359565266:`, the immutable subject form this repository's GitHub OIDC tokens carry. Set it to bind attestation to a different repository. The self-hosted acceptance runner checks now admit this repository too.
 - **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.

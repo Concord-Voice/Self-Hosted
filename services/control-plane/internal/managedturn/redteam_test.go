@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedturn"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedturn"
 )
 
 // Regression tests for the #3931 Task 2 red-team findings. Each fails against

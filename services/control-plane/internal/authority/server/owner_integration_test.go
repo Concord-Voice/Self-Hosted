@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/authoritytest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/signer"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/authoritydb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/authoritytest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/signer"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/store"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/authoritydb"
 )
 
 // The owner verbs against a running serve (B3 Task 4, DoR:1762). They live in

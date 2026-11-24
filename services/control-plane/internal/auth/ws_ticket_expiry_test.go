@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	lf "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
+	lf "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -20,7 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 )
 
 // A fresh access-only family binds the prepared token's exact expiry before signing.

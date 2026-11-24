@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/argon2"
 )

@@ -3,7 +3,7 @@ package channels
 import (
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
 	"github.com/stretchr/testify/assert"
 )
 

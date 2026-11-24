@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -71,7 +71,7 @@ func TestSSOCookieRouteInventory(t *testing.T) {
 		"auth/handlers.go:rotateAndRespond":         1, // refresh exemption
 		"auth/handlers.go:handleGracePeriodRefresh": 1, // refresh exemption
 		"auth/handlers.go:Logout":                   1, // logout exemption, clear only
-		"auth/sso_link.go:CompleteSSOLink":            1, // mfa/verify link completion
+		"auth/sso_link.go:CompleteSSOLink":          1, // mfa/verify link completion
 		"oauth/handler.go:respondExistingSSO":       2, // provider/session
 		"oauth/handler.go:CompleteRegistration":     1, // provider/complete-registration
 		"oauth/handler.go:CompleteLink":             1, // provider/complete-link

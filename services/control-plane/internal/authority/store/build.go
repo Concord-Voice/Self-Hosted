@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/policy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/signer"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/policy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/signer"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // anbOf is R2: asserted_at + delta_ms + g_ms of the signing delegation.

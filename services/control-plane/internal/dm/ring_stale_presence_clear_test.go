@@ -16,9 +16,9 @@ import (
 	gorillaWS "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
 func privateCallPlanCount(t *testing.T, ts *testhelpers.TestServer, userID string) int {
