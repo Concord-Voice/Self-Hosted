@@ -811,12 +811,10 @@ export function Portal({
         </header>
 
         <main aria-labelledby="workspace-title" className="workspace-main">
-          {adminsAdded > 0 ? (
-            <AdminsAddedNotice
-              count={adminsAdded}
-              onDismiss={onAdminsAddedDismiss}
-            />
-          ) : null}
+          <AdminsAddedNotice
+            count={adminsAdded}
+            onDismiss={onAdminsAddedDismiss}
+          />
           {healthData === null ? (
             <output className="shell-notice">
               Live telemetry is temporarily unavailable

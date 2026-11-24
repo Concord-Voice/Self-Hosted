@@ -22,14 +22,14 @@ export function AdminsAddedNotice({
   count,
   onDismiss,
 }: Readonly<AdminsAddedNoticeProps>) {
+  if (count <= 0) return null;
   return (
     <section
       aria-labelledby="admins-added-title"
       className="shell-notice admins-added-notice"
     >
       <h2 id="admins-added-title">
-        <span aria-hidden="true">! </span>
-        Admins added
+        <span aria-hidden="true">!</span> Admins added
       </h2>
       <p role="alert">{adminsAddedMessage(count)}</p>
       <p>If you did not expect this, check the admin audit log.</p>
