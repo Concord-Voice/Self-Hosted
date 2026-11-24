@@ -4,6 +4,7 @@ import (
 	"crypto/elliptic"
 	"crypto/sha512"
 	"encoding/base64"
+	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -165,6 +166,148 @@ func TestPublicationSuccessorRules(t *testing.T) {
 	next.Protocol = ProtocolSplitPending
 	next.DescriptorDigest = OptionalDigest{Present: true, Value: fixtureDigest(201)}
 	require.ErrorIs(t, CheckPublicationSuccessor(previous, next), ErrMalformed)
+}
+
+func TestPublicationSuccessorProtocolPaths(t *testing.T) {
+	legacy := fixturePublication()
+	legacyDigest, err := PublicationDigest(legacy)
+	require.NoError(t, err)
+
+	pending := legacy
+	pending.Protocol = ProtocolSplitPending
+	pending.CredentialGeneration++
+	pending.PublicationSequence++
+	pending.PreviousPublicationDigest = OptionalDigest{Present: true, Value: legacyDigest}
+	pending.DescriptorDigest = OptionalDigest{Present: true, Value: fixtureDigest(201)}
+	require.NoError(t, CheckPublicationSuccessor(legacy, pending))
+
+	pendingDigest, err := PublicationDigest(pending)
+	require.NoError(t, err)
+	authWrap := pending
+	authWrap.Protocol = ProtocolSplitAuthWrap
+	authWrap.PublicationSequence++
+	authWrap.PreviousPublicationDigest = OptionalDigest{Present: true, Value: pendingDigest}
+	require.NoError(t, CheckPublicationSuccessor(pending, authWrap))
+
+	authWrapDigest, err := PublicationDigest(authWrap)
+	require.NoError(t, err)
+	rotated := authWrap
+	rotated.CredentialGeneration++
+	rotated.PublicationSequence++
+	rotated.PreviousPublicationDigest = OptionalDigest{Present: true, Value: authWrapDigest}
+	require.NoError(t, CheckPublicationSuccessor(authWrap, rotated))
+
+	rotated.Protocol = ProtocolLegacy
+	require.ErrorIs(t, CheckPublicationSuccessor(authWrap, rotated), ErrMalformed)
+	require.ErrorIs(t, checkProtocolTransition(CredentialPublication{Protocol: CredentialProtocol("unknown")}, rotated), ErrMalformed)
+}
+
+func TestValidationRejectsMalformedFields(t *testing.T) {
+	publication := fixturePublication()
+	publicationCases := []CredentialPublication{
+		func() CredentialPublication { value := publication; value.RealmID = "not-a-uuid"; return value }(),
+		func() CredentialPublication {
+			value := publication
+			value.DescriptorDigest = OptionalDigest{Present: true, Value: fixtureDigest(1)}
+			return value
+		}(),
+		func() CredentialPublication {
+			value := publication
+			value.Protocol = ProtocolSplitPending
+			return value
+		}(),
+		func() CredentialPublication {
+			value := publication
+			value.PreviousPublicationDigest = OptionalDigest{Present: true, Value: fixtureDigest(1)}
+			return value
+		}(),
+		func() CredentialPublication { value := publication; value.PublicationSequence = 2; return value }(),
+	}
+	for _, value := range publicationCases {
+		require.ErrorIs(t, validatePublication(value), ErrMalformed)
+	}
+
+	evidence := fixtureEvidence(publication)
+	challenge := [32]byte{}
+	status := fixtureStatus(publication, evidence, challenge)
+	status.Protocol = ProtocolSplitPending
+	require.ErrorIs(t, validateStatus(status), ErrMalformed)
+	status = fixtureStatus(publication, evidence, challenge)
+	status.IssuedAtMs = maxSafeInt - statusLifetimeMs + 1
+	require.ErrorIs(t, validateStatus(status), ErrMalformed)
+
+	evidence.RealmID = "not-a-uuid"
+	require.ErrorIs(t, validateEvidence(evidence), ErrMalformed)
+
+	inner, err := publication.Encode()
+	require.NoError(t, err)
+	require.ErrorIs(t, validateEnvelope(SignedCredential{Type: SignedType("unknown"), Inner: inner}), ErrMalformed)
+	require.ErrorIs(t, validateEnvelope(SignedCredential{Type: SignedTypePublication}), ErrMalformed)
+	require.ErrorIs(t, validateEnvelope(SignedCredential{Type: SignedTypePublication, Inner: []byte("not-json")}), ErrMalformed)
+}
+
+func TestParsingHelpersRejectMalformedFields(t *testing.T) {
+	_, err := decodeArray([]byte{}, string(SignedTypePublication), 1)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = decodeArray([]byte(`{}`), string(SignedTypePublication), 1)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = decodeArray([]byte(`["wrong",2,"credential-publication"]`), string(SignedTypePublication), 3)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = decodeArray([]byte(`["concord-account-authority",3,"credential-publication"]`), string(SignedTypePublication), 3)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = decodeArray([]byte(`["concord-account-authority",2,"wrong"]`), string(SignedTypePublication), 3)
+	require.ErrorIs(t, err, ErrMalformed)
+
+	_, err = stringAt([]any{1}, 0)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = uintAt([]any{json.Number("01")}, 0)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = uintAt([]any{json.Number("9007199254740992")}, 0)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = bytesAt([]any{"!"}, 0, 1)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = bytesUpToAt([]any{""}, 0, 1)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = optionalDigestAt([]any{1}, 0)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = optionalDigestAt([]any{"!"}, 0)
+	require.ErrorIs(t, err, ErrMalformed)
+}
+
+func TestDecodersRejectMalformedFieldsAcrossTheWireShape(t *testing.T) {
+	publication := fixturePublication()
+	evidence := fixtureEvidence(publication)
+	challenge := [32]byte{}
+	status := fixtureStatus(publication, evidence, challenge)
+	publicationRaw, err := publication.Encode()
+	require.NoError(t, err)
+	evidenceRaw, err := evidence.Encode()
+	require.NoError(t, err)
+	statusRaw, err := status.Encode()
+	require.NoError(t, err)
+
+	for _, index := range []int{3, 4, 6, 7, 8, 9, 11, 12, 13, 14} {
+		_, err := DecodePublication(replaceJSONField(t, publicationRaw, index, "invalid"))
+		require.ErrorIs(t, err, ErrMalformed)
+	}
+	for _, index := range []int{3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14} {
+		_, err := DecodeLegacyStatus(replaceJSONField(t, statusRaw, index, "invalid"))
+		require.ErrorIs(t, err, ErrMalformed)
+	}
+	for _, index := range []int{3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14} {
+		_, err := DecodeEvidenceCarrier(replaceJSONField(t, evidenceRaw, index, "invalid"))
+		require.ErrorIs(t, err, ErrMalformed)
+	}
+}
+
+func replaceJSONField(t *testing.T, raw []byte, index int, value any) []byte {
+	t.Helper()
+	var fields []any
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	fields[index] = value
+	mutated, err := json.Marshal(fields)
+	require.NoError(t, err)
+	return mutated
 }
 
 func TestSignedEnvelopeChecksExactTypeAndP384Math(t *testing.T) {
