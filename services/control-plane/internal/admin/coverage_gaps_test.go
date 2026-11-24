@@ -468,11 +468,11 @@ func TestEnrollBegin_TokenBoundToDifferentAdmin_Rejected(t *testing.T) {
 	hashVal, err := auth.HashPassword(adminTestPassword)
 	require.NoError(t, err)
 
-	adminA, err := repo.CreatePending(ctx, uniqueAdminUsername("enrollA"), hashVal)
+	adminA, err := repo.CreatePending(ctx, uniqueAdminUsername("enroll-a"), hashVal)
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, adminA.ID)
 
-	adminB, err := repo.CreatePending(ctx, uniqueAdminUsername("enrollB"), hashVal)
+	adminB, err := repo.CreatePending(ctx, uniqueAdminUsername("enroll-b"), hashVal)
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, adminB.ID)
 
