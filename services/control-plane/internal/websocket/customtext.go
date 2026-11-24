@@ -693,8 +693,7 @@ func mergeCustomTextSnapshotRollback(tx *sql.Tx, returnErr *error) {
 func (h *Hub) readCustomTextSnapshotCandidate(
 	ctx context.Context,
 	tx *sql.Tx,
-	viewerID uuid.UUID,
-	senderID uuid.UUID,
+	viewerID, senderID uuid.UUID,
 ) (*CustomTextPayload, bool, error) {
 	var masterEnabled bool
 	var tier int

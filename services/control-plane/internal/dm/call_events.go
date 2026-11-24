@@ -244,8 +244,7 @@ func loadLiveDMCallParticipants(
 func insertCompletedCallEvent(
 	ctx context.Context,
 	db *sql.DB,
-	convID uuid.UUID,
-	messageID uuid.UUID,
+	convID, messageID uuid.UUID,
 	payload CallEventPayload,
 	replaceExisting bool,
 ) (respawned []uuid.UUID, err error) {
