@@ -5,6 +5,7 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -200,6 +201,48 @@ func TestPublicationSuccessorProtocolPaths(t *testing.T) {
 	rotated.Protocol = ProtocolLegacy
 	require.ErrorIs(t, CheckPublicationSuccessor(authWrap, rotated), ErrMalformed)
 	require.ErrorIs(t, checkProtocolTransition(CredentialPublication{Protocol: CredentialProtocol("unknown")}, rotated), ErrMalformed)
+}
+
+func TestPublicationSuccessorRejectsEveryStaticRelationshipMismatch(t *testing.T) {
+	previous := fixturePublication()
+	previousDigest, err := PublicationDigest(previous)
+	require.NoError(t, err)
+	next := previous
+	next.PublicationSequence++
+	next.CredentialGeneration++
+	next.PreviousPublicationDigest = OptionalDigest{Present: true, Value: previousDigest}
+
+	next.RealmID = "33333333-3333-4333-8333-333333333333"
+	require.ErrorIs(t, CheckPublicationSuccessor(previous, next), ErrMalformed)
+	next.RealmID = previous.RealmID
+	next.PreviousPublicationDigest.Value[0] ^= 1
+	require.ErrorIs(t, CheckPublicationSuccessor(previous, next), ErrMalformed)
+	next.PreviousPublicationDigest.Value = previousDigest
+	next.AuthorityChainSequence--
+	require.ErrorIs(t, CheckPublicationSuccessor(previous, next), ErrMalformed)
+
+	require.ErrorIs(t, checkSplitPendingTransition(previous, next), ErrMalformed)
+	require.ErrorIs(t, checkSplitAuthWrapTransition(previous, next), ErrMalformed)
+}
+
+func TestStaticStatusBindingsAndEncodingFailClosed(t *testing.T) {
+	publication := fixturePublication()
+	evidence := fixtureEvidence(publication)
+	challenge := [32]byte{}
+	status := fixtureStatus(publication, evidence, challenge)
+
+	status.RealmID = "33333333-3333-4333-8333-333333333333"
+	require.ErrorIs(t, CheckStaticStatusBindings(status, publication, evidence, challenge), ErrMalformed)
+	status = fixtureStatus(publication, evidence, challenge)
+	evidence.PublicationDigest = fixtureDigest(200)
+	require.ErrorIs(t, CheckStaticStatusBindings(status, publication, evidence, challenge), ErrMalformed)
+
+	invalidEvidence := fixtureEvidence(publication)
+	invalidEvidence.RealmID = "not-a-uuid"
+	_, err := invalidEvidence.Encode()
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = digestRaw(nil, errors.New("encode failed"))
+	require.Error(t, err)
 }
 
 func TestValidationRejectsMalformedFields(t *testing.T) {
