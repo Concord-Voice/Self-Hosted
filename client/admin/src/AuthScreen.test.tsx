@@ -30,7 +30,11 @@ describe("AuthScreen", () => {
           handle: "login-handle",
           assertion: { id: "credential" },
         });
-        return HttpResponse.json({ status: "authenticated" });
+        return HttpResponse.json({
+          status: "authenticated",
+          admins_added: 2,
+          notice_cursor: "31",
+        });
       }),
     );
 
@@ -44,6 +48,10 @@ describe("AuthScreen", () => {
     );
     resolveCredential(credential);
     await waitFor(() => expect(onAuthenticated).toHaveBeenCalledTimes(1));
+    expect(onAuthenticated).toHaveBeenCalledWith({
+      adminsAdded: 2,
+      cursor: "31",
+    });
     // The password is cleared in the same continuation that calls
     // onAuthenticated, so that re-render is still pending when the spy gate
     // above resolves. Wait on the DOM, not on the spy.
