@@ -30,6 +30,8 @@ belongs in it, and write it if the section has none. Do not edit the
 
 ## [Prerelease]
 
+## [0.4.0] - 2026-11-23
+
 WebSocket event budgets are ready for self-hosted operators and stay off
 until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
@@ -38,7 +40,7 @@ SSO initiation is bound to the Desktop flow that started it, and backup-code
 readers accept the versioned formats needed for a later storage migration.
 The media plane now admits encrypted media format v6 alongside earlier room versions, while keeping each active call on one version.
 
-**23 Total Changes** | 8 Added | 6 Changed | 7 Fixed | 2 Security
+**96 Total Changes** | 29 Added | 6 Changed | 1 Deprecated | 1 Removed | 17 Fixed | 42 Security
 
 ### Added
 
