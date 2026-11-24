@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/authoritytest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/authoritytest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/store"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // Task 14 (plan, DoR:1767, AC13): the restore sequence end to end, with serve

@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/authoritytest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/signer"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/tlspin"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/authoritytest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/signer"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/store"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/tlspin"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // N2 (carry 5) and B2-D10: LoadTrust's own refusals are trust, D-223's reuse

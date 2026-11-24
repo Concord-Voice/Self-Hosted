@@ -7,7 +7,7 @@ import (
 
 	"github.com/lib/pq"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // reconcile/required and reconcile/hold (DoR:527, :1610, :1611, :1728; RT6-7,

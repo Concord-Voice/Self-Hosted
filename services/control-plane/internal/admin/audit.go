@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 )
 
 // Audit result values — mirror the CHECK constraint on admin_audit_log.result.

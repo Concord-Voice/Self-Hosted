@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/argon2"

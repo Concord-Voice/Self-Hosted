@@ -3,8 +3,8 @@ package loginfamily_test
 import (
 	"testing"
 
-	lf "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	lf "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )

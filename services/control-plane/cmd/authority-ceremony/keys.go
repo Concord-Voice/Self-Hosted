@@ -16,7 +16,7 @@ import (
 	"os"
 	"syscall"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // signer signs msg with the key whose point is want, and returns a P1363

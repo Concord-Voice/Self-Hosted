@@ -3,7 +3,7 @@ package purge
 import (
 	"fmt"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
 )
 
 // HiddenRangeFilter returns the anti-join SQL fragment that excludes, from a

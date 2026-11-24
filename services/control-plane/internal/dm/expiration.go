@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/expiration"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/expiration"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
