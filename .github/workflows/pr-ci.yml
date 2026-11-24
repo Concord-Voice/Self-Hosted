@@ -514,13 +514,13 @@ jobs:
             case "$t" in
               infrastructure/deploy/tests/test-control-plane-secrets.sh|infrastructure/deploy/tests/test-security-event-logging.sh)
                 # Both read infrastructure/deploy/provision-production.sh, the
-                # managed-host provisioner, which stays in Hosted.
+                # managed-host provisioner, which is not part of this repository.
                 continue
                 ;;
               infrastructure/deploy/tests/test-selfhost-acceptance.sh)
                 # Reads selfhost-acceptance.yml and selfhost-release-guards.yml
-                # (ported in S5) plus Hosted's provision-production.sh and
-                # public-mirror scripts. Re-enable with the S5 workflows.
+                # (ported in S5) plus the managed deployment's provision-production.sh
+                # and public-mirror scripts, which are not part of this repository. Re-enable with the S5 workflows.
                 continue
                 ;;
               infrastructure/deploy/tests/test-selfhost-*.sh)

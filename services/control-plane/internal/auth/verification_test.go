@@ -3,6 +3,7 @@ package auth
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +51,8 @@ func TestHashCode(t *testing.T) {
 }
 
 func TestRedisKey(t *testing.T) {
-	assert.Equal(t, "email_verify:user-123", redisKey("user-123"))
+	pendingID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440001")
+	assert.Equal(t, "email_verify:550e8400-e29b-41d4-a716-446655440001", redisKey(pendingID))
 }
 
 func TestGenerateAccessTokenEmailVerifiedClaim(t *testing.T) {
