@@ -177,10 +177,13 @@ func (h *Handler) storeAdminStepUp(ctx context.Context, ch adminStepUp) (string,
 // auditCreateAdmin records one admin_created refusal or failure against the
 // acting admin. These rows are best-effort, like every other admin audit row.
 // The success row is not written here: CreateAdmin commits it in the same
-// transaction as the pending admin, so no admin exists without one. A success
-// row can outlive its admin: when the enrollment-token mint then fails, the
-// pending admin is removed and a token_mint_failed row written here records
-// that the creation did not complete.
+// transaction as the pending admin, so no admin exists without one, and it
+// carries the new admin's id (detail.created_admin_id), by which the sign-in
+// notice counts it. The rows written here carry no id, and the notice reads
+// only success rows. A success row can outlive its admin: when the
+// enrollment-token mint then fails, the pending admin is removed and a
+// token_mint_failed row written here records that the creation did not
+// complete; the notice then finds no admin with that id and skips it.
 func (h *Handler) auditCreateAdmin(ctx context.Context, actingAdminID, username, result, reason string) {
 	acting := actingAdminID
 	ev := AuditEvent{AdminID: &acting, Actor: username, EventType: EventAdminCreated, Result: result}
