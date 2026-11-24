@@ -167,9 +167,15 @@ func (h *Handler) ServerAction(c *gin.Context) {
 	}
 	// The agent runs the arguments bound at Begin and ignores these, so a
 	// different tag or archive here would make the audit row lie about what ran.
-	if !h.server.matchesBinding(req.StepUp.Handle, c.GetString(adminIDContextKey), action, args) {
+	// The binding is single-use: an unknown, expired, reused or mismatched
+	// handle is refused before the agent is called.
+	bound, ok := h.server.consumeBinding(req.StepUp.Handle, c.GetString(adminIDContextKey), action, args)
+	if !ok {
 		for k, v := range args {
 			detail["sent_"+k] = v
+		}
+		for k, v := range bound {
+			detail["bound_"+k] = v
 		}
 		deny(http.StatusBadRequest, "stepup_binding_mismatch")
 		return
@@ -406,7 +412,7 @@ func (s *ServerArea) bind(handle, admin, action string, args map[string]string) 
 	if s.bindings == nil {
 		s.bindings = map[string]stepUpBinding{}
 	}
-	now := time.Now()
+	now := s.clock()
 	for k, b := range s.bindings {
 		if now.After(b.expires) {
 			delete(s.bindings, k)
@@ -415,15 +421,27 @@ func (s *ServerArea) bind(handle, admin, action string, args map[string]string) 
 	s.bindings[handle] = stepUpBinding{admin, action, maps.Clone(args), now.Add(bindingTTL)}
 }
 
-// matchesBinding is false only when this process issued the handle and the
-// request differs from what it was issued for. An unknown handle passes: the
-// agent refuses handles it did not issue and runs only its own bound arguments.
-func (s *ServerArea) matchesBinding(handle, admin, action string, args map[string]string) bool {
+// consumeBinding removes the handle's binding and reports whether this process
+// issued it, it is unexpired, and the request is for what it was issued for.
+// It returns the arguments bound at Begin (nil for an unknown handle). The
+// binding is deleted whether or not it matched, so a handle is checked once.
+func (s *ServerArea) consumeBinding(handle, admin, action string, args map[string]string) (map[string]string, bool) {
 	s.bindMu.Lock()
 	defer s.bindMu.Unlock()
 	b, known := s.bindings[handle]
-	if !known || time.Now().After(b.expires) {
-		return true
+	if !known {
+		return nil, false
 	}
-	return b.admin == admin && b.action == action && maps.Equal(b.args, args)
+	delete(s.bindings, handle)
+	if s.clock().After(b.expires) {
+		return nil, false
+	}
+	return b.args, b.admin == admin && b.action == action && maps.Equal(b.args, args)
+}
+
+func (s *ServerArea) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }

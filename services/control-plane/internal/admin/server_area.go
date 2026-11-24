@@ -53,6 +53,7 @@ type ServerArea struct {
 
 	bindMu   sync.Mutex
 	bindings map[string]stepUpBinding
+	now      func() time.Time // test clock; nil means time.Now
 }
 
 // NewServerArea returns a ServerArea that talks to the agent on its socket.
