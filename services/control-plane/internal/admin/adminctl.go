@@ -76,7 +76,7 @@ type securityEventsOpener func() (securityevent.Emitter, io.Closer, error)
 func RunAdminCtl(args []string) int {
 	if len(args) == 0 {
 		outf(os.Stderr, "usage: control-plane admin <%s> [flags]\n"+
-			"       control-plane admin unlock <username>\n", adminCtlUsage)
+			"       control-plane admin unlock [--] <username>\n", adminCtlUsage)
 		return 2
 	}
 
@@ -224,7 +224,7 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 		return errors.New("--username is required")
 	}
 	if err := ValidateAdminUsername(*username); err != nil {
-		return fmt.Errorf("%w: it must be 1 to %d lowercase ASCII letters (a-z), digits, '.', '_' or '-'", err, MaxAdminUsernameLength)
+		return fmt.Errorf("%w: it must be 1 to %d lowercase ASCII letters (a-z), digits, '.', '_' or '-', beginning and ending with a letter or a digit", err, MaxAdminUsernameLength)
 	}
 
 	password, err := readPassword(deps.stdin, deps.stdout, *passwordStdin)
@@ -344,12 +344,19 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 
 // runUnlock is the operator's way out of a sign-in lockout: it clears the named
 // admin's lock, attempts and escalation level, so the next correct sign-in
-// succeeds. Usage: unlock <username>. It does not touch the IP axis (an IP lock
-// expires within an hour) and it audits EventBootstrap with verb "unlock", as the
-// other break-glass verbs do (EventLockout would emit an account-locked event).
+// succeeds. Usage: unlock [--] <username>. A "--" ends the options, so a legacy
+// username that begins with '-' is unlocked with unlock -- <username>; without
+// it, such an argument is refused as a misplaced flag. It does not touch the IP
+// axis (an IP lock expires within an hour) and it audits EventBootstrap with
+// verb "unlock", as the other break-glass verbs do (EventLockout would emit an
+// account-locked event).
 func runUnlock(ctx context.Context, deps adminCtlDeps, args []string) error {
-	if len(args) != 1 || args[0] == "" || strings.HasPrefix(args[0], "-") {
-		return errors.New("usage: unlock <username>")
+	endOfOptions := len(args) > 0 && args[0] == "--"
+	if endOfOptions {
+		args = args[1:]
+	}
+	if len(args) != 1 || args[0] == "" || (!endOfOptions && strings.HasPrefix(args[0], "-")) {
+		return errors.New("usage: unlock [--] <username>")
 	}
 	username := args[0]
 

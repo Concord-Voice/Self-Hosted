@@ -296,12 +296,70 @@ func TestAdminCtl_Unlock_BadUsage(t *testing.T) { // regression for #221
 		"flag form":      {"unlock", "--username", "someone"},
 		"lone flag":      {"unlock", "--username"}, // one argument, so only the dash-prefix guard refuses it
 		"two usernames":  {"unlock", "a", "b"},
+		"lone --":        {"unlock", "--"},
+		"-- then empty":  {"unlock", "--", ""},
+		"-- then two":    {"unlock", "--", "a", "b"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout bytes.Buffer
 			code := admin.RunAdminCtlForTest(context.Background(), db, rdb, strings.NewReader(""), &stdout, testEnrollBaseURL, args)
 			assert.Equal(t, 1, code)
-			assert.Contains(t, stdout.String(), "usage: unlock <username>")
+			assert.Contains(t, stdout.String(), "usage: unlock [--] <username>")
+		})
+	}
+}
+
+// A legacy admin whose name begins with '-' is unlocked with "--" ending the
+// options. Without it the name is refused as a misplaced flag and nothing is
+// cleared. Before, unlock refused such a name even after "--".
+func TestAdminCtl_Unlock_DashLeadingLegacyNameAfterDoubleDash(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rdbCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rdbCleanup)
+	ctx := context.Background()
+	username := "-" + uniqueAdminUsername("legacy-unlock")
+	legacyAdminNamed(t, db, username)
+	lockOut(t, admin.NewLockout(rdb, nil), username, uniqueLockoutIP("4.4.4"))
+
+	var stdout bytes.Buffer
+	code := admin.RunAdminCtlForTest(ctx, db, rdb, strings.NewReader(""), &stdout, testEnrollBaseURL,
+		[]string{"unlock", username})
+	require.Equal(t, 1, code, "stdout: %s", stdout.String())
+	assert.Contains(t, stdout.String(), "usage: unlock [--] <username>")
+	require.True(t, keyExists(t, rdb, acctLockKey(username)), "a refused unlock clears nothing")
+
+	stdout.Reset()
+	code = admin.RunAdminCtlForTest(ctx, db, rdb, strings.NewReader(""), &stdout, testEnrollBaseURL,
+		[]string{"unlock", "--", username})
+	require.Equal(t, 0, code, "stdout: %s", stdout.String())
+	assert.Contains(t, stdout.String(), "Unlocked "+username)
+	for _, k := range []string{acctKey(username), acctLockKey(username), acctLevelKey(username)} {
+		assert.False(t, keyExists(t, rdb, k), "unlock must clear %s", k)
+	}
+}
+
+// A legacy admin whose name begins with '-' is reset through --username,
+// whether the name follows as the next argument or after '=', and a "--"
+// after the options ends them.
+func TestAdminCtl_ResetEnrollment_DashLeadingLegacyName(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rdbCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rdbCleanup)
+	ctx := context.Background()
+	username := "-" + uniqueAdminUsername("legacy-reset")
+	legacyAdminNamed(t, db, username)
+
+	for name, args := range map[string][]string{
+		"next argument then --": {"reset-enrollment", "--username", username, "--"},
+		"equals form":           {"reset-enrollment", "--username=" + username},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			code := admin.RunAdminCtlForTest(ctx, db, rdb, strings.NewReader(""), &stdout, testEnrollBaseURL, args)
+			require.Equal(t, 0, code, "stdout: %s", stdout.String())
+			assert.NotEmpty(t, extractToken(t, stdout.String()))
 		})
 	}
 }

@@ -11,7 +11,7 @@ import (
 
 func TestValidateAdminUsername_AcceptsTheAllowlist(t *testing.T) {
 	for _, ok := range []string{
-		"a", "alice", "ops-admin_2", "first.last", "0", "-", "_.-",
+		"a", "alice", "ops-admin_2", "first.last", "0", "a-b", "a_.-9",
 		strings.Repeat("x", admin.MaxAdminUsernameLength),
 	} {
 		assert.NoError(t, admin.ValidateAdminUsername(ok), "%q", ok)
@@ -25,6 +25,18 @@ func TestValidateAdminUsername_RefusesUppercaseControlSpaceAndLength(t *testing.
 		"slash/name", "at@name", "per%cent", "amp&name", "q?name", "hash#name", "plus+name",
 		"Alice", "aIice", "ALICE", "opsO", "pipe|name",
 		strings.Repeat("x", admin.MaxAdminUsernameLength+1),
+	} {
+		assert.ErrorIs(t, admin.ValidateAdminUsername(bad), admin.ErrInvalidUsername, "%q", bad)
+	}
+}
+
+// A new name begins and ends with a letter or a digit. One that begins with
+// '-' reads as an option to adminctl, and an edge separator is trimmed by the
+// confusable skeleton, so dave. would be a second dave.
+func TestValidateAdminUsername_RefusesEdgeSeparators(t *testing.T) {
+	for _, bad := range []string{
+		"-", "_", ".", "_.-", "-bob", "-unlock", "--", "_frank", ".hidden",
+		"dave.", "erin-", "gina_", "-a-", "a.-",
 	} {
 		assert.ErrorIs(t, admin.ValidateAdminUsername(bad), admin.ErrInvalidUsername, "%q", bad)
 	}

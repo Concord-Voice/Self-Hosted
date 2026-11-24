@@ -24,7 +24,10 @@ const MaxAdminUsernameLength = 64
 // ValidateAdminUsername is the character rule for a new admin username,
 // applied by CreateAdmin, adminctl bootstrap and the repository insert that
 // both reach. A username is 1 to MaxAdminUsernameLength characters, each a
-// lowercase ASCII letter (a-z), an ASCII digit, '.', '_' or '-'.
+// lowercase ASCII letter (a-z), an ASCII digit, '.', '_' or '-', and its first
+// and last characters are a letter or a digit. So no new name begins with '-'
+// and reads as an option to adminctl, and none ends in a separator that the
+// confusable skeleton would trim.
 //
 // The rule is an allowlist, so a new name holds no character that is
 // invisible, default-ignorable, a control character, another Unicode
@@ -40,6 +43,9 @@ func ValidateAdminUsername(username string) error {
 	if username == "" || len(username) > MaxAdminUsernameLength {
 		return ErrInvalidUsername
 	}
+	if !isAdminUsernameEdgeByte(username[0]) || !isAdminUsernameEdgeByte(username[len(username)-1]) {
+		return ErrInvalidUsername
+	}
 	for i := 0; i < len(username); i++ {
 		if !isAdminUsernameByte(username[i]) {
 			return ErrInvalidUsername
@@ -48,9 +54,15 @@ func ValidateAdminUsername(username string) error {
 	return nil
 }
 
+// isAdminUsernameEdgeByte reports whether b may begin or end a new admin
+// username: a lowercase ASCII letter or an ASCII digit.
+func isAdminUsernameEdgeByte(b byte) bool {
+	return 'a' <= b && b <= 'z' || '0' <= b && b <= '9'
+}
+
 func isAdminUsernameByte(b byte) bool {
 	switch {
-	case 'a' <= b && b <= 'z', '0' <= b && b <= '9':
+	case isAdminUsernameEdgeByte(b):
 		return true
 	case b == '.', b == '_', b == '-':
 		return true
