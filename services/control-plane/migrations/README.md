@@ -83,7 +83,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000201)
+## Existing Migrations (000001–000202)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -310,6 +310,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000199 | add_positive_admin_session_generation_check | Aborts under a bounded write-blocking lock if any existing admin generation is nonpositive, then adds a positive check for future writes. The original nonnegative check remains. |
 | 000200 | validate_positive_admin_session_generation | Validates the positive check against existing administrator rows without holding an exclusive lock across the scan. Existing nonpositive rows are already rejected by 000199. |
 | 000201 | e2ee_format_metadata | Adds nullable dormant stored-format and request-fingerprint metadata to channel/DM messages and encrypted media, with user/message-v1/attachment-v4 shape constraints; no writer or fallback behavior is enabled. |
+| 000202 | message_id_reservations | Adds a dormant global ID-only reservation namespace for channel and DM message UUIDs, plus the online baseline gate; no message-v1 writer is enabled. |
 
 If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
 
