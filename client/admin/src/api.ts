@@ -159,11 +159,16 @@ function credentialOptionsResponse(value: unknown): CredentialOptionsResponse {
 export const MAX_ADMINS_ADDED_NOTICE = 100;
 
 // The sign-in success carries one scalar beside its status: how many admins
-// were created in the console since this admin's previous sign-in. It is
-// required, so a server that stops sending it is refused rather than read as
-// zero.
+// were created in the console since this admin's previous sign-in. The server
+// leaves it out when it could not read the count, rather than block the
+// sign-in; the portal then shows no notice. When present it must be valid.
 function signInResponse(value: unknown): number {
   const data = record(value);
+  if (!("admins_added" in data)) {
+    exactKeys(data, ["status"]);
+    if (data.status !== "authenticated") throw new ContractError();
+    return 0;
+  }
   exactKeys(data, ["status", "admins_added"]);
   if (data.status !== "authenticated") throw new ContractError();
   const count = data.admins_added;

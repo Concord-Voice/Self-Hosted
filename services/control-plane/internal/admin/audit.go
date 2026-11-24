@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -79,12 +80,25 @@ func (a *AuditLog) securityEventEmitter() securityevent.Emitter {
 // a parameterized INSERT, and commits. The Actor field is routed through
 // sanitizeAuditString (CWE-117) before storage.
 func (a *AuditLog) Write(ctx context.Context, ev AuditEvent) error {
+	return a.WriteWith(ctx, ev, nil)
+}
+
+// errAuditWrite marks a WriteWith failure in the audit step (begin, role,
+// insert or commit), as opposed to an error returned by its before function.
+var errAuditWrite = errors.New("admin audit write failed")
+
+// WriteWith runs before (when not nil) and then inserts ev in ONE transaction,
+// so the rows before writes and the audit row commit together or not at all.
+// An error from before is returned as is and writes no audit row; an error in
+// the audit step wraps errAuditWrite. before runs under the connecting role;
+// the audit INSERT then runs under the restricted role.
+func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sql.Tx) error) error {
 	var detailJSON []byte
 	if ev.Detail != nil {
 		b, err := json.Marshal(ev.Detail)
 		if err != nil {
 			a.emitAuditWriteFailure(ctx)
-			return fmt.Errorf("marshal audit detail: %w", err)
+			return fmt.Errorf("%w: marshal audit detail: %w", errAuditWrite, err)
 		}
 		detailJSON = b
 	}
@@ -92,17 +106,23 @@ func (a *AuditLog) Write(ctx context.Context, ev AuditEvent) error {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		a.emitAuditWriteFailure(ctx)
-		return fmt.Errorf("begin audit tx: %w", err)
+		return fmt.Errorf("%w: begin audit tx: %w", errAuditWrite, err)
 	}
 	// Roll back on any error path; a successful Commit makes Rollback a no-op.
 	defer func() { _ = tx.Rollback() }()
 
-	// Adopt the restricted role for this transaction. SET ROLE takes an
-	// identifier, not a bind parameter, so the role name is a fixed constant
-	// (never user input).
+	if before != nil {
+		if err := before(tx); err != nil {
+			return err
+		}
+	}
+
+	// Adopt the restricted role for the rest of this transaction. SET ROLE
+	// takes an identifier, not a bind parameter, so the role name is a fixed
+	// constant (never user input).
 	if _, err := tx.ExecContext(ctx, "SET LOCAL ROLE "+auditRole); err != nil {
 		a.emitAuditWriteFailure(ctx)
-		return fmt.Errorf("adopt audit role: %w", err)
+		return fmt.Errorf("%w: adopt audit role: %w", errAuditWrite, err)
 	}
 
 	const q = `
@@ -118,12 +138,12 @@ func (a *AuditLog) Write(ctx context.Context, ev AuditEvent) error {
 		detailJSONOrNil(detailJSON),
 	); err != nil {
 		a.emitAuditWriteFailure(ctx)
-		return fmt.Errorf("insert audit row: %w", err)
+		return fmt.Errorf("%w: insert audit row: %w", errAuditWrite, err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		a.emitAuditWriteFailure(ctx)
-		return fmt.Errorf("commit audit row: %w", err)
+		return fmt.Errorf("%w: commit audit row: %w", errAuditWrite, err)
 	}
 	a.emitAuditCommitted(ctx, ev.EventType, ev.Result)
 	return nil

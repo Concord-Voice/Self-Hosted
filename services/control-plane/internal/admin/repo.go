@@ -46,6 +46,20 @@ func NewAdminRepo(db *sql.DB) *AdminRepo {
 // CreatePending inserts a new admin in the pending_enrollment state. It returns
 // ErrDuplicateUsername if the username is already taken.
 func (r *AdminRepo) CreatePending(ctx context.Context, username, passwordHash string) (AdminUser, error) {
+	return createPending(ctx, r.db, username, passwordHash)
+}
+
+// CreatePendingTx is CreatePending inside the caller's transaction, so the
+// row commits only with whatever else that transaction writes.
+func (r *AdminRepo) CreatePendingTx(ctx context.Context, tx *sql.Tx, username, passwordHash string) (AdminUser, error) {
+	return createPending(ctx, tx, username, passwordHash)
+}
+
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func createPending(ctx context.Context, db rowQueryer, username, passwordHash string) (AdminUser, error) {
 	const q = `
 		INSERT INTO admin_users (username, password_hash, status)
 		VALUES ($1, $2, $3)
@@ -55,7 +69,7 @@ func (r *AdminRepo) CreatePending(ctx context.Context, username, passwordHash st
 	var u AdminUser
 	var status string
 	var disabledAt sql.NullTime
-	err := r.db.QueryRowContext(ctx, q, username, passwordHash, string(StatusPending)).Scan(
+	err := db.QueryRowContext(ctx, q, username, passwordHash, string(StatusPending)).Scan(
 		&u.ID, &u.Username, &u.PasswordHash, &status, &u.CredentialGeneration, &u.SessionGeneration,
 		&u.CreatedAt, &u.UpdatedAt, &disabledAt,
 	)

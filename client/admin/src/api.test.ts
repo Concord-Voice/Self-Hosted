@@ -267,8 +267,23 @@ describe("api", () => {
     },
   );
 
+  // The server leaves the count out when it could not read it, and still
+  // signs the admin in; the portal shows no notice.
+  it("accepts a sign-in without a count as no admins added", async () => {
+    server.use(
+      http.post(`${base}/admin/api/v1/auth/webauthn`, () =>
+        json({ status: "authenticated" }),
+      ),
+    );
+
+    await expect(
+      api.webauthnLogin("login-handle", { id: "credential" }),
+    ).resolves.toBe(0);
+  });
+
   it.each([
-    ["missing", { status: "authenticated" }],
+    ["missing under another status", { status: "enrolled" }],
+    ["missing beside another key", { status: "authenticated", extra: 1 }],
     ["null", { status: "authenticated", admins_added: null }],
     ["negative", { status: "authenticated", admins_added: -1 }],
     ["fractional", { status: "authenticated", admins_added: 1.5 }],
