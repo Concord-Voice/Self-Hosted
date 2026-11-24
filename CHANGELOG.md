@@ -95,6 +95,7 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 - **Self-host:** Updated coturn to 4.19.0, Redis to 8.10.3, NATS to 2.15.3 and the PostgreSQL base image to 16.16, and the media-plane image now upgrades zlib. This clears the fixable OS-package and Go findings that the container scans reported in these images.
 - **Voice:** Frames Picture-in-Picture can now receive every active microphone and camera while participant consumer limits still block clone-everything egress exhaustion ([#303](https://github.com/Concord-Voice/Self-Hosted/pull/303)).
 - **Authorization:** Alternate UUID spellings no longer bypass the affected permission, hierarchy, channel-key, group-DM creator, voice, message, and purge checks. Those paths emit canonical IDs, and invalid write targets are rejected before mutation.
+- **Voice:** Voice moderation now checks the moderator before it reveals anything about the target's voice state, and a refused caller gets the same answer whatever the target is doing. User-mute, user-deafen, disconnect and temporary-access revoke now honour channel denies of Mute Members, Deafen Members and Move Members, and a moderator can no longer act on someone in a channel the moderator cannot see. Moving a member now needs Move Members on both channels and the mover's own access to the destination, including Speak when the move gives temporary access, and every such move is audited. Server mute and server deafen stay server-wide. Several of these routes now answer 403 where they answered 400.
 
 ### Changed
 
@@ -108,6 +109,10 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 ### Deprecated
 
 - **Recovery:** The 6-digit email recovery code is deprecated. It still works for clients that do not ask for a recovery key, and operators can turn it off with `RECOVERY_LEGACY_CODE=false` once every client accepts recovery keys ([#361](https://github.com/Concord-Voice/Self-Hosted/pull/361)).
+
+### Removed
+
+- **Voice:** Removed the unused `POST /channels/{id}/voice/authorize-action` route. No client or service called it, and it now returns 404.
 
 ### Fixed
 

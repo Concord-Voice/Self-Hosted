@@ -1217,6 +1217,18 @@ conventions below do not apply there. Its own rules:
 
 Design of record §3.3; plan `docs/superpowers/plans/2026-10-15-3587-pr-b2-transport-binary-tick.md`.
 
+## Voice moderation authority
+
+Applies to every `/servers/:id/voice/:userId/*` handler and to `internal/voice/mod_authority.go` (ADR-0023 Decision 3).
+
+- **Authorize before reveal.** Run the pool preamble (`authorizeVoiceModWith` / `authorizeVoiceMod`) before parsing a body, reading voice state, beginning a transaction or taking a lock. A non-member gets 403 `Not a member of this server` whatever the target's voice state.
+- **Decide at the channel, in the committing transaction.** Session actions and moves resolve the actor at each channel they touch with `ResolveChannelPermissionsTx` inside the transaction that commits the effect. Cached `HasPermission` may only refuse early. Persistent `ServerMute`/`ServerUnmute`/`ServerDeafen`/`ServerUndeafen` stay at server scope by decision; do not add a channel step to them.
+- **Hidden is absent; visible-but-denied refuses.** A channel the actor cannot VIEW is dropped (not-in-voice answer); a visible channel without the bit refuses the whole request with 403. Never return a partial success.
+- **Multi-bit checks use `hasAllPerms`.** `Permission.Has(A|B)` is an any-of test. Never call a permission check with `0`.
+- **`ErrChannelNotInServer` before `ErrNotMember`.** The first wraps the second; test it first on every channel resolve so a missing or foreign channel never reads as "Not a member".
+- **A grant always runs its authority closure.** `grantTemporaryChannelAccessWithCredential` refuses a nil closure and runs it unconditionally; a moderated move passes only `revalidateVoiceMoveAuthorityTx`, and the mover must hold all of `tempGrantAllow` at the destination.
+- `ServerMove` is the only `requireHierarchy=false` call; every non-self move that crosses hierarchy or writes a temporary grant goes through `auditVoiceMove`.
+
 ## Gin Conventions
 - `c.ShouldBindJSON(&req)` (returns error), NOT `c.BindJSON` (auto-aborts)
 - For Gin JSON request bodies that require both a byte cap and strict full-document enforcement,
