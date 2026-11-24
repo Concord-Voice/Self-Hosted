@@ -4698,8 +4698,8 @@ export class RoomManager {
         this.releaseConsumerEntry(consumer, newConsumer.id, producerId);
         consumer.consumersByKey.delete(key);
         room.lastNPausedConsumers.delete(newConsumer.id);
-        // The publisher closed its producer, so its owner caused this removal
-        // and not the viewer whose demand it was.
+        // The publisher closed its producer, so its owner caused this removal,
+        // not the viewer whose demand it was.
         this.clearCameraLayerDemand(room, newConsumer.id, producerUserId);
         this.clearScreenLayerDemand(room, newConsumer.id);
       });
