@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -235,6 +236,30 @@ func TestCorpusContainsClosedRequiredCaseManifest(t *testing.T) {
 		{"credential/descriptor/weak-parameters", "credential", "descriptor"},
 		{"credential/descriptor/wrong-realm", "credential", "descriptor"},
 		{"aead/decrypt/attachment-v4/tamper-header", "aead", "decrypt"},
+		{"aead/decrypt/attachment-v4/tamper-flags", "aead", "decrypt"},
+		{"aead/decrypt/attachment-v4/tamper-chunk-size", "aead", "decrypt"},
+		{"aead/decrypt/attachment-v4/tamper-total-chunks", "aead", "decrypt"},
+		{"aead/decrypt/attachment-v4/tamper-version", "aead", "decrypt"},
+		{"aead/decrypt/attachment-v4/tamper-magic", "aead", "decrypt"},
+		{"credential/derive/short-subject", "credential", "derive"},
+		{"credential/derive/short-salt", "credential", "derive"},
+		{"credential/derive/invalid-password-utf8", "credential", "derive"},
+		{"credential/descriptor/noncanonical-whitespace", "credential", "descriptor"},
+		{"credential/descriptor/invalid-subject-base64", "credential", "descriptor"},
+		{"credential/descriptor/wrong-discriminator", "credential", "descriptor"},
+		{"credential/descriptor/zero-generation", "credential", "descriptor"},
+		{"credential/descriptor/trailing-field", "credential", "descriptor"},
+		{"rsa-label/derive/channel-key-capsule-v1/invalid-recipient-id", "rsa-label", "derive"},
+		{"context/encode/message-v1/unknown-tag", "context", "encode"},
+		{"context/encode/message-v1/invalid-realm", "context", "encode"},
+		{"context/parse/message-v1/unknown-tag", "context", "parse"},
+		{"context/parse/message-v1/noncanonical-whitespace", "context", "parse"},
+		{"context/parse/message-v1/invalid-realm", "context", "parse"},
+		{"context/parse/account-ek-wrap-v1/wrong-key-purpose", "context", "parse"},
+		{"context/parse/attachment-v4/invalid-flags", "context", "parse"},
+		{"context/parse/attachment-v4/invalid-chunk-index", "context", "parse"},
+		{"context/parse/attachment-v4/fractional-chunk-index", "context", "parse"},
+		{"context/parse/attachment-v4/fractional-total-chunks", "context", "parse"},
 	} {
 		requireNamedVector(t, byName, required.name, required.suite, required.operation)
 	}
@@ -248,6 +273,7 @@ func TestCorpusContainsClosedRequiredCaseManifest(t *testing.T) {
 		requireNamedVector(t, byName, "policy/upgrade-outcome/"+name, "policy", "upgrade-outcome")
 	}
 	assertRequiredRejectCategories(t, byName, tags)
+	assertRequiredCandidateMutationManifest(t, byName)
 	assertNamedPolicyPredicates(t, byName)
 }
 
@@ -688,8 +714,34 @@ func assertRequiredRejectCategories(t *testing.T, vectors map[string]vector, tag
 	assertRejectCategory(t, requireNamedVector(t, vectors, "credential/descriptor/weak-parameters", "credential", "descriptor"), "validate", "weak_parameters")
 	assertRejectCategory(t, requireNamedVector(t, vectors, "credential/descriptor/wrong-realm", "credential", "descriptor"), "validate", "wrong_realm")
 	assertRejectCategory(t, requireNamedVector(t, vectors, "aead/decrypt/attachment-v4/tamper-header", "aead", "decrypt"), "authenticate", "aead_failure")
+	for name, semantic := range map[string]string{"tamper-flags": "flags", "tamper-chunk-size": "chunk_size", "tamper-total-chunks": "total_chunks"} {
+		v := requireNamedVector(t, vectors, "aead/decrypt/attachment-v4/"+name, "aead", "decrypt")
+		assertRejectCategory(t, v, "validate", "invalid_field")
+		if object(t, v.Mutation)["semantic_field"] != semantic {
+			t.Fatalf("vector %q has wrong header semantic field", v.Name)
+		}
+	}
+	for _, field := range []string{"version", "magic"} {
+		assertRejectCategory(t, requireNamedVector(t, vectors, "aead/decrypt/attachment-v4/tamper-"+field, "aead", "decrypt"), "parse", "bad_envelope")
+	}
 	for _, tag := range []string{"account-ek-wrap-v1", "recovery-wrap-v1", "recovery-prefs-wrap-v1"} {
 		assertRejectCategory(t, requireNamedVector(t, vectors, "context/encode/"+tag+"/wrong-key-purpose", "context", "encode"), "validate", "invalid_purpose")
+	}
+	for _, name := range []string{"short-subject", "short-salt", "invalid-password-utf8"} {
+		assertRejectCategory(t, requireNamedVector(t, vectors, "credential/derive/"+name, "credential", "derive"), "validate", "invalid_field")
+	}
+	for _, name := range []string{"noncanonical-whitespace", "invalid-subject-base64", "wrong-discriminator", "zero-generation", "trailing-field"} {
+		assertRejectCategory(t, requireNamedVector(t, vectors, "credential/descriptor/"+name, "credential", "descriptor"), "parse", "malformed_descriptor")
+	}
+	assertRejectCategory(t, requireNamedVector(t, vectors, "rsa-label/derive/channel-key-capsule-v1/invalid-recipient-id", "rsa-label", "derive"), "validate", "invalid_field")
+	assertRejectCategory(t, requireNamedVector(t, vectors, "context/encode/message-v1/unknown-tag", "context", "encode"), "validate", "unknown_tag")
+	assertRejectCategory(t, requireNamedVector(t, vectors, "context/encode/message-v1/invalid-realm", "context", "encode"), "validate", "invalid_field")
+	assertRejectCategory(t, requireNamedVector(t, vectors, "context/parse/message-v1/unknown-tag", "context", "parse"), "validate", "unknown_tag")
+	assertRejectCategory(t, requireNamedVector(t, vectors, "context/parse/message-v1/noncanonical-whitespace", "context", "parse"), "parse", "malformed_context")
+	assertRejectCategory(t, requireNamedVector(t, vectors, "context/parse/message-v1/invalid-realm", "context", "parse"), "validate", "invalid_field")
+	assertRejectCategory(t, requireNamedVector(t, vectors, "context/parse/account-ek-wrap-v1/wrong-key-purpose", "context", "parse"), "validate", "invalid_purpose")
+	for _, name := range []string{"invalid-flags", "invalid-chunk-index", "fractional-chunk-index", "fractional-total-chunks"} {
+		assertRejectCategory(t, requireNamedVector(t, vectors, "context/parse/attachment-v4/"+name, "context", "parse"), "validate", "invalid_field")
 	}
 }
 
@@ -698,6 +750,168 @@ func assertRejectCategory(t *testing.T, v vector, stage, reason string) {
 	expect := object(t, v.Expect)
 	if expect["verdict"] != "reject" || expect["stage"] != stage || expect["reason"] != reason {
 		t.Fatalf("vector %q reject got %#v want %s/%s", v.Name, expect, stage, reason)
+	}
+}
+
+func assertRequiredCandidateMutationManifest(t *testing.T, vectors map[string]vector) {
+	t.Helper()
+	required := []struct {
+		name, parent, semantic, kind string
+	}{
+		{"credential/derive/short-subject", "credential/derive/base", "subject_b64", "replace"},
+		{"credential/derive/short-salt", "credential/derive/base", "salt_b64", "replace"},
+		{"credential/derive/invalid-password-utf8", "credential/derive/base", "password_utf8_b64", "replace"},
+		{"credential/descriptor/noncanonical-whitespace", "credential/descriptor/base", "descriptor_b64", "insert"},
+		{"credential/descriptor/invalid-subject-base64", "credential/descriptor/base", "subject_b64", "replace"},
+		{"credential/descriptor/wrong-discriminator", "credential/descriptor/base", "protocol", "replace"},
+		{"credential/descriptor/zero-generation", "credential/descriptor/base", "generation", "replace"},
+		{"credential/descriptor/trailing-field", "credential/descriptor/base", "descriptor_b64", "insert"},
+		{"rsa-label/derive/channel-key-capsule-v1/invalid-recipient-id", "rsa-label/derive/channel-key-capsule-v1/base", "recipient_id", "replace"},
+		{"context/encode/message-v1/unknown-tag", "context/encode/message-v1/base", "tag", "replace"},
+		{"context/encode/message-v1/invalid-realm", "context/encode/message-v1/base", "realm", "replace"},
+		{"context/parse/message-v1/unknown-tag", "context/parse/message-v1/base", "tag", "replace"},
+		{"context/parse/message-v1/noncanonical-whitespace", "context/parse/message-v1/base", "context_b64", "insert"},
+		{"context/parse/message-v1/invalid-realm", "context/parse/message-v1/base", "realm", "replace"},
+		{"context/parse/account-ek-wrap-v1/wrong-key-purpose", "context/parse/account-ek-wrap-v1/base", "key_purpose", "replace"},
+		{"context/parse/attachment-v4/invalid-flags", "context/parse/attachment-v4/base", "flags", "replace"},
+		{"context/parse/attachment-v4/invalid-chunk-index", "context/parse/attachment-v4/base", "chunk_index", "replace"},
+		{"context/parse/attachment-v4/fractional-chunk-index", "context/parse/attachment-v4/base", "chunk_index", "replace"},
+		{"context/parse/attachment-v4/fractional-total-chunks", "context/parse/attachment-v4/base", "total_chunks", "replace"},
+	}
+	for _, required := range required {
+		v, ok := vectors[required.name]
+		if !ok {
+			t.Fatalf("missing required candidate mutation %q", required.name)
+		}
+		mutation := object(t, v.Mutation)
+		if v.NegativeOf != required.parent || mutation["semantic_field"] != required.semantic || mutation["kind"] != required.kind {
+			t.Fatalf("candidate mutation %q got parent=%q mutation=%#v", required.name, v.NegativeOf, mutation)
+		}
+	}
+
+	assertBase64Length(t, vectors["credential/derive/short-subject"], "subject_b64", 31)
+	assertBase64Length(t, vectors["credential/derive/short-salt"], "salt_b64", 15)
+	if got := mustBase64(t, object(t, vectors["credential/derive/invalid-password-utf8"].Input)["password_utf8_b64"]); utf8.Valid(got) {
+		t.Fatal("invalid-password-utf8 must carry invalid UTF-8 candidate bytes")
+	}
+	assertDescriptorCandidateMutations(t, vectors)
+	for _, name := range []string{
+		"context/parse/message-v1/unknown-tag",
+		"context/parse/message-v1/noncanonical-whitespace",
+		"context/parse/message-v1/invalid-realm",
+		"context/parse/account-ek-wrap-v1/wrong-key-purpose",
+		"context/parse/attachment-v4/invalid-flags",
+		"context/parse/attachment-v4/invalid-chunk-index",
+		"context/parse/attachment-v4/fractional-chunk-index",
+		"context/parse/attachment-v4/fractional-total-chunks",
+	} {
+		assertContextParseCandidateMutation(t, vectors["context/parse/"+strings.TrimPrefix(name, "context/parse/")], vectors)
+	}
+	for name, index := range map[string]int{
+		"context/parse/attachment-v4/fractional-chunk-index":  8,
+		"context/parse/attachment-v4/fractional-total-chunks": 9,
+	} {
+		candidate := mustBase64(t, object(t, vectors[name].Input)["context_b64"])
+		var fields []any
+		if json.Unmarshal(candidate, &fields) != nil || len(fields) <= index+3 || fields[index+3] != 0.5 {
+			t.Fatalf("vector %q must carry fractional 0.5 at context field %d", name, index)
+		}
+	}
+}
+
+func assertBase64Length(t *testing.T, v vector, key string, want int) {
+	t.Helper()
+	if got := len(mustBase64(t, object(t, v.Input)[key])); got != want {
+		t.Fatalf("vector %q decoded %s length got %d want %d", v.Name, key, got, want)
+	}
+}
+
+func assertDescriptorCandidateMutations(t *testing.T, vectors map[string]vector) {
+	t.Helper()
+	base := mustBase64(t, object(t, vectors["credential/descriptor/base"].Input)["descriptor_b64"])
+	whitespace := mustBase64(t, object(t, vectors["credential/descriptor/noncanonical-whitespace"].Input)["descriptor_b64"])
+	if bytes.Equal(base, whitespace) || !bytes.HasPrefix(whitespace, []byte(" ")) {
+		t.Fatal("noncanonical descriptor must add leading whitespace")
+	}
+	var baseFields, whitespaceFields []any
+	if json.Unmarshal(base, &baseFields) != nil || json.Unmarshal(whitespace, &whitespaceFields) != nil || !sameJSONValues(baseFields, whitespaceFields) {
+		t.Fatal("noncanonical descriptor must retain the same parsed fields")
+	}
+	badSubject := mustBase64(t, object(t, vectors["credential/descriptor/invalid-subject-base64"].Input)["descriptor_b64"])
+	var fields []any
+	if json.Unmarshal(badSubject, &fields) != nil || len(fields) != 8 {
+		t.Fatal("invalid-subject descriptor must remain an eight-field JSON array")
+	}
+	if len(baseFields) != len(fields) || fields[2] == baseFields[2] {
+		t.Fatal("invalid-subject descriptor must change its subject field")
+	}
+	for index := range fields {
+		if index != 2 && !jsonValueEqual(baseFields[index], fields[index]) {
+			t.Fatalf("invalid-subject descriptor changed field %d in addition to subject", index)
+		}
+	}
+	if encoded, ok := fields[2].(string); !ok || func() bool { _, err := base64.StdEncoding.DecodeString(encoded); return err == nil }() {
+		t.Fatal("invalid-subject descriptor must carry a non-base64 subject candidate")
+	}
+	assertDescriptorFieldMutation(t, baseFields, mustDescriptorFields(t, vectors["credential/descriptor/wrong-discriminator"]), 0, "wrong discriminator")
+	assertDescriptorFieldMutation(t, baseFields, mustDescriptorFields(t, vectors["credential/descriptor/zero-generation"]), 3, "zero generation")
+	trailing := mustDescriptorFields(t, vectors["credential/descriptor/trailing-field"])
+	if len(trailing) != len(baseFields)+1 || trailing[len(baseFields)] != "extra" || !sameJSONValues(baseFields, trailing[:len(baseFields)]) {
+		t.Fatal("trailing descriptor field must append exactly one field")
+	}
+}
+
+func mustDescriptorFields(t *testing.T, v vector) []any {
+	t.Helper()
+	candidate := mustBase64(t, object(t, v.Input)["descriptor_b64"])
+	var fields []any
+	if json.Unmarshal(candidate, &fields) != nil {
+		t.Fatalf("vector %q has invalid JSON descriptor candidate", v.Name)
+	}
+	return fields
+}
+
+func assertDescriptorFieldMutation(t *testing.T, base, candidate []any, index int, name string) {
+	t.Helper()
+	if len(base) != len(candidate) || index >= len(base) || jsonValueEqual(base[index], candidate[index]) {
+		t.Fatalf("%s descriptor candidate did not change required field", name)
+	}
+	for i := range base {
+		if i != index && !jsonValueEqual(base[i], candidate[i]) {
+			t.Fatalf("%s descriptor candidate changed field %d in addition to %d", name, i, index)
+		}
+	}
+}
+
+func assertContextParseCandidateMutation(t *testing.T, v vector, vectors map[string]vector) {
+	t.Helper()
+	parent := vectors[v.NegativeOf]
+	parentBytes := mustBase64(t, object(t, parent.Input)["context_b64"])
+	childBytes := mustBase64(t, object(t, v.Input)["context_b64"])
+	var parentFields, childFields []any
+	if json.Unmarshal(parentBytes, &parentFields) != nil || json.Unmarshal(childBytes, &childFields) != nil || len(parentFields) < 3 || len(childFields) < 3 {
+		t.Fatalf("vector %q must carry JSON context candidates", v.Name)
+	}
+	semantic := object(t, v.Mutation)["semantic_field"].(string)
+	if semantic == "context_b64" {
+		canonical, err := json.Marshal(childFields)
+		if err != nil || bytes.Equal(canonical, childBytes) || !sameJSONValues(parentFields, childFields) {
+			t.Fatalf("vector %q must differ only by noncanonical JSON bytes", v.Name)
+		}
+		return
+	}
+	if semantic == "tag" {
+		if parentFields[2] == childFields[2] || !sameJSONValues(parentFields[3:], childFields[3:]) {
+			t.Fatalf("vector %q must change only its context tag", v.Name)
+		}
+		return
+	}
+	tag, _ := parentFields[2].(string)
+	fieldNames := contextTagFields[tag]
+	for index, field := range fieldNames {
+		if !jsonValueEqual(parentFields[index+3], childFields[index+3]) && field != semantic {
+			t.Fatalf("vector %q changed context field %q while declaring %q", v.Name, field, semantic)
+		}
 	}
 }
 
@@ -991,8 +1205,8 @@ func assertSemanticContextMutation(t *testing.T, parent, child vector, semantic 
 	if !parentOK || !childOK || parentTag != childTag {
 		return
 	}
-	if semantic == "file_nonce_b64" && parentTag == "attachment-v4" && sameJSONValues(parentFields, childFields) {
-		assertAttachmentHeaderMutation(t, parent, child)
+	if parentTag == "attachment-v4" && sameJSONValues(parentFields, childFields) && attachmentHeaderField(semantic) != nil {
+		assertAttachmentHeaderMutation(t, parent, child, semantic)
 		return
 	}
 	fieldNames, known := contextTagFields[parentTag]
@@ -1093,41 +1307,62 @@ func sameJSONValues(left, right []any) bool {
 	return len(left) == len(right) && jsonValueEqual(left, right)
 }
 
-func assertAttachmentHeaderMutation(t *testing.T, parent, child vector) {
+func attachmentHeaderField(semantic string) []int {
+	ranges := map[string][]int{
+		"magic":          {0, 2},
+		"version":        {2, 3},
+		"flags":          {3, 4},
+		"chunk_size":     {4, 8},
+		"total_chunks":   {8, 12},
+		"file_nonce_b64": {12, 28},
+	}
+	return ranges[semantic]
+}
+
+func assertAttachmentHeaderMutation(t *testing.T, parent, child vector, semantic string) {
 	t.Helper()
 	if parent.Suite != "aead" || parent.Operation != "decrypt" || child.Suite != "aead" || child.Operation != "decrypt" {
-		t.Fatalf("vector %q declared attachment file_nonce_b64 outside AEAD decrypt", child.Name)
+		t.Fatalf("vector %q declared attachment header mutation outside AEAD decrypt", child.Name)
 	}
 	parentEnvelope, parentOK := base64Input(parent, "envelope_b64")
 	childEnvelope, childOK := base64Input(child, "envelope_b64")
 	if !parentOK || !childOK || len(parentEnvelope) < 28 || len(childEnvelope) != len(parentEnvelope) {
 		t.Fatalf("vector %q has invalid attachment envelope mutation", child.Name)
 	}
-	if !bytes.Equal(parentEnvelope[:12], childEnvelope[:12]) || !bytes.Equal(parentEnvelope[28:], childEnvelope[28:]) {
-		t.Fatalf("vector %q changed bytes outside attachment fileNonce header", child.Name)
+	target := attachmentHeaderField(semantic)
+	if target == nil {
+		t.Fatalf("vector %q has unknown attachment header semantic %q", child.Name, semantic)
 	}
-	changed := 0
-	for i := 12; i < 28; i++ {
-		if parentEnvelope[i] != childEnvelope[i] {
-			changed++
+	if bytes.Equal(parentEnvelope[target[0]:target[1]], childEnvelope[target[0]:target[1]]) {
+		t.Fatalf("vector %q did not change attachment header %q", child.Name, semantic)
+	}
+	if !bytes.Equal(parentEnvelope[:target[0]], childEnvelope[:target[0]]) || !bytes.Equal(parentEnvelope[target[1]:], childEnvelope[target[1]:]) {
+		t.Fatalf("vector %q changed bytes outside attachment header %q", child.Name, semantic)
+	}
+	if semantic == "file_nonce_b64" {
+		changed := 0
+		for i := target[0]; i < target[1]; i++ {
+			if parentEnvelope[i] != childEnvelope[i] {
+				changed++
+			}
 		}
-	}
-	if changed != 1 {
-		t.Fatalf("vector %q changed %d attachment fileNonce bytes, want one", child.Name, changed)
-	}
-	_, fields, contextOK := vectorContext(parent)
-	if !contextOK || len(fields) != len(contextTagFields["attachment-v4"]) {
-		t.Fatalf("vector %q has no valid parent attachment context", child.Name)
-	}
-	candidateFields := append([]any(nil), fields...)
-	candidateFields[6] = base64.StdEncoding.EncodeToString(childEnvelope[12:28])
-	candidateAAD := marshalContext(t, "attachment-v4", candidateFields)
-	key, keyOK := base64Input(child, "key_b64")
-	if !keyOK {
-		t.Fatalf("vector %q has invalid key", child.Name)
-	}
-	if _, err := mustGCM(t, key).Open(nil, childEnvelope[28:40], childEnvelope[40:], candidateAAD); err == nil {
-		t.Fatalf("vector %q header-derived candidate AAD unexpectedly authenticated", child.Name)
+		if changed != 1 {
+			t.Fatalf("vector %q changed %d attachment fileNonce bytes, want one", child.Name, changed)
+		}
+		_, fields, contextOK := vectorContext(parent)
+		if !contextOK || len(fields) != len(contextTagFields["attachment-v4"]) {
+			t.Fatalf("vector %q has no valid parent attachment context", child.Name)
+		}
+		candidateFields := append([]any(nil), fields...)
+		candidateFields[6] = base64.StdEncoding.EncodeToString(childEnvelope[12:28])
+		candidateAAD := marshalContext(t, "attachment-v4", candidateFields)
+		key, keyOK := base64Input(child, "key_b64")
+		if !keyOK {
+			t.Fatalf("vector %q has invalid key", child.Name)
+		}
+		if _, err := mustGCM(t, key).Open(nil, childEnvelope[28:40], childEnvelope[40:], candidateAAD); err == nil {
+			t.Fatalf("vector %q header-derived candidate AAD unexpectedly authenticated", child.Name)
+		}
 	}
 }
 

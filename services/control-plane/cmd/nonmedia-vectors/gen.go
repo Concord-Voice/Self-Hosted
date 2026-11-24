@@ -190,11 +190,31 @@ func credentialCases() {
 		root, auth, wrap, prefs := credential([]byte("páss"), realm, subject, g.generation, salt)
 		accept("credential/derive/"+g.name, "credential", "derive", cite, obj(field("password_utf8_b64", b64([]byte("páss"))), field("realm", realm), field("subject_b64", b64(subject)), field("generation", g.generation), field("salt_b64", b64(salt))), obj(field("root_b64", b64(root)), field("auth_b64", base64.RawURLEncoding.EncodeToString(auth)), field("wrap_b64", b64(wrap)), field("prefs_b64", b64(prefs))))
 	}
+	deriveBase := obj(field("password_utf8_b64", b64([]byte("páss"))), field("realm", realm), field("subject_b64", b64(subject)), field("generation", 1), field("salt_b64", b64(salt)))
+	for _, bad := range []struct {
+		name, key string
+		value     any
+	}{
+		{"short-subject", "subject_b64", b64(subject[:31])},
+		{"short-salt", "salt_b64", b64(salt[:15])},
+		{"invalid-password-utf8", "password_utf8_b64", b64([]byte{0xff})},
+	} {
+		reject("credential/derive/"+bad.name, "credential", "derive", cite, replace(deriveBase, bad.key, bad.value), "credential/derive/base", "replace", "/input/"+bad.key, bad.key, "validate", "invalid_field")
+	}
 	base := obj(field("authenticated_realm", realm), field("descriptor_b64", b64(descriptor(realm, subject, 1, salt, 65536, 3, 4))))
 	out := obj(field("realm", realm), field("subject_b64", b64(subject)), field("generation", 1), field("salt_b64", b64(salt)), field("m_kib", 65536), field("t", 3), field("p", 4))
 	accept("credential/descriptor/base", "credential", "descriptor", cite, base, out)
 	reject("credential/descriptor/weak-parameters", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(descriptor(realm, subject, 1, salt, 32768, 3, 4))), "credential/descriptor/base", "replace", "/input/descriptor_b64", "m_kib", "validate", "weak_parameters")
 	reject("credential/descriptor/wrong-realm", "credential", "descriptor", cite, replace(base, "authenticated_realm", otherRealm), "credential/descriptor/base", "replace", "/input/authenticated_realm", "authenticated_realm", "validate", "wrong_realm")
+	withWhitespace := append([]byte(" "), descriptor(realm, subject, 1, salt, 65536, 3, 4)...)
+	reject("credential/descriptor/noncanonical-whitespace", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(withWhitespace)), "credential/descriptor/base", "insert", "/input/descriptor_b64", "descriptor_b64", "parse", "malformed_descriptor")
+	badSubject := jsonBytes([]any{"split-auth-wrap-v1", realm, "not-base64", 1, b64(salt), 65536, 3, 4})
+	reject("credential/descriptor/invalid-subject-base64", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(badSubject)), "credential/descriptor/base", "replace", "/input/descriptor_b64", "subject_b64", "parse", "malformed_descriptor")
+	wrongProtocol := jsonBytes([]any{"server-selected-v2", realm, b64(subject), 1, b64(salt), 65536, 3, 4})
+	reject("credential/descriptor/wrong-discriminator", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(wrongProtocol)), "credential/descriptor/base", "replace", "/input/descriptor_b64", "protocol", "parse", "malformed_descriptor")
+	reject("credential/descriptor/zero-generation", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(descriptor(realm, subject, 0, salt, 65536, 3, 4))), "credential/descriptor/base", "replace", "/input/descriptor_b64", "generation", "parse", "malformed_descriptor")
+	trailingField := jsonBytes([]any{"split-auth-wrap-v1", realm, b64(subject), 1, b64(salt), 65536, 3, 4, "extra"})
+	reject("credential/descriptor/trailing-field", "credential", "descriptor", cite, replace(base, "descriptor_b64", b64(trailingField)), "credential/descriptor/base", "insert", "/input/descriptor_b64", "descriptor_b64", "parse", "malformed_descriptor")
 }
 
 type tagFixture struct {
@@ -318,6 +338,20 @@ func aeadCases(f tagFixture) {
 		bad := append([]byte(nil), env...)
 		bad[12] ^= 1
 		reject("aead/decrypt/attachment-v4/tamper-header", "aead", "decrypt", cite, replace(dec, "envelope_b64", b64(bad)), decName, "replace", "/input/envelope_b64", "file_nonce_b64", "authenticate", "aead_failure")
+		for _, wireChange := range []struct {
+			name, semantic, stage, reason string
+			change                        func([]byte)
+		}{
+			{"tamper-flags", "flags", "validate", "invalid_field", func(b []byte) { b[3] = 1 }},
+			{"tamper-chunk-size", "chunk_size", "validate", "invalid_field", func(b []byte) { binary.BigEndian.PutUint32(b[4:8], 1) }},
+			{"tamper-total-chunks", "total_chunks", "validate", "invalid_field", func(b []byte) { binary.BigEndian.PutUint32(b[8:12], 2) }},
+			{"tamper-version", "version", "parse", "bad_envelope", func(b []byte) { b[2] = 3 }},
+			{"tamper-magic", "magic", "parse", "bad_envelope", func(b []byte) { b[0] = 'X' }},
+		} {
+			changed := append([]byte(nil), env...)
+			wireChange.change(changed)
+			reject("aead/decrypt/attachment-v4/"+wireChange.name, "aead", "decrypt", cite, replace(dec, "envelope_b64", b64(changed)), decName, "replace", "/input/envelope_b64", wireChange.semantic, wireChange.stage, wireChange.reason)
+		}
 	}
 }
 func rsaCases(f tagFixture) {
@@ -325,6 +359,7 @@ func rsaCases(f tagFixture) {
 	base := "rsa-label/verify/" + f.tag + "/base"
 	label := context(f.tag, f.fields)
 	accept("rsa-label/derive/"+f.tag+"/base", "rsa-label", "derive", cite, obj(field("context_fields", f.fields)), obj(field("label_b64", b64(label))))
+	reject("rsa-label/derive/"+f.tag+"/invalid-recipient-id", "rsa-label", "derive", cite, obj(field("context_fields", alteredFields(f, 4, "not-a-uuid"))), "rsa-label/derive/"+f.tag+"/base", "replace", "/input/context_fields/4", "recipient_id", "validate", "invalid_field")
 	input := obj(field("context_fields", f.fields), field("candidate_label_b64", b64(label)))
 	accept(base, "rsa-label", "verify", cite, input, obj())
 	for i, name := range f.names {
@@ -365,6 +400,21 @@ func allContextCases() {
 		bad := alteredFields(f, 2, wrong)
 		reject("context/encode/"+tag+"/wrong-key-purpose", "context", "encode", "ADR-0051 Canonical non-authority context", contextInput(tag, bad), "context/encode/"+tag+"/base", "replace", "/input/context_fields/2", "key_purpose", "validate", "invalid_purpose")
 	}
+	cite := "ADR-0051 Canonical non-authority context"
+	message := fixtures()[0]
+	reject("context/encode/message-v1/unknown-tag", "context", "encode", cite, contextInput("server-selected-v2", message.fields), "context/encode/message-v1/base", "replace", "/input/tag", "tag", "validate", "unknown_tag")
+	reject("context/encode/message-v1/invalid-realm", "context", "encode", cite, contextInput(message.tag, alteredFields(message, 0, "not-a-uuid")), "context/encode/message-v1/base", "replace", "/input/context_fields/0", "realm", "validate", "invalid_field")
+	reject("context/parse/message-v1/unknown-tag", "context", "parse", cite, obj(field("context_b64", b64(context("server-selected-v2", message.fields)))), "context/parse/message-v1/base", "replace", "/input/context_b64", "tag", "validate", "unknown_tag")
+	withWhitespace := bytes.Replace(context(message.tag, message.fields), []byte(","), []byte(", "), 1)
+	reject("context/parse/message-v1/noncanonical-whitespace", "context", "parse", cite, obj(field("context_b64", b64(withWhitespace))), "context/parse/message-v1/base", "insert", "/input/context_b64", "context_b64", "parse", "malformed_context")
+	reject("context/parse/message-v1/invalid-realm", "context", "parse", cite, contextParseInput(message.tag, alteredFields(message, 0, "not-a-uuid")), "context/parse/message-v1/base", "replace", "/input/context_b64", "realm", "validate", "invalid_field")
+	accountWrap := fixtures()[2]
+	reject("context/parse/account-ek-wrap-v1/wrong-key-purpose", "context", "parse", cite, contextParseInput(accountWrap.tag, alteredFields(accountWrap, 2, "preferences-aes256-gcm")), "context/parse/account-ek-wrap-v1/base", "replace", "/input/context_b64", "key_purpose", "validate", "invalid_purpose")
+	attachment := fixtures()[5]
+	reject("context/parse/attachment-v4/invalid-flags", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 7, 1)), "context/parse/attachment-v4/base", "replace", "/input/context_b64", "flags", "validate", "invalid_field")
+	reject("context/parse/attachment-v4/invalid-chunk-index", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 8, 2)), "context/parse/attachment-v4/base", "replace", "/input/context_b64", "chunk_index", "validate", "invalid_field")
+	reject("context/parse/attachment-v4/fractional-chunk-index", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 8, 0.5)), "context/parse/attachment-v4/base", "replace", "/input/context_b64", "chunk_index", "validate", "invalid_field")
+	reject("context/parse/attachment-v4/fractional-total-chunks", "context", "parse", cite, contextParseInput(attachment.tag, alteredFields(attachment, 9, 0.5)), "context/parse/attachment-v4/base", "replace", "/input/context_b64", "total_chunks", "validate", "invalid_field")
 }
 
 func uniformityCases() {

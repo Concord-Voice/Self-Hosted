@@ -9,8 +9,10 @@ const corpusBytes = readFileSync(
   new URL('../../../../../docs/design/nonmedia-e2ee-v1-vectors.json', import.meta.url)
 );
 const corpusPin =
-  'd1d4b789d2665e71a5698497a79053f5509dd6dac4d3550b4913930f3577b06627dfbc7701aa5ff0ded72a804f8a5d28';
+  'd4b2e4b72b7ff351e5a379431f547664f162bd2c60f532f641ae0297f7313e77a1602cafb28c9be03eb6c2c6ef50fbd2';
 const sha384 = (bytes: Uint8Array): string => createHash('sha384').update(bytes).digest('hex');
+if (sha384(corpusBytes) !== corpusPin)
+  throw new Error('ADR-0051 corpus SHA-384 mismatch before parse');
 const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
 const unb64 = (text: string): Buffer => {
   const result = Buffer.from(text, 'base64');
@@ -149,12 +151,15 @@ function validContext(tag: string, fields: unknown[]): boolean {
     if (name === 'chunk_size' && value !== 8388608) return false;
     if (
       name === 'chunk_index' &&
-      (typeof value !== 'number' ||
+      (!Number.isSafeInteger(value) ||
         value < 0 ||
         value >= Number(fields[names.indexOf('total_chunks')]))
     )
       return false;
-    if (name === 'total_chunks' && (typeof value !== 'number' || value < 1 || value > 10000))
+    if (
+      name === 'total_chunks' &&
+      (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 10000)
+    )
       return false;
     if (name === 'file_nonce_b64' && (typeof value !== 'string' || unb64(value).length !== 16))
       return false;
@@ -229,14 +234,69 @@ function classifyReject(v: V): string {
     if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(text))
       return 'validate/invalid_unicode';
   }
+  if (v.suite === 'credential' && v.operation === 'derive') {
+    const subject = unb64(get(v, 'subject_b64'));
+    const salt = unb64(get(v, 'salt_b64'));
+    let utf8Valid = true;
+    try {
+      new TextDecoder('utf-8', { fatal: true }).decode(unb64(get(v, 'password_utf8_b64')));
+    } catch {
+      utf8Valid = false;
+    }
+    if (subject.length !== 32 || salt.length !== 16 || !utf8Valid) return 'validate/invalid_field';
+  }
   if (v.suite === 'credential' && v.operation === 'descriptor') {
-    const d = JSON.parse(unb64(get(v, 'descriptor_b64')).toString()) as unknown[];
+    const raw = unb64(get(v, 'descriptor_b64')).toString();
+    const d = JSON.parse(raw) as unknown[];
+    if (
+      !Array.isArray(d) ||
+      d.length !== 8 ||
+      d[0] !== 'split-auth-wrap-v1' ||
+      JSON.stringify(d) !== raw ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        String(d[1])
+      ) ||
+      !Number.isSafeInteger(d[3]) ||
+      Number(d[3]) < 1
+    )
+      return 'parse/malformed_descriptor';
+    try {
+      if (unb64(String(d[2])).length !== 32 || unb64(String(d[4])).length !== 16)
+        return 'parse/malformed_descriptor';
+    } catch {
+      return 'parse/malformed_descriptor';
+    }
     if (d[5] !== 65536 || d[6] !== 3 || d[7] !== 4) return 'validate/weak_parameters';
     if (d[1] !== get(v, 'authenticated_realm')) return 'validate/wrong_realm';
   }
   if (v.suite === 'context' && v.operation === 'encode') {
-    if (!validContext(get(v, 'tag'), v.input.context_fields as unknown[]))
-      return 'validate/invalid_purpose';
+    const tag = get(v, 'tag');
+    if (!contextFields[tag]) return 'validate/unknown_tag';
+    if (!validContext(tag, v.input.context_fields as unknown[]))
+      return v.mutation?.semantic_field === 'key_purpose'
+        ? 'validate/invalid_purpose'
+        : 'validate/invalid_field';
+  }
+  if (v.suite === 'context' && v.operation === 'parse') {
+    const raw = unb64(get(v, 'context_b64')).toString();
+    const parsed = JSON.parse(raw) as unknown[];
+    if (
+      !Array.isArray(parsed) ||
+      JSON.stringify(parsed) !== raw ||
+      parsed[0] !== 'concord-e2ee-context' ||
+      parsed[1] !== 1
+    )
+      return 'parse/malformed_context';
+    const tag = String(parsed[2]);
+    if (!contextFields[tag]) return 'validate/unknown_tag';
+    if (!validContext(tag, parsed.slice(3)))
+      return v.mutation?.semantic_field === 'key_purpose'
+        ? 'validate/invalid_purpose'
+        : 'validate/invalid_field';
+  }
+  if (v.suite === 'rsa-label' && v.operation === 'derive') {
+    if (!validContext('channel-key-capsule-v1', v.input.context_fields as unknown[]))
+      return 'validate/invalid_field';
   }
   if (v.suite === 'rsa-label' && v.operation === 'verify') {
     const fields = v.input.context_fields as unknown[];
@@ -258,12 +318,17 @@ function classifyReject(v: V): string {
     if (!validContext(parsed.tag, parsed.fields)) return 'validate/invalid_field';
     if (formatTag[get(v, 'format')] !== parsed.tag) return 'validate/invalid_format_context';
     const wire = unb64(get(v, 'envelope_b64'));
-    if (
-      get(v, 'format') === 'attachment-v4' &&
-      wire.length >= 28 &&
-      Number(parsed.fields[9]) !== wire.readUInt32BE(8)
-    )
-      return 'validate/invalid_field';
+    if (get(v, 'format') === 'attachment-v4') {
+      if (wire.length < 56 || wire.subarray(0, 2).toString() !== 'CV' || wire[2] !== 4)
+        return 'parse/bad_envelope';
+      if (
+        wire[3] !== 0 ||
+        wire.readUInt32BE(4) !== 8388608 ||
+        wire.readUInt32BE(8) !== Number(parsed.fields[9]) ||
+        wire.readUInt32BE(8) !== 1
+      )
+        return 'validate/invalid_field';
+    }
     let payload: { nonce: Buffer; sealed: Buffer };
     try {
       payload = splitEnvelope(get(v, 'format'), wire);
@@ -470,7 +535,7 @@ describe('ADR-0051 shared byte vectors', () => {
       expect(classifyReject(v), v.name).toBe(`${v.expect.stage}/${v.expect.reason}`);
       count++;
     }
-    expect(count).toBe(108);
+    expect(count).toBe(132);
   });
 
   it('independently evaluates every policy outcome and descriptor shape', () => {
