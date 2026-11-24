@@ -32,7 +32,7 @@ export type NonmediaContext =
     >;
 
 const INVALID_CONTEXT = 'Invalid non-media context';
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const isUuid = (value: unknown): value is string => typeof value === 'string' && uuid.test(value);
 const isScope = (value: unknown): value is Scope => value === 'channel' || value === 'dm';
 const positive = (value: unknown): value is number =>

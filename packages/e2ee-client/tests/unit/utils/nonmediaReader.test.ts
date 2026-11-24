@@ -116,6 +116,16 @@ describe('dormant ADR-0051 reader', () => {
     expect(() => encodeNonmediaContext({ ...context, tag: 'unregistered' } as never)).toThrow();
   });
 
+  it('accepts canonical lowercase UUID text without a version restriction', () => {
+    const sample = vector('aead/decrypt/message-v1/base');
+    const context = parseNonmediaContext(base64(sample.input.expected_context_b64));
+    const canonical = { ...context, fields: [...context.fields] } as NonmediaContext;
+    (canonical.fields as unknown[])[0] = '00000000-0000-0000-0000-000000000000';
+    expect(() => encodeNonmediaContext(canonical)).not.toThrow();
+    (canonical.fields as unknown[])[0] = '00000000-0000-0000-0000-00000000000A';
+    expect(() => encodeNonmediaContext(canonical)).toThrow();
+  });
+
   it('rejects every pinned malformed or invalid context parse case', () => {
     const rejected = vectors.filter(
       (entry) => entry.name.startsWith('context/parse/') && entry.expect.verdict === 'reject'
