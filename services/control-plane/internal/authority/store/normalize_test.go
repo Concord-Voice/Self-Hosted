@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 func pendingHead(base, g, accBase uint64) *headRow {

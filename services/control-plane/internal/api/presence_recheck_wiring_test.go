@@ -9,8 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/ownership"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/ownership"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 )
 
 // stubPresenceRecheck is the smallest thing that satisfies the seam; the guard

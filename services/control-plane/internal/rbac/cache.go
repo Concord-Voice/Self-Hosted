@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/permgen"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/permgen"
 )
 
 // PermissionCache provides Redis-backed caching for computed permissions

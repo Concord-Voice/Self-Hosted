@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const moduleInternal = "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/"
+const moduleInternal = "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/"
 
 // TestLeafImports pins this package's place in the import graph.
 //

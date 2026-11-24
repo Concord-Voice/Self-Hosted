@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/migrationrunner"
 )
 
 // twoMigrations writes versions 1 and 2 and returns the file:// URL.

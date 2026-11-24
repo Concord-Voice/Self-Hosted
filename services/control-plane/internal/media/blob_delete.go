@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/storage"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/storage"
 )
 
 // Per-object storage-backend resolution on the DELETE rail (ADR-0038 / #2759).
