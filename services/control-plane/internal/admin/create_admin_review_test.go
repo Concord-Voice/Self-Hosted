@@ -438,7 +438,7 @@ func TestCreateAdmin_SameUsernameConcurrently_OneCreatedOneConflict(t *testing.T
 		engine *gin.Engine
 		body   map[string]any
 	}
-	var actors []actor
+	actors := make([]actor, 0, 2)
 	for range 2 {
 		id, _, va := enrolledAdmin(t, db, rdb)
 		e := adminCreateEngine(t, db, rdb, id)
@@ -456,7 +456,7 @@ func TestCreateAdmin_SameUsernameConcurrently_OneCreatedOneConflict(t *testing.T
 	}
 	wg.Wait()
 	assert.ElementsMatch(t, []int{http.StatusCreated, http.StatusConflict}, codes)
-	var taken []string
+	taken := make([]string, 0, 1)
 	for _, a := range actors {
 		taken = append(taken, reasonsOf(createAuditRows(t, db, a.id), admin.AuditFailure)...)
 	}
@@ -499,7 +499,7 @@ func TestCreateAdmin_Throttled_DoesNotSpendStepUp(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, createPath, bytes.NewReader(raw))
 	req.RemoteAddr = "192.0.2.10:4242"
 	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: "__Host-cv_admin_sid", Value: sid})
+	req.AddCookie(&http.Cookie{Name: "__Host-cv_admin_sid", Value: sid, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	rec := httptest.NewRecorder()
 	routed.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
