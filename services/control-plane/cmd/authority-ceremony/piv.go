@@ -12,7 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // errStrictDER is any ECDSA signature that is not exactly the minimal DER

@@ -3,8 +3,8 @@ package api
 import (
 	"context"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
 )
 
 // newDurableErasedMediaReclaimer wakes Tier-1 retry processing and enqueues

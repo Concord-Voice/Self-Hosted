@@ -7,7 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 )
 
 // actorCtx gives ctx the live signed identity AuthRequired would attach for

@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 )
 
 // StateReader is the narrow slice of ActivityStore the resolver needs. Narrow so

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // Signer is GET /v1/signer's database half (§2.6, B2-D4), read in one

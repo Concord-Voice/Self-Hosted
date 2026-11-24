@@ -26,8 +26,8 @@ import (
 	_ "github.com/joho/godotenv/autoload" // dotenv autoload for DATABASE_URL
 	_ "github.com/lib/pq"                 // postgres driver
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/redemption"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/redemption"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 // issueOptions groups the CLI-supplied issuance parameters into one value so the

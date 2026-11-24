@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/authoritytest"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/authoritydb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/authoritytest"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/authoritydb"
 )
 
 // runPreBegin decodes body and runs steps 2–5 on a fresh connection.

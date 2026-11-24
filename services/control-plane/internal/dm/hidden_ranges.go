@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
 	"github.com/lib/pq"
 )
 

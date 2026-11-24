@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
 // #4179: terminal dm_voice_state_update events carry the call they belong to,

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voicecommand"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voicecommand"
 	natssdk "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
