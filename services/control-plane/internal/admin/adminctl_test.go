@@ -3,6 +3,7 @@ package admin_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -320,4 +321,12 @@ func TestAdminCtl_Unlock_UnknownAdmin(t *testing.T) { // regression for #221
 
 	assert.Equal(t, 1, code)
 	assert.True(t, keyExists(t, rdb, acctLockKey(ghost)), "an unknown admin must not be unlocked")
+}
+
+// removeAdminNamed removes the admin with this username, if any, so a test's
+// admin does not outlive it in the shared test database.
+func removeAdminNamed(t *testing.T, db *sql.DB, username string) {
+	t.Helper()
+	_, err := db.Exec(`DELETE FROM admin_users WHERE username = $1`, username)
+	assert.NoError(t, err)
 }

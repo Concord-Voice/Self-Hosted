@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,9 @@ const (
 	msgInternalError      = "internal error"
 	msgTooManyAttempts    = "too many attempts, try again later"
 	logLockoutCheckFailed = "admin lockout check failed"
+	// msgConfusableUsername refuses a new admin username that reads like an
+	// existing one (UsernameSkeleton).
+	msgConfusableUsername = "username looks like an existing admin username"
 )
 
 // errInvalidAdminChallenge denotes an absent, expired or already consumed handle.
@@ -333,23 +337,33 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	}
 
 	adminID := challenge.AdminID
-	// Recording the sign-in also reads the notice: the admins created in the
-	// console since this admin's previous sign-in, counted in the same
-	// transaction that writes this login_success row (RecordSignIn), so no
-	// creation can fall between two sign-ins. The notice is informational, so
-	// a failed read does not block sign-in: the response then carries no
-	// count rather than a zero, and the next sign-in still reports what this
-	// one could not.
-	adminsAdded, noticeRead, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username)
-	if !noticeRead {
-		h.log.Error("admin sign-in notice read failed")
+	// Recording the sign-in also reads the notice: the admins added since this
+	// admin last acknowledged one, counted in the same transaction that writes
+	// this login_success row (RecordSignIn), so no creation can fall between
+	// two windows. The notice is informational, so a failed read does not
+	// block sign-in: the response then carries no count rather than a zero.
+	// The window moves only when the portal acknowledges the cursor
+	// (AcknowledgeSignInNotice), so a notice this response never delivers is
+	// shown again at the next sign-in.
+	rec, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username, sid)
+	if !rec.Shown {
+		stage := "notice_read"
+		if errors.Is(rec.NoticeErr, errAuditWrite) {
+			stage = "audit_write"
+		}
+		h.log.Error("admin sign-in notice unavailable", "stage", stage, "error", rec.NoticeErr)
 	}
 	if err != nil {
 		h.log.Warn("admin audit write failed", "error", err)
 	}
 	resp := gin.H{"status": "authenticated"}
-	if noticeRead {
-		resp["admins_added"] = adminsAdded
+	if rec.Shown {
+		resp["admins_added"] = rec.Notice.AdminsAdded
+		if rec.Notice.AdminsAdded > 0 {
+			// Opaque to the portal, which sends it back once it has shown the
+			// notice (POST /admin/api/v1/signin-notice/ack).
+			resp["notice_cursor"] = strconv.FormatInt(rec.Notice.Cursor, 10)
+		}
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -857,6 +871,18 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid username"})
 		return
 	}
+	// A name that looks like an existing admin's is refused here, before the
+	// step-up is spent; CreatePendingTx checks again under its lock.
+	switch err := h.repo.CheckUsernameAvailable(ctx, req.Username); {
+	case err == nil, errors.Is(err, ErrDuplicateUsername):
+	case errors.Is(err, ErrConfusableUsername):
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgConfusableUsername})
+		return
+	default:
+		h.log.Error("admin create username check failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+		return
+	}
 	if err := auth.ValidatePasswordStrength(req.Password); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "password too weak"})
 		return
@@ -898,6 +924,11 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	case errors.Is(err, ErrDuplicateUsername):
 		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_taken")
 		c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
+		return
+	case errors.Is(err, ErrConfusableUsername):
+		// A lookalike created between the early check and the lock.
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_confusable")
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgConfusableUsername})
 		return
 	case errors.Is(err, errAuditWrite):
 		h.log.Error("admin create audit write failed", "error", err)

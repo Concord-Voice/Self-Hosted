@@ -22,23 +22,31 @@ import (
 
 // signInResult is one RecordSignIn outcome.
 type signInResult struct {
-	n    int
-	read bool
-	err  error
+	n      int
+	cursor int64
+	read   bool
+	err    error
 }
 
-func recordSignIn(ctx context.Context, audit *admin.AuditLog, adminID string) signInResult {
-	n, read, err := audit.RecordSignIn(ctx, adminID, "viewer")
-	return signInResult{n: n, read: read, err: err}
+func recordSignIn(ctx context.Context, audit *admin.AuditLog, adminID, sessionID string) signInResult {
+	rec, err := audit.RecordSignIn(ctx, adminID, "viewer", sessionID)
+	return signInResult{n: rec.Notice.AdminsAdded, cursor: rec.Notice.Cursor, read: rec.Shown, err: err}
 }
 
-// requireCounted records a sign-in and requires a read count.
-func requireCounted(t *testing.T, audit *admin.AuditLog, adminID string) int {
+// requireCountedIn records a sign-in of this session and requires a read
+// count.
+func requireCountedIn(t *testing.T, audit *admin.AuditLog, adminID, sessionID string) signInResult {
 	t.Helper()
-	r := recordSignIn(t.Context(), audit, adminID)
+	r := recordSignIn(t.Context(), audit, adminID, sessionID)
 	require.NoError(t, r.err)
 	require.True(t, r.read, "the count must be read")
-	return r.n
+	return r
+}
+
+// requireCounted is requireCountedIn for a fresh session.
+func requireCounted(t *testing.T, audit *admin.AuditLog, adminID string) int {
+	t.Helper()
+	return requireCountedIn(t, audit, adminID, uniqueAdminUsername("session")).n
 }
 
 // A creation transaction's ts is when it began, which can be long before it
@@ -82,16 +90,17 @@ func TestAdminsAddedSinceLastSignIn_LegacySignInRowOnlyWidens(t *testing.T) {
 	assert.Equal(t, 2, n, "the overlap row and the late row, not the one a minute before")
 }
 
-// A sign-in whose count was not read showed nothing, so it ends no window: the
-// next count runs from the last sign-in that did show one.
-func TestAdminsAddedSinceLastSignIn_UnreadSignInEndsNoWindow(t *testing.T) {
+// A sign-in whose count was not read, or whose nonzero count was never
+// acknowledged, moves no window: the next count runs from the last
+// acknowledged cursor.
+func TestAdminsAddedSinceLastSignIn_UnacknowledgedSignInEndsNoWindow(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
 	rdb, rCleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(rCleanup)
 
 	viewerID, _, _ := enrolledAdmin(t, db, rdb)
-	unread := map[string]any{"admins_added_unread": true}
+	unread := map[string]any{"notice_session": "unread"}
 	// Only unread sign-ins: nothing was ever shown, so every creation counts.
 	insertAuditRow(t, db, nil, existingAdmin(t, db, "unread-first"), admin.EventAdminCreated, admin.AuditSuccess, "12 hours")
 	insertAuditRowJSON(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "12 hours 1 minute", unread)
@@ -102,9 +111,11 @@ func TestAdminsAddedSinceLastSignIn_UnreadSignInEndsNoWindow(t *testing.T) {
 	signInRow(t, db, viewerID, "12 hours 2 minutes")
 	insertAuditRow(t, db, nil, existingAdmin(t, db, "unread-between"), admin.EventAdminCreated, admin.AuditSuccess, "12 hours 3 minutes")
 	insertAuditRowJSON(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "12 hours 4 minutes", unread)
+	insertAuditRowJSON(t, db, &viewerID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "12 hours 5 minutes",
+		map[string]any{"notice_session": "shown-never-acked", "admins_added": 1, "notice_cursor": maxAuditRowID(t, db)})
 	n, err = admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
 	require.NoError(t, err)
-	assert.Equal(t, 1, n, "the creation after the last read sign-in, though an unread sign-in followed it")
+	assert.Equal(t, 1, n, "the creation after the last zero count, though unread and unacknowledged sign-ins followed it")
 }
 
 // RecordSignIn counts under the exclusive notice lock, so it waits for a
@@ -135,7 +146,7 @@ func TestRecordSignIn_WaitsForInFlightCreation(t *testing.T) {
 	require.NoError(t, err)
 
 	done := make(chan signInResult, 1)
-	go func() { done <- recordSignIn(context.Background(), audit, viewerID) }()
+	go func() { done <- recordSignIn(context.Background(), audit, viewerID, "in-flight-session") }()
 	select {
 	case r := <-done:
 		assert.Fail(t, "the sign-in counted while a creation held the lock", "count %d", r.n)
@@ -152,6 +163,7 @@ func TestRecordSignIn_WaitsForInFlightCreation(t *testing.T) {
 	}
 	require.NoError(t, during.err)
 	require.True(t, during.read)
+	require.NoError(t, audit.AcknowledgeSignInNotice(t.Context(), viewerID, "in-flight-session", during.cursor))
 	after := requireCounted(t, audit, viewerID)
 	assert.Equal(t, 1, during.n, "counted at the sign-in that waited for it")
 	assert.Equal(t, 0, after, "and only there")
@@ -229,7 +241,7 @@ func TestWebAuthnLogin_NoticeReadFailure_NextSignInStillReports(t *testing.T) {
 	var unread int
 	require.NoError(t, db.QueryRow(
 		`SELECT COUNT(*) FROM admin_audit_log
-		 WHERE admin_id = $1 AND event_type = $2 AND result = $3 AND detail ? 'admins_added_unread'`,
+		 WHERE admin_id = $1 AND event_type = $2 AND result = $3 AND detail ? 'notice_session' AND NOT detail ? 'notice_cursor'`,
 		viewerID, admin.EventLoginSuccess, admin.AuditSuccess,
 	).Scan(&unread))
 	assert.Equal(t, 1, unread, "the sign-in is still audited")

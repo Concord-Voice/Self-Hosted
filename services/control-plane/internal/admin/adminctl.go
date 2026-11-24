@@ -8,10 +8,12 @@ package admin
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
@@ -24,10 +26,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// verbResetEnrollment is the break-glass recovery subcommand name (extracted to
-// satisfy go:S1192 — it recurs as the dispatch case, the flag-set name, and the
-// audit detail).
-const verbResetEnrollment = "reset-enrollment"
+// verbBootstrap and verbResetEnrollment name the first-admin and break-glass
+// recovery subcommands (extracted to satisfy go:S1192: each recurs as the
+// dispatch case, the flag-set name and the audit detail).
+const (
+	verbBootstrap       = "bootstrap"
+	verbResetEnrollment = "reset-enrollment"
+)
 
 // verbUnlock is the lockout recovery subcommand name.
 const verbUnlock = "unlock"
@@ -169,7 +174,7 @@ func runAdminCtl(ctx context.Context, deps adminCtlDeps, args []string) int {
 	verb := args[0]
 	rest := args[1:]
 	switch verb {
-	case "bootstrap":
+	case verbBootstrap:
 		if err := runBootstrap(ctx, deps, rest); err != nil {
 			outf(deps.stdout, "admin bootstrap failed: %v\n", err)
 			return 1
@@ -208,7 +213,7 @@ func outf(w io.Writer, format string, args ...any) {
 // to STDOUT (never the logger — secrets must not reach any log sink), and audits
 // EventBootstrap.
 func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
-	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	fs := flag.NewFlagSet(verbBootstrap, flag.ContinueOnError)
 	fs.SetOutput(deps.stdout)
 	username := fs.String("username", "", "operator handle for the new admin (required)")
 	passwordStdin := fs.Bool("password-stdin", false, "read the password from stdin without an interactive prompt")
@@ -219,7 +224,7 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 		return errors.New("--username is required")
 	}
 	if err := ValidateAdminUsername(*username); err != nil {
-		return fmt.Errorf("%w: it must be 1 to %d ASCII letters, digits, '.', '_' or '-'", err, MaxAdminUsernameLength)
+		return fmt.Errorf("%w: it must be 1 to %d lowercase ASCII letters (a-z), digits, '.', '_' or '-'", err, MaxAdminUsernameLength)
 	}
 
 	password, err := readPassword(deps.stdin, deps.stdout, *passwordStdin)
@@ -235,26 +240,38 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 		return fmt.Errorf("hash password: %w", err)
 	}
 
-	adminUser, err := deps.repo.CreatePending(ctx, *username, hash)
-	if err != nil {
+	// The pending row and its bootstrap audit row commit in one transaction,
+	// under the sign-in notice lock held shared (WriteWith), so the admin is
+	// counted in every other admin's sign-in notice and no admin exists
+	// without its row. The audit row carries the outcome and the new admin's
+	// id, NEVER the password or token.
+	var adminUser AdminUser
+	err = deps.audit.WriteWith(ctx, AuditEvent{
+		Actor:     *username,
+		EventType: EventBootstrap,
+		Result:    AuditSuccess,
+		Detail:    map[string]any{"verb": verbBootstrap},
+	}, func(tx *sql.Tx, ev *AuditEvent) error {
+		created, cerr := deps.repo.CreatePendingTx(ctx, tx, *username, hash)
+		if cerr != nil {
+			return cerr
+		}
+		adminUser = created
+		ev.AdminID = &adminUser.ID
+		ev.Detail = map[string]any{"verb": verbBootstrap, detailCreatedAdminID: adminUser.ID}
+		return nil
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, errAuditWrite):
+		return fmt.Errorf("audit bootstrap: %w", err)
+	default:
 		return fmt.Errorf("create pending admin: %w", err)
 	}
 
 	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID, adminUser.CredentialGeneration)
 	if err != nil {
 		return fmt.Errorf("mint enrollment token: %w", err)
-	}
-
-	// Audit BEFORE printing so the row exists even if stdout is redirected away.
-	// The audit row carries the outcome + handle, NEVER the password or token.
-	if auditErr := deps.audit.Write(ctx, AuditEvent{
-		AdminID:   &adminUser.ID,
-		Actor:     *username,
-		EventType: EventBootstrap,
-		Result:    AuditSuccess,
-		Detail:    map[string]any{"verb": "bootstrap"},
-	}); auditErr != nil {
-		return fmt.Errorf("audit bootstrap: %w", auditErr)
 	}
 
 	printEnrollment(deps.stdout, *username, deps.enrollBaseURL, token)
@@ -378,11 +395,13 @@ func readPassword(stdin io.Reader, stdout io.Writer, promptSuppressed bool) (str
 // operator's terminal). This is the ONLY place the token surfaces; it is never
 // logged. The token is carried as a query parameter the enrollment page reads.
 func printEnrollment(stdout io.Writer, username, baseURL, token string) {
-	url := fmt.Sprintf("%s/admin/enroll?username=%s&token=%s", baseURL, username, token)
+	// Both values are query-escaped: a legacy username can hold a space, & or
+	// non-ASCII text, which would otherwise break or rewrite the query.
+	enrollURL := fmt.Sprintf("%s/admin/enroll?username=%s&token=%s", baseURL, url.QueryEscape(username), url.QueryEscape(token))
 	outf(stdout, "Admin created. Complete enrollment within 1 hour at the URL below.\n")
 	outf(stdout, "Copy this from your terminal — it is NOT written to any log:\n")
 	outf(stdout, "  Username:   %s\n", username)
-	outf(stdout, "  Enroll URL: %s\n", url)
+	outf(stdout, "  Enroll URL: %s\n", enrollURL)
 	outf(stdout, "  Token:      %s\n", token)
 	outf(stdout, "Register a BACKUP hardware key immediately to avoid lockout.\n")
 }

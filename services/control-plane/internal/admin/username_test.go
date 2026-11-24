@@ -11,18 +11,19 @@ import (
 
 func TestValidateAdminUsername_AcceptsTheAllowlist(t *testing.T) {
 	for _, ok := range []string{
-		"a", "alice", "Alice", "ops-admin_2", "first.last", "0", "-", "_.-",
+		"a", "alice", "ops-admin_2", "first.last", "0", "-", "_.-",
 		strings.Repeat("x", admin.MaxAdminUsernameLength),
 	} {
 		assert.NoError(t, admin.ValidateAdminUsername(ok), "%q", ok)
 	}
 }
 
-func TestValidateAdminUsername_RefusesControlSpaceAndLength(t *testing.T) {
+func TestValidateAdminUsername_RefusesUppercaseControlSpaceAndLength(t *testing.T) {
 	for _, bad := range []string{
 		"", "evil\x01", "\x01\x02", "tab\there", "line\nbreak", "del\x7f", "c1\u0085",
 		"two words", " leading", "trailing ", " nbsp", "bad\xffutf8", "nul\x00",
 		"slash/name", "at@name", "per%cent", "amp&name", "q?name", "hash#name", "plus+name",
+		"Alice", "aIice", "ALICE", "opsO", "pipe|name",
 		strings.Repeat("x", admin.MaxAdminUsernameLength+1),
 	} {
 		assert.ErrorIs(t, admin.ValidateAdminUsername(bad), admin.ErrInvalidUsername, "%q", bad)
