@@ -219,7 +219,7 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 		return errors.New("--username is required")
 	}
 	if err := ValidateAdminUsername(*username); err != nil {
-		return fmt.Errorf("%w: it must be printable characters only, with no leading or trailing space", err)
+		return fmt.Errorf("%w: it must be 1 to %d ASCII letters, digits, '.', '_' or '-'", err, MaxAdminUsernameLength)
 	}
 
 	password, err := readPassword(deps.stdin, deps.stdout, *passwordStdin)
