@@ -67,7 +67,7 @@ done
 # covered by scripts/test-check-compose-manifest-coverage.sh against a
 # synthetic fixture context — though note that coverage is currently vacuous
 # and the mechanism itself is unreachable, tracked in:
-#   https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/2885
+#   pre-split issue 2885
 PROFILE_GATED_CONTEXTS=()
 
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then

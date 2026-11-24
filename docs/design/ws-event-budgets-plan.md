@@ -1,6 +1,6 @@
 # WebSocket event budget implementation plan
 
-Plan for `Hosted issue 2270`, governed
+Implementation plan governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
 **UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1–C4 supply
 socket lifetimes, enabled event gates and complete dispatch/renewal integration.
@@ -21,17 +21,17 @@ remain prerequisites for activation.
 | E: schema | Self-Hosted: canonical `packages/protocol` error contract | valid/invalid payload vectors and compatibility |
 | F: client | Desktop: actual WebSocket service and currently required consumer schema copy | strict 1013 grammar, generation timers, all automatic dial paths and no mutation replay |
 | G: self-host config | Self-Hosted: actual production Compose, fresh installer, env example and operator docs | required-value wiring, installer/parity fixtures and existing-install preparation |
-| H: managed delivery | Hosted: canonical config writer, Compose, ACL/operator docs and verified delivery lane | every admitted writer branch, reader/client prerequisites and canonical source provenance |
+| H: managed delivery | Managed deployment: canonical config writer, Compose, ACL/operator docs and verified delivery lane | every admitted writer branch, reader/client prerequisites and canonical source provenance |
 
 D2 requires an additive migration for both closed metric-key CHECKs; its number
 and canonical delivery order must be allocated before publication. C5 and D1
 introduce no migration. No media-plane change or live commissioning belongs to
 these units.
 Self-Hosted owns control-plane policy and the protocol origin; Desktop owns its
-consumer; Hosted owns managed deployment. The protocol package is unpublished:
+consumer; the managed deployment is maintained downstream. The protocol package is unpublished:
 identify the exact schema source commit and required consumer copy instead of
 assuming a package version propagates it. Census other supported clients before
-activation. Hosted source builds must prove a delivery lane from canonical changes.
+activation. Downstream managed-deployment builds must prove a delivery lane from canonical changes.
 
 ## Unit E schema and consumer delivery
 
@@ -413,7 +413,7 @@ well. Existing B evidence owns engine idempotence and application-work joining.
 
 Focused normal/race checks, meaningful changed-code coverage and independent
 review remain required. Source wiring alone supplies none of D's paired metrics
-reader, released E/F consumers and floors, G/H writer delivery, canonical Hosted
+reader, released E/F consumers and floors, G/H writer delivery, canonical downstream
 delivery or measured workload acceptance.
 
 ## Unit D1 scalar observation groundwork

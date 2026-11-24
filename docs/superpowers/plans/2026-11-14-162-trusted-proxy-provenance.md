@@ -349,7 +349,7 @@ the running endpoints match.
 - Modify comments next to all Compose writers/consumers
 
 **Interfaces:**
-- Produces: operator migration instructions and a topology-neutral Hosted
+- Produces: operator migration instructions and a topology-neutral downstream
   mirror checklist.
 
 - [ ] **Step 1: Document the contract.** Explain exact host routes, lifecycle
