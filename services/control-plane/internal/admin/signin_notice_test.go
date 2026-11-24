@@ -86,9 +86,18 @@ func existingAdmin(t *testing.T, db *sql.DB, prefix string) string {
 	return username
 }
 
-// The count covers admin_created successes by any admin since this admin's
-// previous sign-in, opens ten seconds early, ignores refusals and other events,
-// and is 0 before the first sign-in.
+// signInRow writes a login_success row as RecordSignIn does when it reads the
+// count: it records the count it showed, so it ends the window exactly.
+func signInRow(t *testing.T, db *sql.DB, adminID, offset string) {
+	t.Helper()
+	insertAuditRowJSON(t, db, &adminID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, offset,
+		map[string]any{"admins_added": 0})
+}
+
+// The count covers admin_created successes by any admin written after this
+// admin's previous sign-in, ignores refusals and other events, and is 0
+// before the first sign-in. "After" is row order, not ts: a row written
+// before the sign-in was shown then, whatever its ts.
 func TestAdminsAddedSinceLastSignIn_CountsCreationsSincePreviousSignIn(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
@@ -98,23 +107,23 @@ func TestAdminsAddedSinceLastSignIn_CountsCreationsSincePreviousSignIn(t *testin
 	audit := admin.NewAuditLog(db)
 
 	adminID, _, _ := enrolledAdmin(t, db, rdb)
-	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-later"), admin.EventAdminCreated, admin.AuditSuccess, "2 hours")
+	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-shown"), admin.EventAdminCreated, admin.AuditSuccess, "2 hours")
 
 	n, err := audit.AdminsAddedSinceLastSignIn(ctx, adminID)
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "no previous sign-in: nothing to report")
 
-	insertAuditRow(t, db, &adminID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "1 hour")
-	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-before"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour -1 minute")   // before the window
-	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-overlap"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour -5 seconds") // inside the 10 s overlap
-	insertAuditRow(t, db, &adminID, existingAdmin(t, db, "notice-own"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour 1 minute")  // this admin's own
+	signInRow(t, db, adminID, "1 hour")
+	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-after"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour 1 minute")
+	insertAuditRow(t, db, &adminID, existingAdmin(t, db, "notice-own"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour 1 minute") // this admin's own
 	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-denied"), admin.EventAdminCreated, admin.AuditDenied, "1 hour 1 minute")
 	insertAuditRow(t, db, nil, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "1 hour 1 minute")
 
 	n, err = audit.AdminsAddedSinceLastSignIn(ctx, adminID)
 	require.NoError(t, err)
-	// The "2 hours" row is after the sign-in too.
-	assert.Equal(t, 3, n)
+	// The "2 hours" row was written before the sign-in, so that sign-in
+	// already counted it.
+	assert.Equal(t, 2, n)
 }
 
 func TestAdminsAddedSinceLastSignIn_IsCapped(t *testing.T) {

@@ -2,7 +2,9 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,6 +121,17 @@ func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sq
 		}
 	}
 
+	// An admin_created success row takes its id and commits under the sign-in
+	// notice lock held shared, so a sign-in's count, which holds it exclusive,
+	// either sees the row or the row's id is above that sign-in's row
+	// (RecordSignIn).
+	if ev.EventType == EventAdminCreated && ev.Result == AuditSuccess {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared($1)`, signInNoticeLockKey); err != nil {
+			a.emitAuditWriteFailure(ctx)
+			return fmt.Errorf("%w: take sign-in notice lock: %w", errAuditWrite, err)
+		}
+	}
+
 	// Adopt the restricted role for the rest of this transaction. SET ROLE
 	// takes an identifier, not a bind parameter, so the role name is a fixed
 	// constant (never user input).
@@ -207,14 +220,40 @@ const MaxAdminsAddedNotice = 100
 // security event carries the detail.
 const detailCreatedAdminID = "created_admin_id"
 
+// detailAdminsAdded is the detail key of a login_success row whose notice
+// count was read in the same transaction as the row; it holds that count.
+// Such a row ends a notice window exactly (see RecordSignIn).
+const detailAdminsAdded = "admins_added"
+
+// detailAdminsAddedUnread marks a login_success row written after its notice
+// count could not be read. Nothing was shown at that sign-in, so the row never
+// ends a notice window.
+const detailAdminsAddedUnread = "admins_added_unread"
+
 // canonicalUUIDPattern matches the lowercase hyphenated id CreateAdmin writes.
 // Any other value is treated as no id.
 const canonicalUUIDPattern = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 
+// signInNoticeLockKey is the PostgreSQL advisory key that orders admin
+// creations against sign-in notice reads. WriteWith takes it shared, as the
+// last step before inserting an admin_created success row, and holds it until
+// that row commits; RecordSignIn takes it exclusive around its count and its
+// login_success insert. The domain string keeps the key apart from every other
+// advisory key space.
+var signInNoticeLockKey = func() int64 {
+	digest := sha256.Sum256([]byte("admin_signin_notice\x00v1"))
+	return int64(binary.BigEndian.Uint64(digest[:8])) //nolint:gosec // bit-preserving conversion into the signed advisory key space
+}()
+
+// signInNoticeLockTimeout bounds RecordSignIn's wait for in-flight creations.
+// A timeout writes the sign-in without a count, which ends no window.
+const signInNoticeLockTimeout = "5s"
+
 // AdminsAddedSinceLastSignIn counts the console-created admins (admin_created
 // successes, by any admin) recorded since this admin's previous successful
 // sign-in that still exist, capped at MaxAdminsAddedNotice. It is 0 on a
-// first sign-in.
+// first sign-in. It only reads; RecordSignIn reads the same count while it
+// records a sign-in.
 //
 // A success row does not prove an admin was added: when the enrollment-token
 // mint fails, CreateAdmin removes the pending admin but its committed success
@@ -232,23 +271,56 @@ const canonicalUUIDPattern = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 // malformed) cannot be matched, so each such row counts as one: it can only
 // over-count, never hide an admin.
 //
-// The window opens ten seconds before the previous sign-in's row, so a
-// creation that committed while that sign-in was being recorded is counted
-// at the next one. Such a creation can be reported twice; none is missed. A
-// lost login_success row widens the window, which also only over-reports.
+// The window is bounded by audit row id, never by time alone, because ts is
+// the writing transaction's start time and a creation can commit long after
+// it started. The previous sign-in is the admin's newest login_success row
+// that does not carry detailAdminsAddedUnread:
+//   - A row carrying detailAdminsAdded was written by RecordSignIn under the
+//     exclusive lock, so it saw exactly the success rows with a lower id; the
+//     window is the rows with a higher id.
+//   - A row with neither key was written before this rule. Its window is the
+//     rows with a higher id plus those from ten seconds before it (the
+//     earlier rule), which can only over-count.
+//   - When every sign-in row is unread, nothing was ever shown, so every
+//     success row counts.
+//
+// Picking an older row than the newest one, which ts order can do when two
+// sign-ins of one admin overlap, only widens the window.
 func (a *AuditLog) AdminsAddedSinceLastSignIn(ctx context.Context, adminID string) (int, error) {
-	const q = `
-		WITH created AS (
+	return adminsAddedSince(ctx, a.db, adminID)
+}
+
+type auditRowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// adminsAddedQueryMarker starts the count query, so a fault test can match it.
+const adminsAddedQueryMarker = "/* admins added since last sign-in */"
+
+func adminsAddedSince(ctx context.Context, db auditRowQuerier, adminID string) (int, error) {
+	const q = adminsAddedQueryMarker + `
+		WITH prev AS (
+		  SELECT id, ts, COALESCE(detail ? $7, false) AS exact
+		  FROM admin_audit_log
+		  WHERE admin_id = $1 AND event_type = $3 AND result = $5
+		    AND NOT COALESCE(detail ? $8, false)
+		  ORDER BY ts DESC
+		  LIMIT 1
+		), signed_in AS (
+		  SELECT EXISTS (
+		    SELECT 1 FROM admin_audit_log
+		    WHERE admin_id = $1 AND event_type = $3 AND result = $5
+		  ) AS any
+		), created AS (
 		  SELECT CASE WHEN l.detail->>'created_admin_id' ~ $6
 		              THEN (l.detail->>'created_admin_id')::uuid END AS id
 		  FROM admin_audit_log l
-		  WHERE l.event_type = $2 AND l.result = $5
-		    AND l.ts > (
-		      SELECT ts FROM admin_audit_log
-		      WHERE admin_id = $1 AND event_type = $3 AND result = $5
-		      ORDER BY ts DESC
-		      LIMIT 1
-		    ) - interval '10 seconds'
+		  CROSS JOIN signed_in s
+		  LEFT JOIN prev p ON true
+		  WHERE l.event_type = $2 AND l.result = $5 AND s.any
+		    AND (p.id IS NULL
+		         OR l.id > p.id
+		         OR (NOT p.exact AND l.ts > p.ts - interval '10 seconds'))
 		)
 		SELECT LEAST(
 		  (SELECT COUNT(DISTINCT u.id) FROM created c JOIN admin_users u ON u.id = c.id)
@@ -256,12 +328,61 @@ func (a *AuditLog) AdminsAddedSinceLastSignIn(ctx context.Context, adminID strin
 		  $4)::int
 	`
 	var n int
-	if err := a.db.QueryRowContext(ctx, q,
+	if err := db.QueryRowContext(ctx, q,
 		adminID, EventAdminCreated, EventLoginSuccess, MaxAdminsAddedNotice, AuditSuccess, canonicalUUIDPattern,
+		detailAdminsAdded, detailAdminsAddedUnread,
 	).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count admins added since sign-in: %w", err)
 	}
 	return n, nil
+}
+
+// RecordSignIn writes this admin's login_success row and returns the sign-in
+// notice count: the admins added since the previous sign-in
+// (AdminsAddedSinceLastSignIn). read reports whether the count was read; the
+// caller shows no count when it was not. err is set only when no
+// login_success row could be written.
+//
+// The count and the row commit in one transaction that holds
+// signInNoticeLockKey exclusive, and every admin_created success row is
+// inserted and committed under the same key held shared. So each success row
+// either committed before the count, and has a lower id than this sign-in's
+// row, or took its id after this transaction committed, and has a higher one.
+// The row records the count it shows (detailAdminsAdded), and the next sign-in
+// counts the rows above its id, so no creation falls between two windows
+// however long a creation transaction or a sign-in takes.
+//
+// When the count cannot be read, or that transaction fails for any other
+// reason, the row is written again without the lock and marked
+// detailAdminsAddedUnread, which the next sign-in skips: its window then runs
+// from the last sign-in that did show a count, so a failed read never drops a
+// creation.
+func (a *AuditLog) RecordSignIn(ctx context.Context, adminID, actor string) (n int, read bool, err error) {
+	id := adminID
+	ev := AuditEvent{AdminID: &id, Actor: actor, EventType: EventLoginSuccess, Result: AuditSuccess}
+	countErr := a.WriteWith(ctx, ev, func(tx *sql.Tx, ev *AuditEvent) error {
+		if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '"+signInNoticeLockTimeout+"'"); err != nil {
+			return fmt.Errorf("bound sign-in notice lock wait: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, signInNoticeLockKey); err != nil {
+			return fmt.Errorf("take sign-in notice lock: %w", err)
+		}
+		count, err := adminsAddedSince(ctx, tx, adminID)
+		if err != nil {
+			return err
+		}
+		n = count
+		ev.Detail = map[string]any{detailAdminsAdded: count}
+		return nil
+	})
+	if countErr == nil {
+		return n, true, nil
+	}
+	ev.Detail = map[string]any{detailAdminsAddedUnread: true}
+	if werr := a.Write(ctx, ev); werr != nil {
+		return 0, false, errors.Join(countErr, werr)
+	}
+	return 0, false, nil
 }
 
 // adminIDValue dereferences a nullable admin id pointer to a string ("" => NULL).

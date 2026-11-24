@@ -311,15 +311,6 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		return
 	}
 
-	// Read before this sign-in is recorded, so "since your last sign-in" is the
-	// previous one. The notice is informational, so a failed read does not
-	// block sign-in: the response then carries no count rather than a zero.
-	adminsAdded, err := h.audit.AdminsAddedSinceLastSignIn(ctx, challenge.AdminID)
-	noticeRead := err == nil
-	if err != nil {
-		h.log.Error("admin sign-in notice read failed")
-	}
-
 	sid, err := h.repo.FinalizeWebAuthnLogin(ctx, h.sessions, challenge.AdminID, cred.ID, int64(cred.Authenticator.SignCount))
 	if err != nil {
 		if errors.Is(err, ErrAdminAuthenticationStateChanged) {
@@ -342,10 +333,20 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	}
 
 	adminID := challenge.AdminID
-	h.auditOK(ctx, &adminID, challenge.Username, EventLoginSuccess)
-	// admins_added tells this admin how many admins were created in the
-	// console since their previous sign-in; the portal shows it. It is left
-	// out when it could not be read.
+	// Recording the sign-in also reads the notice: the admins created in the
+	// console since this admin's previous sign-in, counted in the same
+	// transaction that writes this login_success row (RecordSignIn), so no
+	// creation can fall between two sign-ins. The notice is informational, so
+	// a failed read does not block sign-in: the response then carries no
+	// count rather than a zero, and the next sign-in still reports what this
+	// one could not.
+	adminsAdded, noticeRead, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username)
+	if !noticeRead {
+		h.log.Error("admin sign-in notice read failed")
+	}
+	if err != nil {
+		h.log.Warn("admin audit write failed", "error", err)
+	}
 	resp := gin.H{"status": "authenticated"}
 	if noticeRead {
 		resp["admins_added"] = adminsAdded
