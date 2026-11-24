@@ -607,13 +607,15 @@ def settled_jobs(api, path):
 def settled_proof_inventory(api, run_id, name, earliest):
     # The upload can succeed before the separately dispatched workflow sees
     # the artifact in GitHub's inventory. Retry only an absent exact match.
-    for attempt in range(ARTIFACT_SETTLE_ATTEMPTS):
-        inventory = api.artifacts(run_id)
+    inventory = api.artifacts(run_id)
+    for _ in range(ARTIFACT_SETTLE_ATTEMPTS - 1):
         matches = [a for a in inventory if isinstance(a, dict) and a.get("name") == name
                    and timestamp(a.get("created_at")) >= earliest]
-        if matches or attempt == ARTIFACT_SETTLE_ATTEMPTS - 1:
+        if matches:
             return inventory
         time.sleep(ARTIFACT_SETTLE_DELAY)
+        inventory = api.artifacts(run_id)
+    return inventory
 
 
 def prepare(candidate, directory, api):
