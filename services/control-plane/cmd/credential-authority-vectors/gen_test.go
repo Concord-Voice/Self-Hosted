@@ -32,6 +32,36 @@ func TestGeneratorCheckModeMatchesCommittedCorpus(t *testing.T) {
 	require.Error(t, run())
 }
 
+func TestGeneratorFailsClosedOutsideARepositoryAndWritesOnlyItsCorpus(t *testing.T) {
+	oldArgs := os.Args
+	oldDirectory, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		require.NoError(t, os.Chdir(oldDirectory))
+	})
+
+	noRoot := t.TempDir()
+	require.NoError(t, os.Chdir(noRoot))
+	_, err = repositoryRoot()
+	require.ErrorContains(t, err, "repository root not found")
+	os.Args = []string{"credential-authority-vectors", "--check", "extra"}
+	require.ErrorContains(t, run(), "usage")
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "CHANGELOG.md"), nil, 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, filepath.Dir(generatorPath)), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, generatorPath), []byte("generator"), 0o600))
+	require.NoError(t, os.Chdir(root))
+	os.Args = []string{"credential-authority-vectors", "--check"}
+	require.ErrorContains(t, run(), "read corpus")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, filepath.Dir(corpusPath)), 0o700))
+	os.Args = []string{"credential-authority-vectors", "--write"}
+	require.NoError(t, run())
+	os.Args = []string{"credential-authority-vectors", "--check"}
+	require.NoError(t, run())
+}
+
 func TestCorpusVectorsMatchCodec(t *testing.T) {
 	root, err := repositoryRoot()
 	require.NoError(t, err)
