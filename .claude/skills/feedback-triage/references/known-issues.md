@@ -66,7 +66,7 @@ A section with no entries is **omitted**. If every section is empty, the body is
 ### Entry rules
 - **Sort** within each group by report count descending (demand-ranked).
 - **Title** = the survivor's user title with the `[Bug Report]` / `[Feature Request]` prefix stripped, truncated to ~80 chars.
-- **Counts + the public `#N` link + the inert tracker ref only.** Never an internal reporter ID; never private tracker body content (same redaction discipline as the comment templates).
+- **Counts + the public `#N` link + the `alpha_display` ref only.** Strip private `owner/` prefixes or use an opaque ref when repository names are withheld per disclosure policy; never include an internal reporter ID or private tracker body content (same redaction discipline as [`markers-and-templates.md`](markers-and-templates.md)).
 - **`Recently fixed` is bounded** to ~30 days by `fixed_in` / close date, so the list can't grow without bound — older fixes drop off the list (they remain on the closed issues).
 
 ## Upsert (idempotent)

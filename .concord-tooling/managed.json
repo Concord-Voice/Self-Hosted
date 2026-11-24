@@ -9,7 +9,7 @@
   ".agents/skills/fleet-dev-lifecycle/SKILL.md": "7880235973751e24a854bd71f2f8d7854912e59216e377c0565e4e83280b3e6b",
   ".agents/skills/fleet-issue-creation/SKILL.md": "dd420817e18194ca2f62ad7ad1b33a60d3524c0137b6d19bccc28f49d1a42335",
   ".agents/skills/issue-creation/SKILL.md": "c1ac3b9cf0d44971e50b6298ec80cfa1b37f9c78315d5a4339e141a41db889d6",
-  ".claude/agents/feedback-analyst.md": "6e2f1ab5a5439e82ab4f697d8f8ae7434e2094de24c4f128c88a4f783f4ffd4a",
+  ".claude/agents/feedback-analyst.md": "f2e69c92c2a35830221f35a880832eee828fe3d5519be8e3e40cd286ef2085a2",
   ".claude/agents/fleet-architect.md": "40c87896a1331e2185628826a04827314707dce523f84518f06f1656bd563f5a",
   ".claude/agents/fleet-backend-developer.md": "fe1ec58cd867f1485b765c23bc327734d5a8f8d50b8b0f1750c3c3557ddc299e",
   ".claude/agents/fleet-code-reviewer.md": "7ae5d717622a6fe5d3ec31a705ac729436c74db9b11e812361378d9c26d676b8",
@@ -48,6 +48,6 @@
   ".codex/agents/ui-designer.toml": "1fbaaedd414d08b3cba3aca1bea885e5c83d86a4187fa3d73ce35b70342e89c0",
   ".codex/agents/ux-designer.toml": "e1758df8ec9f1c23cca2bb3c11c66d1ebe8d852382ab13b83568585db05ede9a",
   ".concord-tooling/bootstrap.py": "9918a6d9da97e46a1e34208f5d8983b7265c5fbd43d82c177059da4b733e4356",
-  ".concord-tooling/sources.json": "19981de4d25d0a16ec4b7d78d289f25b8a9007e8e58ba5e3994b990284bc7f92",
+  ".concord-tooling/sources.json": "c87e3c37898773f65e37777724b1ea6ceb28691f75189aced41e8adbae92663d",
   ".github/agents/code-reviewer.agent.md": "6b4eca9f4365ce64e926691cdcc17e37ba086f3a3b59979de20f3f88f57f383b"
 }
