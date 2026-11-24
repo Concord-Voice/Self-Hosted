@@ -39,6 +39,8 @@ Reconcile all AI-authored code review feedback with project-specific subagent re
 
 ## Phase 1 — Gather
 
+From a host-provisioned trusted checkout, resolve the public review edition with `python3 -I -B .concord-tooling/bootstrap.py --public-only --skill enhanced-pr-review`. Read `references/maintainer-decisions.md` beside the returned SKILL.md. Set FLEET_SKILLS to the parent of that skill directory and FLEET_TARGET_REPO to the verified owner/repo. Follow its fleet collector procedure for the verified repository, PR and head, including when there are no inline threads. Use the returned edition's helper for `--maintainer-sources` and `--formal-state`. Keep raw review text inside the approved read-only boundary. Preliminary triage may proceed while missing evidence holds approval and merge. The checkout's trusted-base helper still governs its own inline dispositions and bot reconciliation.
+
 **Step 1** — Resolve repo identity and load the bot roster:
 
 ```bash
@@ -509,7 +511,7 @@ Output the triage table. The **Source(s)** column names each reviewer explicitly
 - **Line-level findings** (inline review comments, subagent findings) populate `File:Line` with a specific path:line; the Finding column holds the line-level description.
 - **PR-level verdicts / recommendations** (a verdict-only reviewer's overall judgment, a Quality-Gate result, a release-signal version-bump recommendation, a review summary) leave `File:Line` blank or marked `—`; the Finding column carries the overall verdict or recommendation. These rows describe the PR as a whole.
 
-**The `Thread` column is REQUIRED on every row.** It carries the GraphQL thread ID (`PRRT_…`, from the `id` field in Phase 4 Step 4.1) for a line-level finding, or the top-level comment's `id` for a PR-level verdict; `—` only for a subagent-only finding that has no GitHub conversation behind it. This column is what makes a decision *addressable*: without it the table records that N findings were fixed but never which conversation each fix answers, so nothing downstream can verify that the finding a commit claims to close is the finding whose thread got resolved. Phase 3.5 and the Phase 4 gate both key on it.
+**The `Thread` column is REQUIRED on every row.** It carries the GraphQL thread ID (`PRRT_…`, from the `id` field in Phase 4 Step 4.1) for a line-level finding, the native source URL for a top-level maintainer finding, or the top-level comment's `id` for a PR-level verdict; `—` only for a subagent-only finding that has no GitHub conversation behind it. This column is what makes a decision *addressable*: without it the table records that N findings were fixed but never which conversation each fix answers, so nothing downstream can verify that the finding a commit claims to close is the finding whose thread got resolved. Use it to match each decision to its source during reconciliation.
 
 **Row ordering: BLOCK rows first.** Any row with a `BLOCK` severity (a release-signal recommending a version bump or note while it is absent — only when `.release_signal` is configured — or any subagent finding flagged blocking-merge) sorts to the top of the table regardless of category. The developer sees blockers first; everything else is below.
 
@@ -536,8 +538,8 @@ Autofix footprint: <agent display name> — N commits, N thread-resolutions (N v
 Recommended next steps:
 1. Fix all Agreed + valid Bot-only + Subagent-only findings
 2. Review Conflicts and decide
-3. Carry every row to a disposition and record it in its thread (Post-Report)
-4. Post/update the Phase 3.5 reconciliation post, then run the disposition gate from the default branch (§3.5.3)
+3. Record each disposition at its applicable thread or linked written decision (Post-Report)
+4. Post or update the Phase 3.5 reconciliation when required, verify linked maintainer decisions and run the disposition gate from the default branch (§3.5.3)
 ```
 
 If NO bots posted findings (the filter returned an empty array in Phase 1), the report should explicitly call that out — an empty bot-findings section is itself a signal (bots either agree the PR is clean, or they haven't reviewed yet).
@@ -546,7 +548,7 @@ If NO bots posted findings (the filter returned an empty array in Phase 1), the 
 
 ## Post-Report — Interactive Phase (the disposition ledger)
 
-After the developer reviews the table, every row is carried to a **disposition** — a recorded decision, written into the conversation the finding came from. The ledger is the set of those dispositions. It is complete when the disposition gate (§3.5.3, run from the default branch) exits 0, and Phase 4 will not pass until it does.
+After the developer reviews the table, every row is carried to a **disposition** — a recorded decision, linked to its source. Use the marker procedure below for qualifying inline threads and the verified maintainer procedure for top-level feedback. Completion requires linked decisions and a successful default-branch disposition gate (§3.5.3), and Phase 4 will not pass until it does.
 
 ### The four dispositions (closed set)
 
@@ -610,13 +612,15 @@ The `/replies` endpoint works for any bot's comment regardless of which GitHub a
 
 ---
 
-## Phase 3.5 — The reconciliation post (REQUIRED when any reviewer spoke, one per PR)
+## Phase 3.5 — The reconciliation post (one per PR when a bot, rostered reviewer or specialist reported)
 
-This skill posts its own comment to the PR. It is the single artifact that reconciles **every** review signal — each bot's findings, each specialist subagent's findings, and the decision on each — into one record that lives with the PR rather than in terminal scrollback.
+When bot or specialist reconciliation is required, this skill posts a comment to the PR that reconciles their signals — each bot's findings, each specialist subagent's findings, and the decision on each — into one record that lives with the PR rather than in terminal scrollback.
 
-**It posts regardless of merge-readiness.** A review whose outcome is "three findings deferred and one still under discussion" needs this record more than a clean one does, not less. This is why the reconciliation post is here and not folded into Phase 6: Phase 6's artifact is gated behind the §6.0 honesty gate and only ever appears on a PR that is *ready*, so a PR that stalls would carry no record of what was decided at all.
+**When required, it posts regardless of merge-readiness.** A review whose outcome is "three findings deferred and one still under discussion" needs this record more than a clean one does, not less. This is why the reconciliation post is here and not folded into Phase 6: Phase 6's artifact is gated behind the §6.0 honesty gate and only ever appears on a PR that is *ready*, so a PR that stalls would carry no record of what was decided at all.
 
 **Why the summary comments make this mandatory rather than nice-to-have.** Bots post a master comment enumerating their findings and then one inline comment per finding. Top-level conversation comments have no thread and no Resolve affordance — GitHub offers nowhere to record a decision against them — so no per-thread gate can ever reach that surface. PRs are routinely observed with **zero** review threads and several top-level bot comments, where a thread-only gate reports "all threads resolved" over a review surface it never read. The reconciliation post is where those bots get answered.
+
+For each actionable maintainer top-level PR comment or submitted review body, link its native URL to a written decision with rationale and supporting evidence. A link to an existing written decision covering that finding suffices. Human-only feedback needs no separate reconciliation post. Ordinary conversation needs no decision. Follow the verified maintainer procedure for new or edited feedback.
 
 ### 3.5.1 — Shape
 
@@ -654,15 +658,15 @@ The first line is the marker; the gate keys on it and on the reviewer names in t
 
 **Agent names are written bare in this post, never `@`-prefixed** (`red-team`, not `@red-team`): GitHub turns an `@`-prefixed word into a mention of whoever owns that login. The same holds for every disposition reply, review body and issue this skill writes. See § Agent names in GitHub posts in the dispatch table.
 
-Every reviewer that posted anything gets a row in **Reviewers consulted**, including summary-only bots with no findings — that row is what records they were read rather than skipped. Every triage-table row gets a row in **Decisions**, carrying the same `Thread` handle so a reader can walk from the decision to the conversation it answers.
+In a required reconciliation post, every participating reviewer gets a row in **Reviewers consulted**, including summary-only bots with no findings — that row is what records they were read rather than skipped. Every triage-table row gets a row in **Decisions**, carrying the same `Thread` handle so a reader can walk from the decision to the conversation it answers.
 
-**Required vs. example — what the gate verifies, and what is convention.** Be precise about this, because the two are not the same size. `check-review-dispositions.sh` verifies exactly three things about this post: that exactly one exists, that a repo member (not a bot) authored it, and that every reviewer which spoke on any of the three surfaces — review threads, top-level comments, and PR reviews — is named in it by login or by a roster display-name alias. It does **not** parse the Decisions table, cross-check `Thread` handles, or count rows. The table shape above is the house format a reader relies on; the reviewer-coverage clause is the part with teeth. Do not read "REQUIRED" as "machine-verified in full".
+**Required vs. example — what the gate verifies, and what is convention.** Be precise about this, because the two are not the same size. `check-review-dispositions.sh` verifies exactly three things about this post: that a bot reconciliation post exists when required, that any such post is unique and member-authored, and that every bot or rostered reviewer which spoke on any of the three surfaces — review threads, top-level comments, and PR reviews — is named in it by login or by a roster display-name alias. It does **not** parse the Decisions table, cross-check `Thread` handles, or count rows. The table shape above is the house format a reader relies on; the reviewer-coverage clause is the part with teeth. Do not read "REQUIRED" as "machine-verified in full".
 
 The `Decision` values are the same four verbs as the thread markers. A row still under discussion is `undecided` and keeps the ledger open; Phase 4 will not pass while the count is non-zero.
 
 ### 3.5.2 — Post once, then edit in place
 
-The gate requires **exactly one** reconciliation post. Re-running the skill after a fix commit updates the existing comment; it never adds a second, so the PR carries one current record rather than a pile of superseded ones.
+When bot or rostered feedback requires a reconciliation post, the gate requires **exactly one**. For human-only feedback, use the linked decisions and skip the posting command. Re-running the skill after a fix commit updates the existing comment; it never adds a second, so the PR carries one current record rather than a pile of superseded ones.
 
 ```bash
 # --paginate + jq -s: a long PR spreads comments over several pages, and a first-page-only
@@ -687,19 +691,19 @@ case "$GATE_REF" in refs/remotes/origin/?*) GATE_SH="$(git show "$GATE_REF:.clau
 if [ -n "$GATE_SH" ]; then bash -c "$GATE_SH" check-review-dispositions "$0"; else echo "UNKNOWN: no gate script on $GATE_REF" >&2; (exit 3); fi
 ```
 
-Exit 0 means every in-scope thread carries a decision, every deferral names an issue that exists, and the reconciliation post accounts for every reviewer that spoke. Exit 1 → the blocking list is printed. Exit 2 means the check could not be made — treat that as UNKNOWN, never as clean. Any other exit (3 when no gate script could be read from the default branch, or a crash) → UNKNOWN, never clean.
+Exit 0 means every in-scope thread carries a decision, every deferral names an issue that exists, and the post covers the bots and rostered reviewers that spoke. Manually verify linked maintainer decisions. Exit 1 → the blocking list is printed. Exit 2 means the check could not be made — treat that as UNKNOWN, never as clean. Any other exit (3 when no gate script could be read from the default branch, or a crash) → UNKNOWN, never clean.
 
 **The gate runs from the default branch, never from this checkout.** A PR can edit the checkout's copy, for example by adding `exit 0` at the top, and a gate the PR controls verifies nothing. So every invocation reads the script from `refs/remotes/origin/HEAD` with `git show` and runs that copy. The full refname matters: a short `origin/main` resolves to a local branch or a fetched tag of that name before the remote-tracking ref, and a PR can supply either, the same trust rule the gate already applies to the roster. A PR that changes the gate is therefore judged by the previous gate, and its own version takes effect after it merges.
 
-**What a green run proves, and what it does not.** It proves the decisions are recorded, addressable, and auditable. It does **not** prove a human made them: `gh` authenticates as the repo owner, so an agent's reply is authored by a `User` and clears the non-bot filter exactly as the developer's would. The gate cannot distinguish them and does not try. What changes is that the reasoning is now written down in one reviewable place instead of living in a terminal scrollback — a developer can read the reconciliation post and audit five decisions in one pass. Human judgment enters at the Phase 8 mode gate (`On-the-Loop` pauses on the triage outcome), not at this check. Never cite a green run as evidence that a person reviewed anything.
+**What a green run proves, and what it does not.** It verifies qualifying inline dispositions and bot reconciliation. Check linked maintainer decisions separately. It does **not** prove a human made them: `gh` authenticates as the repo owner, so an agent's reply is authored by a `User` and clears the non-bot filter exactly as the developer's would. The gate cannot distinguish them and does not try. What changes is that the reasoning is now written down in one reviewable place instead of living in a terminal scrollback — a developer can read the reconciliation post and audit five decisions in one pass. Human judgment enters at the Phase 8 mode gate (`On-the-Loop` pauses on the triage outcome), not at this check. Never cite a green run as evidence that a person reviewed anything.
 
 ---
 
 ## Phase 4 — Pre-merge thread resolution check
 
-This phase runs **after** all fix commits land and CI is green. It gates `/dev-lifecycle` Phase 9 (MERGE-READY) on one invariant: **every in-scope review conversation carries a recorded human decision** — a Phase 3.5 disposition marker — and the reconciliation post accounts for every reviewer that spoke.
+This phase runs **after** all fix commits land and CI is green. It gates `/dev-lifecycle` Phase 9 (MERGE-READY) on qualifying inline dispositions, bot reconciliation and the linked maintainer decisions in Phase 3.5.
 
-Run the check; it is the gate, and the rest of this phase is how to read and clear its output:
+Run the inline and bot disposition check, and the rest of this phase is how to read and clear its output:
 
 ```bash
 GATE_REF="$(git symbolic-ref --quiet refs/remotes/origin/HEAD || echo refs/remotes/origin/main)"   # full refname: a branch or tag named origin/main cannot shadow it
@@ -707,7 +711,7 @@ case "$GATE_REF" in refs/remotes/origin/?*) GATE_SH="$(git show "$GATE_REF:.clau
 if [ -n "$GATE_SH" ]; then bash -c "$GATE_SH" check-review-dispositions "$0"; else echo "UNKNOWN: no gate script on $GATE_REF" >&2; (exit 3); fi
 ```
 
-Exit 0 → proceed. Exit 1 → the blocking list is printed; clear it. Exit 2 → the lookup failed; treat as UNKNOWN and re-run, never as clean. Any other exit (3 when no gate script could be read from the default branch, or a crash) → UNKNOWN, never clean.
+Exit 0 clears the inline and bot checks. Verify the linked maintainer decisions before proceeding. Exit 1 → the blocking list is printed; clear it. Exit 2 → the lookup failed; treat as UNKNOWN and re-run, never as clean. Any other exit (3 when no gate script could be read from the default branch, or a crash) → UNKNOWN, never clean.
 
 **Why the invariant is "carries a decision", not "was resolved by a human".** The obvious alternative — *a thread resolved by a `[bot]` actor is blocking unless an autofix re-review cleared it* — misfires in both directions when measured. Reviewer bots resolve their own threads as routine housekeeping once a developer has replied (on one measured PR, a reviewer bot resolved 13 of 17 threads, 11 of them after substantial developer replies), so that rule blocks a large majority of well-handled threads; a gate that blocks the common good case gets overridden as routine, and an overridden gate stops catching the real hole — on that same PR, two threads that received no human reply at all and were closed by the bot with no decision on record. Keying on the presence of a human disposition clears the housekeeping and catches the silence. Phase 1.7 is unaffected: an autofix agent's *code change* still needs its `Verified-correct` disposition under §6.0 precondition 9. What changed is that a reviewer bot tidying up its own thread is no longer conflated with an autofix agent manufacturing a green.
 
@@ -893,7 +897,7 @@ The approval artifact may be emitted ONLY if ALL of the following hold. If ANY f
 3. **Every blocking Quality-Gate / SAST check = passed.** A `PENDING` / queued / not-yet-reported check is **NOT** a pass. Wait for the result; never approve ahead of a gate that has not reported.
 4. **All required CI checks green** — `gh pr checks $0` shows zero `fail` and zero `pending` in the required set. **Pending ≠ green.** Report the actual state, never the assumed-imminent one.
 5. **(Only when `.release_signal` is configured)** the release signal = ALL CLEAR or SATISFIED, or an explicitly-approved defer per §2.6.4. When `.release_signal` is absent, this precondition does not exist — skip it.
-6. **The disposition ledger is complete** — the disposition gate, run from the default branch per §3.5.3, exits 0 at the current HEAD: every in-scope conversation carries a decision, every deferral names an issue that exists, and exactly one Phase 3.5 reconciliation post accounts for every reviewer that spoke. Re-run it here if the Phase 4 result isn't fresh; when Phase 6 is invoked directly rather than via `/dev-lifecycle` Step 9.1.5 there is no prior run to consume, so run it. **Exit 2 fails this precondition** — an unverifiable ledger is not a clean one.
+6. **The disposition ledger is complete** — the disposition gate, run from the default branch per §3.5.3, exits 0 at the current HEAD: qualifying inline threads carry decisions, their deferrals name existing issues and the gate's bot reconciliation requirements are met. Before approval, including direct Phase 6 invocation, refresh the verified maintainer sources, reconcile new or edited findings and require the verified collector's clear formal-state receipt to match the GitHub owner/repo case-insensitively and the exact PR and reviewed head. A current request for changes, an undecided actionable finding or unavailable evidence holds approval. Keep all existing repository approval and merge requirements. Re-run it here if the Phase 4 result isn't fresh; when Phase 6 is invoked directly rather than via `/dev-lifecycle` Step 9.1.5 there is no prior run to consume, so run it. **Exit 2 fails this precondition** — an unverifiable ledger is not a clean one.
 7. **Every `Fix`-marked finding is actually resolved** — verify by reading `gh pr diff $0` / the fix-commit SHAs, not by asserting it. A finding you intended to fix but didn't push is still open.
 8. **HEAD is the commit being approved** — no unpushed local fixes. The artifact references the current HEAD SHA. If the active ruleset dismisses stale reviews on push (the common configuration), **any later push dismisses the approval** — so Phase 6 is genuinely the last step before merge. If a fix still needs to land, you are not in Phase 6 yet.
 9. **No UNVERIFIED autonomous-agent (autofix) action remains** (Phase 1.7). Every footprint action carries a disposition; every non-`Verified-correct`, non-`No-finding` disposition has a landed Fix commit (verify by diff per precondition 7). This precondition is about the autofix agent's **change**, and precondition 6 is about the **decision record**; they are independent and both must hold. A `cv-disposition` marker on a thread does not discharge this one — an agent's unreviewed commit needs re-review on its merits no matter how well the thread was answered. A manufactured green — the agent resolved a thread it did not fix, a reviewer bot re-approved a cosmetic change, or a failing test was deleted/skipped to green CI — does NOT satisfy this gate. If any footprint action is still `UNVERIFIED`, this precondition FAILS. A **`No-finding`** disposition (a benign non-autofix commit that §1.7.2 tied to no finding and no thread) is informational and does NOT block. When Phase 1.7 reported `Autofix footprint: none detected`, this precondition is trivially satisfied.
@@ -939,9 +943,9 @@ Use this exact shape every time, so the approval record is uniform and greppable
 | Bot review threads | ✅ 0 unresolved | |
 | Disposition ledger | ✅ N/N decided | N accepted · N rejected · N deferred · 0 undecided |
 
-**Decisions:** recorded in the [review reconciliation post](<permalink to the Phase 3.5 comment>) — N findings, 0 undecided.
+**Decisions:** <link to the Phase 3.5 post when required and the applicable written decisions; for human-only feedback, link the existing decisions directly> — N findings, 0 undecided.
 
-The per-finding decisions are NOT restated here. They live in exactly one place, the Phase 3.5 post, which is edited in place as the review progresses; a second copy in this artifact would be a snapshot taken at a different moment and would start disagreeing with the ledger the first time a decision changed.
+Link the current decision records for each finding. Reuse a link when it already covers that finding. When there are no findings, report zero and omit the links.
 
 **Verdict: APPROVED FOR MERGE.** Every merge-gate signal is green and every finding is resolved or properly dispositioned.
 
