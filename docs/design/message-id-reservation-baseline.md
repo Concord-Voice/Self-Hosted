@@ -34,12 +34,14 @@ turn reservation state into an oracle.
    dedicated advisory lock, first rejects any pre-existing cross-table UUID
    collision, then keyset-scans each table in bounded batches.
 3. The command rechecks the cross-table collision condition and both
-   table-to-reservation anti-joins. Only after they pass does one transaction
-   set `message_id_reservation_rollout.backfill_complete = true` and remove the
-   temporary delete-capture triggers. Trigger removal uses a transaction-local
-   five-second lock timeout, so it fails rather than queueing an exclusive lock
-   behind ordinary message traffic. It is safe to rerun; a completed run
-   revalidates before ensuring the temporary triggers are absent.
+   table-to-reservation anti-joins, then commits
+   `message_id_reservation_rollout.backfill_complete = true`. It removes the
+   temporary delete-capture triggers in a separate cleanup transaction. Trigger
+   removal uses a transaction-local five-second lock timeout, so it fails rather
+   than queueing an exclusive lock behind ordinary message traffic. A cleanup
+   failure leaves the verified gate committed and the temporary triggers in
+   place; rerunning the command revalidates the baseline and retries cleanup
+   without rescanning either message table.
 
 The operation never deletes rows to resolve a collision or make an anti-join
 pass. Investigate and reconcile a failed database manually; do not set the gate

@@ -49,6 +49,48 @@ func TestReservationBackfillCompletesVerifiedBaseline(t *testing.T) {
 	assert.Zero(t, deleteCaptureTriggers, "verified completion removes temporary delete capture")
 }
 
+func TestReservationBackfillPreservesCommittedGateWhenDeleteCaptureCleanupTimesOut(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+
+	messageID, dmMessageID := insertReservationFixture(t, db, uuid.New(), uuid.New())
+	_, err := testdb.ExecReplica(db, `DELETE FROM message_id_reservations WHERE message_id IN ($1, $2)`, messageID, dmMessageID)
+	require.NoError(t, err)
+
+	locker, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer func() {
+		_, rollbackErr := locker.ExecContext(context.Background(), `ROLLBACK`)
+		require.NoError(t, rollbackErr)
+		require.NoError(t, locker.Close())
+	}()
+	_, err = locker.ExecContext(context.Background(), `BEGIN; LOCK TABLE messages IN SHARE ROW EXCLUSIVE MODE`)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	err = (&reservationBackfill{db: db, batchSize: 1}).run(ctx)
+	require.ErrorContains(t, err, "remove temporary message ID delete capture")
+
+	var complete bool
+	require.NoError(t, db.QueryRow(`
+		SELECT backfill_complete FROM message_id_reservation_rollout WHERE singleton = TRUE`).Scan(&complete))
+	assert.True(t, complete, "a cleanup lock timeout must not roll back the verified baseline")
+
+	_, err = locker.ExecContext(context.Background(), `ROLLBACK`)
+	require.NoError(t, err)
+
+	require.NoError(t, (&reservationBackfill{db: db, batchSize: 1}).run(context.Background()))
+	var deleteCaptureTriggers int
+	require.NoError(t, db.QueryRow(`
+		SELECT count(*)
+		FROM pg_trigger
+		WHERE tgname = 'message_id_reservations_before_delete'
+			AND tgrelid IN ('messages'::regclass, 'dm_messages'::regclass)
+			AND NOT tgisinternal`).Scan(&deleteCaptureTriggers))
+	assert.Zero(t, deleteCaptureTriggers, "a rerun removes the retained temporary delete capture")
+}
+
 func TestReservationBackfillRejectsPreexistingCrossTableCollision(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	defer cleanup()
