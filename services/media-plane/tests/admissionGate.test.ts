@@ -70,6 +70,14 @@ describe('resolveClientIp', () => {
     expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('10.0.0.9');
   });
 
+  it('treats an IPv4-compatible X-Real-IP that ipaddr.js rejects as unusable', () => {
+    expect(resolveClientIp(req({ 'x-real-ip': '::1.2.3.4' }), trust('10.0.0.9'))).toBe('10.0.0.9');
+  });
+
+  it('returns null for an unparseable untrusted peer', () => {
+    expect(resolveClientIp(req({}, '::1.2.3.4'), trust('10.0.0.8'))).toBeNull();
+  });
+
   it('ignores an unparseable X-Real-IP but still honours a valid X-Forwarded-For', () => {
     const r = req({ 'x-real-ip': 'attacker-chosen-key', 'x-forwarded-for': '203.0.113.7' });
     expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('203.0.113.7');
@@ -313,11 +321,35 @@ describe('createAdmissionGate', () => {
 
   it('denies a genuinely peerless request before it can enter a counter', () => {
     const clock = makeClock();
-    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    const onReject = vi.fn();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'], onReject });
     const cb = vi.fn();
     gate(peerlessReq({}), cb);
     expect(cb).toHaveBeenCalledWith(null, false);
+    expect(onReject).toHaveBeenCalledTimes(1);
     expect(gate.trackedCount()).toBe(0);
+  });
+
+  it('shares one budget across addresses in the same /64', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    const cb = vi.fn();
+    for (let i = 0; i < HANDSHAKE_BURST; i += 1) {
+      gate(req({ 'x-real-ip': `2001:db8:1:2::${(i + 1).toString(16)}` }), cb);
+    }
+    gate(req({ 'x-real-ip': '2001:db8:1:2:ffff::1' }), cb);
+    expect(cb).toHaveBeenLastCalledWith(null, false);
+    expect(gate.trackedCount()).toBe(1);
+  });
+
+  it('does not throw, and does not crash the handshake, for address forms ipaddr.js rejects', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    const cb = vi.fn();
+    // node:net accepts the IPv4-compatible form; ipaddr.process throws on it.
+    expect(() => gate(req({ 'x-real-ip': '::1.2.3.4' }), cb)).not.toThrow();
+    expect(() => gate(req({}, '::1.2.3.4'), cb)).not.toThrow();
+    expect(cb).toHaveBeenCalledTimes(2);
   });
 
   // Fail INERT, not fail-shared. With no trusted proxy configured every client

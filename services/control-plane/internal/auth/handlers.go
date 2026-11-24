@@ -4073,10 +4073,11 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 
 // refuseRecoveryEmailToken answers an unusable recovery key. The client
 // address auth ban still counts it.
-func (h *Handler) refuseRecoveryEmailToken(ctx context.Context, c *gin.Context) {
+func (h *Handler) refuseRecoveryEmailToken(_ context.Context, c *gin.Context) {
+	if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+		return
+	}
 	h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
-	outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-	middleware.MarkAuthFailureOutcome(c, outcome)
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode})
 }
 

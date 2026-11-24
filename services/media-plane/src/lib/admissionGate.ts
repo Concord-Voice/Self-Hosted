@@ -56,7 +56,11 @@ type IpFamily = 'ipv4' | 'ipv6';
 const ipv4AddressSpace = new BlockList();
 ipv4AddressSpace.addSubnet('0.0.0.0', 0, 'ipv4');
 
+// ipaddr.isValid keeps this guard and bucketClientIp's ipaddr.process in
+// agreement: node:net accepts forms (such as the deprecated IPv4-compatible
+// `::1.2.3.4`) that ipaddr.process throws on.
 function ipFamily(address: string): IpFamily | null {
+  if (!ipaddr.isValid(address)) return null;
   if (isIPv4(address)) return 'ipv4';
   if (isIPv6(address)) return 'ipv6';
   return null;
@@ -167,7 +171,7 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
  * forwarded headers only when the immediate peer is a known proxy — an
  * untrusted peer presenting X-Real-IP is spoofing.
  *
- * Returns null when nothing can be determined; callers MUST fail open on null.
+ * Returns null when nothing can be determined; the gate rejects such a request.
  */
 export function resolveClientIp(
   req: AdmissionRequest,
@@ -199,8 +203,9 @@ export function resolveClientIp(
     return peer;
   }
 
-  // Untrusted peer: it IS the client, so attribute the request to it directly.
-  return peer ?? null;
+  // Untrusted peer: it IS the client, so attribute the request to it directly,
+  // but only when it parses; an unparseable peer is treated as peerless.
+  return peer && ipFamily(peer) ? peer : null;
 }
 
 // bucketClientIp returns canonical IPv4 /32 identities and masks native IPv6
@@ -274,7 +279,16 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
       callback(null, false);
       return;
     }
-    const bucket = bucketClientIp(ip);
+    let bucket: string;
+    try {
+      bucket = bucketClientIp(ip);
+    } catch {
+      // Defence in depth: resolveClientIp validates, but a throw inside
+      // engine.io's allowRequest would otherwise take the process down.
+      options.onReject?.();
+      callback(null, false);
+      return;
+    }
 
     const nowMs = now();
     let entry = counters.get(bucket);
