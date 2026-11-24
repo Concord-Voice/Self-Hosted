@@ -47,6 +47,8 @@ This subsection is **Proposed**, not part of the frozen account-authority protoc
 
 **Frozen existing protocol boundary.** Account-authority protocol v1 keeps its existing canonical layouts unchanged. In particular, the RSK-signed `status` object remains an account-root status, its array position 10 remains `active_root_digest`, its signed-type registry remains closed, and the existing `status` delegation scope does not authorize credential assertions. The private `cp-evidence.credential_epoch_digest` is operation evidence, not credential-protocol state. The proposed proof therefore does not append fields to `status`, reinterpret position 10, or widen the meaning of an existing delegation.
 
+For credential legacy-status, ADR-0045's bounded trusted-control-plane authorization is insufficient: neither a control-plane assertion nor an mTLS-authenticated control-plane request can establish legacy eligibility under VULN-172's compromised-control-plane threat model.
+
 **Proposed versioned extension.** A follow-on authority protocol v2 would preserve every v1 codec and signed-type meaning and add two distinct RSK delegation scopes: `credential-publication` for durable credential-state transitions and `credential-status` for the short-lived statement considered during login. Every proposed v2 signed object uses this canonical UTF-8 JSON envelope:
 
 ```text
@@ -100,18 +102,28 @@ On a fresh device, independently restored identity means an account ID and autho
 
 Existing legacy accounts require a sealed initial import before any proof could become eligible. The proposed import consumes an independently audited source manifest binding at least the authority realm and account, `legacy`, the credential generation, the credential-epoch state, the authenticated authority-chain head and an import digest. The manifest itself is SHA-384 digested, and an owner-only authority transaction creates the account's sequence-1 publication exactly once. Re-import is forbidden. Eligibility begins only after the selected #10 checkpoint and observer policy independently covers that publication. New split accounts instead begin with a sequence-1 `split-auth-wrap-v1` publication. The authoritative legacy source, manifest codec, auditor identity and independence requirements, reconciliation procedure and owner-only ceremony remain unresolved; the existing legacy encryption-key population is not a credential-generation source and cannot fill those gaps.
 
-**Pending security-owner decisions.** None of the following has sign-off merely because it appears in this Proposed ADR:
+**Pending security-owner decisions.** The protocol core can be reviewed and vectorized before an evidence profile is selected. None of these conditions has sign-off merely because it appears in this Proposed ADR:
 
-1. Approve authority protocol v2, its `credential-signed` envelope and the two distinct `credential-publication` and `credential-status` delegation scopes, without changing frozen v1 or widening its `status` scope.
-2. Approve the exact publication, status and evidence layouts, the exact-inner-byte SHA-384 digest rules, the publication/status P-384/SHA-384 P1363 signature contract, publication chain and compare-and-swap semantics described above.
-3. Freeze Security #10's directory adapter, lookup and history or consistency proof encodings, checkpoint source and codec, observer quorum, freshness windows, fork and disagreement handling, and every digest input represented by the proposed evidence carrier.
-4. Select the independent legacy import source and auditor, then freeze the source-manifest codec, audit and reconciliation procedure, owner-only import ceremony and no-reimport enforcement. The existing legacy encryption-key population remains ineligible as a credential-generation source.
-5. Approve authority database time, the exact five-minute status lifetime, strict expiry and the permitted future-skew bound; choose explicitly between the existing authority tolerance and a smaller v2-specific bound.
-6. Approve the irreversible `split-pending` fence before the control-plane credential commit, including deny-only behavior and availability loss after an ambiguous or failed later step until durable reconciliation finalizes `split-auth-wrap-v1`.
-7. Freeze the independent restoration artifact and durable realm/account high-water procedure for existing and fresh devices. The security owner has already approved the fail-closed fresh-device rule; this decision specifies how an eligible device proves identity and freshness. Ordinary username/password first contact remains ineligible.
-8. Approve a cross-runtime vector set covering both signer scopes, every array field and digest, predecessor forks, stale and conflicting high-waters, checkpoint or observer disagreement, sealed-import replay or mismatch, ambiguous upgrade outcomes, wrong realm/account/challenge, signature encoding errors and strict expiry.
+1. Approve separate authority protocol v2, its `credential-signed` envelope and the distinct `credential-publication` and `credential-status` scopes, preserving frozen v1 byte-for-byte.
+2. Approve the exact publication, status and evidence arrays, exact-inner-byte SHA-384 digests, P-384/SHA-384 P1363 signatures, strict canonical decoding, publication chain and compare-and-swap semantics.
+3. Require every non-import transition to consume an exact-action account-root-authorized request. The RSK may attest an accepted transition; it may not infer credential state from a control-plane row.
+4. Approve the irreversible `legacy → split-pending → split-auth-wrap-v1` fence before the control-plane credential transaction. An ambiguous or failed completion remains deny-only until durable reconciliation.
+5. Approve a client-generated 32-byte one-attempt challenge, exact five-minute status lifetime, strict expiry and the realm, account, generation, publication, evidence and delegation bindings. The future-skew bound remains an activation-profile choice.
+6. Approve the restoration eligibility classes: a returning device retains trusted realm/account state and both high-waters; a transferred device receives them through authenticated existing-root SAS transfer; a recovery device accepts the fresh root's authority transition and publication evidence. Username/password-only first contact remains ineligible.
+7. Require cross-runtime vectors for every field and scope, wrong realm/account/challenge, signature encoding, predecessor forks, high-water conflicts, stale evidence, observer disagreement, import replay, ambiguous upgrade and strict expiry.
+8. Limit approval of the above to passive codecs, parsers and vectors. It authorizes no raw-password continuation, writer, authority endpoint, import or migration.
 
-Until all eight decisions are recorded and the publication and proof vectors pass every client runtime, the existing rule remains unchanged: no authority proof means no raw-password continuation.
+**Activation-profile decisions and evidence remain pending:**
+
+| Decision | Evidence required before activation |
+| --- | --- |
+| Directory and proof codec | Reviewed adapter and durable storage contract; bounded real lookup, history and malformed-proof verification; dependency and license review |
+| Checkpoint and observers | Independently trusted realm-scoped checkpoint codec and anchors; named observer keys, quorum, rotation, withholding and disagreement behavior; durable stale-restore handling |
+| Freshness and capacity | Measured authority/client clock behavior and future-skew bound; publication latency and deadline; actual credential payloads, cohort sizes, tail latency, memory and storage throughput |
+| Legacy import | Independent credential source and auditor; frozen canonical manifest and reconciliation; owner-only one-time ceremony and permanent no-reimport enforcement |
+| Root and high-water restoration | Security #11 custody implementation and durable state across session-only use, Remember Me, SAS transfer, recovery, rollback and realm switching |
+
+Until every activation-profile item is approved and verified, the client has no trusted evidence profile and remains deny-only for raw-password continuation.
 
 Clients reject any descriptor whose Argon2id values differ from exactly `(65536 KiB, 3, 4)`; changing these values requires a new protocol discriminator. These values match the current client derivation constants and have [security-owner design signoff](https://github.com/Concord-Voice/Security/issues/177#issuecomment-7117537633); the proof, migration, and writer activation retain their separate gates. The vector corpus includes a lower-parameter descriptor that every client rejects before KDF work.
 
