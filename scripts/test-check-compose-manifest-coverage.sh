@@ -200,7 +200,7 @@ echo "=== Case 5: missing example-gated, default mode (PASS expected — exit st
 # ::warning:: branch never fires. These cases therefore assert exit 0 for a
 # reason unrelated to profile gating. Do not read them as coverage of the
 # gating mechanism. Tracked in:
-#   https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/2885
+#   pre-split issue 2885
 run "case 5: missing example-gated, default mode (exit 0 — gating NOT exercised, #2885)" \
     "services/control-plane
 services/media-plane
