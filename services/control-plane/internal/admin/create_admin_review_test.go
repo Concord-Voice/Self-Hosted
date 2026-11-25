@@ -424,7 +424,9 @@ func TestCreateAdmin_OneHandleConcurrently_CreatesOne(t *testing.T) {
 }
 
 // Two valid step-ups racing for one username create one admin; the other
-// gets 409 and a username_taken row.
+// gets 409. When both passed the early check, the loser spent its step-up and
+// writes a username_taken row; when it was refused by the early check it
+// spent nothing and writes none.
 func TestCreateAdmin_SameUsernameConcurrently_OneCreatedOneConflict(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
@@ -460,7 +462,8 @@ func TestCreateAdmin_SameUsernameConcurrently_OneCreatedOneConflict(t *testing.T
 	for _, a := range actors {
 		taken = append(taken, reasonsOf(createAuditRows(t, db, a.id), admin.AuditFailure)...)
 	}
-	assert.Equal(t, []string{"username_taken"}, taken)
+	assert.Subset(t, []string{"username_taken"}, taken)
+	assert.LessOrEqual(t, len(taken), 1, "reasons %v", taken)
 }
 
 // A rate-limited create never reaches the handler, so it does not spend the

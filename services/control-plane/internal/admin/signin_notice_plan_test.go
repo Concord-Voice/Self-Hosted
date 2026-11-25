@@ -11,12 +11,12 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
-// The sign-in notice count, exactly as production sends it, uses migration
-// 000202's partial index for the previous sign-in and 000203's index for the
-// admin_created rows, also under a generic plan, where bound parameters are
-// unknown to the planner. A partial index matches only a predicate spelled
-// with the same literals, so a parameter in the inner lookup loses it.
-func TestAdminsAddedQuery_UsesNoticeIndexesUnderGenericPlan(t *testing.T) {
+// The sign-in notice query, exactly as production sends it, finds the
+// viewer's sign-ins through migration 000203's partial index also under a
+// generic plan, where the bound admin id is unknown to the planner. A partial
+// index matches only a predicate spelled with the same literals, so a bound
+// event_type or result in a login_success lookup would lose it.
+func TestSignInNoticeQuery_UsesIndexesUnderGenericPlan(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(cleanup)
 
@@ -27,13 +27,12 @@ func TestAdminsAddedQuery_UsesNoticeIndexesUnderGenericPlan(t *testing.T) {
 	for _, stmt := range []string{
 		`SET LOCAL enable_seqscan = off`,
 		`SET LOCAL plan_cache_mode = force_generic_plan`,
-		`PREPARE admins_added_plan AS ` + admin.AdminsAddedQueryForTest,
+		`PREPARE signin_notice_plan AS ` + admin.SignInNoticeQueryForTest,
 	} {
 		_, err = tx.Exec(stmt)
 		require.NoError(t, err, stmt)
 	}
-	rows, err := tx.Query(`EXPLAIN EXECUTE admins_added_plan(
-		'00000000-0000-0000-0000-000000000001', 'admin_created', 100, 'success', '^x$')`)
+	rows, err := tx.Query(`EXPLAIN EXECUTE signin_notice_plan('00000000-0000-0000-0000-000000000001')`)
 	require.NoError(t, err)
 	var plan strings.Builder
 	for rows.Next() {

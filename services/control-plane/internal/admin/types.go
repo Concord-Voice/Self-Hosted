@@ -88,6 +88,9 @@ const (
 	// the step-up is missing or fails. Successes are what other admins are told
 	// about at their next sign-in.
 	EventAdminCreated = "admin_created"
+	// EventSignInNoticeAck marks an admin session acknowledging the sign-in
+	// notice it displayed; its detail holds the acknowledged cursor.
+	EventSignInNoticeAck = "signin_notice_ack"
 	// EventServerRead marks an admin reading server status, health or logs
 	// through the host agent (#186).
 	EventServerRead = "server_read"

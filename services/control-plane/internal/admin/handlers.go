@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,11 @@ const (
 	msgInternalError      = "internal error"
 	msgTooManyAttempts    = "too many attempts, try again later"
 	logLockoutCheckFailed = "admin lockout check failed"
+	// msgConfusableUsername refuses a new admin username that reads like an
+	// existing one (UsernameSkeleton).
+	msgConfusableUsername = "username looks like an existing admin username"
+	// msgUsernameTaken refuses a new admin username an admin already has.
+	msgUsernameTaken = "username already exists"
 )
 
 // errInvalidAdminChallenge denotes an absent, expired or already consumed handle.
@@ -311,15 +317,6 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		return
 	}
 
-	// Read before this sign-in is recorded, so "since your last sign-in" is the
-	// previous one. The notice is informational, so a failed read does not
-	// block sign-in: the response then carries no count rather than a zero.
-	adminsAdded, err := h.audit.AdminsAddedSinceLastSignIn(ctx, challenge.AdminID)
-	noticeRead := err == nil
-	if err != nil {
-		h.log.Error("admin sign-in notice read failed")
-	}
-
 	sid, err := h.repo.FinalizeWebAuthnLogin(ctx, h.sessions, challenge.AdminID, cred.ID, int64(cred.Authenticator.SignCount))
 	if err != nil {
 		if errors.Is(err, ErrAdminAuthenticationStateChanged) {
@@ -342,13 +339,33 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	}
 
 	adminID := challenge.AdminID
-	h.auditOK(ctx, &adminID, challenge.Username, EventLoginSuccess)
-	// admins_added tells this admin how many admins were created in the
-	// console since their previous sign-in; the portal shows it. It is left
-	// out when it could not be read.
+	// Recording the sign-in also reads the notice: the admins added since this
+	// admin last acknowledged one, counted in the same transaction that writes
+	// this login_success row (RecordSignIn), so no creation can fall between
+	// two windows. The notice is informational, so a failed read does not
+	// block sign-in: the response then carries no count rather than a zero.
+	// The window moves only when the portal acknowledges the cursor
+	// (AcknowledgeSignInNotice), so a notice this response never delivers is
+	// shown again at the next sign-in.
+	rec, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username, sid)
+	if !rec.Shown {
+		stage := "notice_read"
+		if isAuditStoreError(rec.NoticeErr) {
+			stage = "audit_write"
+		}
+		h.log.Error("admin sign-in notice unavailable", "stage", stage, "error", rec.NoticeErr)
+	}
+	if err != nil {
+		h.log.Warn("admin audit write failed", "error", err)
+	}
 	resp := gin.H{"status": "authenticated"}
-	if noticeRead {
-		resp["admins_added"] = adminsAdded
+	if rec.Shown {
+		resp["admins_added"] = rec.Notice.AdminsAdded
+		if rec.Notice.AdminsAdded > 0 {
+			// Opaque to the portal, which sends it back once it has shown the
+			// notice (POST /admin/api/v1/signin-notice/ack).
+			resp["notice_cursor"] = strconv.FormatInt(rec.Notice.Cursor, 10)
+		}
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -839,9 +856,9 @@ const maxCreateAdminBody = 16 << 10
 // back.
 //
 // The body is decoded strictly (no unknown fields, at most
-// maxCreateAdminBody) and the username and password are validated before the
-// step-up is checked, so malformed input spends no proof and writes no audit
-// row. The request must carry a fresh create_admin step-up from the acting
+// maxCreateAdminBody), the username and password are validated, and a taken
+// or lookalike username is refused (409 or 400), before the step-up is
+// checked, so such input spends no proof and writes no audit row. The request must carry a fresh create_admin step-up from the acting
 // admin, redeemed before any row is written, so a session alone cannot mint a
 // new step-up-capable identity (VULN-139). Every attempt that reaches the
 // step-up check is audited. The admin_created audit row commits with the
@@ -866,6 +883,22 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	}
 	if ValidateAdminUsername(req.Username) != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid username"})
+		return
+	}
+	// A taken name (409) or one that looks like an existing admin's (400) is
+	// refused here, before the step-up is spent; CreatePendingTx checks again
+	// under its lock.
+	switch err := h.repo.CheckUsernameAvailable(ctx, req.Username); {
+	case err == nil:
+	case errors.Is(err, ErrDuplicateUsername):
+		c.JSON(http.StatusConflict, gin.H{"error": msgUsernameTaken})
+		return
+	case errors.Is(err, ErrConfusableUsername):
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgConfusableUsername})
+		return
+	default:
+		h.log.Error("admin create username check failed", "admin_id", actingAdminID, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
 	if err := auth.ValidatePasswordStrength(req.Password); err != nil {
@@ -907,8 +940,14 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrDuplicateUsername):
+		// A name taken between the early check and the lock.
 		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_taken", "")
-		c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
+		c.JSON(http.StatusConflict, gin.H{"error": msgUsernameTaken})
+		return
+	case errors.Is(err, ErrConfusableUsername):
+		// A lookalike created between the early check and the lock.
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_confusable", "")
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgConfusableUsername})
 		return
 	case errors.Is(err, errAuditCommit):
 		// The server may have committed and lost only the reply, leaving a

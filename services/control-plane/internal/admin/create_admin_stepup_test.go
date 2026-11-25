@@ -224,9 +224,9 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 	}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditDenied))
 }
 
-// Input that is refused before the step-up does not spend the handle, and a
-// duplicate username is reported only after the step-up verifies, so a
-// session alone cannot probe which admin usernames exist.
+// Input that is refused before the step-up does not spend the handle: a weak
+// password, and a taken username, which is a 409 before the step-up as a
+// lookalike is a 400.
 func TestCreateAdmin_StepUpOrdering(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
@@ -243,23 +243,67 @@ func TestCreateAdmin_StepUpOrdering(t *testing.T) {
 	weak["password"] = "short"
 	assert.Equal(t, http.StatusBadRequest, postJSON(engine, "/admin/api/v1/admins", weak).Code)
 
-	// Without a step-up a taken username is still a 403, not a 409.
+	// A taken username is a 409 with or without a step-up.
 	rec := postJSON(engine, "/admin/api/v1/admins", map[string]any{"username": actingName, "password": adminTestPassword})
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-
-	// The same handle still works after the 400; a taken username is a 409.
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	rec = postJSON(engine, "/admin/api/v1/admins", createBody(actingName, handle, assertion))
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Equal(t, []string{"username_taken"}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditFailure),
-		"a verified step-up spent on a taken username is audited")
+	assert.Contains(t, rec.Body.String(), "username already exists")
+	assert.Equal(t, 0, adminCreatedRows(t, db, actingID, admin.AuditFailure), "no step-up was spent")
 
-	handle, challenge = stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
+	// The same handle still works after the 400 and the 409.
 	username := uniqueAdminUsername("after")
-	rec = postJSON(engine, "/admin/api/v1/admins", createBody(username, handle, signStepUp(t, va, challenge, flagUP|flagUV)))
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	rec = postJSON(engine, "/admin/api/v1/admins", createBody(username, handle, assertion))
+	require.Equal(t, http.StatusCreated, rec.Code, "the proof was not spent: %s", rec.Body.String())
 	created, err := admin.NewAdminRepo(db).GetByUsername(ctx, username)
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, created.ID)
+}
+
+// A username taken between the early check and the create lock is still a
+// 409, after the step-up is spent, and that spent step-up is audited.
+func TestCreateAdmin_UsernameTakenAfterEarlyCheck_ConflictAfterStepUp(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	actingID, _, va := enrolledAdmin(t, db, rdb)
+	engine := adminCreateEngine(t, db, rdb, actingID)
+	username := uniqueAdminUsername("raced")
+
+	// This transaction holds the create lock with the name inserted but not
+	// committed, so the early check, which reads without the lock, passes.
+	tx, err := db.BeginTx(t.Context(), &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	first, err := admin.NewAdminRepo(db).CreatePendingTx(t.Context(), tx, username, "unused-hash")
+	require.NoError(t, err)
+
+	handle, challenge := stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
+	assertion := signStepUp(t, va, challenge, flagUP|flagUV)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- postJSON(engine, "/admin/api/v1/admins", createBody(username, handle, assertion)) }()
+	select {
+	case rec := <-done:
+		assert.Fail(t, "the creation finished while another held the create lock", "code %d", rec.Code)
+		done <- rec
+	case <-time.After(500 * time.Millisecond):
+	}
+	require.NoError(t, tx.Commit())
+	registerAdminCleanup(t, db, first.ID)
+
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-done:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "the creation did not finish after the lock holder committed")
+	}
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"username_taken"}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditFailure),
+		"the spent step-up is audited")
+	rec = postJSON(engine, "/admin/api/v1/admins", createBody(uniqueAdminUsername("reuse"), handle, assertion))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "the step-up was spent: %s", rec.Body.String())
 }
 
 // An admin with no enrolled key cannot begin a create_admin step-up.

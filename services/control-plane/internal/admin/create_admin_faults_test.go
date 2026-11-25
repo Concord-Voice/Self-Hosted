@@ -168,7 +168,7 @@ func TestWebAuthnLogin_NoticeReadFailure_DoesNotBlockSignIn(t *testing.T) {
 	t.Cleanup(rCleanup)
 
 	_, username, va := enrolledAdmin(t, db, rdb)
-	h := faultHandler(t, rdb, dbFault{statement: "WITH created AS"})
+	h := faultHandler(t, rdb, dbFault{statement: admin.AdminsAddedQueryMarkerForTest})
 	engine := gin.New()
 	engine.POST("/admin/api/v1/auth/password", h.PasswordLogin)
 	engine.POST("/admin/api/v1/auth/webauthn", h.WebAuthnLogin)

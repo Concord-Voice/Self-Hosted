@@ -86,9 +86,27 @@ func existingAdmin(t *testing.T, db *sql.DB, prefix string) string {
 	return username
 }
 
-// The count covers admin_created successes by any admin since this admin's
-// previous sign-in, opens ten seconds early, ignores refusals and other events,
-// and is 0 before the first sign-in.
+// signInRow writes a login_success row as RecordSignIn does when it reads a
+// zero count: its cursor is the newest audit row, and a zero count moves the
+// window to it, so the next window holds only rows written after it.
+func signInRow(t *testing.T, db *sql.DB, adminID, offset string) {
+	t.Helper()
+	insertAuditRowJSON(t, db, &adminID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, offset,
+		map[string]any{"notice_session": "zero", "admins_added": 0, "notice_cursor": maxAuditRowID(t, db)})
+}
+
+// maxAuditRowID is the newest admin_audit_log row id.
+func maxAuditRowID(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var id int64
+	require.NoError(t, db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM admin_audit_log`).Scan(&id))
+	return id
+}
+
+// The count covers admin_created successes by any admin written after this
+// admin's previous sign-in, ignores refusals and other events, and is 0
+// before the first sign-in. "After" is row order, not ts: a row written
+// before the sign-in was shown then, whatever its ts.
 func TestAdminsAddedSinceLastSignIn_CountsCreationsSincePreviousSignIn(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
@@ -98,23 +116,23 @@ func TestAdminsAddedSinceLastSignIn_CountsCreationsSincePreviousSignIn(t *testin
 	audit := admin.NewAuditLog(db)
 
 	adminID, _, _ := enrolledAdmin(t, db, rdb)
-	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-later"), admin.EventAdminCreated, admin.AuditSuccess, "2 hours")
+	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-shown"), admin.EventAdminCreated, admin.AuditSuccess, "2 hours")
 
 	n, err := audit.AdminsAddedSinceLastSignIn(ctx, adminID)
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "no previous sign-in: nothing to report")
 
-	insertAuditRow(t, db, &adminID, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "1 hour")
-	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-before"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour -1 minute")   // before the window
-	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-overlap"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour -5 seconds") // inside the 10 s overlap
-	insertAuditRow(t, db, &adminID, existingAdmin(t, db, "notice-own"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour 1 minute")  // this admin's own
+	signInRow(t, db, adminID, "1 hour")
+	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-after"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour 1 minute")
+	insertAuditRow(t, db, &adminID, existingAdmin(t, db, "notice-own"), admin.EventAdminCreated, admin.AuditSuccess, "1 hour 1 minute") // this admin's own
 	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-denied"), admin.EventAdminCreated, admin.AuditDenied, "1 hour 1 minute")
 	insertAuditRow(t, db, nil, "viewer", admin.EventLoginSuccess, admin.AuditSuccess, "1 hour 1 minute")
 
 	n, err = audit.AdminsAddedSinceLastSignIn(ctx, adminID)
 	require.NoError(t, err)
-	// The "2 hours" row is after the sign-in too.
-	assert.Equal(t, 3, n)
+	// The "2 hours" row was written before the sign-in, so that sign-in
+	// already counted it.
+	assert.Equal(t, 2, n)
 }
 
 func TestAdminsAddedSinceLastSignIn_IsCapped(t *testing.T) {
@@ -281,21 +299,37 @@ func signInAdmin(t *testing.T, engine *gin.Engine, username string, va *virtualA
 	return rec.Code, rec.Body.Bytes(), rec.Header().Get("Set-Cookie")
 }
 
-// decodeSignIn decodes the sign-in success body and requires exactly the two
-// fields the portal accepts.
+// decodeSignIn decodes the sign-in success body and returns its count. It
+// requires exactly the fields the portal accepts: status and admins_added,
+// plus notice_cursor exactly when the count is above zero.
 func decodeSignIn(t *testing.T, body []byte) int {
+	t.Helper()
+	n, _ := decodeSignInNotice(t, body)
+	return n
+}
+
+// decodeSignInNotice is decodeSignIn that also returns the cursor ("" for
+// none).
+func decodeSignInNotice(t *testing.T, body []byte) (int, string) {
 	t.Helper()
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(body, &raw))
-	require.Len(t, raw, 2, string(body))
 	var resp struct {
-		Status      string `json:"status"`
-		AdminsAdded *int   `json:"admins_added"`
+		Status       string  `json:"status"`
+		AdminsAdded  *int    `json:"admins_added"`
+		NoticeCursor *string `json:"notice_cursor"`
 	}
 	require.NoError(t, json.Unmarshal(body, &resp))
 	require.Equal(t, "authenticated", resp.Status)
 	require.NotNil(t, resp.AdminsAdded, "admins_added is required")
-	return *resp.AdminsAdded
+	if *resp.AdminsAdded == 0 {
+		require.Len(t, raw, 2, string(body))
+		return 0, ""
+	}
+	require.Len(t, raw, 3, string(body))
+	require.NotNil(t, resp.NoticeCursor, "notice_cursor is required with a count")
+	require.Regexp(t, `^[1-9][0-9]*$`, *resp.NoticeCursor)
+	return *resp.AdminsAdded, *resp.NoticeCursor
 }
 
 // A sign-in reports the admins created in the console since the previous one.

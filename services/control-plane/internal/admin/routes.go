@@ -91,6 +91,15 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 				adminRoutes.POST("", h.CreateAdmin)
 				adminRoutes.POST("/stepup", h.CreateAdminStepUpBegin)
 			}
+			noticeRoutes := gated.Group("/signin-notice")
+			noticeRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
+				rdb,
+				adminAuthRateLimit,
+				adminAuthRateWindow,
+				adminRateLimited,
+				adminRateLimitUnavailable,
+			))
+			noticeRoutes.POST("/ack", h.AcknowledgeSignInNotice)
 			serverRoutes := gated.Group("/server")
 			serverRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
 				rdb,

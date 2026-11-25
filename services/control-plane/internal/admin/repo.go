@@ -43,25 +43,54 @@ func NewAdminRepo(db *sql.DB) *AdminRepo {
 	return &AdminRepo{db: db}
 }
 
-// CreatePending inserts a new admin in the pending_enrollment state. It returns
-// ErrInvalidUsername if ValidateAdminUsername refuses the username and
-// ErrDuplicateUsername if the username is already taken.
+// adminCreateLockKey is the PostgreSQL advisory key that serializes admin
+// inserts, so the confusable-username check and the insert of one creation
+// run before the next creation reads the usernames. It is taken
+// transaction-scoped, before signInNoticeLockKey, by every path that inserts
+// an admin row (createPendingTx). The domain string keeps it apart from every
+// other advisory key space.
+var adminCreateLockKey = advisoryKey("admin_create\x00v1")
+
+// CreatePending inserts a new admin in the pending_enrollment state in its own
+// transaction. It returns ErrInvalidUsername if ValidateAdminUsername refuses
+// the username, ErrDuplicateUsername if the username is already taken and
+// ErrConfusableUsername if it looks like an existing admin's.
 func (r *AdminRepo) CreatePending(ctx context.Context, username, passwordHash string) (AdminUser, error) {
-	return createPending(ctx, r.db, username, passwordHash)
+	if err := ValidateAdminUsername(username); err != nil {
+		return AdminUser{}, err
+	}
+	tx, err := r.db.BeginTx(ctx, readCommitted)
+	if err != nil {
+		return AdminUser{}, fmt.Errorf("begin create pending admin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	u, err := r.CreatePendingTx(ctx, tx, username, passwordHash)
+	if err != nil {
+		return AdminUser{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AdminUser{}, fmt.Errorf("commit create pending admin: %w", err)
+	}
+	return u, nil
 }
 
 // CreatePendingTx is CreatePending inside the caller's transaction, so the
-// row commits only with whatever else that transaction writes.
+// row commits only with whatever else that transaction writes. The caller's
+// transaction must be READ COMMITTED (readCommitted): the username read after
+// the advisory lock must see the admin the previous lock holder committed.
+//
+// It takes adminCreateLockKey, which the transaction then holds until it ends,
+// reads every admin username and refuses a new name whose
+// UsernameSkeleton equals an existing one's. Two concurrent creations of
+// lookalike names therefore cannot both pass the check.
 func (r *AdminRepo) CreatePendingTx(ctx context.Context, tx *sql.Tx, username, passwordHash string) (AdminUser, error) {
-	return createPending(ctx, tx, username, passwordHash)
-}
-
-type rowQueryer interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-func createPending(ctx context.Context, db rowQueryer, username, passwordHash string) (AdminUser, error) {
 	if err := ValidateAdminUsername(username); err != nil {
+		return AdminUser{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, adminCreateLockKey); err != nil {
+		return AdminUser{}, fmt.Errorf("take admin create lock: %w", err)
+	}
+	if err := refuseConfusable(ctx, tx, username); err != nil {
 		return AdminUser{}, err
 	}
 	const q = `
@@ -73,7 +102,7 @@ func createPending(ctx context.Context, db rowQueryer, username, passwordHash st
 	var u AdminUser
 	var status string
 	var disabledAt sql.NullTime
-	err := db.QueryRowContext(ctx, q, username, passwordHash, string(StatusPending)).Scan(
+	err := tx.QueryRowContext(ctx, q, username, passwordHash, string(StatusPending)).Scan(
 		&u.ID, &u.Username, &u.PasswordHash, &status, &u.CredentialGeneration, &u.SessionGeneration,
 		&u.CreatedAt, &u.UpdatedAt, &disabledAt,
 	)
@@ -89,6 +118,54 @@ func createPending(ctx context.Context, db rowQueryer, username, passwordHash st
 		u.DisabledAt = &disabledAt.Time
 	}
 	return u, nil
+}
+
+// CheckUsernameAvailable reports, without a lock, whether a new admin could
+// take this username: ErrInvalidUsername, ErrDuplicateUsername or
+// ErrConfusableUsername when not. CreateAdmin calls it before the step-up is
+// redeemed, so a refused name does not spend the proof; CreatePendingTx checks
+// again under the lock.
+func (r *AdminRepo) CheckUsernameAvailable(ctx context.Context, username string) error {
+	if err := ValidateAdminUsername(username); err != nil {
+		return err
+	}
+	return refuseConfusable(ctx, r.db, username)
+}
+
+type usernameQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// refuseConfusable returns ErrDuplicateUsername when an admin has exactly
+// this username and ErrConfusableUsername when one has the same
+// UsernameSkeleton. Admins are few, so it reads every username.
+func refuseConfusable(ctx context.Context, db usernameQuerier, username string) error {
+	rows, err := db.QueryContext(ctx, `SELECT username FROM admin_users`)
+	if err != nil {
+		return fmt.Errorf("read admin usernames: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	skeleton := UsernameSkeleton(username)
+	confusable := false
+	for rows.Next() {
+		var existing string
+		if err := rows.Scan(&existing); err != nil {
+			return fmt.Errorf("read admin usernames: %w", err)
+		}
+		if existing == username {
+			return ErrDuplicateUsername
+		}
+		if UsernameSkeleton(existing) == skeleton {
+			confusable = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read admin usernames: %w", err)
+	}
+	if confusable {
+		return ErrConfusableUsername
+	}
+	return nil
 }
 
 // GetByUsername returns the admin with the given username, or ErrAdminNotFound.

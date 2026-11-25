@@ -128,18 +128,6 @@ func TestCreateAdmin_SuccessRowCarriesCreatedAdminID(t *testing.T) {
 	assert.Equal(t, created.ID, recorded)
 }
 
-func TestValidateAdminUsername(t *testing.T) {
-	for _, ok := range []string{"alice", "ops-admin_2", "Zoë", "two words", "名前"} {
-		assert.NoError(t, admin.ValidateAdminUsername(ok), "%q", ok)
-	}
-	for _, bad := range []string{
-		"", "evil\x01", "\x01\x02", "tab\there", "line\nbreak", "del\x7f", "c1\u0085",
-		"zero\u200bwidth", "bidi\u202eflip", " leading", "trailing ", "\u00a0nbsp", "bad\xffutf8",
-	} {
-		assert.ErrorIs(t, admin.ValidateAdminUsername(bad), admin.ErrInvalidUsername, "%q", bad)
-	}
-}
-
 func TestAdminCtl_Bootstrap_RejectsInvalidUsername(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)

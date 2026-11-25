@@ -10,7 +10,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
-// Migrations 000202 and 000203 index admin_audit_log for the admin sign-in
+// Migrations 000203 and 000204 index admin_audit_log for the admin sign-in
 // notice (AuditLog.AdminsAddedSinceLastSignIn).
 
 // migrationStatements returns the file's SQL statements, comments dropped.
@@ -34,18 +34,18 @@ func migrationStatements(t *testing.T, path string) []string {
 // Each file holds exactly one CONCURRENTLY statement: golang-migrate sends a
 // file as one simple query, and PostgreSQL wraps a multi-statement query in a
 // transaction, where CONCURRENTLY cannot run.
-func TestMigration000202_000203_AreSingleConcurrentStatements(t *testing.T) {
+func TestMigration000203_000204_AreSingleConcurrentStatements(t *testing.T) {
 	cases := []struct {
 		file string
 		want string
 	}{
-		{"../../migrations/000202_admin_audit_login_success_index.up.sql",
+		{"../../migrations/000203_admin_audit_login_success_index.up.sql",
 			"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_admin_audit_login_success ON admin_audit_log (admin_id, ts DESC) WHERE event_type = 'login_success' AND result = 'success'"},
-		{"../../migrations/000202_admin_audit_login_success_index.down.sql",
+		{"../../migrations/000203_admin_audit_login_success_index.down.sql",
 			"DROP INDEX CONCURRENTLY IF EXISTS idx_admin_audit_login_success"},
-		{"../../migrations/000203_admin_audit_event_result_ts_index.up.sql",
+		{"../../migrations/000204_admin_audit_event_result_ts_index.up.sql",
 			"CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_admin_audit_event_result_ts ON admin_audit_log (event_type, result, ts)"},
-		{"../../migrations/000203_admin_audit_event_result_ts_index.down.sql",
+		{"../../migrations/000204_admin_audit_event_result_ts_index.down.sql",
 			"DROP INDEX CONCURRENTLY IF EXISTS idx_admin_audit_event_result_ts"},
 	}
 	for _, tc := range cases {
@@ -56,10 +56,10 @@ func TestMigration000202_000203_AreSingleConcurrentStatements(t *testing.T) {
 }
 
 // After the runner applies them, both indexes exist, are valid, and have the
-// pinned definitions. That the production count query uses them is pinned in
-// internal/admin (TestAdminsAddedQuery_UsesNoticeIndexesUnderGenericPlan),
-// which can EXPLAIN the query itself.
-func TestMigration000202_000203_IndexesAreValid(t *testing.T) {
+// pinned definitions. That the production notice query uses them is pinned in
+// internal/admin (TestSignInNoticeQuery_UsesIndexesUnderGenericPlan), which
+// can EXPLAIN the query itself.
+func TestMigration000203_000204_IndexesAreValid(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(cleanup)
 

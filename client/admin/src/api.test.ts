@@ -252,20 +252,31 @@ describe("api", () => {
     await expect(api.logout()).rejects.toBeInstanceOf(ApiContractError);
   });
 
-  it.each([0, 1, 100])(
-    "returns the sign-in count of admins added (%i)",
-    async (count) => {
-      server.use(
-        http.post(`${base}/admin/api/v1/auth/webauthn`, () =>
-          json({ status: "authenticated", admins_added: count }),
-        ),
-      );
+  it.each([
+    [{ status: "authenticated", admins_added: 0 }, 0, null],
+    [
+      { status: "authenticated", admins_added: 1, notice_cursor: "12" },
+      1,
+      "12",
+    ],
+    [
+      {
+        status: "authenticated",
+        admins_added: 100,
+        notice_cursor: "999999999999999999",
+      },
+      100,
+      "999999999999999999",
+    ],
+  ])("returns the sign-in notice %j", async (body, adminsAdded, cursor) => {
+    server.use(
+      http.post(`${base}/admin/api/v1/auth/webauthn`, () => json(body)),
+    );
 
-      await expect(
-        api.webauthnLogin("login-handle", { id: "credential" }),
-      ).resolves.toBe(count);
-    },
-  );
+    await expect(
+      api.webauthnLogin("login-handle", { id: "credential" }),
+    ).resolves.toEqual({ adminsAdded, cursor });
+  });
 
   // The server leaves the count out when it could not read it, and still
   // signs the admin in; the portal shows no notice.
@@ -278,7 +289,7 @@ describe("api", () => {
 
     await expect(
       api.webauthnLogin("login-handle", { id: "credential" }),
-    ).resolves.toBe(0);
+    ).resolves.toEqual({ adminsAdded: 0, cursor: null });
   });
 
   it.each([
@@ -290,7 +301,32 @@ describe("api", () => {
     ["over the cap", { status: "authenticated", admins_added: 101 }],
     ["a string", { status: "authenticated", admins_added: "3" }],
     ["under another status", { status: "enrolled", admins_added: 0 }],
-  ])("rejects a sign-in count that is %s", async (_label, body) => {
+    ["above 0 without a cursor", { status: "authenticated", admins_added: 2 }],
+    [
+      "0 with a cursor",
+      { status: "authenticated", admins_added: 0, notice_cursor: "4" },
+    ],
+    [
+      "a numeric cursor",
+      { status: "authenticated", admins_added: 1, notice_cursor: 4 },
+    ],
+    [
+      "a zero cursor",
+      { status: "authenticated", admins_added: 1, notice_cursor: "0" },
+    ],
+    [
+      "a non-decimal cursor",
+      { status: "authenticated", admins_added: 1, notice_cursor: "4e2" },
+    ],
+    [
+      "an overlong cursor",
+      {
+        status: "authenticated",
+        admins_added: 1,
+        notice_cursor: "1234567890123456789",
+      },
+    ],
+  ])("rejects a sign-in notice that is %s", async (_label, body) => {
     server.use(
       http.post(`${base}/admin/api/v1/auth/webauthn`, () => json(body)),
     );
@@ -298,6 +334,50 @@ describe("api", () => {
     await rejectWithContractError(
       api.webauthnLogin("login-handle", { id: "credential" }),
     );
+  });
+
+  it("acknowledges a notice with a JSON POST of its cursor", async () => {
+    const requests: { body: unknown; contentType: string | null }[] = [];
+    server.use(
+      http.post(
+        `${base}/admin/api/v1/signin-notice/ack`,
+        async ({ request }) => {
+          requests.push({
+            body: await request.json(),
+            contentType: request.headers.get("Content-Type"),
+          });
+          return new HttpResponse(null, { status: 204 });
+        },
+      ),
+    );
+
+    await expect(api.ackSignInNotice("917")).resolves.toBeUndefined();
+    expect(requests).toEqual([
+      { body: { cursor: "917" }, contentType: "application/json" },
+    ]);
+  });
+
+  it.each([400, 409, 503])(
+    "rejects a refused acknowledgement (%i)",
+    async (status) => {
+      server.use(
+        http.post(`${base}/admin/api/v1/signin-notice/ack`, () =>
+          json({ error: "invalid_cursor" }, status),
+        ),
+      );
+
+      await expect(api.ackSignInNotice("917")).rejects.toBeInstanceOf(ApiError);
+    },
+  );
+
+  it("rejects an acknowledgement answered with a body", async () => {
+    server.use(
+      http.post(`${base}/admin/api/v1/signin-notice/ack`, () =>
+        json({ status: "ok" }),
+      ),
+    );
+
+    await rejectWithContractError(api.ackSignInNotice("917"));
   });
 
   it.each([
