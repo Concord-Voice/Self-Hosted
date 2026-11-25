@@ -471,9 +471,11 @@ describe('createAdmissionGate', () => {
   it('still bounds the store when every tracked bucket is over budget', () => {
     const clock = makeClock();
     const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    // One shared callback: a spy per call (600k of them) timed out on CI runners.
+    const noop = () => {};
     for (let i = 0; i < MAX_TRACKED_IPS + 10; i += 1) {
       const headers = { 'x-real-ip': `203.0.${Math.floor(i / 256)}.${i % 256}` };
-      for (let n = 0; n < HANDSHAKE_BURST; n += 1) gate(req(headers), vi.fn());
+      for (let n = 0; n < HANDSHAKE_BURST; n += 1) gate(req(headers), noop);
     }
     expect(gate.trackedCount()).toBeLessThanOrEqual(HARD_MAX_TRACKED_IPS);
   });
