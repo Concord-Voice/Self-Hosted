@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,11 @@ const (
 	msgInternalError      = "internal error"
 	msgTooManyAttempts    = "too many attempts, try again later"
 	logLockoutCheckFailed = "admin lockout check failed"
+	// msgConfusableUsername refuses a new admin username that reads like an
+	// existing one (UsernameSkeleton).
+	msgConfusableUsername = "username looks like an existing admin username"
+	// msgUsernameTaken refuses a new admin username an admin already has.
+	msgUsernameTaken = "username already exists"
 )
 
 // errInvalidAdminChallenge denotes an absent, expired or already consumed handle.
@@ -333,8 +339,35 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	}
 
 	adminID := challenge.AdminID
-	h.auditOK(ctx, &adminID, challenge.Username, EventLoginSuccess)
-	c.JSON(http.StatusOK, gin.H{"status": "authenticated"})
+	// Recording the sign-in also reads the notice: the admins added since this
+	// admin last acknowledged one, counted in the same transaction that writes
+	// this login_success row (RecordSignIn), so no creation can fall between
+	// two windows. The notice is informational, so a failed read does not
+	// block sign-in: the response then carries no count rather than a zero.
+	// The window moves only when the portal acknowledges the cursor
+	// (AcknowledgeSignInNotice), so a notice this response never delivers is
+	// shown again at the next sign-in.
+	rec, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username, sid)
+	if !rec.Shown {
+		stage := "notice_read"
+		if errors.Is(rec.NoticeErr, errAuditWrite) {
+			stage = "audit_write"
+		}
+		h.log.Error("admin sign-in notice unavailable", "stage", stage, "error", rec.NoticeErr)
+	}
+	if err != nil {
+		h.log.Warn("admin audit write failed", "error", err)
+	}
+	resp := gin.H{"status": "authenticated"}
+	if rec.Shown {
+		resp["admins_added"] = rec.Notice.AdminsAdded
+		if rec.Notice.AdminsAdded > 0 {
+			// Opaque to the portal, which sends it back once it has shown the
+			// notice (POST /admin/api/v1/signin-notice/ack).
+			resp["notice_cursor"] = strconv.FormatInt(rec.Notice.Cursor, 10)
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // Logout revokes the current admin session and clears the cookie. It is mounted
@@ -804,6 +837,9 @@ func httpRequestWithBody(c *gin.Context, body []byte) *http.Request {
 type createAdminRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	// StepUp is the acting admin's fresh create_admin assertion, begun with
+	// POST /admin/api/v1/admins/stepup (VULN-139).
+	StepUp *adminStepUpProof `json:"stepup,omitempty"`
 }
 
 // CreateAdmin provisions a pending admin and mints a one-time enrollment token,
@@ -811,6 +847,15 @@ type createAdminRequest struct {
 // (set by AdminAuthRequired). The password set here is a temporary credential the
 // new operator changes is out-of-scope; it is hashed with Argon2id and never
 // echoed back.
+//
+// The request must carry a fresh create_admin step-up from the acting admin,
+// redeemed before any row is written, so a session alone cannot mint a new
+// step-up-capable identity (VULN-139). The admin_created audit row commits with
+// the pending row, before the token is minted, and neither exists when the
+// audit row cannot be written, so
+// every live enrollment token has a durable record other admins are told about
+// at their next sign-in. When the token cannot be minted, the still-unenrolled
+// pending row is removed and a failure row is written, so a retry succeeds.
 func (h *Handler) CreateAdmin(c *gin.Context) {
 	ctx := c.Request.Context()
 	actingAdminID := c.GetString(adminIDContextKey)
@@ -824,11 +869,32 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username is required"})
 		return
 	}
+	if ValidateAdminUsername(req.Username) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid username"})
+		return
+	}
+	// A taken name (409) or one that looks like an existing admin's (400) is
+	// refused here, before the step-up is spent; CreatePendingTx checks again
+	// under its lock.
+	switch err := h.repo.CheckUsernameAvailable(ctx, req.Username); {
+	case err == nil:
+	case errors.Is(err, ErrDuplicateUsername):
+		c.JSON(http.StatusConflict, gin.H{"error": msgUsernameTaken})
+		return
+	case errors.Is(err, ErrConfusableUsername):
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgConfusableUsername})
+		return
+	default:
+		h.log.Error("admin create username check failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+		return
+	}
 	if err := auth.ValidatePasswordStrength(req.Password); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "password too weak"})
 		return
 	}
-
+	// Hash before the step-up is redeemed, so a hashing failure does not
+	// spend the proof.
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		h.log.Error("admin hash password failed", "error", err)
@@ -836,26 +902,76 @@ func (h *Handler) CreateAdmin(c *gin.Context) {
 		return
 	}
 
-	created, err := h.repo.CreatePending(ctx, req.Username, hash)
-	if err != nil {
-		if errors.Is(err, ErrDuplicateUsername) {
-			c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
-			return
+	if !h.requireCreateAdminStepUp(c, req.Username, req.StepUp) {
+		return
+	}
+
+	// From here the step-up is spent, so every failure is audited. The
+	// pending row and its admin_created success row commit in one
+	// transaction: when the record cannot be written no row is left behind,
+	// and a retry with a fresh step-up can create the same username.
+	acting := actingAdminID
+	var created AdminUser
+	// The success row names the created admin by id, which the sign-in notice
+	// counts by: the actor is sanitized on write, so it need not equal the
+	// stored username.
+	err = h.audit.WriteWith(ctx, AuditEvent{
+		AdminID: &acting, Actor: req.Username, EventType: EventAdminCreated, Result: AuditSuccess,
+	}, func(tx *sql.Tx, ev *AuditEvent) error {
+		var cerr error
+		created, cerr = h.repo.CreatePendingTx(ctx, tx, req.Username, hash)
+		if cerr == nil {
+			ev.Detail = map[string]any{detailCreatedAdminID: created.ID}
 		}
+		return cerr
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrDuplicateUsername):
+		// A name taken between the early check and the lock.
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_taken")
+		c.JSON(http.StatusConflict, gin.H{"error": msgUsernameTaken})
+		return
+	case errors.Is(err, ErrConfusableUsername):
+		// A lookalike created between the early check and the lock.
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "username_confusable")
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgConfusableUsername})
+		return
+	case errors.Is(err, errAuditWrite):
+		h.log.Error("admin create audit write failed", "error", err)
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "audit_unavailable")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "audit_unavailable"})
+		return
+	default:
 		h.log.Error("admin create pending failed", "error", err)
+		h.auditCreateAdmin(ctx, actingAdminID, req.Username, AuditFailure, "create_failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
 
 	token, err := h.enroll.MintEnrollmentToken(ctx, created.ID, created.CredentialGeneration)
 	if err != nil {
+		// The pending row is committed but has no token, so nobody can
+		// enroll it. Remove it, while it is still unenrolled, so a retry
+		// with a fresh step-up can create the same username. The committed
+		// admin_created success row stays (the log is append-only); the
+		// failure row below records that the creation did not complete, and
+		// the sign-in notice skips the success row because the admin is gone.
+		// The cleanup runs detached from the request, so a client that
+		// hangs up cannot leave the row behind.
 		h.log.Error("admin mint enrollment token failed", "error", err)
+		reason := "token_mint_failed"
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		if derr := h.repo.DeleteUnenrolledPending(cleanupCtx, created.ID, created.CredentialGeneration); derr != nil {
+			// The row stays; reset-enrollment can still recover it.
+			h.log.Error("admin remove unminted pending admin failed", "error", derr)
+			reason = "token_mint_failed_row_kept"
+		}
+		cancel()
+		h.auditCreateAdmin(context.WithoutCancel(ctx), actingAdminID, req.Username, AuditFailure, reason)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
-
-	acting := actingAdminID
-	h.auditOK(ctx, &acting, req.Username, EventBootstrap)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"username": created.Username,

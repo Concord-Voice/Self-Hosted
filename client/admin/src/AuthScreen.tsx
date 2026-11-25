@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
-import { ApiContractError, ApiError, api } from "./api";
+import { ApiContractError, ApiError, type SignInNotice, api } from "./api";
 import { decodeRequestOptions, encodeAssertion } from "./webauthn";
 
 interface AuthScreenProps {
-  onAuthenticated: () => void;
+  // notice is what the sign-in response says about admins added since this
+  // admin last acknowledged a sign-in notice.
+  onAuthenticated: (notice: SignInNotice) => void;
 }
 
 interface Ceremony {
@@ -49,14 +51,14 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
         setError("Security key did not return a credential.");
         return;
       }
-      await api.webauthnLogin(
+      const notice = await api.webauthnLogin(
         next.handle,
         encodeAssertion(credential as PublicKeyCredential),
       );
       setPassword("");
       setStatus("");
       setCeremony(null);
-      onAuthenticated();
+      onAuthenticated(notice);
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "NotAllowedError") {
         setError("Security key verification was canceled.");

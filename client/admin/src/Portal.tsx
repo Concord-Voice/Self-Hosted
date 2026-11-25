@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AdminsAddedNotice } from "./AdminsAddedNotice";
 import { api } from "./api";
 import type {
   AdminCountersResponse,
@@ -141,9 +142,18 @@ function reloadDocument(): void {
   globalThis.location.reload();
 }
 
+// A stable default, so the notice's display effect does not rerun each render.
+function noticeDisplayedNoop(): void {
+  // Nothing to acknowledge outside the app shell.
+}
+
 interface PortalProps {
+  adminsAdded?: number;
+  adminsAddedCursor?: string | null;
   initialHealth: AdminHealthResponse | null;
   initialState?: PollingState;
+  onAdminsAddedDismiss?: () => void;
+  onAdminsAddedDisplayed?: (cursor: string) => void;
   onForbidden?: () => void;
   onSessionEnded: () => void;
 }
@@ -331,8 +341,12 @@ function WorkspaceContent({
 }
 
 export function Portal({
+  adminsAdded = 0,
+  adminsAddedCursor = null,
   initialHealth,
   initialState = initialHealth === null ? "stale" : "ready",
+  onAdminsAddedDismiss = () => undefined,
+  onAdminsAddedDisplayed = noticeDisplayedNoop,
   onForbidden = reloadDocument,
   onSessionEnded,
 }: Readonly<PortalProps>) {
@@ -806,6 +820,12 @@ export function Portal({
         </header>
 
         <main aria-labelledby="workspace-title" className="workspace-main">
+          <AdminsAddedNotice
+            count={adminsAdded}
+            cursor={adminsAddedCursor}
+            onDismiss={onAdminsAddedDismiss}
+            onDisplayed={onAdminsAddedDisplayed}
+          />
           {healthData === null ? (
             <output className="shell-notice">
               Live telemetry is temporarily unavailable
