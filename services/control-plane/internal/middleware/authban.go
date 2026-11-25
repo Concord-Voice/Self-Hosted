@@ -2,8 +2,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"time"
@@ -109,7 +109,9 @@ func abortAuthBudgetBackendUnavailable(c *gin.Context) {
 // outage over 2-4 seconds, so a brief Redis outage does not synchronise every
 // client (session refresh included) into one retry wave.
 func authBudgetRetryAfter() string {
-	return strconv.Itoa(2 + rand.IntN(3)) //nolint:gosec // retry jitter, not a security value
+	var b [1]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never returns an error (Go 1.24+)
+	return strconv.Itoa(2 + int(b[0])%3)
 }
 
 // RecordAuthFailure increments the cumulative failure counter for an IP.
