@@ -22,7 +22,7 @@ func TestReservationBackfillCompletesVerifiedBaseline(t *testing.T) {
 	defer cleanup()
 
 	messageID, dmMessageID := insertReservationFixture(t, db, uuid.New(), uuid.New())
-	// SetupTestDB is already at migration 000202, so remove these fixture
+	// SetupTestDB is already at migration 000206, so remove these fixture
 	// reservations to model rows that existed before the schema migration.
 	_, err := testdb.ExecReplica(db, `DELETE FROM message_id_reservations WHERE message_id IN ($1, $2)`, messageID, dmMessageID)
 	require.NoError(t, err)
@@ -377,7 +377,7 @@ func insertReservationFixture(t *testing.T, db *sql.DB, messageID, dmMessageID u
 	}
 	if messageID == dmMessageID {
 		// A scoped trigger bypass models a historical collision that predates
-		// 000202; it is immediately restored for the rest of this test DB.
+		// 000206; it is immediately restored for the rest of this test DB.
 		tx, beginErr := db.Begin()
 		require.NoError(t, beginErr)
 		defer func() {
