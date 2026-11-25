@@ -1,5 +1,5 @@
 // Command message-id-reservation-backfill establishes the dormant message-ID
-// reservation baseline introduced by migration 000202. It does not enable a
+// reservation baseline introduced by migration 000206. It does not enable a
 // message writer; a later writer must independently require the completed gate.
 package main
 

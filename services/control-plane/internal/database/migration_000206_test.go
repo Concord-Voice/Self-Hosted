@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMigration000202_ReservationNamespaceAndGuards(t *testing.T) {
+func TestMigration000206_ReservationNamespaceAndGuards(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	defer cleanup()
 
@@ -22,7 +22,7 @@ func TestMigration000202_ReservationNamespaceAndGuards(t *testing.T) {
 		WHERE table_schema = current_schema() AND table_name = 'message_id_reservations'`).Scan(&columnCount))
 	assert.Equal(t, 1, columnCount, "the reservation namespace must remain ID-only")
 
-	messageID, dmMessageID, channelID, userID, conversationID := migration000202Fixture(t, db)
+	messageID, dmMessageID, channelID, userID, conversationID := migration000206Fixture(t, db)
 	_, err := db.Exec(`DELETE FROM message_id_reservations WHERE message_id = $1`, messageID)
 	migrationRequirePQError(t, err, "23000", "message_id_reservations_immutable")
 	_, err = db.Exec(`TRUNCATE message_id_reservations`)
@@ -63,15 +63,15 @@ func TestMigration000202_ReservationNamespaceAndGuards(t *testing.T) {
 	assert.NotEqual(t, uuid.Nil, channelID)
 }
 
-func TestMigration000202_DownFailsClosedAndRoundTripsWhenUnused(t *testing.T) {
+func TestMigration000206_DownFailsClosedAndRoundTripsWhenUnused(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	defer cleanup()
 
-	down := migrationReadFile(t, "../../migrations/000202_message_id_reservations.down.sql")
-	up := migrationReadFile(t, "../../migrations/000202_message_id_reservations.up.sql")
+	down := migrationReadFile(t, "../../migrations/000206_message_id_reservations.down.sql")
+	up := migrationReadFile(t, "../../migrations/000206_message_id_reservations.up.sql")
 
 	t.Run("history blocks downgrade", func(t *testing.T) {
-		messageID, _, _, _, _ := migration000202Fixture(t, db)
+		messageID, _, _, _, _ := migration000206Fixture(t, db)
 		_, err := db.Exec(down)
 		require.ErrorContains(t, err, "refusing to remove message ID reservation state")
 		var retained int
@@ -102,7 +102,7 @@ func TestMigration000202_DownFailsClosedAndRoundTripsWhenUnused(t *testing.T) {
 	})
 }
 
-func migration000202Fixture(t *testing.T, db *sql.DB) (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) {
+func migration000206Fixture(t *testing.T, db *sql.DB) (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	userID := testhelpers.CreateUser(t, db)
 	serverID := testhelpers.CreateServer(t, db, userID)

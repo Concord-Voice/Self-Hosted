@@ -1,6 +1,6 @@
 # Message-ID Reservation Baseline
 
-Migration 000202 is a dormant prerequisite for a future `message-v1` writer. It
+Migration 000206 is a dormant prerequisite for a future `message-v1` writer. It
 does not select an E2EE format, change a route, enable a writer, or change
 client-visible responses.
 
@@ -21,7 +21,7 @@ turn reservation state into an oracle.
 
 ## Operator procedure
 
-1. Apply migration 000202. It performs DDL only; it intentionally does not
+1. Apply migration 000206. It performs DDL only; it intentionally does not
    scan existing message tables under an exclusive migration lock. It has a
    five-second DDL lock timeout: resolve the conflicting transaction and rerun
    the migration if the timeout is reached.

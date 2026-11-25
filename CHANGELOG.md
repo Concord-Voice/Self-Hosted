@@ -105,7 +105,6 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 ### Removed
 
 - **Voice:** Removed the unused `POST /channels/{id}/voice/authorize-action` route. No client or service called it, and it now returns 404.
-
 - **Authentication:** Removed the compiled `authority-ceremony` binary that was committed with the tool's source. Build the tool from source; build outputs are now ignored.
 
 ### Fixed
