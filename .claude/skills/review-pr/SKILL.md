@@ -23,6 +23,8 @@ allowed-tools:
 
 Review PR #$0 against this repository's standards.
 
+On Codex, apply the [independent reviewer requirement](../_shared/pr-review-agent-dispatch.md#codex-review-of-untrusted-prs) before retrieving any PR-authored review input.
+
 ## Review Steps
 
 1. **Fetch PR context** — use `gh pr view $0` and `gh pr diff $0` to understand the change
