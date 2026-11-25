@@ -51,7 +51,7 @@ func TestCreateAdmin_WithoutStepUp_RefusedAndCreatesNoRow(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			username := uniqueAdminUsername("nostepup")
 			body["username"] = username
-			body["password"] = adminTestPassword
+			body["password"] = adminTestPassword // pragma: allowlist secret
 			rec := postJSON(engine, "/admin/api/v1/admins", body)
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 			assert.NotContains(t, rec.Body.String(), "enrollment_token")
@@ -153,7 +153,7 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 		t.Helper()
 		username := uniqueAdminUsername("misuse")
 		body["username"] = username
-		body["password"] = adminTestPassword
+		body["password"] = adminTestPassword // pragma: allowlist secret
 		rec := postJSON(engine, "/admin/api/v1/admins", body)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.JSONEq(t, `{"error":"`+want+`"}`, rec.Body.String())
@@ -240,7 +240,7 @@ func TestCreateAdmin_StepUpOrdering(t *testing.T) {
 	handle, challenge := stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
 	assertion := signStepUp(t, va, challenge, flagUP|flagUV)
 	weak := createBody(uniqueAdminUsername("weak"), handle, assertion)
-	weak["password"] = "short"
+	weak["password"] = "short" // pragma: allowlist secret
 	assert.Equal(t, http.StatusBadRequest, postJSON(engine, "/admin/api/v1/admins", weak).Code)
 
 	// A taken username is a 409 with or without a step-up.

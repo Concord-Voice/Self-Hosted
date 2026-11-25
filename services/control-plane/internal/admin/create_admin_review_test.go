@@ -377,12 +377,13 @@ func TestCreateAdmin_WrongAdmin_DoesNotSpendTheHandle(t *testing.T) {
 	other := adminCreateEngine(t, db, rdb, otherID)
 
 	handle, challenge := stepUpBegin(t, owner, createStepUpPath, nil)
-	body := createBody(uniqueAdminUsername("owned"), handle, signStepUp(t, ownerVA, challenge, flagUP|flagUV))
+	username := uniqueAdminUsername("owned")
+	cleanupAdminNamed(t, db, username)
+	body := createBody(username, handle, signStepUp(t, ownerVA, challenge, flagUP|flagUV))
 	rec := postJSON(other, createPath, body)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	rec = postJSON(owner, createPath, body)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	cleanupAdminNamed(t, db, body["username"].(string))
 }
 
 // One handle redeemed by many concurrent requests creates exactly one admin.
@@ -491,8 +492,9 @@ func TestCreateAdmin_Throttled_DoesNotSpendStepUp(t *testing.T) {
 
 	engine := adminCreateEngine(t, db, rdb, actingID)
 	handle, challenge := stepUpBegin(t, engine, createStepUpPath, nil)
-	body := createBody(uniqueAdminUsername("throttled"), handle, signStepUp(t, va, challenge, flagUP|flagUV))
-	cleanupAdminNamed(t, db, body["username"].(string))
+	username := uniqueAdminUsername("throttled")
+	cleanupAdminNamed(t, db, username)
+	body := createBody(username, handle, signStepUp(t, va, challenge, flagUP|flagUV))
 
 	for range 5 {
 		serveAdminMetricsRoute(routed, sid, http.MethodPost, createPath)
