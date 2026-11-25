@@ -8,8 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/messages"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/stmthook"
 	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -340,6 +344,153 @@ func TestGetChannelPins_DM_CarriesKeyVersion(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, want[id], m["key_version"], "pin %s", id)
 	}
+}
+
+// A pinned DM message must carry its attachments, as a pinned channel message
+// does. The DM branch used to return the message rows alone, so the desktop
+// pin panel showed a pinned picture, attached GIF or video as nothing at all
+// (Concord-Voice/Desktop#14).
+func TestGetChannelPins_DM_CarriesAttachments(t *testing.T) {
+	ts := setupTS(t)
+	u1 := ts.CreateTestUser(t, "dmpinatt_a")
+	u2 := ts.CreateTestUser(t, "dmpinatt_b")
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
+
+	withFiles := insertDMMessageDirect(t, ts, convID, u1.ID, "two files")
+	oneFile := insertDMMessageDirect(t, ts, convID, u2.ID, "one file")
+	bare := insertDMMessageDirect(t, ts, convID, u2.ID, "no files")
+	deletedOnly := insertDMMessageDirect(t, ts, convID, u1.ID, "its file was deleted")
+
+	// Inserted out of position order, so the response order proves the sort.
+	video := insertDMAttachmentDirect(t, ts, withFiles, convID, u1.ID, "video", "video/mp4", 2048, 1, false)
+	photo := insertDMAttachmentDirect(t, ts, withFiles, convID, u1.ID, "photo", "image/png", 1024, 0, false)
+	// A soft-deleted file is gone for every reader, the pin list included.
+	_ = insertDMAttachmentDirect(t, ts, withFiles, convID, u1.ID, "file", "text/plain", 12, 2, true)
+	// A second pin with a file of its own: each pin carries its files and no other's.
+	audio := insertDMAttachmentDirect(t, ts, oneFile, convID, u2.ID, "audio", "audio/ogg", 512, 0, false)
+	// A pin whose only file is soft-deleted reads as a pin with no files.
+	_ = insertDMAttachmentDirect(t, ts, deletedOnly, convID, u1.ID, "photo", "image/png", 99, 0, true)
+
+	for _, id := range []string{withFiles, oneFile, bare, deletedOnly} {
+		require.Equal(t, http.StatusOK,
+			ts.DoRequest("POST", pinAPIMsg+id+pinPath, nil,
+				testhelpers.AuthHeaders(u1.AccessToken)).Code)
+	}
+
+	// The other participant reads the same attachments as the uploader.
+	w := ts.DoRequest("GET", pinAPICh+convID+pinsPath, nil,
+		testhelpers.AuthHeaders(u2.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, bodyFmtPlaceholder, w.Body.String())
+
+	type attachment struct {
+		ID       string `json:"id"`
+		FileType string `json:"file_type"`
+		MimeType string `json:"mime_type"`
+		FileSize int64  `json:"file_size"`
+	}
+	var resp struct {
+		PinnedMessages []struct {
+			ID string `json:"id"`
+			// A pointer, so a missing field (nil) differs from an empty list.
+			Attachments *[]attachment `json:"attachments"`
+		} `json:"pinned_messages"`
+		Count int `json:"count"`
+	}
+	testhelpers.ParseJSON(t, w, &resp)
+	require.Equal(t, 4, resp.Count)
+	require.Len(t, resp.PinnedMessages, 4)
+
+	got := map[string]*[]attachment{}
+	for _, m := range resp.PinnedMessages {
+		got[m.ID] = m.Attachments
+	}
+	require.NotNil(t, got[withFiles])
+	assert.Equal(t, []attachment{
+		{ID: photo, FileType: "photo", MimeType: "image/png", FileSize: 1024},
+		{ID: video, FileType: "video", MimeType: "video/mp4", FileSize: 2048},
+	}, *got[withFiles], "attachments in position order, the deleted one left out")
+	require.NotNil(t, got[oneFile])
+	assert.Equal(t, []attachment{
+		{ID: audio, FileType: "audio", MimeType: "audio/ogg", FileSize: 512},
+	}, *got[oneFile], "each pin carries its own files")
+	assert.Nil(t, got[bare], "a pin with no files omits the field, as a DM message does")
+	assert.Nil(t, got[deletedOnly], "a pin whose only file is deleted omits the field too")
+	assert.NotContains(t, w.Body.String(), `"attachments":[]`)
+	assert.NotContains(t, w.Body.String(), `"attachments":null`)
+}
+
+// A failed attachment read must not take the pin list down with it. The pins
+// come back without files, the same degrade as a channel's pin list.
+func TestGetChannelPins_DM_AttachmentReadFailureKeepsPins(t *testing.T) {
+	ts := setupTS(t)
+	u1 := ts.CreateTestUser(t, "dmpinattf_a")
+	u2 := ts.CreateTestUser(t, "dmpinattf_b")
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
+	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "has a file")
+	_ = insertDMAttachmentDirect(t, ts, msgID, convID, u1.ID, "photo", "image/png", 1024, 0, false)
+	_, err := ts.DB.Exec(
+		`UPDATE dm_messages SET pinned_at = NOW(), pinned_by = $2 WHERE id = $1`, msgID, u1.ID)
+	require.NoError(t, err)
+
+	hook, wrapped := stmthook.Open(t)
+	hook.Arm([]string{"FROM dm_message_attachments"}, nil, stmthook.ErrInjected)
+	handler := messages.NewHandler(wrapped, logger.New("test"), nil, nil, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, pinAPICh+convID+pinsPath, nil)
+	c.Params = gin.Params{{Key: "id", Value: convID}}
+	c.Set("user_id", u1.ID)
+	handler.GetChannelPins(c)
+
+	seen, betweenErr := hook.Report()
+	require.NoError(t, betweenErr)
+	require.Equal(t, 1, seen, "the attachment read must have run, and been failed")
+	require.Equal(t, http.StatusOK, w.Code, bodyFmtPlaceholder, w.Body.String())
+	var resp struct {
+		PinnedMessages []map[string]interface{} `json:"pinned_messages"`
+		Count          int                      `json:"count"`
+	}
+	testhelpers.ParseJSON(t, w, &resp)
+	require.Equal(t, 1, resp.Count)
+	require.Len(t, resp.PinnedMessages, 1)
+	assert.Equal(t, msgID, resp.PinnedMessages[0]["id"])
+	assert.NotContains(t, resp.PinnedMessages[0], "attachments")
+}
+
+// With no message IDs there is nothing to read. A nil pool proves the loader
+// returns before it touches one.
+func TestLoadDMAttachmentsForMessages_NoIDsReadsNothing(t *testing.T) {
+	got, err := messages.LoadDMAttachmentsForMessages(nil, nil)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+// insertDMAttachmentDirect links one file to a DM message and returns the file
+// id. deleted marks the file soft-deleted.
+func insertDMAttachmentDirect(
+	t *testing.T, ts *testhelpers.TestServer,
+	messageID, convID, uploaderID, fileType, mimeType string,
+	size int64, position int, deleted bool,
+) string {
+	t.Helper()
+	fileID := uuid.NewString()
+	_, err := ts.DB.Exec(`
+		INSERT INTO media_files
+			(id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key,
+			 key_version, conversation_id)
+		VALUES ($1, $2, $3, 2, $4, $5, $6, 1, $7)`,
+		fileID, uploaderID, fileType, mimeType, size, "attachments/"+fileID, convID)
+	require.NoError(t, err, "failed to insert media file")
+	if deleted {
+		_, err = ts.DB.Exec(`UPDATE media_files SET deleted_at = NOW() WHERE id = $1`, fileID)
+		require.NoError(t, err, "failed to soft-delete media file")
+	}
+	_, err = ts.DB.Exec(
+		`INSERT INTO dm_message_attachments (message_id, file_id, position) VALUES ($1, $2, $3)`,
+		messageID, fileID, position)
+	require.NoError(t, err, "failed to link DM attachment")
+	return fileID
 }
 
 func TestGetChannelPins_DM_NonParticipant_404(t *testing.T) {

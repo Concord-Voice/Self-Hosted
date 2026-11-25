@@ -670,6 +670,33 @@ type dmPinnedMessage struct {
 	Username       string     `json:"username"`
 	DisplayName    *string    `json:"display_name,omitempty"`
 	AvatarURL      *string    `json:"avatar_url,omitempty"`
+	// Attachments mirrors the field a pinned channel message carries, so a
+	// client renders a pinned DM file as it renders a pinned channel file.
+	Attachments []models.AttachmentSummary `json:"attachments,omitempty"`
+}
+
+// attachDMPinAttachments batch-loads and attaches file attachment summaries to
+// pinned DM messages, as enrichMessages does for a channel's pins. A failed
+// load is logged and the pins are returned without attachments: the same
+// degrade as the channel branch and the DM message list.
+func (h *Handler) attachDMPinAttachments(pinned []dmPinnedMessage) {
+	if len(pinned) == 0 {
+		return
+	}
+	messageIDs := make([]string, len(pinned))
+	for i, m := range pinned {
+		messageIDs[i] = m.ID
+	}
+	attachmentMap, err := LoadDMAttachmentsForMessages(h.db, messageIDs)
+	if err != nil {
+		h.log.Error("Failed to load pinned DM attachments", "error", err)
+		return
+	}
+	for i := range pinned {
+		if attachments, ok := attachmentMap[pinned[i].ID]; ok {
+			pinned[i].Attachments = attachments
+		}
+	}
 }
 
 // getDMConversationPins returns all pinned messages for a DM conversation.
@@ -740,6 +767,8 @@ func (h *Handler) getDMConversationPins(c *gin.Context, conversationID, userID s
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFetchPinsFailed})
 		return
 	}
+
+	h.attachDMPinAttachments(pinned)
 
 	c.JSON(http.StatusOK, gin.H{"pinned_messages": pinned, "count": len(pinned), "conversation_id": conversationID})
 }

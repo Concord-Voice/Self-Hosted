@@ -28,13 +28,38 @@ func loadAttachmentsForMessages(db *sql.DB, messageIDs []string) (map[string][]m
 	return ScanAttachmentSummaries(rows)
 }
 
+// LoadDMAttachmentsForMessages batch-loads attachment summaries for a set of DM
+// messages. Returns a map from message ID to its attachment summaries. Avoids
+// N+1 queries. It is the one loader of DM attachment summaries: the DM message
+// list in internal/dm and the DM pin list in this package both read through it.
+//
+// It performs no access check. A caller passes only message IDs that a query
+// gated on the viewer's participation has already returned.
+func LoadDMAttachmentsForMessages(db *sql.DB, messageIDs []string) (map[string][]models.AttachmentSummary, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := db.Query(`
+		SELECT ma.message_id, mf.id, mf.file_type, mf.mime_type, mf.file_size
+		FROM dm_message_attachments ma
+		INNER JOIN media_files mf ON ma.file_id = mf.id
+		WHERE ma.message_id = ANY($1::uuid[])
+		  AND mf.deleted_at IS NULL
+		ORDER BY ma.message_id, ma.position
+	`, pq.Array(messageIDs))
+	if err != nil {
+		return nil, err
+	}
+	return ScanAttachmentSummaries(rows)
+}
+
 // ScanAttachmentSummaries consumes rows of
 // (message_id, file id, file_type, mime_type, file_size) and groups the
 // summaries by message ID, closing rows before returning. Shared by the
-// channel-message loader above and the DM loader in internal/dm, whose
-// queries differ only by attachment table (message_attachments vs
-// dm_message_attachments) — the SQL stays a per-package literal so no
-// query text is ever built dynamically.
+// channel-message and DM loaders above, whose queries differ only by
+// attachment table (message_attachments vs dm_message_attachments) — each
+// keeps its SQL as a literal so no query text is ever built dynamically.
 func ScanAttachmentSummaries(rows *sql.Rows) (map[string][]models.AttachmentSummary, error) {
 	defer func() { _ = rows.Close() }()
 
