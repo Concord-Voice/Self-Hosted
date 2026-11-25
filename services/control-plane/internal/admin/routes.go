@@ -24,6 +24,11 @@ const (
 	// Each Server read runs a root command through the host agent and writes an
 	// audit row, so the budget is tighter than the metrics one.
 	adminServerRateLimit = 30
+	// Creating an admin is rare and mints a step-up-capable identity, so its
+	// budget is the tightest (VULN-139). The step-up begin route has its own
+	// bucket of the same size.
+	adminCreateRateLimit  = 5
+	adminCreateRateWindow = time.Hour
 )
 
 var adminMetricsDeniedMethods = []string{
@@ -73,18 +78,35 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 		gated := api.Group("/")
 		gated.Use(AdminAuthRequired(h.sessions, h.repo))
 		{
-			gated.POST("/admins", h.CreateAdmin)
+			// Fail closed: a limiter that cannot count refuses the request.
+			adminRoutes := gated.Group("/admins")
+			adminRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
+				rdb,
+				adminCreateRateLimit,
+				adminCreateRateWindow,
+				adminRateLimited,
+				adminRateLimitUnavailable,
+			))
+			{
+				adminRoutes.POST("", h.CreateAdmin)
+				adminRoutes.POST("/stepup", h.CreateAdminStepUpBegin)
+			}
+			noticeRoutes := gated.Group("/signin-notice")
+			noticeRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
+				rdb,
+				adminAuthRateLimit,
+				adminAuthRateWindow,
+				adminRateLimited,
+				adminRateLimitUnavailable,
+			))
+			noticeRoutes.POST("/ack", h.AcknowledgeSignInNotice)
 			serverRoutes := gated.Group("/server")
 			serverRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
 				rdb,
 				adminServerRateLimit,
 				adminMetricsRateWindow,
-				func(c *gin.Context) {
-					c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate_limited"})
-				},
-				func(c *gin.Context) {
-					c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-				},
+				adminRateLimited,
+				adminRateLimitUnavailable,
 			))
 			{
 				serverRoutes.GET("/status", h.server.Status)
@@ -116,6 +138,16 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 		}
 	}
 
+}
+
+// adminRateLimited and adminRateLimitUnavailable are the fixed responses of
+// the fail-closed admin limiters.
+func adminRateLimited(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate_limited"})
+}
+
+func adminRateLimitUnavailable(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 }
 
 // preAuthRoutePaths is the explicit allowlist of admin routes that are

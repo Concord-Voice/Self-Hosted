@@ -136,7 +136,7 @@ describe("api", () => {
       }),
       http.post(`${base}/admin/api/v1/auth/webauthn`, async ({ request }) => {
         bodies.push(await request.json());
-        return json({ status: "authenticated" });
+        return json({ status: "authenticated", admins_added: 0 });
       }),
       http.post(`${base}/admin/api/v1/enroll/begin`, async ({ request }) => {
         bodies.push(await request.json());
@@ -216,7 +216,7 @@ describe("api", () => {
         }),
       ),
       http.post(`${base}/admin/api/v1/auth/webauthn`, () =>
-        json({ status: "authenticated", unexpected: true }),
+        json({ status: "authenticated", admins_added: 0, unexpected: true }),
       ),
       http.post(`${base}/admin/api/v1/enroll/begin`, () =>
         json({
@@ -250,6 +250,134 @@ describe("api", () => {
       api.enrollFinish("enroll-handle", { id: "credential" }, "primary"),
     ).rejects.toBeInstanceOf(ApiContractError);
     await expect(api.logout()).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+  it.each([
+    [{ status: "authenticated", admins_added: 0 }, 0, null],
+    [
+      { status: "authenticated", admins_added: 1, notice_cursor: "12" },
+      1,
+      "12",
+    ],
+    [
+      {
+        status: "authenticated",
+        admins_added: 100,
+        notice_cursor: "999999999999999999",
+      },
+      100,
+      "999999999999999999",
+    ],
+  ])("returns the sign-in notice %j", async (body, adminsAdded, cursor) => {
+    server.use(
+      http.post(`${base}/admin/api/v1/auth/webauthn`, () => json(body)),
+    );
+
+    await expect(
+      api.webauthnLogin("login-handle", { id: "credential" }),
+    ).resolves.toEqual({ adminsAdded, cursor });
+  });
+
+  // The server leaves the count out when it could not read it, and still
+  // signs the admin in; the portal shows no notice.
+  it("accepts a sign-in without a count as no admins added", async () => {
+    server.use(
+      http.post(`${base}/admin/api/v1/auth/webauthn`, () =>
+        json({ status: "authenticated" }),
+      ),
+    );
+
+    await expect(
+      api.webauthnLogin("login-handle", { id: "credential" }),
+    ).resolves.toEqual({ adminsAdded: 0, cursor: null });
+  });
+
+  it.each([
+    ["missing under another status", { status: "enrolled" }],
+    ["missing beside another key", { status: "authenticated", extra: 1 }],
+    ["null", { status: "authenticated", admins_added: null }],
+    ["negative", { status: "authenticated", admins_added: -1 }],
+    ["fractional", { status: "authenticated", admins_added: 1.5 }],
+    ["over the cap", { status: "authenticated", admins_added: 101 }],
+    ["a string", { status: "authenticated", admins_added: "3" }],
+    ["under another status", { status: "enrolled", admins_added: 0 }],
+    ["above 0 without a cursor", { status: "authenticated", admins_added: 2 }],
+    [
+      "0 with a cursor",
+      { status: "authenticated", admins_added: 0, notice_cursor: "4" },
+    ],
+    [
+      "a numeric cursor",
+      { status: "authenticated", admins_added: 1, notice_cursor: 4 },
+    ],
+    [
+      "a zero cursor",
+      { status: "authenticated", admins_added: 1, notice_cursor: "0" },
+    ],
+    [
+      "a non-decimal cursor",
+      { status: "authenticated", admins_added: 1, notice_cursor: "4e2" },
+    ],
+    [
+      "an overlong cursor",
+      {
+        status: "authenticated",
+        admins_added: 1,
+        notice_cursor: "1234567890123456789",
+      },
+    ],
+  ])("rejects a sign-in notice that is %s", async (_label, body) => {
+    server.use(
+      http.post(`${base}/admin/api/v1/auth/webauthn`, () => json(body)),
+    );
+
+    await rejectWithContractError(
+      api.webauthnLogin("login-handle", { id: "credential" }),
+    );
+  });
+
+  it("acknowledges a notice with a JSON POST of its cursor", async () => {
+    const requests: { body: unknown; contentType: string | null }[] = [];
+    server.use(
+      http.post(
+        `${base}/admin/api/v1/signin-notice/ack`,
+        async ({ request }) => {
+          requests.push({
+            body: await request.json(),
+            contentType: request.headers.get("Content-Type"),
+          });
+          return new HttpResponse(null, { status: 204 });
+        },
+      ),
+    );
+
+    await expect(api.ackSignInNotice("917")).resolves.toBeUndefined();
+    expect(requests).toEqual([
+      { body: { cursor: "917" }, contentType: "application/json" },
+    ]);
+  });
+
+  it.each([400, 409, 503])(
+    "rejects a refused acknowledgement (%i)",
+    async (status) => {
+      server.use(
+        http.post(`${base}/admin/api/v1/signin-notice/ack`, () =>
+          json({ error: "invalid_cursor" }, status),
+        ),
+      );
+
+      await expect(api.ackSignInNotice("917")).rejects.toBeInstanceOf(ApiError);
+    },
+  );
+
+  it("rejects an acknowledgement answered with a body", async () => {
+    server.use(
+      http.post(`${base}/admin/api/v1/signin-notice/ack`, () =>
+        json({ status: "ok" }),
+      ),
+    );
+
+    await rejectWithContractError(api.ackSignInNotice("917"));
   });
 
   it.each([

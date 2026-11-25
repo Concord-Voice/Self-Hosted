@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiError, api } from "./api";
+import { ApiError, type SignInNotice, api } from "./api";
 import concordSymbol from "./assets/logos/symbol-transparent-vector.svg";
 import { AuthScreen } from "./AuthScreen";
 import type { AdminHealthResponse } from "./contracts";
@@ -46,7 +46,7 @@ type View =
 interface EntryContentProps {
   isEnrollment: boolean;
   navigate: (path: string) => void;
-  onAuthenticated: () => void;
+  onAuthenticated: (notice: SignInNotice) => void;
   onRetry: () => void;
   view: View;
 }
@@ -93,6 +93,11 @@ export function App({
   const isEnrollment = globalThis.location.pathname === "/admin/enroll";
   const [view, setView] = useState<View>({ kind: "loading" });
   const [probeGeneration, setProbeGeneration] = useState(0);
+  // The latest sign-in's notice, kept until this admin dismisses it or the
+  // session ends. A later sign-in replaces it: its count already includes
+  // every admin added since the last acknowledged notice.
+  const [notice, setNotice] = useState<SignInNotice | null>(null);
+  const acknowledgedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (isEnrollment) return;
@@ -127,21 +132,46 @@ export function App({
     setProbeGeneration((generation) => generation + 1);
   };
 
+  const handleAuthenticated = (next: SignInNotice) => {
+    // A new session must acknowledge its own notice.
+    acknowledgedRef.current = null;
+    setNotice(next.adminsAdded > 0 ? next : null);
+    retrySessionProbe();
+  };
+
+  // Called once the portal has displayed the notice. A failed acknowledgement
+  // is not retried here: the server then shows the notice again at the next
+  // sign-in.
+  const handleNoticeDisplayed = useCallback((cursor: string) => {
+    if (acknowledgedRef.current === cursor) return;
+    acknowledgedRef.current = cursor;
+    void api.ackSignInNotice(cursor).catch(() => undefined);
+  }, []);
+
+  const handleSessionEnded = () => {
+    setNotice(null);
+    setView({ kind: "login" });
+  };
+
   return (
     <div className="app-shell">
       <Brand />
       {!isEnrollment && view.kind === "portal" ? (
         <Portal
+          adminsAdded={notice?.adminsAdded ?? 0}
+          adminsAddedCursor={notice?.cursor ?? null}
           initialHealth={view.health}
+          onAdminsAddedDismiss={() => setNotice(null)}
+          onAdminsAddedDisplayed={handleNoticeDisplayed}
           onForbidden={reload}
-          onSessionEnded={() => setView({ kind: "login" })}
+          onSessionEnded={handleSessionEnded}
         />
       ) : (
         <main className="app-main">
           <EntryContent
             isEnrollment={isEnrollment}
             navigate={navigate}
-            onAuthenticated={retrySessionProbe}
+            onAuthenticated={handleAuthenticated}
             onRetry={retrySessionProbe}
             view={view}
           />

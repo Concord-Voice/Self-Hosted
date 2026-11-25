@@ -62,4 +62,3 @@ Investigate the highest-value question first and write your report as soon as yo
 can support it, marking any unverified area explicitly. A complete report on
 partial evidence is useful; a thorough investigation the orchestrator never sees
 is worthless.
-

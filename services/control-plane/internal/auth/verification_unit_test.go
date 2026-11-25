@@ -3,6 +3,7 @@ package auth
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,13 +60,22 @@ func TestHashCodeLength(t *testing.T) {
 }
 
 func TestRedisKeyFormat(t *testing.T) {
-	key := redisKey("user-abc-123")
-	assert.Equal(t, "email_verify:user-abc-123", key)
+	pendingID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440001")
+	assert.Equal(t, "email_verify:550e8400-e29b-41d4-a716-446655440001", redisKey(pendingID))
 }
 
 func TestRedisKeyUUID(t *testing.T) {
-	key := redisKey("550e8400-e29b-41d4-a716-446655440000")
-	assert.Equal(t, "email_verify:550e8400-e29b-41d4-a716-446655440000", key)
+	for _, raw := range []string{
+		"550e8400-e29b-41d4-a716-446655440000",
+		"550E8400-E29B-41D4-A716-446655440000",
+		"550e8400-E29B-41d4-a716-446655440000",
+	} {
+		pendingID, err := uuid.Parse(raw)
+		require.NoError(t, err)
+		assert.Equal(t, "email_verify:550e8400-e29b-41d4-a716-446655440000", redisKey(pendingID))
+		assert.Equal(t, "email_verify_attempts:550e8400-e29b-41d4-a716-446655440000", verificationAttemptsKey(pendingID))
+		assert.Equal(t, "test_only:550e8400-e29b-41d4-a716-446655440000", testVerificationCodeKey(pendingID))
+	}
 }
 
 func TestVerificationRecordStructure(t *testing.T) {
