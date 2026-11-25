@@ -968,6 +968,8 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Server deleted; presence cleanup is pending"})
 			return
 		}
+		// The gated transaction has rolled back and its fence has closed.
+		h.refundBusyCharge(ctx, err, userID, budget)
 		h.respondServerDeleteError(c, err, serverDeleteTransactionFailureClass(err))
 		return
 	}

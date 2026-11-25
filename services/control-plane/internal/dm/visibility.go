@@ -430,6 +430,16 @@ func (h *Handler) enforceClearStepUp(ctx context.Context, c *gin.Context, tx *sq
 		return true
 	}
 	if stepUpErr := h.verifyClearStepUp(ctx, tx, userID, subject, req); stepUpErr != nil {
+		if stepup.IsBusy(stepUpErr) {
+			// A busy backup-code check judged nothing, so the attempt
+			// admitClearRequest charged goes back. Roll the transaction back
+			// first: no Redis call may run while it is open. The caller
+			// returns at once, and its deferred rollback then sees ErrTxDone.
+			rollbackVisibilityTx(h, tx)
+			if err := stepup.RefundIfBusy(c.Request.Context(), stepUpErr, userID, stepup.DangerousActionBudget(h.redis)); err != nil {
+				h.log.Warn("Could not refund a busy DM-clear MFA attempt", "user_id", userID, "error", err)
+			}
+		}
 		h.logClearStepUpFailure(stepUpErr)
 		stepUpErr.Write(c)
 		return false

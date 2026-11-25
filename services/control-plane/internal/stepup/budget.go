@@ -149,3 +149,41 @@ func budgetUnavailable(cause error) *Error {
 		Cause:  cause,
 	}
 }
+
+// refundScript returns one attempt without creating the key or taking it
+// below zero, and keeps the window's TTL: DECR leaves the expiry alone.
+var refundScript = redis.NewScript(`
+local n = tonumber(redis.call('GET', KEYS[1]) or '0')
+if n > 0 then return redis.call('DECR', KEYS[1]) end
+return 0
+`)
+
+// Refund returns the one attempt a request charged when its code was never
+// judged. Only RefundIfBusy calls it: a wrong code, or any other failure,
+// keeps its charge. It runs on SettleContext so a client that hangs up after
+// a busy answer still gets the attempt back.
+func (b Budget) Refund(ctx context.Context, userID string) error {
+	if b.rdb == nil {
+		return nil
+	}
+	sctx, cancel := SettleContext(ctx)
+	defer cancel()
+	if err := refundScript.Run(sctx, b.rdb, []string{b.Key(userID)}).Err(); err != nil {
+		return fmt.Errorf("refund step-up attempt: %w", err)
+	}
+	return nil
+}
+
+// RefundIfBusy refunds each budget's charge when err is a busy backup-code
+// check (IsBusy) and does nothing otherwise. Call it with every budget the
+// request charged, once the verification result is known.
+func RefundIfBusy(ctx context.Context, err error, userID string, budgets ...Budget) error {
+	if !IsBusy(err) {
+		return nil
+	}
+	var errs []error
+	for _, b := range budgets {
+		errs = append(errs, b.Refund(ctx, userID))
+	}
+	return errors.Join(errs...)
+}

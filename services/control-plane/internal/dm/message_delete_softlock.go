@@ -29,6 +29,7 @@ const (
 	failureClassSoftLockConfirm     = "delete_softlock_confirm_failed"
 	failureClassSoftLockReset       = "delete_softlock_reset_failed"
 	failureClassSoftLockClear       = "delete_softlock_budget_clear_failed"
+	failureClassSoftLockRefund      = "delete_softlock_budget_refund_failed"
 	failureClassDeleteLockConflict  = "delete_lock_conflict"
 )
 
@@ -150,6 +151,15 @@ func (h *Handler) confirmDMMessageDelete(
 		return err
 	})
 	if err != nil {
+		// The delete transaction has ended, so this Redis call holds no
+		// connection. A busy backup-code check judged nothing and gets its
+		// attempt back; every other refusal keeps its charge. The soft-lock's
+		// burst and day counters are left alone: they count delete attempts,
+		// not guesses, and only decide whether a confirmation is asked for.
+		if refundErr := stepup.RefundIfBusy(ctx, err, t.userID, budget); refundErr != nil {
+			h.log.Warn("Could not refund a busy delete soft-lock step-up attempt",
+				"failure_class", failureClassSoftLockRefund, "error", refundErr)
+		}
 		h.writeDMMessageDeleteError(c, err, verdict.RetryAfter)
 		return dmDeletedMessage{}, false
 	}

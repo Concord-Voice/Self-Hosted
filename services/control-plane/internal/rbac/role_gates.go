@@ -170,6 +170,17 @@ func (h *Handler) settleRoleGate(ctx context.Context, outcome mfaenforce.Outcome
 		in.grace, actorID)
 }
 
+// refundRoleGateIfBusy returns chargeRoleGate's attempt when err is a busy
+// backup-code check (stepup.IsBusy): the code was never judged, so it must not
+// cost an attempt. Any other error keeps its charge. Each gated route calls it
+// on its transaction's error, after that transaction has ended: it is a Redis
+// call, and none may run while the transaction is open (A-2, A-9).
+func (h *Handler) refundRoleGateIfBusy(ctx context.Context, err error, actorID string) {
+	if rErr := stepup.RefundIfBusy(ctx, err, actorID, stepup.DangerousActionBudget(h.redis)); rErr != nil {
+		h.log.Warn("Could not refund a busy role-gate attempt", "error", rErr)
+	}
+}
+
 // isRoleGateError reports whether err is the gate's to answer through
 // mfaenforce.WriteError: a *stepup.Error (a gate, RS4 or RS5 refusal, or a
 // verification fault), a lock conflict on the gate's own lock, or one at

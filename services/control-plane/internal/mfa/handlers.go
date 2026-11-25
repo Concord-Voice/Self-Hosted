@@ -38,7 +38,8 @@ const (
 	// Redis key patterns. A login challenge's remember-me key is
 	// auth.MFAChallengeRememberMeKey, since auth discards it too.
 	redisKeyMFAChallengeUsed     = "mfa_challenge_used:%s"
-	redisKeyMFAVerifyAttempts    = "mfa_verify_attempts:%s"
+	verifyAttemptsPrefix         = "mfa_verify_attempts:"
+	redisKeyMFAVerifyAttempts    = verifyAttemptsPrefix + "%s"
 	redisKeyMFAVerifyLockout     = "mfa_verify_lockout:%s"
 	redisKeyEmailSmsEnabled      = "mfa_emailsms_enabled:%s:%s"
 	redisKeyEmailSmsEnabledEmail = "mfa_emailsms_enabled:%s:email"
@@ -1546,6 +1547,13 @@ func (h *Handler) verifyAndDeleteTOTPTx(
 	}
 
 	valid, err := h.VerifyCodeTx(ctx, tx, userID, stepup.PurposeTOTPDisable, req.Code)
+	if stepup.IsBusy(err) {
+		// Roll back first so the refund's Redis call runs under no lock.
+		h.rollbackQuietly(tx)
+		h.refundBusyStepUp(ctx, userID, err)
+		stepup.BusyError(err).Write(c)
+		return false, false
+	}
 	if err != nil {
 		h.log.Error("MFA code verification error during TOTP disable", "user_id", userID, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed because of a server error. Contact support if this continues."})
@@ -1634,9 +1642,11 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 		return
 	}
 
-	// Generate new backup codes
+	// Generate new backup codes. A busy hasher refunds the charge: the
+	// matched code changed nothing, so it must not cost an attempt.
 	codes, hashes, err := GenerateBackupCodes(ctx)
 	if err != nil {
+		h.refundBusyStepUp(ctx, userID, err)
 		h.log.Error(errMsgFailedBackupCodes, "user_id", userID, "error", err)
 		writeBackupHashFailure(c, err, errMsgFailedBackupCodes)
 		return
@@ -2468,6 +2478,12 @@ func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, 
 	// Login never accepts a WebAuthn inline token (see noInlinePurpose).
 	valid, matchedMethod, err := h.verifyCodeMatchedMethod(ctx, h.db, userID, noInlinePurpose, code)
 	if err != nil {
+		// A busy hasher judged nothing (VerifyBackupCode derives under one
+		// slot before comparing, and only an 8-character code reaches it, which
+		// no 6-digit TOTP matches), so it returns the attempt Verify counted.
+		if rErr := stepup.RefundIfBusy(ctx, err, userID, stepup.NewBudget(h.redis, verifyAttemptsPrefix)); rErr != nil {
+			h.log.Warn("Could not refund a busy MFA verify attempt", "error", rErr)
+		}
 		h.verifyDependencyFailed(c, userID, err)
 		return false, "", true
 	}

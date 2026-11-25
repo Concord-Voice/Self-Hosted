@@ -111,6 +111,18 @@ func (h *Handler) settleModerationGate(ctx context.Context, outcome mfaenforce.O
 		in.grace, actorID)
 }
 
+// refundModerationGateIfBusy returns chargeModerationGate's attempt when err is
+// a busy backup-code check (stepup.IsBusy): the code was never judged, so it
+// must not cost an attempt. Any other error keeps its charge. The ban and
+// removal routes call it on their transaction's error, after that transaction
+// has ended: it is a Redis call, and none may run while the transaction is
+// open (A-2, A-9).
+func (h *Handler) refundModerationGateIfBusy(ctx context.Context, err error, actorID string) {
+	if rErr := stepup.RefundIfBusy(ctx, err, actorID, stepup.DangerousActionBudget(h.redis)); rErr != nil {
+		h.log.Warn("Could not refund a busy moderation-gate attempt", "error", rErr)
+	}
+}
+
 // writeModerationDenial writes a moderation preflight's permission refusal.
 // When that refusal is the generic 403 and the MFA mask caused it, the actor
 // gets RS5's mfa_enrollment_required instead (#3454 D-3); every other answer

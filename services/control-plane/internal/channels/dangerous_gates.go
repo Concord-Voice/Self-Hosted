@@ -94,6 +94,17 @@ func (h *Handler) settleChannelGate(ctx context.Context, outcome mfaenforce.Outc
 		in.grace, userID)
 }
 
+// refundChannelGateIfBusy returns chargeChannelGate's attempt when err is a
+// busy backup-code check (stepup.IsBusy): the code was never judged, so it
+// must not cost an attempt. Any other error keeps its charge. Both gated
+// routes call it only after their transaction has ended: it is a Redis call,
+// and none may run while the transaction is open (A-2, A-9).
+func (h *Handler) refundChannelGateIfBusy(ctx context.Context, err error, userID string) {
+	if rErr := stepup.RefundIfBusy(ctx, err, userID, stepup.DangerousActionBudget(h.redis)); rErr != nil {
+		h.log.Warn("Could not refund a busy channel-gate attempt", "error", rErr)
+	}
+}
+
 // manageChannelsDenial answers a ManageChannels denial on q, the querier the
 // denial came from, at the denial's own scope (RS5, A-11): the enrollment
 // refusal when an inline factor would lift it, otherwise

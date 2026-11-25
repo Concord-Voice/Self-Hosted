@@ -235,12 +235,20 @@ func (h *Handler) verifyMFASettingsStepUpTx(
 	ctx context.Context, tx *sql.Tx, userID string, subj stepup.Subject,
 	creds mfaStepUpCredentials, gate settingsStepUp, attempt *stepup.PasswordAttempt,
 ) (*stepup.Error, gateStage) {
-	return verifyStepUpFactors(attempt, subj, creds, gate.wording, func() *stepup.Error {
+	e, stage := verifyStepUpFactors(attempt, subj, creds, gate.wording, func() *stepup.Error {
 		// Tx form: backup-code redemption is a write that a rollback must be
 		// able to undo. The preloaded set keeps GetEnabledMethods (a pool
 		// read) from ever running under the lock.
 		return stepup.VerifyMFAFactorTx(ctx, tx, h, userID, gate.purpose, creds.MFACode, subj.MFAMethods)
 	})
+	if stepup.IsBusy(e) {
+		// End the transaction before the refund, so no Redis call runs under
+		// its locks. The caller refuses and returns; its deferred end is then
+		// a no-op rollback.
+		h.rollbackQuietly(tx)
+		h.refundBusyStepUp(ctx, userID, e)
+	}
+	return e, stage
 }
 
 // verifyStepUpFactors is the one decision table both gate shapes share: the
@@ -311,6 +319,7 @@ func (h *Handler) requirePasswordAndMFA(
 		return stepup.VerifyMFAFactor(ctx, h, userID, gate.purpose, creds.MFACode, subj.MFAMethods)
 	})
 	h.settleStepUpPassword(attempt)
+	h.refundBusyStepUp(ctx, userID, e)
 	if e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return stepup.Subject{}, false
@@ -388,4 +397,13 @@ func (h *Handler) clearStepUpAfterSuccess(c *gin.Context, userID string) {
 	post, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), postCommitTimeout)
 	defer cancel()
 	h.clearMFASettingsStepUp(post, userID)
+}
+
+// refundBusyStepUp returns the shared budget's charge when err is a busy
+// backup-code check (stepup.IsBusy): the code was never judged, so it must
+// not cost an attempt. Any other outcome keeps its charge.
+func (h *Handler) refundBusyStepUp(ctx context.Context, userID string, err error) {
+	if rErr := stepup.RefundIfBusy(ctx, err, userID, h.stepUpBudget()); rErr != nil {
+		h.log.Warn("Could not refund a busy step-up attempt", "error", rErr)
+	}
 }

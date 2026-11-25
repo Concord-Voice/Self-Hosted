@@ -11,14 +11,22 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 )
 
@@ -177,4 +185,175 @@ func TestRegenerateBackupCodes_BudgetDownIs503(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
 	assert.Equal(t, stepup.ErrMsgBudgetUnavailable, iuBody(t, w)["error"])
 	assert.Equal(t, true, iuBody(t, w)["step_up_budget_unavailable"])
+}
+
+// ── A busy backup-code check costs no attempt ──────────────────────────────
+//
+// Each case fills every backuphash slot, sends a code whose check must derive
+// a v2 hash, and asserts a 503 with Retry-After: 1 and the charge refunded.
+// A wrong code still costs one attempt, and the same request succeeds once
+// the slots free.
+
+// busyBackupUser enrolls TOTP with a real set of v2 backup codes.
+func busyBackupUser(t *testing.T, db *sql.DB, kr *Keyring) (userID, secret string, codes []string) {
+	t.Helper()
+	userID = iuCreateUser(t, db, iuPassword)
+	secret = iuEnrollTOTP(t, db, kr, userID)
+	codes, hashes, err := GenerateBackupCodes(context.Background())
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE user_mfa_totp SET backup_codes_hash = $1, backup_codes_used = $2 WHERE user_id = $3`,
+		pq.Array(hashes), pq.Array(make([]bool, len(hashes))), userID)
+	require.NoError(t, err)
+	return userID, secret, codes
+}
+
+// holdBackupHashSlots fills every slot until release or the end of the test.
+func holdBackupHashSlots(t *testing.T) (release func()) {
+	t.Helper()
+	free := backuphash.HoldAllSlots(50 * time.Millisecond)
+	var once sync.Once
+	release = func() { once.Do(free) }
+	t.Cleanup(release)
+	return release
+}
+
+func requireBusy(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Equal(t, "1", w.Header().Get("Retry-After"))
+}
+
+func requireCharge(t *testing.T, mr *miniredis.Miniredis, key, want string) {
+	t.Helper()
+	got, err := mr.Get(key)
+	require.NoError(t, err, "the charge key must exist")
+	require.Equal(t, want, got)
+}
+
+func TestBusyBackupCheck_TOTPDisableRefundsTheCharge(t *testing.T) {
+	db := iuNewTestDB(t)
+	kr := iuKeyring(t)
+	rdb, mr := iuLockoutRedis(t)
+	h := iuHandler(db, rdb, kr)
+	userID, _, codes := busyBackupUser(t, db, kr)
+	var locked []string
+	rdb.AddHook(tdLockWatchHook{db: db, userID: userID, mu: &sync.Mutex{}, locked: &locked})
+	t.Cleanup(func() { assert.Empty(t, locked, "Redis commands issued under the users-row lock") })
+	disable := func(code string) *httptest.ResponseRecorder {
+		c, w := iuGinContext(http.MethodPost, "/mfa/totp/disable", fmt.Sprintf(`{"password":%q,"code":%q}`, iuPassword, code), userID, "")
+		h.TOTPDisable(c)
+		return w
+	}
+
+	release := holdBackupHashSlots(t)
+	for range stepup.BudgetLimit + 1 {
+		w := disable(codes[0])
+		requireBusy(t, w)
+		assert.Equal(t, true, iuBody(t, w)["verification_busy"])
+		requireCharge(t, mr, h.stepUpBudget().Key(userID), "0")
+	}
+	release()
+
+	require.Equal(t, http.StatusForbidden, disable("WRONGCOD").Code)
+	requireCharge(t, mr, h.stepUpBudget().Key(userID), "1")
+	w := disable(codes[0])
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+}
+
+func TestBusyBackupCheck_RegenerateRefundsTheCharge(t *testing.T) {
+	db := iuNewTestDB(t)
+	kr := iuKeyring(t)
+	rdb, mr := iuLockoutRedis(t)
+	h := iuHandler(db, rdb, kr)
+	userID, secret, _ := busyBackupUser(t, db, kr)
+	regenerate := func(code string) *httptest.ResponseRecorder {
+		c, w := iuGinContext(http.MethodPost, "/mfa/backup-codes/regenerate", fmt.Sprintf(`{"password":%q,"code":%q}`, iuPassword, code), userID, "")
+		h.RegenerateBackupCodes(c)
+		return w
+	}
+
+	release := holdBackupHashSlots(t)
+	requireBusy(t, regenerate(iuTOTPCode(t, secret)))
+	requireCharge(t, mr, h.stepUpBudget().Key(userID), "0")
+	release()
+
+	require.Equal(t, http.StatusForbidden, regenerate("000000").Code)
+	requireCharge(t, mr, h.stepUpBudget().Key(userID), "1")
+	w := regenerate(iuTOTPCode(t, secret))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+}
+
+func TestBusyBackupCheck_SettingsGatesRefundTheCharge(t *testing.T) {
+	for _, route := range []struct {
+		name string
+		call func(h *Handler, c *gin.Context)
+		body string
+	}{
+		{"pool gate (recovery hardened)", (*Handler).SetRecoveryHardened, `{"enabled":true,"password":%q,"mfa_code":%q}`},
+		{"transaction gate (backup email)", (*Handler).SetBackupEmail, `{"email":"backup@iu-stepup.test","password":%q,"mfa_code":%q}`},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			db := iuNewTestDB(t)
+			kr := iuKeyring(t)
+			rdb, mr := iuLockoutRedis(t)
+			h := iuHandler(db, rdb, kr)
+			userID, _, codes := busyBackupUser(t, db, kr)
+			var locked []string
+			rdb.AddHook(tdLockWatchHook{db: db, userID: userID, mu: &sync.Mutex{}, locked: &locked})
+			t.Cleanup(func() { assert.Empty(t, locked, "Redis commands issued under the users-row lock") })
+			send := func(code string) *httptest.ResponseRecorder {
+				c, w := iuGinContext(http.MethodPost, "/mfa/settings", fmt.Sprintf(route.body, iuPassword, code), userID, "")
+				route.call(h, c)
+				return w
+			}
+
+			release := holdBackupHashSlots(t)
+			for range stepup.BudgetLimit + 1 {
+				w := send(codes[0])
+				requireBusy(t, w)
+				assert.Equal(t, true, iuBody(t, w)["verification_busy"])
+				requireCharge(t, mr, h.stepUpBudget().Key(userID), "0")
+			}
+			release()
+
+			require.Equal(t, http.StatusForbidden, send("WRONGCOD").Code)
+			requireCharge(t, mr, h.stepUpBudget().Key(userID), "1")
+			w := send(codes[0])
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		})
+	}
+}
+
+func TestBusyBackupCheck_SignInRefundsTheAttempt(t *testing.T) {
+	db := iuNewTestDB(t)
+	kr := iuKeyring(t)
+	rdb, mr := iuLockoutRedis(t)
+	h := iuHandler(db, rdb, kr)
+	completer := &recordingLoginCompleter{}
+	h.SetLoginCompleter(completer)
+	userID, _, codes := busyBackupUser(t, db, kr)
+	token, _, err := h.GenerateLoginChallenge(context.Background(), userID, false, "", securityevent.AuthPassword)
+	require.NoError(t, err)
+	attemptsKey := fmt.Sprintf(redisKeyMFAVerifyAttempts, userID)
+	verify := func(code string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/mfa/verify",
+			strings.NewReader(`{"mfa_challenge_token":"`+token+`","method":"backup_code","code":"`+code+`"}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Verify(c)
+		return w
+	}
+
+	release := holdBackupHashSlots(t)
+	for range failedAttemptLimit + 1 {
+		requireBusy(t, verify(codes[0]))
+		requireCharge(t, mr, attemptsKey, "0")
+	}
+	release()
+
+	require.Equal(t, http.StatusForbidden, verify("WRONGCOD").Code)
+	requireCharge(t, mr, attemptsKey, "1")
+	verify(codes[0])
+	require.True(t, completer.called, "the right code signs in once the slots free")
 }

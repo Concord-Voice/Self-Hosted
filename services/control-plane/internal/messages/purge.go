@@ -1099,6 +1099,8 @@ func (h *Handler) refuseSelfPurge(c *gin.Context, o selfPurgeOutcome) bool {
 	if a == nil || a.err == nil {
 		return false
 	}
+	// The admission transaction has rolled back by the time Run returns.
+	h.refundBusyStepUp(c.Request.Context(), a.err, a)
 	if len(a.d1) > 0 {
 		h.respondD1AdmissionError(c, a.err, a.forbidden, a.notFound)
 		return true

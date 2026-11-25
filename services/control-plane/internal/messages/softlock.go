@@ -68,6 +68,7 @@ const (
 	failureClassSoftLockConfirm     = "delete_softlock_confirm_failed"
 	failureClassSoftLockReset       = "delete_softlock_reset_failed"
 	failureClassSoftLockClear       = "delete_softlock_budget_clear_failed"
+	failureClassSoftLockRefund      = "delete_softlock_budget_refund_failed"
 	failureClassDeleteLockConflict  = "delete_lock_conflict"
 )
 
@@ -302,6 +303,29 @@ func (a *deleteAdmission) d1Provenance() PurgeProvenance {
 // factor present.
 func (a *deleteAdmission) softLockCharged() bool {
 	return a.mode == confirmOverThreshold && a.gate.hasFactor()
+}
+
+// budgetCharged reports whether this request charged the shared budget at
+// all: the soft-lock did (softLockCharged), or D1 did, which it does for an
+// mfa_code when the soft-lock had not (armD1Purge). Both charge one key once.
+func (a *deleteAdmission) budgetCharged() bool {
+	return a.softLockCharged() || (len(a.d1) > 0 && a.gate.input.MFACode != "")
+}
+
+// refundBusyStepUp returns the one attempt a request charged when its
+// confirmation failed on a busy backup-code check (stepup.IsBusy), which
+// judged no code. Any other failure keeps its charge. Call it only after the
+// confirming transaction has ended: it is a Redis call. Best-effort: a
+// failure leaves the counter high, which fails toward more limiting.
+func (h *Handler) refundBusyStepUp(ctx context.Context, err error, a *deleteAdmission) {
+	if !a.budgetCharged() {
+		return
+	}
+	budget := stepup.NewBudget(h.redis, stepup.MFASettingsBudgetPrefix)
+	if refundErr := stepup.RefundIfBusy(ctx, err, a.gate.userID, budget); refundErr != nil {
+		h.log.Warn("Could not refund a busy delete soft-lock step-up attempt",
+			"failure_class", failureClassSoftLockRefund, "error", refundErr)
+	}
 }
 
 // lockSoftLockGateTx takes the soft-lock's locks — the actor's users row,

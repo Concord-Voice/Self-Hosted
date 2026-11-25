@@ -20749,13 +20749,35 @@ components:
         a window that never started. Retry shortly. The body carries
         `step_up_budget_unavailable: true`, which tells it apart from a
         row-lock conflict's 503 (`lock_conflict: true`).
+
+
+        A backup code that could not be checked because backup-code hashing had
+        no free slot answers the same status with `verification_busy: true` and
+        `Retry-After: 1`. No code was judged and the attempt it was charged is
+        returned, so it never counts toward the step-up budget. Retry after
+        `Retry-After`.
+      headers:
+        Retry-After:
+          description: 1 on the verification-busy body. Absent on the budget-unavailable body.
+          schema:
+            type: integer
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/StepUpBudgetUnavailableError'
-          example:
-            error: Verification is temporarily unavailable. Try again in a few minutes.
-            step_up_budget_unavailable: true
+            anyOf:
+            - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
+            - $ref: '#/components/schemas/VerificationBusyError'
+          examples:
+            budgetUnavailable:
+              summary: Step-up attempt budget unavailable
+              value:
+                error: Verification is temporarily unavailable. Try again in a few minutes.
+                step_up_budget_unavailable: true
+            verificationBusy:
+              summary: Backup-code hashing busy (Retry-After 1)
+              value:
+                error: Verification is busy. Try again.
+                verification_busy: true
     DeleteSessionRejected:
       description: >-
         A missing, invalid or stale bearer token, or a session whose
@@ -20920,6 +20942,7 @@ components:
             anyOf:
             - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
             - $ref: '#/components/schemas/LockConflictError'
+            - $ref: '#/components/schemas/VerificationBusyError'
             - $ref: '#/components/schemas/Error'
           examples:
             softLockUnavailable:
@@ -24742,6 +24765,22 @@ components:
         - step_up_budget_unavailable
         properties:
           step_up_budget_unavailable:
+            type: boolean
+            enum:
+            - true
+    VerificationBusyError:
+      description: >-
+        A backup code that was never checked because backup-code hashing had
+        no free slot (`stepup.BusyError`). Nothing was judged or written, and
+        the attempt it was charged is returned. Retry after `Retry-After`,
+        which is 1.
+      allOf:
+      - $ref: '#/components/schemas/Error'
+      - type: object
+        required:
+        - verification_busy
+        properties:
+          verification_busy:
             type: boolean
             enum:
             - true

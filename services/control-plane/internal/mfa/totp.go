@@ -199,19 +199,40 @@ func VerifyBackupCode(ctx context.Context, code string, hashes []string, used []
 	normalized = strings.ToUpper(normalized)
 	codeHash := sha256.Sum256([]byte(normalized))
 
-	for i := 0; i < len(parsed) && i < len(used); i++ {
-		// A code with no used flag is treated as used: the arrays are written
-		// together, so a short one is a damaged row, and the caller indexes
-		// used[i] to mark the match.
+	// A code with no used flag is treated as used: the arrays are written
+	// together, so a short one is a damaged row, and the caller indexes
+	// used[i] to mark the match.
+	n := min(len(parsed), len(used))
+	// Every unused v2 digest is derived under one slot before any comparison,
+	// so a busy hasher (backuphash.ErrBusy) answers before anything is judged
+	// and the caller can refund the attempt.
+	var v2At []int
+	var salts [][]byte
+	for i := range n {
+		if !used[i] && parsed[i].salt != nil {
+			v2At = append(v2At, i)
+			salts = append(salts, parsed[i].salt)
+		}
+	}
+	derived := make(map[int][]byte, len(salts))
+	if len(salts) > 0 {
+		digests, deriveErr := backuphash.DeriveEachV2(ctx, normalized, salts)
+		if deriveErr != nil {
+			return -1, false, deriveErr
+		}
+		for j, i := range v2At {
+			derived[i] = digests[j]
+		}
+	}
+
+	for i := range n {
 		if used[i] {
 			continue
 		}
 		stored := parsed[i]
 		candidate := codeHash[:]
-		if stored.salt != nil {
-			if candidate, err = backuphash.DeriveV2(ctx, normalized, stored.salt); err != nil {
-				return -1, false, err
-			}
+		if d, ok := derived[i]; ok {
+			candidate = d
 		}
 		if subtle.ConstantTimeCompare(candidate, stored.digest) == 1 {
 			return i, true, nil

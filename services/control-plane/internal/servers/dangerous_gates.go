@@ -93,6 +93,7 @@ func (h *Handler) updateServerGated(
 		return nil
 	})
 	if err != nil {
+		h.refundBusyCharge(ctx, err, userID, budget) // the transaction has rolled back
 		return models.Server{}, err
 	}
 	mfaenforce.Settle(ctx, h.log, outcome, budget, store, grace, userID)
@@ -159,6 +160,18 @@ func (h *Handler) gateServerDeleteTx(
 		return mfaenforce.Unconfirmed, e
 	}
 	return outcome, nil
+}
+
+// refundBusyCharge returns the attempt a request charged to budget when err is
+// a busy backup-code check (stepup.IsBusy): the code was never judged, so it
+// must not cost one (#164). Any other error keeps its charge. Call it only
+// after the request's transaction has ended, since it is a Redis call (A-2,
+// A-9). A failed refund leaves the counter high, which fails toward more
+// limiting, so it is logged and the request is answered as it would be.
+func (h *Handler) refundBusyCharge(ctx context.Context, err error, userID string, budget stepup.Budget) {
+	if rErr := stepup.RefundIfBusy(ctx, err, userID, budget); rErr != nil {
+		h.log.Warn("Could not refund a step-up attempt after a busy verification", "error", rErr)
+	}
 }
 
 // respondGateError answers err through mfaenforce.WriteError when the gate

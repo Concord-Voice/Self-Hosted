@@ -545,6 +545,15 @@ func (h *Handler) authenticateForRevokeWithMFA(ctx context.Context, c *gin.Conte
 		}
 		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
 		if mfaErr != nil {
+			// A busy backup-code check judged nothing: give the attempt back
+			// and answer a retryable 503. No transaction is open here.
+			if stepup.IsBusy(mfaErr) {
+				if err := stepup.RefundIfBusy(ctx, mfaErr, uid, stepup.DangerousActionBudget(h.redis)); err != nil {
+					h.log.Warn("Could not refund a busy session-revoke MFA attempt", "error", err)
+				}
+				stepup.BusyError(mfaErr).Write(c)
+				return true, false
+			}
 			h.log.Error("MFA verification error during session revoke", "error", mfaErr)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
 			return true, false

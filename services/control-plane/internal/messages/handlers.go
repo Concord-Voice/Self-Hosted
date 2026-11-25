@@ -1227,6 +1227,11 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 		return
 	}
 	if err != nil {
+		// DeleteOne has ended the delete transaction, so the refund's Redis
+		// call holds no connection. Only an over-threshold delete charged.
+		if verdict.Over {
+			h.refundBusyStepUp(ctx, err, &deleteAdmission{gate: gate, mode: confirmOverThreshold})
+		}
 		h.respondSoftLockError(c, err, verdict.RetryAfter, errMsgMessageNotFound, errMsgFailedDeleteMessage)
 		return
 	}

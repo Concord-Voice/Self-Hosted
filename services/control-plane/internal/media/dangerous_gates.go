@@ -147,6 +147,12 @@ func (h *Handler) storeServerImageGated(c *gin.Context, up serverImageUpload) (s
 		return err
 	})
 	if err != nil {
+		// The gate transaction has rolled back. A busy backup-code check was
+		// never judged, so it returns the attempt it was charged (#164); any
+		// other error keeps its charge.
+		if rErr := stepup.RefundIfBusy(ctx, err, up.userID, budget); rErr != nil {
+			h.log.Warn("Could not refund a step-up attempt after a busy verification", "error", rErr)
+		}
 		return "", err
 	}
 	mfaenforce.Settle(ctx, h.log, outcome, budget, graceStore, grace, up.userID)

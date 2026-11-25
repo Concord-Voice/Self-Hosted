@@ -198,3 +198,25 @@ func mustDerive(t *testing.T, code string, salt []byte) []byte {
 	}
 	return digest
 }
+
+// A verifier derives every salt under one slot, so a busy answer means none
+// was derived and nothing was compared.
+func TestDeriveEachV2IsAllOrNothing(t *testing.T) {
+	var calls atomic.Int32
+	swapDeriveKey(t, func(string, []byte) []byte { calls.Add(1); return make([]byte, v2DigestLen) })
+	salts := [][]byte{make([]byte, v2SaltLen), make([]byte, v2SaltLen), make([]byte, v2SaltLen)}
+
+	release := HoldAllSlots(10 * time.Millisecond)
+	_, err := DeriveEachV2(context.Background(), "ABCD1234", salts)
+	release()
+	if !errors.Is(err, ErrBusy) || calls.Load() != 0 {
+		t.Fatalf("DeriveEachV2 on held slots = %v after %d derivations, want ErrBusy after none", err, calls.Load())
+	}
+	digests, err := DeriveEachV2(context.Background(), "ABCD1234", salts)
+	if err != nil || len(digests) != len(salts) || int(calls.Load()) != len(salts) {
+		t.Fatalf("DeriveEachV2 = %d digests, %v after %d derivations; want %d", len(digests), err, calls.Load(), len(salts))
+	}
+	if got := time.Duration(derivationWait.Load()); got != maxDerivationWait {
+		t.Fatalf("release left the slot wait at %v, want %v", got, maxDerivationWait)
+	}
+}

@@ -104,18 +104,34 @@ var deriveKey = func(code string, salt []byte) []byte {
 // waits for one of MaxConcurrentDerivations slots and returns ErrBusy, without
 // deriving, if the context ends first.
 func DeriveV2(ctx context.Context, code string, salt []byte) ([]byte, error) {
+	digests, err := DeriveEachV2(ctx, code, [][]byte{salt})
+	if err != nil {
+		return nil, err
+	}
+	return digests[0], nil
+}
+
+// DeriveEachV2 derives code under every salt while holding ONE slot, one
+// derivation at a time. It is all or nothing: ErrBusy means no salt was
+// derived, so a verifier that answers busy has judged nothing and can refund
+// the attempt. Memory stays one 19 MiB derivation per slot.
+func DeriveEachV2(ctx context.Context, code string, salts [][]byte) ([][]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBusy, err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, maxDerivationWait)
+	wait, cancel := context.WithTimeout(ctx, time.Duration(derivationWait.Load()))
 	defer cancel()
 	select {
 	case derivationSlots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, fmt.Errorf("%w: %w", ErrBusy, ctx.Err())
+	case <-wait.Done():
+		return nil, fmt.Errorf("%w: %w", ErrBusy, wait.Err())
 	}
 	defer func() { <-derivationSlots }()
-	return deriveKey(code, salt), nil
+	digests := make([][]byte, len(salts))
+	for i, salt := range salts {
+		digests[i] = deriveKey(code, salt)
+	}
+	return digests, nil
 }
 
 func parseSHA256(encoded string) ([]byte, []byte, error) {
