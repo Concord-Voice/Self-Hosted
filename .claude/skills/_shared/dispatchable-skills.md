@@ -865,7 +865,7 @@ Adding a new dispatchable skill = adding an entry to this file. The catalog is t
 
 ### Eligibility
 
-- Must be a **model-invocable target**: either a registered skill invocable via the `Skill` tool, OR a bundled/saved **dynamic workflow** invocable via the Workflow tool by name (e.g. `/deep-research`, dispatched as `name: deep-research`). NOT a one-off ad-hoc agent or an inline single-use workflow script. A workflow-dispatched entry MUST state its dispatch path in its Use case (see `/deep-research` for the precedent).
+- Must be a **model-invocable target**: either a registered skill eligible for model invocation under the [nested skill contract](nested-skills.md), OR a bundled/saved **dynamic workflow** invocable via the Workflow tool by name (e.g. `/deep-research`, dispatched as `name: deep-research`). NOT a one-off ad-hoc agent or an inline single-use workflow script. A workflow-dispatched entry MUST state its dispatch path in its Use case (see `/deep-research` for the precedent).
 - Must be present in the plugin inventory of the project — if the skill is only available locally, document that limitation in the entry's Use case section.
 - Must have a clear `/dev-lifecycle` phase placement (one of Phase 1–9 or Cross-cutting).
 
