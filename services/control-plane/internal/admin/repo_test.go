@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
 // uniqueAdminUsername returns a per-call unique handle. The admin_* tables are
@@ -54,6 +54,8 @@ func TestAdminRepo_CreatePending(t *testing.T) {
 		assert.Equal(t, username, u.Username)
 		assert.Equal(t, admin.StatusPending, u.Status)
 		assert.False(t, u.CreatedAt.IsZero())
+		_, err = db.ExecContext(ctx, `UPDATE admin_users SET session_generation = 0 WHERE id = $1`, u.ID)
+		require.ErrorContains(t, err, "admin_users_session_generation_positive")
 	})
 
 	t.Run("rejects a duplicate username", func(t *testing.T) {
@@ -356,4 +358,113 @@ func TestMigration000197Down_RefusesAfterReset(t *testing.T) {
 	_, err = tx.ExecContext(ctx, string(down))
 	require.Error(t, err, "down must refuse after a reset revoked sessions")
 	assert.Contains(t, err.Error(), "cannot roll back 000197")
+}
+
+func TestMigration000199Up_RefusesExistingZero(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	var validated bool
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT convalidated FROM pg_constraint
+		WHERE conrelid = 'admin_users'::regclass AND conname = 'admin_users_session_generation_positive'`).Scan(&validated))
+	assert.True(t, validated, "000200 must validate the positive-generation check")
+	created, err := admin.NewAdminRepo(db).CreatePending(ctx, uniqueAdminUsername("zero-guard"), "test-hash")
+	require.NoError(t, err)
+	registerAdminCleanup(t, db, created.ID)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, "ALTER TABLE admin_users DROP CONSTRAINT admin_users_session_generation_positive")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, "UPDATE admin_users SET session_generation = 0 WHERE id = $1", created.ID)
+	require.NoError(t, err)
+
+	up, err := os.ReadFile("../../migrations/000199_add_positive_admin_session_generation_check.up.sql")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, string(up))
+	require.ErrorContains(t, err, "cannot install positive admin session generation check while a nonpositive row exists")
+}
+
+// DeleteUnenrolledPending removes only the row CreateAdmin just committed, and
+// only while it is still unenrolled. Each guard leaves the row in place.
+func TestAdminRepo_DeleteUnenrolledPendingGuards(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	repo := admin.NewAdminRepo(db)
+
+	newPending := func(t *testing.T, prefix string) admin.AdminUser {
+		t.Helper()
+		u, err := repo.CreatePending(ctx, uniqueAdminUsername(prefix), "h")
+		require.NoError(t, err)
+		registerAdminCleanup(t, db, u.ID)
+		return u
+	}
+	assertKept := func(t *testing.T, u admin.AdminUser) {
+		t.Helper()
+		_, err := repo.GetByUsername(ctx, u.Username)
+		require.NoError(t, err, "the guarded row must not be deleted")
+	}
+
+	t.Run("deletes a fresh pending row", func(t *testing.T) {
+		u := newPending(t, "del-fresh")
+		require.NoError(t, repo.DeleteUnenrolledPending(ctx, u.ID, u.CredentialGeneration))
+		_, err := repo.GetByUsername(ctx, u.Username)
+		assert.ErrorIs(t, err, admin.ErrAdminNotFound)
+	})
+
+	t.Run("keeps an active row", func(t *testing.T) {
+		u := newPending(t, "del-active")
+		require.NoError(t, repo.SetStatus(ctx, u.ID, admin.StatusActive))
+		assert.ErrorIs(t, repo.DeleteUnenrolledPending(ctx, u.ID, u.CredentialGeneration), admin.ErrAdminNotFound)
+		assertKept(t, u)
+	})
+
+	t.Run("keeps a pending row that holds a credential", func(t *testing.T) {
+		u := newPending(t, "del-cred")
+		_, err := repo.AddCredential(ctx, admin.AdminCredential{ // #nosec G101 -- test fixture WebAuthn credential, not a secret
+			AdminID: u.ID, CredentialID: []byte(uniqueAdminUsername("del-cred-id")), PublicKey: []byte{0x01}, AAGUID: []byte{0x02},
+		})
+		require.NoError(t, err)
+		assert.ErrorIs(t, repo.DeleteUnenrolledPending(ctx, u.ID, u.CredentialGeneration), admin.ErrAdminNotFound)
+		assertKept(t, u)
+	})
+
+	t.Run("keeps a row reset since creation", func(t *testing.T) {
+		u := newPending(t, "del-reset")
+		_, _, _, err := repo.ResetEnrollment(ctx, u.ID)
+		require.NoError(t, err)
+		assert.ErrorIs(t, repo.DeleteUnenrolledPending(ctx, u.ID, u.CredentialGeneration), admin.ErrAdminNotFound)
+		assertKept(t, u)
+	})
+
+	t.Run("never touches another admin", func(t *testing.T) {
+		target := newPending(t, "del-target")
+		other := newPending(t, "del-other")
+		require.NoError(t, repo.DeleteUnenrolledPending(ctx, target.ID, target.CredentialGeneration))
+		assertKept(t, other)
+	})
+}
+
+// The repository insert applies the username rule itself, so a caller that
+// skips its own check (CreateAdmin and adminctl bootstrap both have one)
+// still cannot store a name the audit writer would rewrite.
+func TestAdminRepo_CreatePending_RejectsInvalidUsername(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	repo := admin.NewAdminRepo(db)
+
+	for _, username := range []string{uniqueAdminUsername("repo") + "\x01", "\x01\x02", uniqueAdminUsername("repo") + " "} {
+		cleanupAdminNamed(t, db, username)
+		_, err := repo.CreatePending(t.Context(), username, "hash")
+		require.ErrorIs(t, err, admin.ErrInvalidUsername, "%q", username)
+
+		tx, err := db.BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		_, err = repo.CreatePendingTx(t.Context(), tx, username, "hash")
+		require.ErrorIs(t, err, admin.ErrInvalidUsername, "%q", username)
+		require.NoError(t, tx.Rollback())
+		assertNoAdmin(t, db, username)
+	}
 }

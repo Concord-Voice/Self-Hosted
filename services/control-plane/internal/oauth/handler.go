@@ -19,10 +19,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // HandlerDeps wires the SSO endpoints. Consumed by api/routes wiring.
@@ -400,7 +400,7 @@ func (h *Handler) Initiate(c *gin.Context) {
 		return
 	}
 	allowed, err := middleware.AllowUserAction(c.Request.Context(), h.deps.Redis,
-		"ratelimit:sso:initiate:"+providerName, 600, time.Minute)
+		"ratelimit:sso:initiate:"+providerName+":"+c.ClientIP(), 600, time.Minute)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error_code": "redis_unavailable"})
 		return

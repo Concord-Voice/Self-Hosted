@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 )
 
@@ -73,8 +73,9 @@ type tempGrantManager struct {
 	grantRollback   func(*sql.Tx) error
 }
 
-// temporaryGrantAuthorityTx is supplied only by REST moderation paths. Cleanup
-// paths have no moderator authority to revalidate.
+// temporaryGrantAuthorityTx is supplied by REST moderation paths. A grant must
+// carry one; revoke cleanup paths have no moderator authority to revalidate
+// and pass none.
 type temporaryGrantAuthorityTx func(context.Context, *sql.Tx) error
 
 type temporaryGrantAuthorization struct {
@@ -86,6 +87,10 @@ type temporaryGrantAuthorization struct {
 }
 
 var errTemporaryGrantSourceChanged = errors.New("temporary grant source participant changed")
+
+// errTemporaryGrantAuthorityRequired refuses a grant that carries no authority
+// closure. Every grant must be authorized under its own locks.
+var errTemporaryGrantAuthorityRequired = errors.New("temporary grant requires an authority check")
 
 // SetPresenceRecheck wires the #2445 Rich Presence capture. Nil leaves the
 // revoke path at its pre-#2445 behavior.
@@ -112,11 +117,12 @@ func newTempGrantManager(db *sql.DB, log *logger.Logger, hub *websocket.Hub, res
 	}
 }
 
-// grantTemporaryChannelAccess gives a moved user just-enough access to participate
-// in a channel they cannot otherwise see (#487 D1). It inserts a user-specific
-// channel_permission_overrides row with allow = VIEW|CONNECT|SPEAK, deny = 0,
-// is_temporary = true. It shares the authority-write lock order with terminal
-// voice cleanup: visibility -> lifecycle -> override -> commit -> cache invalidate.
+// grantTemporaryChannelAccessWithCredential gives a moved user just-enough
+// access to participate in a channel they cannot otherwise see (#487 D1). It
+// inserts a user-specific channel_permission_overrides row with allow =
+// VIEW|CONNECT|SPEAK, deny = 0, is_temporary = true. It shares the
+// authority-write lock order with terminal voice cleanup: visibility ->
+// lifecycle -> override -> commit -> cache invalidate.
 //
 // GRANT INTEGRITY (security-critical): it NEVER downgrades or mutates a permanent
 // override. If a non-temporary row already exists for (channel, user) the function
@@ -124,19 +130,21 @@ func newTempGrantManager(db *sql.DB, log *logger.Logger, hub *websocket.Hub, res
 // grant and the temp layer must not touch it. The guarded ON CONFLICT is the
 // permanent-override check under those locks; an unlocked preflight would reopen
 // the terminal-cleanup race this transaction closes.
-func (m *tempGrantManager) grantTemporaryChannelAccess(
-	ctx context.Context, serverID, channelID, userID string,
-) error {
-	_, err := m.grantTemporaryChannelAccessWithCredential(ctx, serverID, channelID, userID, temporaryGrantAuthorization{})
-	return err
-}
-
-// grantTemporaryChannelAccessWithCredential commits the credential- and
-// authority-fenced grant before its caller sends a move signal. The boolean is
-// false only when a permanent override made the locked upsert a no-op.
+//
+// GRANT AUTHORITY: authorization.authority is mandatory. A grant without one
+// is refused with errTemporaryGrantAuthorityRequired before its transaction
+// begins, so no caller can write access without an authority decision taken
+// under the grant's own locks.
+//
+// It commits the credential- and authority-fenced grant before its caller
+// sends a move signal. The boolean is false only when a permanent override
+// made the locked upsert a no-op.
 func (m *tempGrantManager) grantTemporaryChannelAccessWithCredential(
 	ctx context.Context, serverID, channelID, userID string, authorization temporaryGrantAuthorization,
 ) (granted bool, returnErr error) {
+	if authorization.authority == nil {
+		return false, errTemporaryGrantAuthorityRequired
+	}
 	parsedUserID, err := uuid.Parse(userID)
 	if err != nil || parsedUserID == uuid.Nil {
 		return false, errors.New("invalid temporary grant user")
@@ -207,19 +215,22 @@ func (m *tempGrantManager) grantTemporaryChannelAccessWithCredential(
 	return true, nil
 }
 
+// guardTemporaryGrantAuthorization runs inside the grant transaction, after the
+// visibility lock and before the lifecycle lock: the actor's credential guard
+// when guardCredential is set, then the authority closure, always.
 func guardTemporaryGrantAuthorization(
 	ctx context.Context, tx *sql.Tx, authorization temporaryGrantAuthorization,
 ) error {
-	if !authorization.guardCredential {
-		return nil
-	}
-	if err := credepoch.GuardFamilyTx(ctx, tx, authorization.actorID, authorization.credentialEpoch); err != nil {
-		return fmt.Errorf("temp grant credential guard: %w", err)
-	}
-	if authorization.authority != nil {
-		if err := authorization.authority(ctx, tx); err != nil {
-			return fmt.Errorf("temp grant authority guard: %w", err)
+	if authorization.guardCredential {
+		if err := credepoch.GuardFamilyTx(ctx, tx, authorization.actorID, authorization.credentialEpoch); err != nil {
+			return fmt.Errorf("temp grant credential guard: %w", err)
 		}
+	}
+	if authorization.authority == nil {
+		return errTemporaryGrantAuthorityRequired
+	}
+	if err := authorization.authority(ctx, tx); err != nil {
+		return fmt.Errorf("temp grant authority guard: %w", err)
 	}
 	return nil
 }
@@ -616,14 +627,17 @@ func (m *tempGrantManager) deleteTemporaryGrantWithCapture(
 	if err := rbac.LockServerVisibilityCapture(ctx, tx, serverID); err != nil {
 		return nil, nil, false, fmt.Errorf("temp revoke lock: %w", err)
 	}
+	// Same order as guardTemporaryGrantAuthorization: the credential guard when
+	// guardCredential is set, then the authority closure whenever one is
+	// supplied. Only cleanup revokes pass no closure.
 	if authorization.guardCredential {
 		if err := credepoch.GuardFamilyTx(ctx, tx, authorization.actorID, authorization.credentialEpoch); err != nil {
 			return nil, nil, false, fmt.Errorf("temp revoke credential guard: %w", err)
 		}
-		if authorization.authority != nil {
-			if err := authorization.authority(ctx, tx); err != nil {
-				return nil, nil, false, fmt.Errorf("temp revoke authority guard: %w", err)
-			}
+	}
+	if authorization.authority != nil {
+		if err := authorization.authority(ctx, tx); err != nil {
+			return nil, nil, false, fmt.Errorf("temp revoke authority guard: %w", err)
 		}
 	}
 	if err := LockServerVoiceLifecycleTx(ctx, tx, parsedUserID); err != nil {
@@ -724,8 +738,7 @@ func (m *tempGrantManager) deleteTemporaryGrantAlreadyLocked(
 func (m *tempGrantManager) deleteTemporaryGrantFenceAlreadyLocked(
 	ctx context.Context,
 	tx *sql.Tx,
-	channelID, userID string,
-	grantXmin string,
+	channelID, userID, grantXmin string,
 ) (*keyrotation.Rotation, bool, error) {
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM channel_permission_overrides

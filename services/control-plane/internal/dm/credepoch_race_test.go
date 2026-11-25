@@ -8,12 +8,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/google/uuid"
 )
 
@@ -198,18 +198,22 @@ func TestDMMessageDeleteSerializesCurrentMembershipRemoval(t *testing.T) {
 	}()
 	dbtest.WaitForRowLockWaiter(t, ts.DB, fenceXID)
 
-	deleteDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		deleteDone <- ts.DoRequest(http.MethodDelete,
-			"/api/v1/dm/conversations/"+convID+"/messages/"+messageID,
-			nil, testhelpers.AuthHeaders(target.AccessToken))
-	}()
 	require.NoError(t, fence.Commit())
-
 	removal := <-removalDone
 	assert.Equal(t, http.StatusOK, removal.Code, removal.Body.String())
-	deletion := <-deleteDone
+
+	// The delete takes only FOR SHARE topology locks. Those are compatible
+	// with the fence, and PostgreSQL lets them pass the removal's queued
+	// FOR NO KEY UPDATE, so a delete started while the fence is open is not
+	// ordered behind the removal and may commit first, which is a valid
+	// ordering. Order it after the removal commits. The unlocked authorship
+	// preflight still passes, so the 403 must come from the locked
+	// participant recheck in deleteDMMessageTx.
+	deletion := ts.DoRequest(http.MethodDelete,
+		"/api/v1/dm/conversations/"+convID+"/messages/"+messageID,
+		nil, testhelpers.AuthHeaders(target.AccessToken))
 	assert.Equal(t, http.StatusForbidden, deletion.Code, deletion.Body.String())
+	assert.JSONEq(t, `{"error":"Not a participant"}`, deletion.Body.String())
 
 	var count int
 	require.NoError(t, ts.DB.QueryRow(

@@ -1,16 +1,31 @@
 # Tracker-side sync contract
 
-How Phase 4 turns a surviving public feedback issue into a tracked item in the private `example-repo-private` repo, via `/issue-creation`.
+How Phase 4 turns a surviving public feedback issue into a tracked item in the owning private/product tracker repository (configured via `.feedback_triage.routing` / `.feedback_triage.tracker`), via `/issue-creation`.
+
+## Owning-repo routing & multi-repo epics
+
+When `.claude/repo-config.json` defines `.feedback_triage.routing` (`surface -> owner/repo`), route each surviving feedback item to the repository that actually owns the fix or feature rather than piling unrelated work into a single central tracker:
+
+- **Single-repo ownership:** choose the matching target from `.feedback_triage.routing` (for example desktop shell/UI → desktop repo, mobile clients → mobile repo, self-hosted server/installer → self-hosted repo, backend/operations → backend repo), falling back to `$TRACKER` (`.feedback_triage.tracker`) if `.routing` is unset or the item's owner is unclear. Record `repo#NNN` (or the opaque `internal#NNN` when `.feedback_triage.disclosure` is `internal`, the default) in the public `alpha:` marker; never an `owner/` slug (see SKILL.md Phase 5).
+- **Multi-repo / epic-style ownership:** if the fix spans multiple repositories, place the **epic-style parent** (`type: epic`) in the **main repo owning the fix**, create focused **child tasking sub-issues** in each sibling repo that owns an individual tasking, and link each cross-repo child to the parent via GitHub's native REST sub-issues endpoint (without forcing parent replacement, so existing parent links are never silently overwritten):
+  ```bash
+  CHILD_ID=$(gh api "repos/$SIBLING_REPO/issues/$CHILD_NUM" --jq .id)
+  if ! gh api --method POST "repos/$PARENT_REPO/issues/$PARENT_NUM/sub_issues" \
+    -F "sub_issue_id=$CHILD_ID"; then
+    echo "digest: failed to link $SIBLING_REPO#$CHILD_NUM under $PARENT_REPO#$PARENT_NUM (check for existing parent or permissions)"
+  fi
+  ```
+  Record the parent epic's ref in the public `alpha:` field as `repo#NNN` (or `internal#NNN` when `.feedback_triage.disclosure` is `internal`, the default; never `owner/`), only after its children are reconciled (SKILL.md Phase 4 step 2), and include `Refs https://github.com/$PUBLIC/issues/<N>` on the parent epic only. Child sub-issues in a private candidate repo reference the parent (`Parent: $PARENT_REPO#$PARENT_NUM`) rather than repeating the bare public `Refs` URL so crash-recovery searches remain unambiguous (and never use cross-repo `Closes`). A child in a **public** repo must not name a private parent, since the slug would leak, and it must not carry a `Refs <public URL>` line either: that line is a binding, and a parent and child that share an issue number across candidate repos would both satisfy the opaque `internal#N` marker, so Phase 6 would never resolve it. Give the child `Report: $PUBLIC#<N>` instead, which is not part of the trailing block grammar; the parent epic is the only binding.
 
 ## Dispatch contract
 
-Dispatch `/issue-creation` (it is model-invocable — no `disable-model-invocation`) with a **tracking-request** built from the survivor:
+Dispatch `/issue-creation` (it is model-invocable — no `disable-model-invocation`) targeting the resolved owning repo with a **tracking-request** built from the survivor:
 
 - **Topic / title sketch:** the user's title with the `[Bug Report]`/`[Feature Request]` prefix stripped (e.g. `Reacting to a message with an emoji doesn't work`).
 - **Body seed** handed to `/issue-creation`'s Pre-Spec:
-  - The public report's `## Description` (verbatim, fenced).
+  - The public report's `## Description` (fenced), with every `https://github.com/` rewritten to `https[:]//github.com/`, so a reporter cannot plant a URL that a later search would read as a back-reference.
   - `Demand: <reports> user report(s)` — the prioritization signal.
-  - `Refs https://github.com/$PUBLIC/issues/<N>` — the back-reference (full URL, **not** a bare `#N`, and **not** `Closes` — cross-repo `Closes` is wrong here and a bare number could auto-link the wrong issue).
+  - `Refs https://github.com/$PUBLIC/issues/<N>` — the back-reference (full URL, **not** a bare `#N`, and **not** `Closes` — cross-repo `Closes` is wrong here and a bare number could auto-link the wrong issue). It MUST sit in the **trailing block** at the very end of the body, after the Description and the `Demand:` line: Phase 4 and Phase 6 trust only consecutive `Refs <public URL>` lines (or `<!-- feedback-triage:ref <URL> -->`) there. When a later survivor reuses this tracker issue (adjacency), append its own `Refs` line to that block, never anywhere else. After `/issue-creation` returns, re-read the body and, if anything but those lines follows the `Demand:` line, edit the body so the block ends it.
 - **Pre-answered metadata** (see mappings below) so `/issue-creation` doesn't have to guess.
 
 `/issue-creation` then runs its own adjacency scan — so a feedback item that matches an existing tracker issue or epic is attached/cross-referenced rather than duplicated. That dedup-against-the-tracker is exactly why we route through it instead of `gh issue create`.
@@ -21,8 +36,8 @@ Dispatch `/issue-creation` (it is model-invocable — no `disable-model-invocati
 
 | Checkpoint | Auto-mode answer |
 |---|---|
-| Adjacency (Phase 1) | If a **strong duplicate** exists in the tracker → do NOT create; cross-reference it and record its number as `alpha`. If a **strong parent-epic** fit → create as sub-issue. Otherwise → standalone. |
-| Scope (Phase 2) | Always **single issue** for a feedback item (one report = one landable change). Never auto-spawn an epic from feedback; if it looks epic-sized, create the issue and flag `needs-scoping` in the digest. |
+| Adjacency (Phase 1) | If a **strong duplicate** exists in `$CANDIDATE_TRACKERS` → do NOT create; cross-reference it and record it as `alpha` (`repo#N` or `internal#N`, never `owner/`). If a **strong parent-epic** fit → create as sub-issue (same-repo or cross-repo via `/sub_issues`). Otherwise → standalone (or parent epic if multi-repo). |
+| Scope (Phase 2) | **Single issue** for single-repo feedback (one report = one landable change). If work genuinely spans multiple repos → **epic-style parent** (`type: epic`) in the main repo owning the fix + child sub-issues in sibling owning repos. If single-repo work looks oversized, create the issue and flag `needs-scoping` in the digest. |
 | Relationships (Phase 5) | Accept the auto-detected links. |
 | Preview (Phase 6) | Auto-accept. |
 | Creation (Phase 7) | Create at board **Status = Triage** (or Backlog), **never Ready** — a human vets scope before work starts. |

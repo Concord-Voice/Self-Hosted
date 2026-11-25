@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 	"github.com/google/uuid"
 )
 

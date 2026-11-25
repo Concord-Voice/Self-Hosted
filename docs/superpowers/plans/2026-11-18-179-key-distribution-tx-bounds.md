@@ -137,7 +137,7 @@
 
 ---
 
-## Companion: Hosted mirror PR
+## Companion: managed deployment mirror PR
 
 Apply Tasks 1-6 to the mirrored control plane. `handlers.go`, `postgres.go` and `resolver.go` are equivalent apart from line offsets, comments and one unrelated validation block, so cherry-pick and hand-merge. The nginx file differs: add `proxy_read_timeout 60s;` to its own `/api/` location by hand. Use its rule files `.claude/rules/backend.md` / `e2ee.md`. Run its `scripts/update-claude-md-counts.sh` at Phase 4. Do not add a migration.
 

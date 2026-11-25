@@ -12,9 +12,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/e2eekeys"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/e2eekeys"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2280,21 +2280,9 @@ func TestDistributeUnifiedKeysDM_InvalidMemberUUID(t *testing.T) {
 	assert.Equal(t, float64(0), body["distributed"])
 }
 
-// TestDistributeUnifiedKeysDM_PendingDeleteErrorDoesNotFailDistribution
-// ports TestDistributeKeys_PendingDeleteError_DoesNotFailDistribution
-// (dm/handlers_test.go): the post-commit DELETE against
-// dm_pending_key_requests is best-effort, so a DELETE failure must not fail
-// the handler — the key row was already durably inserted before the DELETE
-// runs.
-//
-// The assertion ("distribution still succeeds despite the DELETE error")
-// holds on the unified route, but its MEANING narrows relative to the
-// legacy route: legacy's runGuardedDMKeyDistribution LOGS a Warn on this
-// failure (dm/handlers.go:1573-1575), while distributeDMKeys DISCARDS it
-// silently ("_, _ = h.db.Exec(...)", handlers.go:3283-3286). This test
-// locks in "still succeeds," not "still logs" — the unified route has no
-// log line to assert on here.
-func TestDistributeUnifiedKeysDM_PendingDeleteErrorDoesNotFailDistribution(t *testing.T) {
+// Pending cleanup is part of key distribution: a failed DELETE must roll back
+// the wrap instead of committing an untracked result.
+func TestDistributeUnifiedKeysDM_PendingDeleteErrorRollsBackDistribution(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "dmpenddel1")
 	user2 := ts.CreateTestUser(t, "dmpenddel2")
@@ -2314,13 +2302,8 @@ func TestDistributeUnifiedKeysDM_PendingDeleteErrorDoesNotFailDistribution(t *te
 			},
 			"key_version": 1,
 		}, testhelpers.AuthHeaders(user1.AccessToken))
-		require.Equal(t, http.StatusOK, w.Code,
-			"post-commit DELETE-cleanup error must NOT fail the handler — key was already distributed")
-
-		var body map[string]interface{}
-		testhelpers.ParseJSON(t, w, &body)
-		assert.Equal(t, float64(1), body["distributed"],
-			"distributed count should reflect successful key insert despite cleanup failure")
+		require.Equal(t, http.StatusInternalServerError, w.Code,
+			"cleanup failure must abort the distribution transaction")
 	})
 
 	var keyRowCount int
@@ -2328,8 +2311,7 @@ func TestDistributeUnifiedKeysDM_PendingDeleteErrorDoesNotFailDistribution(t *te
 		`SELECT COUNT(*) FROM dm_channel_keys WHERE conversation_id = $1 AND user_id = $2`,
 		convID, user2.ID,
 	).Scan(&keyRowCount))
-	assert.Equal(t, 1, keyRowCount,
-		"dm_channel_keys should contain the wrapped key — insert succeeded before DELETE failure path")
+	assert.Zero(t, keyRowCount, "the failed cleanup must roll back the wrapped key")
 }
 
 // ===========================================================================

@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 )
 
@@ -297,7 +297,7 @@ func NewTestTempGrantManager(db *sql.DB, log *logger.Logger, hub *websocket.Hub,
 
 // Grant exposes grantTemporaryChannelAccess.
 func (t *TestTempGrantManager) Grant(ctx context.Context, serverID, channelID, userID string) error {
-	return t.m.grantTemporaryChannelAccess(ctx, serverID, channelID, userID)
+	return t.GrantTemporaryChannelAccessForTest(ctx, serverID, channelID, userID)
 }
 
 // SetGrantCommitForTest replaces only the grant transaction's commit call. It
@@ -488,4 +488,41 @@ func (s *NATSSubscriber) BroadcastPrivateVoiceLeft(conversationID, senderID, cal
 // BroadcastPrivateVoiceRoomEmpty exposes the DM "room_empty" broadcaster (#4179).
 func (s *NATSSubscriber) BroadcastPrivateVoiceRoomEmpty(channelID, callID string, conversationID uuid.UUID) {
 	s.broadcastPrivateVoiceRoomEmpty(voiceRoomEmptyEvent{ChannelID: channelID, CallID: callID}, conversationID)
+}
+
+// allowAllTemporaryGrantAuthorityForTest is the named zero-authority closure
+// for tests that exercise grant/revoke mechanics without a moderator actor.
+func allowAllTemporaryGrantAuthorityForTest() temporaryGrantAuthorization {
+	return temporaryGrantAuthorization{authority: func(context.Context, *sql.Tx) error { return nil }}
+}
+
+// GrantWithAuthorizationForTest exposes the authority-fenced grant with an
+// explicit credential-guard flag and authority closure (nil allowed).
+func (t *TestTempGrantManager) GrantWithAuthorizationForTest(
+	ctx context.Context, serverID, channelID, userID string,
+	guardCredential bool, authority func(context.Context, *sql.Tx) error,
+) error {
+	_, err := t.m.grantTemporaryChannelAccessWithCredential(ctx, serverID, channelID, userID,
+		temporaryGrantAuthorization{guardCredential: guardCredential, authority: authority})
+	return err
+}
+
+// GrantTemporaryChannelAccessForTest grants with the allow-all test authority.
+func (t *TestTempGrantManager) GrantTemporaryChannelAccessForTest(ctx context.Context, serverID, channelID, userID string) error {
+	_, err := t.m.grantTemporaryChannelAccessWithCredential(ctx, serverID, channelID, userID, allowAllTemporaryGrantAuthorityForTest())
+	return err
+}
+
+// ErrTemporaryGrantAuthorityRequiredForTest aliases the production
+// errTemporaryGrantAuthorityRequired.
+var ErrTemporaryGrantAuthorityRequiredForTest = errTemporaryGrantAuthorityRequired
+
+// RevokeWithAuthorizationForTest exposes the authority-fenced revoke with an
+// explicit credential-guard flag and authority closure (nil allowed).
+func (t *TestTempGrantManager) RevokeWithAuthorizationForTest(
+	ctx context.Context, serverID, channelID, userID string,
+	guardCredential bool, authority func(context.Context, *sql.Tx) error,
+) (bool, error) {
+	return t.m.revokeTemporaryChannelAccessWithCredential(ctx, serverID, channelID, userID,
+		temporaryGrantAuthorization{guardCredential: guardCredential, authority: authority})
 }

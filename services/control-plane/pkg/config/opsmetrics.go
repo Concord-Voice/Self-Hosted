@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
 )
 
 // OpsMetricsRole selects the local storage mode. Aggregation is reserved for #1504.

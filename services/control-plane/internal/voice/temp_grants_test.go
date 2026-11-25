@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voice"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -766,4 +766,58 @@ func TestGrantMakesHiddenVoiceChannelVisible(t *testing.T) {
 	visible, err = resolver.GetVisibleChannelIDs(context.Background(), serverID, mover.ID)
 	require.NoError(t, err)
 	assert.NotContains(t, visible, channelID, "channel should be hidden again after revoke")
+}
+
+func TestGrantTemporaryChannelAccess_NilAuthority_ErrorNoRow(t *testing.T) {
+	ts := setupTS(t)
+	mgr := newTempGrantManager(t, ts)
+	owner := ts.CreateTestUser(t, "tg_nilauth_owner")
+	mover := ts.CreateTestUser(t, "tg_nilauth_target")
+	serverID := ts.CreateTestServer(t, owner.ID, "TempGrant NilAuthority")
+	ts.AddMemberToServer(t, serverID, mover.ID, roleMember)
+	channelID := ts.CreateVoiceChannel(t, serverID, "voice-tg-nilauth")
+
+	err := mgr.GrantWithAuthorizationForTest(context.Background(), serverID, channelID, mover.ID, false, nil)
+
+	require.ErrorIs(t, err, voice.ErrTemporaryGrantAuthorityRequiredForTest)
+	exists, _, _, _, _ := tgOverride(t, ts.DB, channelID, mover.ID)
+	assert.False(t, exists, "no row may be written without an authority closure")
+}
+
+func TestGrantTemporaryChannelAccess_ClosureRunsWithoutCredentialGuard(t *testing.T) {
+	ts := setupTS(t)
+	mgr := newTempGrantManager(t, ts)
+	owner := ts.CreateTestUser(t, "tg_closure_owner")
+	mover := ts.CreateTestUser(t, "tg_closure_target")
+	serverID := ts.CreateTestServer(t, owner.ID, "TempGrant Closure")
+	ts.AddMemberToServer(t, serverID, mover.ID, roleMember)
+	channelID := ts.CreateVoiceChannel(t, serverID, "voice-tg-closure")
+	sentinel := errors.New("authority refused")
+
+	err := mgr.GrantWithAuthorizationForTest(context.Background(), serverID, channelID, mover.ID, false,
+		func(context.Context, *sql.Tx) error { return sentinel })
+
+	require.ErrorIs(t, err, sentinel)
+	exists, _, _, _, _ := tgOverride(t, ts.DB, channelID, mover.ID)
+	assert.False(t, exists)
+}
+
+func TestRevokeTemporaryChannelAccess_ClosureRunsWithoutCredentialGuard(t *testing.T) {
+	ts := setupTS(t)
+	mgr := newTempGrantManager(t, ts)
+	owner := ts.CreateTestUser(t, "tg_rclosure_owner")
+	member := ts.CreateTestUser(t, "tg_rclosure_target")
+	serverID := ts.CreateTestServer(t, owner.ID, "TempGrant Revoke Closure")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+	channelID := ts.CreateVoiceChannel(t, serverID, "voice-tg-rclosure")
+	require.NoError(t, mgr.GrantTemporaryChannelAccessForTest(context.Background(), serverID, channelID, member.ID))
+	sentinel := errors.New("authority refused")
+
+	removed, err := mgr.RevokeWithAuthorizationForTest(context.Background(), serverID, channelID, member.ID, false,
+		func(context.Context, *sql.Tx) error { return sentinel })
+
+	require.ErrorIs(t, err, sentinel)
+	assert.False(t, removed)
+	exists, _, _, isTemp, _ := tgOverride(t, ts.DB, channelID, member.ID)
+	assert.True(t, exists && isTemp, "a refused revoke must leave the temporary grant row")
 }

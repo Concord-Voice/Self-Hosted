@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -171,7 +171,7 @@ func TestExplicitTemporaryGrantRevokeFenceProbeControl(t *testing.T) {
 	mgr := &tempGrantManager{db: db, hub: hub}
 
 	_, _, _, err := mgr.deleteTemporaryGrantWithCapture(
-		context.Background(), uuid.NewString(), uuid.NewString(), uuid.NewString(), temporaryGrantAuthorization{},
+		context.Background(), uuid.NewString(), uuid.NewString(), uuid.NewString(), allowAllTemporaryGrantAuthorityForTest(),
 	)
 	require.ErrorIs(t, err, errFenceProbeStopped)
 	require.NotZero(t, probe.seen,

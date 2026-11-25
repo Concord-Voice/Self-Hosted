@@ -44,9 +44,11 @@ Violating one invalidates your work regardless of whether the code is correct:
 2. **Never mutate shared git state.** No `gh pr checkout`, no branch switching, no
    commits unless your task explicitly says to commit. Run `git status` before
    reporting done and account for every modified file.
-3. **Context7 before any third-party API.** Current docs, not training recall, not
-   an in-repo call site. Your task prompt should carry the library IDs; if it
-   doesn't and you need one, fetch it first.
+3. **Verify third-party APIs with current Context7 documentation.** Use the
+   cited documentation returned by the isolated researcher. If a source is
+   missing, give the caller the public library name, version and API question
+   for a fresh documentation session. Leave work that depends on that source
+   pending until the caller supplies the citation. Keep repository evidence here.
 4. **Report honestly.** If tests fail, say so with output. If you skipped a step,
    say that. "Fix applied, awaiting verification" — never "fixed" without evidence.
 

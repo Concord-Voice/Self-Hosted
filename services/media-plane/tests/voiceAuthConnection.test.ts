@@ -111,11 +111,11 @@ describe('private auth connection ownership', () => {
     expect(f.owners.retainedIdentityCount()).toBe(1000);
   });
 
-  it('caps one account at 16 live connections without touching other accounts', async () => {
+  it('caps one account at 4 live connections without touching other accounts', async () => {
     const f = fixture();
-    const held = Array.from({ length: 16 }, (_, i) => f.reserve(`per-user-${i}`));
+    const held = Array.from({ length: 4 }, (_, i) => f.reserve(`per-user-${i}`));
     expect(() => f.reserve('per-user-over')).toThrow(/for user/);
-    expect(f.owners.retainedIdentityCount()).toBe(16);
+    expect(f.owners.retainedIdentityCount()).toBe(4);
     expect(() => f.reserve('other-account', filler(1))).not.toThrow();
     await f.owners.terminate(held[0]);
     expect(() => f.reserve('per-user-freed')).not.toThrow();
@@ -126,15 +126,17 @@ describe('private auth connection ownership', () => {
     const f = fixture();
     const handle = f.reserve(); await f.owners.register(handle);
     const closeNative = vi.fn(async () => {});
-    for (let i = 1; i < 1000; i++) {
+    // Rooms fill the general pool; distinct fresh accounts take the new-user reserve.
+    for (let i = 1; i < 800; i++) {
       f.owners.reserveRoom(handle, {
         sessionGeneration: `${i.toString(16).padStart(8, '0')}-2222-4222-8222-222222222222`,
         nodeBootId: boot, roomId: '00000006-1111-4111-8111-111111111111',
         roomKind: 'channel', userId: user, credentialEpoch: epoch, socketId: 'connection-test',
       }, closeNative);
     }
+    for (let i = 0; i < 200; i++) f.reserve(`mixed-reserve-${i}`, filler(i));
     expect(f.owners.retainedIdentityCount()).toBe(1000);
-    expect(() => f.reserve('mixed-over-cap')).toThrow();
+    expect(() => f.reserve('mixed-over-cap', filler(200))).toThrow();
     expect(() => f.owners.reserveRoom(handle, {
       sessionGeneration: '00000000-2222-4222-8222-222222222222', nodeBootId: boot,
       roomId: '00000006-1111-4111-8111-111111111111', roomKind: 'channel',

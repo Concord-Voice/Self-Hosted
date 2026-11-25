@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/policy"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/policy"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // reconcile/import (DoR:1611, :1727-1730, :1765-1769; D-96, D-287; B3-D4,

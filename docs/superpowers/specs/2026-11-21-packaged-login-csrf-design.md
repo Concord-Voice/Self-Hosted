@@ -21,4 +21,4 @@ This is not a general relaxation for configured origins: HTTPS origins, other `a
 
 ## Scope boundaries
 
-No Desktop, Hosted, configuration, router, dependency, migration, or auth-route changes are part of this fix.
+No Desktop, managed deployment, configuration, router, dependency, migration, or auth-route changes are part of this fix.

@@ -18,9 +18,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/api"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/api"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 	"github.com/google/uuid"
 )
 
@@ -91,24 +91,9 @@ func runVoiceEnforcementRollout(args []string) int {
 		fmt.Fprintln(os.Stderr, "load configuration failed")
 		return 1
 	}
-	var retirement voiceBootRetirementEvidence
-	if args[0] == retireBootCommand {
-		retirement, err = parseVoiceBootRetirementArgs(args, cfg.RoomPlacementEnabled)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "usage: invalid boot retirement evidence")
-			return 64
-		}
-	}
-	var receipt familyActivationReceipt
-	if args[0] == "activate" {
-		if len(args) < 4 {
-			return 64
-		}
-		receipt, err = readFamilyActivationReceipt(args[3], cfg.RoomPlacementEnabled)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "invalid family activation receipt")
-			return 1
-		}
+	inputs, code := readFamilyRolloutInputs(args, cfg.RoomPlacementEnabled)
+	if code != 0 {
+		return code
 	}
 	db, err := database.New(cfg.DatabaseURL)
 	if err != nil {
@@ -122,33 +107,82 @@ func runVoiceEnforcementRollout(args []string) int {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	return runFamilyRolloutVerb(ctx, db, args, inputs)
+}
+
+// familyRolloutInputs carries the argv- and file-derived evidence that is
+// validated against configuration before the database is opened.
+type familyRolloutInputs struct {
+	retirement voiceBootRetirementEvidence
+	receipt    familyActivationReceipt
+}
+
+// readFamilyRolloutInputs parses retire-boot evidence and reads the activation
+// receipt. A non-zero code is the exit code; any diagnostic has already been
+// written.
+func readFamilyRolloutInputs(args []string, placement bool) (inputs familyRolloutInputs, code int) {
+	var err error
 	if args[0] == retireBootCommand {
-		if err := api.RetireStoppedVoiceAuthBoot(ctx, db, retirement.NodeBootID); err != nil {
-			fmt.Fprintln(os.Stderr, "boot retirement refused")
-			return 1
-		}
-		return 0
-	}
-	if args[0] == "verify-retired-boot" {
-		if len(args) < 3 {
-			return 64
-		}
-		verified, err := api.VerifyRetiredVoiceAuthBoot(ctx, db, uuid.MustParse(args[2]))
+		inputs.retirement, err = parseVoiceBootRetirementArgs(args, placement)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "observe retired boot failed")
-			return 1
+			fmt.Fprintln(os.Stderr, "usage: invalid boot retirement evidence")
+			return inputs, 64
 		}
-		if !verified {
-			return 3
-		}
-		return 0
 	}
-	if args[0] != "status" {
-		if err := mutateFamilyRollout(ctx, db, args[0], receipt); err != nil {
+	if args[0] == "activate" {
+		if len(args) < 4 {
+			return inputs, 64
+		}
+		inputs.receipt, err = readFamilyActivationReceipt(args[3], placement)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invalid family activation receipt")
+			return inputs, 1
+		}
+	}
+	return inputs, 0
+}
+
+func runFamilyRolloutVerb(ctx context.Context, db *sql.DB, args []string, inputs familyRolloutInputs) int {
+	switch args[0] {
+	case retireBootCommand:
+		return runRetireVoiceBoot(ctx, db, inputs.retirement.NodeBootID)
+	case "verify-retired-boot":
+		return runVerifyRetiredVoiceBoot(ctx, db, args)
+	case "status":
+		return printFamilyRolloutStatus(ctx, db, args)
+	default:
+		if err := mutateFamilyRollout(ctx, db, args[0], inputs.receipt); err != nil {
 			fmt.Fprintln(os.Stderr, "family rollout mutation refused")
 			return 1
 		}
+		return printFamilyRolloutStatus(ctx, db, args)
 	}
+}
+
+func runRetireVoiceBoot(ctx context.Context, db *sql.DB, boot uuid.UUID) int {
+	if err := api.RetireStoppedVoiceAuthBoot(ctx, db, boot); err != nil {
+		fmt.Fprintln(os.Stderr, "boot retirement refused")
+		return 1
+	}
+	return 0
+}
+
+func runVerifyRetiredVoiceBoot(ctx context.Context, db *sql.DB, args []string) int {
+	if len(args) < 3 {
+		return 64
+	}
+	verified, err := api.VerifyRetiredVoiceAuthBoot(ctx, db, uuid.MustParse(args[2]))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "observe retired boot failed")
+		return 1
+	}
+	if !verified {
+		return 3
+	}
+	return 0
+}
+
+func printFamilyRolloutStatus(ctx context.Context, db *sql.DB, args []string) int {
 	status, err := readFamilyRolloutStatus(ctx, db)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "observe family rollout failed")
@@ -293,45 +327,57 @@ func familyRolloutJSONValue(d *json.Decoder, depth int) (any, error) {
 	}
 	switch delimiter {
 	case '{':
-		object := map[string]any{}
-		for d.More() {
-			key, err := d.Token()
-			if err != nil {
-				return nil, errFamilyRolloutEvidence
-			}
-			name, ok := key.(string)
-			if !ok {
-				return nil, errFamilyRolloutEvidence
-			}
-			if _, present := object[name]; present {
-				return nil, errFamilyRolloutEvidence
-			}
-			value, err := familyRolloutJSONValue(d, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			object[name] = value
-		}
-		if _, err := d.Token(); err != nil {
-			return nil, errFamilyRolloutEvidence
-		}
-		return object, nil
+		return familyRolloutJSONObject(d, depth)
 	case '[':
-		array := []any{}
-		for d.More() {
-			value, err := familyRolloutJSONValue(d, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			array = append(array, value)
-		}
-		if _, err := d.Token(); err != nil {
-			return nil, errFamilyRolloutEvidence
-		}
-		return array, nil
+		return familyRolloutJSONArray(d, depth)
 	default:
 		return nil, errFamilyRolloutEvidence
 	}
+}
+
+// familyRolloutJSONObject reads the members of an object whose opening
+// delimiter was already consumed, refusing non-string and duplicate keys.
+func familyRolloutJSONObject(d *json.Decoder, depth int) (any, error) {
+	object := map[string]any{}
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return nil, errFamilyRolloutEvidence
+		}
+		name, ok := key.(string)
+		if !ok {
+			return nil, errFamilyRolloutEvidence
+		}
+		if _, present := object[name]; present {
+			return nil, errFamilyRolloutEvidence
+		}
+		value, err := familyRolloutJSONValue(d, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		object[name] = value
+	}
+	if _, err := d.Token(); err != nil {
+		return nil, errFamilyRolloutEvidence
+	}
+	return object, nil
+}
+
+// familyRolloutJSONArray reads the elements of an array whose opening
+// delimiter was already consumed.
+func familyRolloutJSONArray(d *json.Decoder, depth int) (any, error) {
+	array := []any{}
+	for d.More() {
+		value, err := familyRolloutJSONValue(d, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		array = append(array, value)
+	}
+	if _, err := d.Token(); err != nil {
+		return nil, errFamilyRolloutEvidence
+	}
+	return array, nil
 }
 func familyRolloutClosedObject(value, exemplar any) bool {
 	object, ok := value.(map[string]any)
@@ -475,25 +521,50 @@ func mutateFamilyRollout(ctx context.Context, db *sql.DB, verb string, receipt f
 		return err
 	}
 	if verb == "deactivate" {
-		if active {
-			return errFamilyRolloutEvidence
-		}
-		if _, err = tx.ExecContext(ctx, `UPDATE voice_enforcement_rollout SET activated_at=NULL,updated_at=clock_timestamp() WHERE id=TRUE`); err != nil {
+		if err = deactivateFamilyRolloutTx(ctx, tx, active); err != nil {
 			return err
 		}
 		return tx.Commit()
 	}
 	if active {
-		first, err := decodeFamilyActivationReceipt(original, len(receipt.MediaSlots) == 2)
-		if err != nil || !reflect.DeepEqual(first, receipt) {
-			return errFamilyRolloutEvidence
+		if err = confirmRecordedFamilyReceipt(original, receipt); err != nil {
+			return err
 		}
 		return tx.Commit()
 	}
-	if err = normalizeFamilyLegacyTx(ctx, tx); err != nil {
+	if err = activateFamilyRolloutTx(ctx, tx, receipt); err != nil {
 		return err
 	}
-	if err = verifyFamilyActivationTx(ctx, tx, receipt); err != nil {
+	return tx.Commit()
+}
+
+// deactivateFamilyRolloutTx clears only the legacy floor, and only while the
+// family floor is still prepared. The caller owns the transaction.
+func deactivateFamilyRolloutTx(ctx context.Context, tx *sql.Tx, active bool) error {
+	if active {
+		return errFamilyRolloutEvidence
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE voice_enforcement_rollout SET activated_at=NULL,updated_at=clock_timestamp() WHERE id=TRUE`)
+	return err
+}
+
+// confirmRecordedFamilyReceipt accepts a repeated activation only when it
+// presents exactly the first recorded receipt.
+func confirmRecordedFamilyReceipt(original []byte, receipt familyActivationReceipt) error {
+	first, err := decodeFamilyActivationReceipt(original, len(receipt.MediaSlots) == 2)
+	if err != nil || !reflect.DeepEqual(first, receipt) {
+		return errFamilyRolloutEvidence
+	}
+	return nil
+}
+
+// activateFamilyRolloutTx normalizes legacy rows, verifies the receipt against
+// locked current state and records it. The caller owns the transaction.
+func activateFamilyRolloutTx(ctx context.Context, tx *sql.Tx, receipt familyActivationReceipt) error {
+	if err := normalizeFamilyLegacyTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := verifyFamilyActivationTx(ctx, tx, receipt); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(receipt)
@@ -514,7 +585,7 @@ func mutateFamilyRollout(ctx context.Context, db *sql.DB, verb string, receipt f
 	if changed != 1 {
 		return errFamilyRolloutEvidence
 	}
-	return tx.Commit()
+	return nil
 }
 func normalizeFamilyLegacyTx(ctx context.Context, tx *sql.Tx) error {
 	var corrupt bool

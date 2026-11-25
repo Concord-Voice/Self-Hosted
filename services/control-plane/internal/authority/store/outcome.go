@@ -1,6 +1,6 @@
 package store
 
-import ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+import ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 
 // Kind is what an Outcome's body is.
 type Kind uint8
