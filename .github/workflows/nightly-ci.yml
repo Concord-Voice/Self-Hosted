@@ -1,8 +1,8 @@
 # Nightly CI — the third trigger-owning orchestrator (ADR-0018 §1, amended).
 #
-# Self-Hosted (epic #3947): the desktop release probe, the release and deploy
+# Self-Hosted: the desktop release probe, the release and deploy
 # legs and native-audiocap are not here. Desktop releases are cut from the
-# Desktop repo and production deploys run from Hosted. This nightly is the scan
+# Desktop repo and production deploys run downstream. This nightly is the scan
 # baseline for main, including SonarCloud's main-branch analysis (F7, #36).
 #
 # WHY THIS EXISTS. Scanning used to run twice per change: once on the PR, then

@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/google/uuid"
 )
 
@@ -164,8 +164,7 @@ func (s *Service) WithReadySenderModeBeforeReconcile(
 	ctx context.Context,
 	senderID uuid.UUID,
 	mode OperationMode,
-	beforeReconcile func() error,
-	work func() error,
+	beforeReconcile, work func() error,
 ) error {
 	if beforeReconcile == nil {
 		return errors.New("presence history pre-reconcile step unavailable")
@@ -177,8 +176,7 @@ func (s *Service) withReadySenderMode(
 	ctx context.Context,
 	senderID uuid.UUID,
 	mode OperationMode,
-	beforeReconcile func() error,
-	work func() error,
+	beforeReconcile, work func() error,
 ) error {
 	if s == nil || s.db == nil || senderID == uuid.Nil || work == nil {
 		return errors.New("presence history ready sender unavailable")
@@ -195,8 +193,7 @@ func (s *Service) runReadySenderMode(
 	ctx context.Context,
 	senderID uuid.UUID,
 	mode OperationMode,
-	beforeReconcile func() error,
-	work func() error,
+	beforeReconcile, work func() error,
 ) error {
 	if beforeReconcile != nil {
 		if err := beforeReconcile(); err != nil {
@@ -998,8 +995,7 @@ func (s *Service) commitClaimQuarantineRepair(
 func (s *Service) deleteClaimedPending(
 	ctx context.Context,
 	tx *sql.Tx,
-	senderID uuid.UUID,
-	operationID uuid.UUID,
+	senderID, operationID uuid.UUID,
 ) (sql.Result, error) {
 	s.transactionMu.RLock()
 	deleteClaim := s.transactionHooks.DeleteClaim
@@ -1480,8 +1476,7 @@ func (s *Service) resolveProvenNonmatching(
 
 func (s *Service) deferAmbiguousTopologyRetry(
 	ctx context.Context,
-	senderID uuid.UUID,
-	operationID uuid.UUID,
+	senderID, operationID uuid.UUID,
 ) error {
 	backoff := pendingOperationGrace
 	if configured := 2 * s.effectiveReconcileInterval(); configured > backoff {
@@ -1580,8 +1575,7 @@ func (s *Service) compensateAndClaim(
 }
 
 func compensationAudienceOperation(
-	senderID uuid.UUID,
-	operationID uuid.UUID,
+	senderID, operationID uuid.UUID,
 	settings lockedPresenceSettings,
 	pending pendingOperationRow,
 ) AudienceOperation {

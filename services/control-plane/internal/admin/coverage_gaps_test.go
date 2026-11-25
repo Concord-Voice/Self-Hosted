@@ -24,11 +24,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -468,11 +468,11 @@ func TestEnrollBegin_TokenBoundToDifferentAdmin_Rejected(t *testing.T) {
 	hashVal, err := auth.HashPassword(adminTestPassword)
 	require.NoError(t, err)
 
-	adminA, err := repo.CreatePending(ctx, uniqueAdminUsername("enrollA"), hashVal)
+	adminA, err := repo.CreatePending(ctx, uniqueAdminUsername("enroll-a"), hashVal)
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, adminA.ID)
 
-	adminB, err := repo.CreatePending(ctx, uniqueAdminUsername("enrollB"), hashVal)
+	adminB, err := repo.CreatePending(ctx, uniqueAdminUsername("enroll-b"), hashVal)
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, adminB.ID)
 

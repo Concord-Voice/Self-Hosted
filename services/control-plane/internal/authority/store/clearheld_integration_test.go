@@ -13,9 +13,9 @@ import (
 
 	"github.com/lib/pq"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/authoritytest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/signer"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/authoritytest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/signer"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // Task 9: clear-held (DoR:1729-1731, D-146, D-286, DoR mutation 8; B3-D1, B3-D9).

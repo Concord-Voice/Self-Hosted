@@ -154,6 +154,56 @@ function credentialOptionsResponse(value: unknown): CredentialOptionsResponse {
   };
 }
 
+// The sign-in response caps admins_added at this value; the portal shows the
+// cap as "N or more".
+export const MAX_ADMINS_ADDED_NOTICE = 100;
+
+// What a sign-in tells the admin: how many admins were added since the last
+// notice they acknowledged, and the opaque cursor that acknowledges it (null
+// when the count is 0, which has nothing to acknowledge).
+export interface SignInNotice {
+  adminsAdded: number;
+  cursor: string | null;
+}
+
+const NOTICE_CURSOR = /^[1-9]\d{0,17}$/;
+
+// The sign-in success carries the count beside its status, and the cursor
+// exactly when the count is above 0. The server leaves both out when it could
+// not read the count, rather than block the sign-in; the portal then shows no
+// notice. When present they must be valid.
+function signInResponse(value: unknown): SignInNotice {
+  const data = record(value);
+  if (data.status !== "authenticated") throw new ContractError();
+  if (!("admins_added" in data)) {
+    exactKeys(data, ["status"]);
+    return { adminsAdded: 0, cursor: null };
+  }
+  const count = data.admins_added;
+  if (
+    typeof count !== "number" ||
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    count > MAX_ADMINS_ADDED_NOTICE
+  ) {
+    throw new ContractError();
+  }
+  if (count === 0) {
+    exactKeys(data, ["status", "admins_added"]);
+    return { adminsAdded: 0, cursor: null };
+  }
+  exactKeys(data, ["status", "admins_added", "notice_cursor"]);
+  const cursor = data.notice_cursor;
+  if (typeof cursor !== "string" || !NOTICE_CURSOR.test(cursor)) {
+    throw new ContractError();
+  }
+  return { adminsAdded: count, cursor };
+}
+
+function noContent(value: unknown): void {
+  if (value !== null) throw new ContractError();
+}
+
 function statusResponse(expected: string): (value: unknown) => void {
   return (value) => {
     const data = record(value);
@@ -207,15 +257,19 @@ export const api = {
     handle: string,
     assertion: unknown,
     options?: RequestOptions,
-  ): Promise<void> {
-    return request(
-      "/admin/api/v1/auth/webauthn",
-      statusResponse("authenticated"),
-      {
-        ...options,
-        body: { handle, assertion },
-      },
-    );
+  ): Promise<SignInNotice> {
+    return request("/admin/api/v1/auth/webauthn", signInResponse, {
+      ...options,
+      body: { handle, assertion },
+    });
+  },
+  // Tells the server this session displayed its sign-in notice, so the next
+  // sign-in counts only the admins added after it.
+  ackSignInNotice(cursor: string, options?: RequestOptions): Promise<void> {
+    return request("/admin/api/v1/signin-notice/ack", noContent, {
+      ...options,
+      body: { cursor },
+    });
   },
   enrollBegin(
     username: string,

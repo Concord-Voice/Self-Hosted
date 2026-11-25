@@ -11,9 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 )
 
 // Statements a lock probe runs against the gated servers row. flipSQL is the

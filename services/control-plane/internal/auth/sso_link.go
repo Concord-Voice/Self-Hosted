@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )

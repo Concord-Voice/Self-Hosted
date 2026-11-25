@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )
@@ -173,13 +173,14 @@ func TestCORSAppSchemePreflightWithCustomHeader(t *testing.T) {
 	req := httptest.NewRequest("OPTIONS", "/test", nil)
 	req.Header.Set("Origin", testAppOrigin)
 	req.Header.Set("Access-Control-Request-Method", "GET")
-	req.Header.Set("Access-Control-Request-Headers", "x-machine-id")
+	req.Header.Set("Access-Control-Request-Headers", "x-machine-id, x-concord-sso-client-binding")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, 204, w.Code)
 	assert.Equal(t, testAppOrigin, w.Header().Get(headerAccessControlAllowOrigin))
 	assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "X-Machine-Id")
+	assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "X-Concord-SSO-Client-Binding")
 }
 
 func TestCORSAppSchemeNotInAllowlistRejected(t *testing.T) {

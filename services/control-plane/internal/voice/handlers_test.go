@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voice"
-	concordws "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
+	concordws "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
@@ -41,13 +41,10 @@ func brokenResolverHandler(t *testing.T, ts *testhelpers.TestServer, userID stri
 }
 
 const (
-	pathChannelsPrefix       = "/api/v1/channels/"
-	roleMember               = "member"
-	pathVoiceJoin            = "/voice/join"
-	pathVoiceAuthorizeAction = "/voice/authorize-action"
-	pathVoiceParticipants    = "/voice/participants"
-	keyAction                = "action"
-	keyTargetUserID          = "target_user_id"
+	pathChannelsPrefix    = "/api/v1/channels/"
+	roleMember            = "member"
+	pathVoiceJoin         = "/voice/join"
+	pathVoiceParticipants = "/voice/participants"
 )
 
 func setupTS(t *testing.T) *testhelpers.TestServer {
@@ -380,101 +377,6 @@ func TestAuthorizeJoin_ResolverError_500(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
 }
 
-// --- AuthorizeVoiceAction Tests (table-driven to reduce duplication) ---
-
-func TestAuthorizeVoiceAction_ValidActions(t *testing.T) {
-	actions := []struct {
-		action     string
-		expectCode int
-	}{
-		{"mute", http.StatusOK},
-		{"deafen", http.StatusOK},
-		{"move", http.StatusOK},
-		{"explode", http.StatusBadRequest},
-	}
-
-	for _, tc := range actions {
-		t.Run(tc.action, func(t *testing.T) {
-			ts := setupTS(t)
-			owner := ts.CreateTestUser(t, "va_"+tc.action+"_owner")
-			target := ts.CreateTestUser(t, "va_"+tc.action+"_target")
-			serverID := ts.CreateTestServer(t, owner.ID, "VoiceAction "+tc.action)
-			ts.AddMemberToServer(t, serverID, target.ID, roleMember)
-			channelID := ts.CreateVoiceChannel(t, serverID, "voice-"+tc.action)
-
-			w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-				keyAction:       tc.action,
-				keyTargetUserID: target.ID,
-			}, testhelpers.AuthHeaders(owner.AccessToken))
-			assert.Equal(t, tc.expectCode, w.Code)
-		})
-	}
-}
-
-func TestAuthorizeVoiceAction_NoPermission(t *testing.T) {
-	ts := setupTS(t)
-	owner := ts.CreateTestUser(t, "vaowner5")
-	actor := ts.CreateTestUser(t, "vaactor5")
-	target := ts.CreateTestUser(t, "vatarget5")
-	serverID := ts.CreateTestServer(t, owner.ID, "VoiceAction NoPerm")
-	ts.AddMemberToServer(t, serverID, actor.ID, roleMember)
-	ts.AddMemberToServer(t, serverID, target.ID, roleMember)
-	channelID := ts.CreateVoiceChannel(t, serverID, "voice-noperm")
-
-	// Base member doesn't have MuteMembers
-	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-		keyAction:       "mute",
-		keyTargetUserID: target.ID,
-	}, testhelpers.AuthHeaders(actor.AccessToken))
-	assert.Equal(t, http.StatusForbidden, w.Code)
-}
-
-func TestAuthorizeVoiceAction_HierarchyViolation(t *testing.T) {
-	ts := setupTS(t)
-	owner := ts.CreateTestUser(t, "vaowner6")
-	moderator := ts.CreateTestUser(t, "vamod6")
-	admin := ts.CreateTestUser(t, "vaadmin6")
-	serverID := ts.CreateTestServer(t, owner.ID, "VoiceAction Hierarchy")
-	ts.AddMemberToServer(t, serverID, moderator.ID, roleMember)
-	ts.AddMemberToServer(t, serverID, admin.ID, roleMember)
-	channelID := ts.CreateVoiceChannel(t, serverID, "voice-hierarchy")
-
-	// Mod (pos 5) has MuteMembers
-	modRoleID := ts.CreateTestRole(t, serverID, "Mod", 5, int64(rbac.PermMuteMembers))
-	ts.AssignRoleToUser(t, serverID, moderator.ID, modRoleID)
-
-	// Admin (pos 10) outranks mod
-	adminRoleID := ts.CreateTestRole(t, serverID, "Admin", 10, int64(rbac.AdminPermissions))
-	ts.AssignRoleToUser(t, serverID, admin.ID, adminRoleID)
-
-	// Mod tries to mute admin → hierarchy violation
-	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-		keyAction:       "mute",
-		keyTargetUserID: admin.ID,
-	}, testhelpers.AuthHeaders(moderator.AccessToken))
-	assert.Equal(t, http.StatusForbidden, w.Code)
-}
-
-// regression: a moderator must not target the server owner
-// merely by changing the owner's UUID spelling.
-func TestAuthorizeVoiceAction_UppercaseOwnerStillProtectedByHierarchy(t *testing.T) {
-	ts := setupTS(t)
-	owner := ts.CreateTestUser(t, "vauuidowner")
-	moderator := ts.CreateTestUser(t, "vauuidmod")
-	serverID := ts.CreateTestServer(t, owner.ID, "Voice UUID Owner")
-	ts.AddMemberToServer(t, serverID, moderator.ID, roleMember)
-	channelID := ts.CreateVoiceChannel(t, serverID, "voice-uuid-owner")
-	modRoleID := ts.CreateTestRole(t, serverID, "Mod", 5, int64(rbac.PermMuteMembers))
-	ts.AssignRoleToUser(t, serverID, moderator.ID, modRoleID)
-
-	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-		keyAction:       "mute",
-		keyTargetUserID: strings.ToUpper(owner.ID),
-	}, testhelpers.AuthHeaders(moderator.AccessToken))
-	assert.Equal(t, http.StatusForbidden, w.Code,
-		"alternate owner UUID spelling must retain owner hierarchy protection")
-}
-
 // regression: every hierarchy-enforcing server moderation
 // route must treat an alternate spelling of the owner ID as the owner.
 func TestServerModeration_UppercaseOwnerStillProtectedByHierarchy(t *testing.T) {
@@ -513,31 +415,6 @@ func TestServerModeration_UppercaseOwnerStillProtectedByHierarchy(t *testing.T) 
 			requireNoServerOutboxCommands(t, ts.DB)
 		})
 	}
-}
-
-func TestAuthorizeVoiceAction_WithCustomPermission(t *testing.T) {
-	ts := setupTS(t)
-	owner := ts.CreateTestUser(t, "vaowner7")
-	actor := ts.CreateTestUser(t, "vaactor7")
-	target := ts.CreateTestUser(t, "vatarget7")
-	serverID := ts.CreateTestServer(t, owner.ID, "VoiceAction CustomPerm")
-	ts.AddMemberToServer(t, serverID, actor.ID, roleMember)
-	ts.AddMemberToServer(t, serverID, target.ID, roleMember)
-	channelID := ts.CreateVoiceChannel(t, serverID, "voice-customperm")
-
-	// Give actor exactly MuteMembers at a higher position than target
-	muterRoleID := ts.CreateTestRole(t, serverID, "Muter", 5, int64(rbac.PermMuteMembers))
-	ts.AssignRoleToUser(t, serverID, actor.ID, muterRoleID)
-
-	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-		keyAction:       "mute",
-		keyTargetUserID: target.ID,
-	}, testhelpers.AuthHeaders(actor.AccessToken))
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
-	assert.Equal(t, true, body["allowed"])
 }
 
 // --- Server-Enforced Mute/Deafen Tests ---

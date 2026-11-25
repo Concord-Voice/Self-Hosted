@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/mediaproof"
 )
 
 // Assembled from parts so the static credential detectors do not read a test

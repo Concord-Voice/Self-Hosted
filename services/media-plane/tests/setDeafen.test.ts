@@ -8,11 +8,12 @@ import {
 
 function makeFakes() {
   const setParticipantDeafen = vi.fn();
+  const getParticipant = vi.fn().mockReturnValue({ socketId: 'socket-1' });
   const emit = vi.fn();
   const to = vi.fn().mockReturnValue({ emit });
-  const roomManager: SetDeafenRoomManager = { setParticipantDeafen };
-  const socket: SetDeafenSocket = { to };
-  return { roomManager, socket, setParticipantDeafen, to, emit };
+  const roomManager: SetDeafenRoomManager = { setParticipantDeafen, getParticipant };
+  const socket: SetDeafenSocket = { id: 'socket-1', to };
+  return { roomManager, socket, setParticipantDeafen, getParticipant, to, emit };
 }
 
 describe('handleSetDeafen (#685)', () => {
@@ -61,5 +62,47 @@ describe('handleSetDeafen (#685)', () => {
     expect(result).toEqual({ error: 'invalid_payload' });
     expect(setParticipantDeafen).not.toHaveBeenCalled();
     expect(to).not.toHaveBeenCalled();
+  });
+
+  // VULN-160: a roomId on the socket is not admission. The flag and the
+  // broadcast belong to the participant's current socket only.
+  describe('admission (VULN-160)', () => {
+    it('refuses a socket with roomId but no participant, recording and emitting nothing', () => {
+      const { roomManager, socket, setParticipantDeafen, getParticipant, to } = makeFakes();
+      getParticipant.mockReturnValue(undefined);
+
+      const result = handleSetDeafen(roomManager, socket, 'room-1', 'user-1', true);
+
+      expect(result).toEqual({ error: 'Not in a room' });
+      expect(getParticipant).toHaveBeenCalledWith('room-1', 'user-1');
+      expect(setParticipantDeafen).not.toHaveBeenCalled();
+      expect(to).not.toHaveBeenCalled();
+    });
+
+    it('refuses when the participant is on another socket', () => {
+      const { roomManager, socket, setParticipantDeafen, getParticipant, to } = makeFakes();
+      getParticipant.mockReturnValue({ socketId: 'other' });
+
+      const result = handleSetDeafen(roomManager, socket, 'room-1', 'user-1', true);
+
+      expect(result).toEqual({ error: 'Not in a room' });
+      expect(getParticipant).toHaveBeenCalledWith('room-1', 'user-1');
+      expect(setParticipantDeafen).not.toHaveBeenCalled();
+      expect(to).not.toHaveBeenCalled();
+    });
+
+    it('accepts the admitted participant on this socket', () => {
+      const { roomManager, socket, setParticipantDeafen, to, emit } = makeFakes();
+
+      const result = handleSetDeafen(roomManager, socket, 'room-1', 'user-1', true);
+
+      expect(result).toEqual({ success: true });
+      expect(setParticipantDeafen).toHaveBeenCalledWith('room-1', 'user-1', true);
+      expect(to).toHaveBeenCalledWith('room-1');
+      expect(emit).toHaveBeenCalledWith('participant-deafen-changed', {
+        userId: 'user-1',
+        isDeafened: true,
+      });
+    });
   });
 });

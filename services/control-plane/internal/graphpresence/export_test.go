@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
 )
 
 // BeginCaptureSavepointForTest exposes the C1 capture savepoint to the external

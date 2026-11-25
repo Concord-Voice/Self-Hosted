@@ -21,8 +21,8 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 )
 
 // #3362 SOUNDNESS. The fix normalizes rather than rejects, and that choice is

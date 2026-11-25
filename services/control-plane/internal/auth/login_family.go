@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -100,7 +100,7 @@ func (h *Handler) rollbackLoginMint(tx *sql.Tx) {
 
 // displaceLoginRefreshRowsTx captures the existing machine-first/IP+UA match
 // before any fresh family or refresh mutation. Empty metadata is not a wildcard.
-func displaceLoginRefreshRowsTx(ctx context.Context, tx *sql.Tx, user loginfamily.UserAuthority, _ string, machineID, ipAddress, userAgent string) error {
+func displaceLoginRefreshRowsTx(ctx context.Context, tx *sql.Tx, user loginfamily.UserAuthority, _, machineID, ipAddress, userAgent string) error {
 	targets, err := loginfamily.CaptureDisplacementTargetsTx(ctx, tx, user, machineID, ipAddress, userAgent)
 	if err != nil {
 		return err

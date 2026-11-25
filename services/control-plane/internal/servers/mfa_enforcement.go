@@ -13,12 +13,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
 )
 
 // The "Enforce MFA On Dangerous Actions" setting (#3453):

@@ -55,10 +55,11 @@ describe('codecFamilyFromRtpParameters', () => {
 });
 
 describe('selectCryptoScheme', () => {
-  it('av1 -> per-obu, others -> whole-frame', () => {
+  it('selects a scheme only for supported codecs', () => {
     expect(selectCryptoScheme('av1')).toBe('per-obu');
     expect(selectCryptoScheme('vp9')).toBe('whole-frame');
     expect(selectCryptoScheme('opus')).toBe('whole-frame');
-    expect(selectCryptoScheme(undefined)).toBe('whole-frame');
+    expect(selectCryptoScheme(undefined)).toBeUndefined();
+    expect(selectCryptoScheme('h265' as never)).toBeUndefined();
   });
 });

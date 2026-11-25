@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
 )
 
 // ClearReason records deletion by the DM clear reap (#3462).

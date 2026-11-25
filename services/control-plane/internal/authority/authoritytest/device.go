@@ -4,7 +4,7 @@ import (
 	"crypto/ecdsa"
 	"testing"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 	"github.com/google/uuid"
 )
 
@@ -133,7 +133,7 @@ func (a *Account) signDevice(t testing.TB, s DeviceSpec, p *DeviceParts, bb []by
 	p.Submit = sub
 }
 
-func (a *Account) bindAt(kind string, key []byte, escrow []byte) *ac.RecoveryBind {
+func (a *Account) bindAt(kind string, key, escrow []byte) *ac.RecoveryBind {
 	return &ac.RecoveryBind{RealmID: a.R.ID, AccountID: a.ID, Kind: kind, RecoveryKey: key, ChainSeq: a.Head.Seq,
 		ChainEntryDigest: a.Head.Entry, BindingRootDigest: ac.KeyDigest(a.Head.Root), EscrowPublicKey: escrow}
 }
@@ -165,7 +165,7 @@ func (a *Account) UnbindRecovery(t testing.TB, wait string, prior *ecdsa.Private
 	return a.BuildDevice(t, s)
 }
 
-func (a *Account) cancelBind(target []byte, key []byte, expires uint64) *ac.RecoveryBind {
+func (a *Account) cancelBind(target, key []byte, expires uint64) *ac.RecoveryBind {
 	return &ac.RecoveryBind{RealmID: a.R.ID, AccountID: a.ID, Kind: ac.BindKindCancel, ExpiresAtMs: expires,
 		RecoveryKey: key, TargetDigest: target}
 }

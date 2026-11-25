@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -145,42 +145,6 @@ func TestConsumeRecoveryCodeFailsClosedAfterCommit(t *testing.T) {
 	require.False(t, mini.Exists(key))
 }
 
-func TestDeleteRecoveryRecordIfSameSendPreservesReplacement(t *testing.T) {
-	ctx := context.Background()
-	mini := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
-	h := &Handler{redis: rdb}
-	key := recoveryRedisKey("replace-after-send-failure@test.local")
-
-	installed, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "first"})
-	require.NoError(t, err)
-	replacement, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "second"})
-	require.NoError(t, err)
-	require.NoError(t, rdb.Set(ctx, key, replacement, time.Minute).Err())
-	require.NoError(t, h.deleteRecoveryRecordIfSameSend(ctx, key, string(installed)))
-	stored, err := rdb.Get(ctx, key).Result()
-	require.NoError(t, err)
-	require.Equal(t, string(replacement), stored)
-}
-
-func TestDeleteRecoveryRecordIfSameSendIgnoresAttemptUpdates(t *testing.T) {
-	ctx := context.Background()
-	mini := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
-	h := &Handler{redis: rdb}
-	key := recoveryRedisKey("attempt-during-send-failure@test.local")
-	original, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "installed"})
-	require.NoError(t, err)
-	updated, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "installed", Attempts: 1})
-	require.NoError(t, err)
-	require.NoError(t, rdb.Set(ctx, key, updated, time.Minute).Err())
-
-	require.NoError(t, h.deleteRecoveryRecordIfSameSend(ctx, key, string(original)))
-	require.False(t, mini.Exists(key), "an attempt must not retain an unsent challenge")
-}
-
 func TestRecoveryFailureBudgetRoundsPTTLUp(t *testing.T) {
 	ctx := context.Background()
 	mini := miniredis.RunT(t)
@@ -261,9 +225,9 @@ func TestRecoveryFailureBudgetBackendFailureIs503(t *testing.T) {
 	require.Contains(t, w.Body.String(), "step_up_budget_unavailable")
 }
 
-// The wrong guess that spends the last attempt deletes the record, so the next
-// RecoveryBegin (which installs with SETNX) can send a new code at once rather
-// than leaving the account with a dead code for the rest of its TTL.
+// The guess that spends the last attempt deletes the record and frees the
+// account's send slot, so the owner can be sent a new code at once rather than
+// waiting out the cooldown with no live code.
 func TestConsumeRecoveryCodeLastWrongGuessDeletesTheRecord(t *testing.T) {
 	ctx := context.Background()
 	mini := miniredis.RunT(t)
@@ -271,20 +235,43 @@ func TestConsumeRecoveryCodeLastWrongGuessDeletesTheRecord(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
 	h := &Handler{redis: rdb}
 	key := recoveryRedisKey("last-guess@test.local")
-	raw, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456")})
+	raw, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "s1"})
 	require.NoError(t, err)
-	require.NoError(t, rdb.Set(ctx, key, raw, recoveryCodeTTL).Err())
+	_, held, err := h.issueRecoveryRecord(ctx, recoveryIssue{RecordKey: key, SlotKey: recoverySlotKey("test-user"), SendsKey: recoverySendsKey("test-user"), SendID: "s1", Record: raw})
+	require.NoError(t, err)
+	require.False(t, held)
 
 	for i := 1; i < recoveryMaxAttempts; i++ {
 		_, err := h.consumeRecoveryCode(ctx, key, "000000")
 		require.ErrorIs(t, err, redis.Nil)
 		require.True(t, mini.Exists(key), "wrong guess %d leaves attempts, so the record stays", i)
+		require.True(t, mini.Exists(recoverySlotKey("test-user")), "a live code keeps its slot")
 	}
 	_, err = h.consumeRecoveryCode(ctx, key, "000000")
 	require.ErrorIs(t, err, redis.Nil)
 	require.False(t, mini.Exists(key), "the guess that spends the last attempt must delete the record")
+	require.False(t, mini.Exists(recoverySlotKey("test-user")), "a spent code must free the send slot")
 
-	installed, err := rdb.SetNX(ctx, key, "fresh", recoveryCodeTTL).Result()
+	_, held, err = h.issueRecoveryRecord(ctx, recoveryIssue{RecordKey: key, SlotKey: recoverySlotKey("test-user"), SendsKey: recoverySendsKey("test-user"), SendID: "s2", Record: raw})
 	require.NoError(t, err)
-	require.True(t, installed, "a new recovery begin must be able to install its code")
+	require.False(t, held, "a new recovery begin must be able to send a new code")
+}
+
+func TestConsumeRecoveryCodeKeepsANewerSendsSlot(t *testing.T) {
+	ctx := context.Background()
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	h := &Handler{redis: rdb}
+	key := recoveryRedisKey("newer-slot@test.local")
+	raw, err := json.Marshal(recoveryRecord{UserID: "test-user", CodeHash: hashRecoveryCode("123456"), SendID: "old"})
+	require.NoError(t, err)
+	require.NoError(t, mini.Set(key, string(raw)))
+	require.NoError(t, mini.Set(recoverySlotKey("test-user"), "newer"))
+
+	_, err = h.consumeRecoveryCode(ctx, key, "123456")
+	require.NoError(t, err)
+	slot, err := mini.Get(recoverySlotKey("test-user"))
+	require.NoError(t, err)
+	require.Equal(t, "newer", slot)
 }

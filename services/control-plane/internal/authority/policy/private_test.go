@@ -3,7 +3,7 @@ package policy
 import (
 	"testing"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 func devIntent(h Head, op string) *ac.DeviceIntent {

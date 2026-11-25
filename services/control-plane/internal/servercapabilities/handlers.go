@@ -7,8 +7,8 @@ package servercapabilities
 import (
 	"net/http"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/clientversion"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/clientversion"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 	"github.com/gin-gonic/gin"
 )
 

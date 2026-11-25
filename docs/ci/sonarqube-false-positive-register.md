@@ -55,7 +55,7 @@ This register is only for `FALSE_POSITIVE` decisions. `ACCEPTED` findings — wh
 This register begins on **2026-04-11** and does not cover the approximately 616
 SonarQube false-positive markings made before that date. **No retroactive audit of
 them was ever run, and none is planned.**
-[#615](https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/615), which
+Pre-split issue 615, which
 tracked that audit, closed **completed** on 2026-05-04; its closing comment records
 that the pre-register markings were rectified incrementally through microchanges
 across a few hundred PRs rather than audited as a batch. Treat the pre-2026-04-11
@@ -465,6 +465,7 @@ Rows marked one at a time after the sweep. Paths are relative to the repo root. 
 | 97 | 2026-11-18 | `AaGQ966Di6y9d045l-2D` | `typescript:S7764` | `packages/e2ee-client/src/renderer/workers/e2eeWorker.ts:92` | Claude (weekly hygiene) | `self.postMessage` in the dedicated worker. A fix was tried in PR #335: it was made and reverted together with row 98, because the `globalThis` edit on the sibling `onmessage` line (row 98) made CodeQL raise `js/missing-origin-check` (code-scanning #499). This line is not a message handler. That is the harm the calibration predicts. Legacy note `typescript:S7764` sub-case (a). |
 | 98 | 2026-11-18 | `AaGQ966Di6y9d045l-2E` | `typescript:S7764` | `packages/e2ee-client/src/renderer/workers/e2eeWorker.ts:105` | Claude (weekly hygiene) | `self.onmessage` in the dedicated worker. A fix was tried in PR #335: the `globalThis` version made CodeQL raise `js/missing-origin-check` (code-scanning #499) on the handler line, so it was reverted. That is the harm the calibration predicts. Legacy note `typescript:S7764` sub-case (a). |
 | 99 | 2026-11-18 | `AaGQ966Di6y9d045l-2F` | `typescript:S7764` | `packages/e2ee-client/src/renderer/workers/e2eeWorker.ts:180` | Claude (weekly hygiene) | `self.addEventListener('rtctransform')` in the dedicated worker. A fix was tried in PR #335: it was made and reverted together with row 98, because the `globalThis` edit on the sibling `onmessage` line (row 98) made CodeQL raise `js/missing-origin-check` (code-scanning #499). This line is not a message handler. That is the harm the calibration predicts. Legacy note `typescript:S7764` sub-case (a). |
+| 100 | 2026-11-23 | `AaHvmBQycpmGsdHixRj6` | `go:S1313` | `services/control-plane/internal/klipy/handlers.go:164` | Claude (#375) | `siteLocalV6` (fec0::/10, deprecated IPv6 site-local space, RFC 3879) is the sibling of row 91 in the KLIPY SSRF egress guard: `isDeniedEgressIP` refuses it because `netip.Addr.IsPrivate` covers only fc00::/7 and no link-local predicate matches it, yet it can still route on legacy internal networks. The literal is the denylist, not an address the code connects to; making it configurable would let configuration delete a refused range. Same reasoning as legacy note `typescript:S1313`. |
 
 ### Builder-pin re-verification — 2026-11-11 (PR #256)
 
@@ -496,9 +497,9 @@ re-registered after one.
 
 ## Related Issues
 
-- [#431](https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/431) — Register genesis, initial 7 entries
-- [#432](https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/432) — Final ACCEPTED-bucket cleanup, 1 new entry (S4084 WebRTC audio)
-- [#615](https://github.com/Concord-Voice/Concord-Voice-Alpha/issues/615) — Retroactive audit of ~616 pre-register FPs; closed **completed** 2026-05-04 without running the audit (resolved incrementally instead)
+- pre-split issue 431 — Register genesis, initial 7 entries
+- pre-split issue 432 — Final ACCEPTED-bucket cleanup, 1 new entry (S4084 WebRTC audio)
+- pre-split issue 615 — Retroactive audit of ~616 pre-register FPs; closed **completed** 2026-05-04 without running the audit (resolved incrementally instead)
 
 ## Maintenance
 

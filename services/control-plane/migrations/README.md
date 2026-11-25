@@ -83,7 +83,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000198)
+## Existing Migrations (000001–000204)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -305,8 +305,15 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000194 | add_login_family_authority | Logical login families and immutable SID membership, sealed revocation frontiers, exact media connection/room associations and closure evidence, permanent boot fences and one-way activation receipt; down refuses activation or retained authority/delivery evidence (#2272; 000190 belongs to #4131 and 000191 to #4137). |
 | 000195 | add_voice_participant_admission_id | Adds nullable `voice_participants.admission_id` and `admission_socket_id`: the admission and socket a Server Voice join consumed. A redelivered `voice.joined` whose reservation is gone is a replay when the row holds that exact pair (#253). The down drops only replay evidence. |
 | 000196 | admin_credential_generation | Adds an administrator credential generation that enrollment ceremonies must match; reset increments it atomically with credential removal. Down refuses once a generation has advanced. |
-| 000197 | add_admin_session_generation | Adds a nonnegative durable generation to `admin_users`; reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; every administrator starts at 1, so pre-migration sessions stop matching and any value above 1 records a revocation; down refuses once any generation passes 1. |
+| 000197 | add_admin_session_generation | Initially adds a nonnegative durable generation to `admin_users` (tightened by 000199–000200); reset-enrollment advances it atomically with credential removal and pending status so pre-reset platform-admin sessions cannot revive; every administrator starts at 1, so pre-migration sessions stop matching and any value above 1 records a revocation; down refuses once any generation passes 1. |
 | 000198 | add_session_revoke_allowance | Moves the rolling session-revocation allowance to a nullable users timestamp and binds simple-mode auth windows to a reset generation. Existing users start a conservative 24-hour window; new users start with no timestamp. Down refuses while any recorded window is active. |
+| 000199 | add_positive_admin_session_generation_check | Aborts under a bounded write-blocking lock if any existing admin generation is nonpositive, then adds a positive check for future writes. The original nonnegative check remains. |
+| 000200 | validate_positive_admin_session_generation | Validates the positive check against existing administrator rows without holding an exclusive lock across the scan. Existing nonpositive rows are already rejected by 000199. |
+| 000201 | e2ee_format_metadata | Adds nullable dormant stored-format and request-fingerprint metadata to channel/DM messages and encrypted media, with user/message-v1/attachment-v4 shape constraints; no writer or fallback behavior is enabled. |
+| 000203 | admin_audit_login_success_index | One-statement `CREATE INDEX CONCURRENTLY` of a partial index on `admin_audit_log (admin_id, ts DESC)` for successful sign-ins, the inner lookup of the admin sign-in notice; a first sign-in no longer scans the whole log. Merge after the change that holds 000202: golang-migrate never applies a version below the one recorded. Down drops the index concurrently. |
+| 000204 | admin_audit_event_result_ts_index | One-statement `CREATE INDEX CONCURRENTLY` on `admin_audit_log (event_type, result, ts)` for the notice's count of `admin_created` successes since the previous sign-in. Same merge order as 000203. Down drops the index concurrently. |
+
+If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
 
 ### Session-revocation allowance cutover (migration 000198)
 
