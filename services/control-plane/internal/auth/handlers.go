@@ -4032,20 +4032,8 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
-	var addr string
-	err = h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, record.UserID).Scan(&addr)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		h.log.Error("Failed to read account for recovery key", "failure_class", "recovery_key_account_lookup")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
-		return
-	}
-	if err != nil || addr != record.Addr {
-		// The account is gone or no longer uses the address the key was sent
-		// to. Discard the key and answer as for any other unusable key.
-		if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
-			h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
-		}
-		h.refuseRecoveryEmailToken(ctx, c)
+	addr, ok := h.recoveryKeyAccountAddr(ctx, c, token, record.UserID, record.Addr)
+	if !ok {
 		return
 	}
 	methods, ok := h.recoveryMethods(ctx, c, record.UserID)
@@ -4069,6 +4057,28 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 	if h.CompleteRecovery(c, record.UserID, "email") {
 		h.clearRecoveryFailureBudget(c, recoveryFailureKeyPrefix+addr)
 	}
+}
+
+// recoveryKeyAccountAddr returns the account's current address when it still
+// matches the one the key was sent to. Otherwise it answers the request, and
+// for a gone or moved account it discards the key and refuses it like any
+// other unusable key.
+func (h *Handler) recoveryKeyAccountAddr(ctx context.Context, c *gin.Context, token, userID, sentTo string) (string, bool) {
+	var addr string
+	err := h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, userID).Scan(&addr)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		h.log.Error("Failed to read account for recovery key", "failure_class", "recovery_key_account_lookup")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return "", false
+	}
+	if err == nil && addr == sentTo {
+		return addr, true
+	}
+	if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
+		h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+	}
+	h.refuseRecoveryEmailToken(ctx, c)
+	return "", false
 }
 
 // refuseRecoveryEmailToken answers an unusable recovery key. The client
