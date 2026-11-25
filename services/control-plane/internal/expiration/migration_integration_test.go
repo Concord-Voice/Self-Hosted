@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	controldatabase "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	controldatabase "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"

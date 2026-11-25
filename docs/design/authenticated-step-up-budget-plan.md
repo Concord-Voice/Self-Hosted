@@ -1,6 +1,6 @@
 # Authenticated step-up budget implementation plan
 
-Plan for Hosted issue 2271 within Hosted epic 696, governed by the
+Implementation plan governed by the
 [design contract](authenticated-step-up-budget.md).
 
 The opaque actor adapter, private SQL accounting core and process proof-work tracker
@@ -23,14 +23,14 @@ validation, release or delivery evidence.
 | Terminal composition | Canonical loginfamily access-guarded target capture | Complete actor/target union, immutable UUID order, final actor check and unchanged selector semantics |
 | Consumer integration | Authenticated mint and the contract's complete consumer inventory | Reserve before proof, no duplicate charges, definite-effect settlement and ordinary-auth isolation |
 | Proof lifecycle | Existing rollout singleton/current-image CLI and all strict readers/controllers | Complete process-generation inventory, whole-work drain, immutable receipt, one-way DB-clock cutover and rollback floor |
-| Delivery | Public API/design records, actual Hosted canonical-consumption lane and response consumers | Exact source provenance, client compatibility and controlled activation evidence |
+| Delivery | Public API/design records, actual downstream canonical-consumption lane and response consumers | Exact source provenance, client compatibility and controlled activation evidence |
 
 Paths are relative to `services/control-plane/` unless otherwise specified.
 No migration number is reserved by this plan. Recheck canonical main and pending
 delivery allocations when schema work begins. Reconcile current overlapping
-key-reveal, auth, router and lifecycle owners before those later units. Hosted
-issue 4201 remains outside this adapter's scope; no repair retry or controller
-write follows from it.
+key-reveal, auth, router and lifecycle owners before those later units. Repair
+work for the managed deployment remains outside this adapter's scope; no repair
+retry or controller write follows from it.
 
 ## SQL core interface and commit-boundary evidence
 
@@ -184,5 +184,5 @@ Canonical Self-Hosted delivery to Hosted and actual supported-consumer compatibi
 must be demonstrated before activation. Deployment remains separately governed.
 Accounting-only Redis degradation after authenticated authority is distinct from
 an unavailable `AuthRequired` veto. The latter's bounded 503 is not availability:
-**A7b remains unfulfilled and blocks full issue closure.** This unit references
-Hosted issue 2271; it does not close it or authorize rollout.
+**A7b remains unfulfilled and blocks full issue closure.** This unit does not
+complete the step-up budget work or authorize rollout.

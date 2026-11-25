@@ -86,6 +86,13 @@ Current version: 167 (clean)
 The number is the highest migration in `migrations/`. Run `ls migrations/*.up.sql | tail -1` to
 confirm the current value.
 
+Migrations 000203 and 000204 each hold one `CREATE INDEX CONCURRENTLY` for the
+admin sign-in notice and nothing else, because PostgreSQL refuses a concurrent
+build inside a multi-statement query. Version 000202 belongs to another change and
+must be applied first. After an up, check that `idx_admin_audit_login_success` and
+`idx_admin_audit_event_result_ts` are valid (`pg_index.indisvalid`). If an up stops
+part way, drop the INVALID index before you force the version.
+
 Migration 000160 creates the bounded pending channel-admission table and expiry index.
 Migration 000161 adds the exact admission and socket identity columns. The positive
 authorization-revision sequence is owned by migration 000159; do not recreate or drop it.

@@ -18,14 +18,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // ---------------------------------------------------------------------------
@@ -888,7 +888,10 @@ func TestUpdateDMMessageCiphertextRetriesLegacyMembershipDriftWithoutDuplicateWr
 	case result := <-resultCh:
 		require.True(t, result.ok)
 		require.Equal(t, "after", result.result.Content)
-	case <-time.After(3 * time.Second):
+	// A liveness bound, not a timing assertion: the retry runs after the
+	// removal commits, and a loaded full-package run can take seconds to
+	// schedule it. 3 s flaked under load; the bound only has to catch a hang.
+	case <-time.After(20 * time.Second):
 		t.Fatal("DM ciphertext edit did not retry after membership snapshot drift")
 	}
 
@@ -912,12 +915,12 @@ func TestDMPackageGainsNoPresenceImport(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, imported := range pkg.Imports {
-		require.NotEqual(t, "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence",
+		require.NotEqual(t, "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence",
 			imported, "internal/dm must reach presence only through the rail")
 		require.False(t, strings.HasSuffix(imported, "/internal/presencehistory"),
 			"internal/dm must not import presencehistory")
 	}
 	require.Contains(t, pkg.Imports,
-		"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/activepresence",
+		"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence",
 		"the rail import is the seam this test bounds; without it the test is vacuous")
 }

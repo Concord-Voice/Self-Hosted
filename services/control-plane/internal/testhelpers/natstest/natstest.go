@@ -23,7 +23,7 @@ package natstest
 import (
 	"os"
 
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 )
 
 // TB is the part of testing.TB this package uses. Callers pass their

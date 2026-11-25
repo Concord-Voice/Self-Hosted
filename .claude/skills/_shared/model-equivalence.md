@@ -23,16 +23,13 @@ column you actually need:
 
 | Claude pin | Capability equivalence | Codex agent model (authoritative for translation) |
 |---|---|---|
-| Mythos 5.1 | None in the GPT-6 catalog | *None* — Claude-only; no Codex profile is generated |
-| Fable 5 | GPT-6 **Astra** | `gpt-6-astra` |
-| Opus 5 | GPT-6 **Astra** | `gpt-6-astra` |
-| Sonnet 5 | GPT-6.1 **Sol** | `gpt-6.1-sol` |
-| Haiku 4.5 | GPT-5.5 | `gpt-6-luna` — **upgrade** |
+| Mythos | None | *None* — Claude-only; no Codex profile is generated |
+| Fable | Astra | `gpt-6-astra`* |
+| Opus | Sol | `gpt-6.1-sol`* |
+| Sonnet | Terra | `gpt-6.1-terra`* |
+| Haiku | Luna | `gpt-6-luna`* |
 
-**Haiku is the row where the columns diverge, deliberately.** GPT-5.5 is the honest capability
-equivalence, but it is not a member of the GPT-6 agent-profile family, so there is no Codex
-agent model at Haiku's class to translate *into* — a `haiku`-pinned agent upgrades to
-`gpt-6-luna` rather than falling back to whatever a translator's default happens to be.
+`*` - Denotes that this is the formal API pin as of writing, but the actual pin may differ for a later/newer version. Unless a specific version is called out or pinned in a `SKILL.md` or `AGENT.md` file, always find the latest version of `gpt-<VERSION>-<MODEL>`. 
 
 ### Codex-only role overrides
 
@@ -44,7 +41,7 @@ After the general pin translation above, Codex applies role-specific assignments
 
 GPT-6 Sol is an explicitly pinned security baseline that replaces the phased-out `gpt-daybreak-blue-latest` assignment. It is not a new capability equivalence, and it is never passed as a dispatch-time override. The translator applies these assignments only while generating `.codex/agents/*.toml`; the `.claude/agents/*.md` source pins stay untouched.
 
-The cyber baseline covers only the adversarial role. Other Opus-pinned agents, including `security-reviewer` and any repo-local domain reviewers, are not in it: no override has been decided for them, so they follow the default Opus mapping (`gpt-6-astra`).
+Other Opus-pinned agents, including `security-reviewer`, follow the Opus row of the translation table above.
 
 An agent pinned to a Claude-only model (e.g. Mythos) is never an override row, because it gets no Codex profile at all: the translator skips it, and must fail rather than fall back to a default model for it.
 
@@ -52,25 +49,16 @@ An agent pinned to a Claude-only model (e.g. Mythos) is never an override row, b
 
 Agent files pin `effort` in Claude's vocabulary. Non-Claude surfaces translate as below.
 
-This is a **uniform one-rung down-shift, not a ceiling clamp**: a Codex rung reasons harder
-than the Claude rung of the same name, so mapping the names onto each other would run every
-mirrored agent hotter than its pin intends. Every row shifts, not just rows that would exceed
-a ceiling. Values in the Codex column are the literal `model_reasoning_effort` wire strings.
+The Codex column supplies the literal `model_reasoning_effort` wire strings. Use the row matching the source agent’s `effort` field.
 
 | Claude | OpenAI / Codex | Notes |
 |---|---|---|
-| *ultracode* | `ultra` | Not an `effort` value — a session posture (above-max reasoning + automated multi-agent parallelization). Governs orchestration breadth, not one agent's depth. **Never emitted into an agent profile**, and the model catalog does not offer it for `gpt-6-luna` at all |
-| `max` | `xhigh` | Codex `max` is deliberately skipped; ultracode owns the rung above `xhigh` |
-| `xhigh` | `high` | |
-| `high` | `medium` | |
-| `medium` | `low` | |
-| `low` | `low` | Collapses with `medium`. `low` is the Codex floor — there is **no** rung beneath it |
-
-**There is no Codex "Light".** An earlier revision of this table mapped `low` → Light; that
-value appears in no model's `supported_reasoning_levels` and is not accepted in
-`config.toml`. The floor is `low`. The verified Codex ladder is
-`low < medium < high < xhigh < max < ultra`. In the GPT-6 family, `ultra` is available on
-`gpt-6-astra` and `gpt-6-sol`, but not `gpt-6-luna`.
+| *ultracode* | `ultra` | Ultracode is no longer an `effort` value, it is a session posture. Codex still features it as an effort level that is for above-max reasoning + automated multi-agent parallelization. As such, this should govern orchestration breadth, not one agent's depth. **Never emitted into an agent profile**. The skill `/dev-lifecycle` recommends `Ultracode` to be toggled *on* when `Dynamic` or `Subagent-Driven` mode are selected during initialization. |
+| `max` | `max` | Codex now emits a `Max` effort setting just below `Ultra` |
+| `xhigh` | `xhigh` | |
+| `high` | `high` | |
+| `medium` | `medium` | |
+| `low` | `low` | UI calls this `Light` effort |
 
 **Governance:** adding or changing a row requires Repo Admin approval — same governance as
 dispatch-catalog entries and labels (file an issue titled `Catalog proposal: model-equivalence
@@ -79,9 +67,7 @@ speculative per-vendor prose.
 
 ## GitHub Copilot (including Copilot Fusion)
 
-There is no Copilot column yet: Agentic-Dev-Tooling does not generate Copilot custom agents (see
-its `CAPABILITIES.md`; consumer repositories receive this file without it). Two facts constrain
-the column when it is added:
+The installer generates one GitHub review profile. It preserves the source Opus class using the verified Copilot model ID documented in the tooling source’s `CAPABILITIES.md`. Two constraints govern Copilot model selection:
 
 - **Fusion has no fixed model.** It picks a model per prompt, and the running conversation
   cannot read which one. Nothing may depend on the orchestrator's model.

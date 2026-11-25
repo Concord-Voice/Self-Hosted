@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // operatorRun is the prologue the four operator routes share (DoR:196, :1431,

@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/mediaproof"
 )
 
 const (
@@ -31,8 +31,7 @@ const (
 // version and attestation gates. Neither can be replayed as the other.
 func (h *Handler) validDMVoiceMediaAuthorizationProof(
 	c *gin.Context,
-	conversationID uuid.UUID,
-	requestedCallID uuid.UUID,
+	conversationID, requestedCallID uuid.UUID,
 ) bool {
 	if h.cfg == nil {
 		h.logProofRejection("no_config")

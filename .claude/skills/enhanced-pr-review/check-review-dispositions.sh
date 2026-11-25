@@ -4,12 +4,11 @@
 # Merge gate enforcing the per-comment DISPOSITION LEDGER on a PR's review
 # surface. Consumed by /enhanced-pr-review Phase 4 and /dev-lifecycle Step 9.1.
 #
-# The invariant: every review conversation carries a recorded human decision,
-# and that decision is machine-checkable rather than inferred from the presence
-# of prose.
+# The ledger checks qualifying inline threads and bot reconciliation.
+# The review workflow separately verifies linked written decisions for actionable maintainer feedback.
 #
 #   Assertion 1 — thread coverage: every review thread that is unresolved OR
-#     reviewer-authored (a Bot, or a login in the roster `.bots[]`) carries a
+#     contains a reviewer comment (a bot or a rostered account) carries a
 #     `<!-- cv-disposition: ... -->` marker written by a non-reviewer author.
 #
 #     Calibrated on the resolver-agnostic signal deliberately. The obvious
@@ -43,8 +42,7 @@
 #     gate prints "all threads resolved" over a review surface it never read.
 #
 # WHAT THIS PROVES, AND WHAT IT DOES NOT.
-#   Proves: a decision is recorded, addressable, and auditable for every review
-#   conversation; that deferrals name issues that exist and are issues rather
+#   Proves: a decision is recorded for each qualifying inline thread; that deferrals name issues that exist and are issues rather
 #   than PRs; and that a repo member — not a drive-by account — recorded them.
 #   It does NOT parse the reconciliation post's Decisions table or cross-check
 #   its Thread handles; the table is house format, the coverage clause is teeth.
@@ -72,7 +70,7 @@
 set -euo pipefail
 
 PR="${1:-}"
-if [ -z "$PR" ]; then
+if [ "$#" -ne 1 ] || [ -z "$PR" ]; then
     echo "usage: $0 <pr-number>" >&2
     exit 2
 fi
@@ -337,14 +335,27 @@ elif git rev-parse --git-dir >/dev/null 2>&1; then
         BASE_REF=$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null) \
             || BASE_REF="refs/remotes/origin/${CV_DEFAULT_BRANCH:-main}"
     fi
-    if ROSTER_RAW=$(git show "${BASE_REF}:.claude/repo-config.json" 2>/dev/null); then
-        ROSTER_SOURCE="${BASE_REF}:.claude/repo-config.json"
-    else
+    # Only a successful tree lookup can establish that the base has no roster.
+    # A shallow clone may be missing the remote base ref or a required Git object.
+    if ! base_oid=$(git rev-parse --verify "${BASE_REF}^{commit}") ||
+       ! roster_entry=$(git ls-tree --full-tree "$base_oid" -- .claude/repo-config.json); then
+        echo "STOP: cannot read the reviewer roster tree at ${BASE_REF}." >&2
+        exit 2
+    fi
+    if [[ -z "$roster_entry" ]]; then
         ROSTER_RAW=''
-        ROSTER_SOURCE="${BASE_REF} (no roster on the base branch)"
+        ROSTER_SOURCE="${base_oid} (no roster on the base branch)"
+    else
+        ROSTER_SOURCE="${base_oid}:.claude/repo-config.json"
+        if [[ "$roster_entry" != "100644 blob "* && "$roster_entry" != "100755 blob "* ]] ||
+           ! ROSTER_RAW=$(git cat-file blob "$ROSTER_SOURCE") || [[ -z "$ROSTER_RAW" ]]; then
+            echo "STOP: cannot read the reviewer roster at ${ROSTER_SOURCE}." >&2
+            exit 2
+        fi
     fi
 else
-    ROSTER_RAW=''
+    echo "STOP: a Git checkout is required to verify the base reviewer roster." >&2
+    exit 2
 fi
 
 if [ -n "$ROSTER_RAW" ]; then
@@ -428,9 +439,8 @@ if [ -n "$ROSTER_RAW" ]; then
 fi
 
 # --- Assertion 1 — thread coverage -------------------------------------------
-# A thread is IN SCOPE if it is unresolved or reviewer-authored (a bot, or a rostered machine account). A human-authored
-# thread a human already resolved is self-evidently decided; requiring a marker
-# there would be ceremony, not coverage.
+# Unresolved threads and threads containing a reviewer comment require a disposition.
+# A resolved human-only thread is already decided.
 # A rostered machine USER account is a reviewer too (see `rostered` below), so its
 # resolved threads stay in scope and its own comments never count as a disposition.
 # Shared by Assertions 1 and 3 so the two cannot drift. A null login (a deleted
@@ -456,7 +466,7 @@ JQ_ROSTERED='
 THREAD_ROWS=$(echo "$RAW" | jq -r --argjson roster "$ROSTER_JSON" "$JQ_ROSTERED"'
   def reviewer: .author.__typename == "Bot" or rostered(.author.login);
   .data.repository.pullRequest.reviewThreads.nodes[]
-  | select(.isResolved == false or (.comments.nodes[0] | reviewer))
+  | select(.isResolved == false or any(.comments.nodes[]; reviewer))
   | . as $t
   # The marker must come from a NON-bot author. A bot echoing a marker back into
   # the thread (quoting a reply, or an autofix agent mimicking the format) must
@@ -717,10 +727,9 @@ if [ "$RECON_COUNT" = "JQERR" ]; then
 fi
 
 if [ -z "$REQUIRED" ] && [ "$RECON_COUNT" -eq 0 ]; then
-    # Nobody reviewed anything. Requiring a post that reconciles nothing is
-    # ceremony, and Step 9.1 runs this gate on EVERY PR including ones no bot
-    # ever touches. Assertion 1 still governs any human thread on such a PR.
-    echo "INFO: no reviewer posted on this PR; reconciliation post not required."
+    # No bot or rostered reviewer needs reconciliation here.
+    # The workflow checks top-level maintainer feedback separately.
+    echo "INFO: no bot or rostered reviewer posted; no bot reconciliation post required."
 elif [ "$RECON_COUNT" -eq 0 ]; then
     echo "BLOCKING: no /enhanced-pr-review reconciliation post on this PR."
     echo "          Post it per /enhanced-pr-review Phase 3.5 before the merge gate."
@@ -753,7 +762,7 @@ fi
 
 # --- Verdict -----------------------------------------------------------------
 if [ "$fail" -eq 0 ]; then
-    echo "✅ Review dispositions complete for PR #${PR} — every in-scope thread carries a decision."
+    echo "✅ Inline thread and bot reconciliation checks passed for PR #${PR}."
     exit 0
 fi
 echo ""

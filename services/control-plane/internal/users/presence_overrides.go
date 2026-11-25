@@ -12,11 +12,11 @@ import (
 	"sort"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -234,8 +234,7 @@ func (h *Handler) ReplacePresenceOverrides(c *gin.Context) {
 func (h *Handler) replacePresenceOverride(
 	ctx context.Context,
 	senderID uuid.UUID,
-	tokenEpoch string,
-	category string,
+	tokenEpoch, category string,
 	req normalizedPresenceOverrideRequest,
 	computeAudience presenceOverrideAudienceFunc,
 	preparePayload presenceOverridePayloadFunc,
@@ -425,8 +424,7 @@ func upsertPresenceOverridePreference(
 	ctx context.Context,
 	tx *sql.Tx,
 	senderID uuid.UUID,
-	category string,
-	encryptedData string,
+	category, encryptedData string,
 	expectedVersion int,
 ) (int, error) {
 	var version int

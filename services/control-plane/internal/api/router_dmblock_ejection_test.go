@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/mediaproof"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/mediaproof"
 	"github.com/google/uuid"
 	rawnats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"

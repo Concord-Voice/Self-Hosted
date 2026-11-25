@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // verificationRecord is stored in Redis keyed by "email_verify:{pending_id}".
@@ -32,12 +34,16 @@ func hashCode(code string) string {
 }
 
 // redisKey returns the Redis key for a pending registration's verification code.
-func redisKey(pendingID string) string {
+func redisKey(pendingID uuid.UUID) string {
 	return fmt.Sprintf("email_verify:%s", pendingID)
 }
 
-func verificationAttemptsKey(pendingID string) string {
+func verificationAttemptsKey(pendingID uuid.UUID) string {
 	return fmt.Sprintf("email_verify_attempts:%s", pendingID)
+}
+
+func testVerificationCodeKey(pendingID uuid.UUID) string {
+	return fmt.Sprintf("test_only:%s", pendingID)
 }
 
 func sanitizeVerificationCode(raw string) string {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
 	"github.com/google/uuid"
 	gorillaws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"

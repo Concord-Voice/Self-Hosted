@@ -3,14 +3,15 @@ package voice_test
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voice"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -295,7 +296,7 @@ func TestRevokeTempAccess_CrossServerIDOR(t *testing.T) {
 	// passing channel B's id on server A's path.
 	w := ts.DoRequest("DELETE", voiceEnforcePath(serverA, target.ID, pathTempAccess),
 		map[string]interface{}{"channel_id": channelB}, testhelpers.AuthHeaders(mover.AccessToken))
-	assert.Equal(t, http.StatusBadRequest, w.Code, "cross-server channel_id is rejected")
+	assert.Equal(t, http.StatusForbidden, w.Code, "cross-server channel_id is refused like any inaccessible channel")
 
 	// The cross-server IDOR guard must leave server B's state untouched.
 	assert.True(t, tempOverrideExists(t, ts.DB, channelB, target.ID),
@@ -315,4 +316,69 @@ func TestRevokeTempAccess_MissingBody(t *testing.T) {
 	w := ts.DoRequest("DELETE", voiceEnforcePath(serverID, target.ID, pathTempAccess),
 		map[string]interface{}{}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// revokeFixture: a mover holding MOVE_MEMBERS and a temp grant for the target on a
+// fresh voice channel. Each refusal test adds one channel-scope defect.
+func newRevokeScopeFixture(t *testing.T, tag string) (moveFixture, string) {
+	t.Helper()
+	f := newMoveFixture(t, tag, false)
+	ch := f.ts.CreateVoiceChannel(t, f.serverID, tag+"-grant")
+	seedTempGrant(t, f.ts, f.serverID, ch, f.target.ID)
+	require.True(t, tempOverrideExists(t, f.ts.DB, ch, f.target.ID))
+	return f, ch
+}
+
+func (f moveFixture) revoke(t *testing.T, channelID string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.ts.DoRequest("DELETE", voiceEnforcePath(f.serverID, f.target.ID, pathTempAccess),
+		map[string]interface{}{"channel_id": channelID}, testhelpers.AuthHeaders(f.mover.AccessToken))
+}
+
+func TestRevokeTempAccess_ScopeControl_Succeeds(t *testing.T) {
+	f, ch := newRevokeScopeFixture(t, "tars_ctl")
+	w := f.revoke(t, ch)
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.False(t, tempOverrideExists(t, f.ts.DB, ch, f.target.ID))
+}
+
+func TestRevokeTempAccess_ChannelDenyMove_403(t *testing.T) {
+	f, ch := newRevokeScopeFixture(t, "tars_deny")
+	f.ts.CreateChannelOverride(t, ch, "user", f.mover.ID, 0, int64(rbac.PermMoveMembers))
+	w := f.revoke(t, ch)
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.JSONEq(t, insufficientBody, w.Body.String())
+	assert.True(t, tempOverrideExists(t, f.ts.DB, ch, f.target.ID), "refused revoke must leave the grant")
+}
+
+func TestRevokeTempAccess_NoView_403(t *testing.T) {
+	f, ch := newRevokeScopeFixture(t, "tars_noview")
+	f.ts.CreateChannelOverride(t, ch, "user", f.mover.ID, 0, int64(rbac.PermViewVoiceChannels))
+	w := f.revoke(t, ch)
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.True(t, tempOverrideExists(t, f.ts.DB, ch, f.target.ID))
+}
+
+func TestRevokeTempAccess_TextChannel_403(t *testing.T) {
+	f, _ := newRevokeScopeFixture(t, "tars_text")
+	text := f.ts.CreateTestChannel(t, f.serverID, "tars-text")
+	f.ts.CreateChannelOverride(t, text, "user", f.target.ID, 0, 0)
+	_, err := f.ts.DB.Exec(`UPDATE channel_permission_overrides SET is_temporary = true
+		WHERE channel_id = $1 AND target_type = 'user' AND target_id = $2`, text, f.target.ID)
+	require.NoError(t, err)
+	w := f.revoke(t, text)
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.True(t, tempOverrideExists(t, f.ts.DB, text, f.target.ID))
+}
+
+func TestRevokeTempAccess_OtherServerChannel_403(t *testing.T) {
+	f, _ := newRevokeScopeFixture(t, "tars_other")
+	ownerB := f.ts.CreateTestUser(t, "tars_other_ownerB")
+	serverB := f.ts.CreateTestServer(t, ownerB.ID, "Revoke Other B")
+	f.ts.AddMemberToServer(t, serverB, f.target.ID, roleMember)
+	chB := f.ts.CreateVoiceChannel(t, serverB, "tars-other-b")
+	seedTempGrant(t, f.ts, serverB, chB, f.target.ID)
+	w := f.revoke(t, chB)
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.True(t, tempOverrideExists(t, f.ts.DB, chB, f.target.ID))
 }

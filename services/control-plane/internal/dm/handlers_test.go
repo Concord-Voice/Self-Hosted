@@ -20,16 +20,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
@@ -6513,4 +6513,86 @@ func TestUpdateMessage_RejectsUnissuedEpoch(t *testing.T) {
 	var storedContent string
 	require.NoError(t, ts.DB.QueryRow(`SELECT content FROM dm_messages WHERE id = $1`, msgID).Scan(&storedContent))
 	assert.Equal(t, originalCiphertext, storedContent)
+}
+
+// ============================================================================
+// DMUserMute rule pins (any participant may soft-mute an in-call peer) and
+// canonical-ID handling.
+// ============================================================================
+
+func dmOutboxRowCount(t *testing.T, ts *testhelpers.TestServer) int {
+	t.Helper()
+	var n int
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM voice_command_outbox`).Scan(&n))
+	return n
+}
+
+func TestDMUserMute_SelfTargetAlternateSpelling_400(t *testing.T) {
+	ts := setupTS(t)
+	userA := ts.CreateTestUser(t, "usrmutealt1")
+	userB := ts.CreateTestUser(t, "usrmutealt2")
+	ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
+	seedDMVoiceParticipant(t, ts, convID, userA.ID)
+	seedDMVoiceParticipant(t, ts, convID, userB.ID)
+	// Positive control: the canonical spelling of a peer is accepted.
+	seedDMOutboxSession(t, ts, convID, userB.ID)
+	ok := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathUserMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
+	requireDMOutboxQueued(t, ok, http.StatusAccepted)
+	before := dmOutboxRowCount(t, ts)
+
+	// The caller's own ID in an alternate (upper-case) spelling is a self-target.
+	seedDMOutboxSession(t, ts, convID, userA.ID)
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+strings.ToUpper(userA.ID)+pathUserMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Equal(t, before, dmOutboxRowCount(t, ts), "self-target must not enqueue a command")
+}
+
+func TestDMUserMute_GroupNonAdminParticipant_Queued(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "usrmutegrpa")
+	member := ts.CreateTestUser(t, "usrmutegrpb")
+	peer := ts.CreateTestUser(t, "usrmutegrpc")
+	convID := createTestGroup(t, ts, admin, member, peer)
+	seedDMVoiceParticipant(t, ts, convID, member.ID)
+	seedDMVoiceParticipant(t, ts, convID, peer.ID)
+	seedDMOutboxSession(t, ts, convID, peer.ID)
+	before := dmOutboxRowCount(t, ts)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+peer.ID+pathUserMute, nil, testhelpers.AuthHeaders(member.AccessToken))
+	requireDMOutboxQueued(t, w, http.StatusAccepted)
+	assert.Greater(t, dmOutboxRowCount(t, ts), before, "non-admin participant soft-mute must write an outbox row")
+}
+
+func TestDMUserMute_OneToOnePeer_Queued(t *testing.T) {
+	ts := setupTS(t)
+	userA := ts.CreateTestUser(t, "usrmute11a")
+	userB := ts.CreateTestUser(t, "usrmute11b")
+	ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
+	seedDMVoiceParticipant(t, ts, convID, userA.ID)
+	seedDMVoiceParticipant(t, ts, convID, userB.ID)
+	seedDMOutboxSession(t, ts, convID, userB.ID)
+	before := dmOutboxRowCount(t, ts)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathUserMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
+	requireDMOutboxQueued(t, w, http.StatusAccepted)
+	assert.Greater(t, dmOutboxRowCount(t, ts), before, "1:1 peer soft-mute must write an outbox row")
+}
+
+func TestDMUserMute_NonParticipant_403NoOutbox(t *testing.T) {
+	ts := setupTS(t)
+	userA := ts.CreateTestUser(t, "usrmutenpa")
+	userB := ts.CreateTestUser(t, "usrmutenpb")
+	outsider := ts.CreateTestUser(t, "usrmutenpc")
+	ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
+	seedDMVoiceParticipant(t, ts, convID, userA.ID)
+	seedDMVoiceParticipant(t, ts, convID, userB.ID)
+	seedDMOutboxSession(t, ts, convID, userB.ID)
+	before := dmOutboxRowCount(t, ts)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathUserMute, nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.Equal(t, before, dmOutboxRowCount(t, ts), "non-participant must not enqueue a command")
 }

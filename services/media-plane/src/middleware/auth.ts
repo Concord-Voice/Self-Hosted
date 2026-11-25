@@ -7,6 +7,7 @@ import { voiceEnforcementNodeBootId } from '../lib/voiceEnforcementIdentity.js';
 import { logger } from '../lib/logger.js';
 import type { VoiceEnforcementSession } from '../lib/voiceEnforcementSession.js';
 import { isCanonicalEnforcementUUID } from '../lib/enforcementCommand.js';
+import { HANDSHAKE_USERNAME_MAX_CHARS } from '../lib/wireBounds.js';
 import type { SecurityEventInput } from '../lib/securityEvent.js';
 import type { TokenBucket } from '../lib/rateLimit.js';
 
@@ -264,6 +265,16 @@ export function createAuthMiddleware(onSecurityEvent?: (event: SecurityEventInpu
         socketId: socket.id,
       });
       return next(new Error('Username required'));
+    }
+
+    // Bound the handshake username before JWT verification (VULN-147). It is
+    // client text; the log line names only the socket.
+    if (username.length > HANDSHAKE_USERNAME_MAX_CHARS) {
+      deny();
+      logger.warn('Socket connection rejected: username too long', {
+        socketId: socket.id,
+      });
+      return next(new Error('Username too long'));
     }
 
     try {

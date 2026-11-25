@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/api"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/api"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -212,10 +212,13 @@ func TestRecoveryBeginStoresCodeInRedis(t *testing.T) {
 func TestRecoveryBeginKeepsLiveRecord(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoverylive")
-	seedRecoveryCode(t, ts, user.Email, testRecoveryCode, user.ID)
+	// The live record comes from a real begin, so the account's send slot is
+	// held the way production holds it (#344).
+	first := ts.DoRequest("POST", pathRecoveryBegin, map[string]string{"email": user.Email}, nil)
+	require.Equal(t, http.StatusOK, first.Code)
 	key := recoveryCodeKeyPrefix + user.Email
-	before, err := ts.Redis.Get(context.Background(), key).Result()
-	require.NoError(t, err)
+	before := waitForRecoveryRecord(t, ts, key)
+	require.NoError(t, ts.Redis.Del(context.Background(), "ratelimit:ip:192.0.2.1:POST:"+pathRecoveryBegin).Err())
 
 	logs := ts.CaptureLogs(t)
 	w := ts.DoRequest("POST", pathRecoveryBegin, map[string]string{"email": user.Email}, nil)

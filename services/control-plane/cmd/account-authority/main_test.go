@@ -31,12 +31,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/server"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/signer"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/tlspin"
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/server"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/signer"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/store"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/tlspin"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // The sentinels the exit-line tests plant where a path, an address, a URL or

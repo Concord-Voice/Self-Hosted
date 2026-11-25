@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/natstest"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -134,6 +134,8 @@ func TestVoiceMoveGrantRejectsModeratorDemotedAfterPreflight(t *testing.T) {
 	fromID := ts.CreateVoiceChannel(t, serverID, "from")
 	toID := ts.CreateVoiceChannel(t, serverID, "to")
 	hideVoiceChannel(t, ts, serverID, toID)
+	// Destination VIEW|JOIN via a user override so the demotion is the only refusal cause.
+	ts.CreateChannelOverride(t, toID, "user", moderator.ID, int64(rbac.PermViewVoiceChannels|rbac.PermJoinVoice|rbac.PermSpeak), 0)
 	_, err := ts.DB.Exec(`INSERT INTO voice_participants (channel_id, user_id) VALUES ($1, $2)`, fromID, target.ID)
 	require.NoError(t, err)
 

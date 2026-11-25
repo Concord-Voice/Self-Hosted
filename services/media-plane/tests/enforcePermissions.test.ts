@@ -67,7 +67,7 @@ function makeIO(socketId?: string) {
   if (socketId) {
     sockets.set(socketId, { emit, disconnect });
   }
-  return { io: { sockets: { sockets } } as unknown as EnforcePermissionsIO, emit, disconnect };
+  return { io: { sockets: { sockets, adapter: { rooms: new Map() } } } as unknown as EnforcePermissionsIO, emit, disconnect };
 }
 
 describe('handlePermissionsUpdate (CV-CAN-007 P1 mid-session enforcement)', () => {

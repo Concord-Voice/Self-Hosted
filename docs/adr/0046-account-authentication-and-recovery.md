@@ -12,18 +12,23 @@ Concord treats every credential as interchangeable, and the weakest can rebuild 
 
 **Current implementation note (2026-10-15):** the ad-hoc `recovery-only-challenge` patch closes this immediate recovery-policy bypass (Codex Security finding `csf_13551019f403b6ab218b09ef`) on this branch, pending deployment. A recovery email is atomically consumed and, where current raw policy reserves an actually enrolled TOTP or WebAuthn factor, a distinct five-minute recovery challenge must prove one before final recovery authority is issued. The final `recovery_v2` token carries signed server-verified factor provenance and every reset, device, and social-recovery consumer rechecks current policy. The patch does not implement this ADR's broader proposed hardening: universal MFA accounts, the 15-minute recovery-token TTL, credential-epoch recovery binding, recovery-key authority, or the seniority/hold model remain proposed work.
 
-**Recovery attempt policy:** email-code verification has a separate
-ten-attempt, twenty-four-hour Redis budget keyed by normalized email. Starting
-recovery again preserves a live code record and never resets either its local
-attempts or the account budget. A successfully consumed email code clears the
-account budget; password proof or a new email send does not. Exhaustion returns
-429 with `Retry-After`; an unavailable budget store fails closed with 503. This
-is an active guess limit, independent of the broader recovery authority changes
-proposed by this ADR. Accepted trade-off: anyone who knows an account's email can
-spend this budget with wrong codes and block email-code recovery for up to 24
-hours. Keying the budget to a live challenge, or resetting it on recovery begin,
-would let a caller reissue challenges and restart guessing, so the account-wide
-bound stays. The per-IP limit is a separate bound, not this defense.
+**Recovery attempt policy (revised 2026-11-18, #344):** email recovery now
+sends a single-use recovery key with 256 random bits. Guessing one is
+infeasible, so the key path has no attempt limit and wrong keys never count
+against the account; that removes the earlier accepted trade-off, in which
+anyone who knew an address could spend its budget and block email recovery
+for 24 hours. The deprecated 6-digit code keeps its limits while clients still
+use it: five wrong guesses delete a code, and a ten-failure, twenty-four-hour
+budget keyed by normalized email bounds total guesses; only a completed
+recovery clears it. Both formats share one live recovery email per account,
+valid until the resend wait ends (15 minutes for the first three emails in 24
+hours, then 60 minutes). A key request replaces a live code once, so a code
+the owner cannot use never blocks the owner's key. Accepted residual while the
+code path exists: anyone who knows an address can make its live recovery email
+a key, which clients older than this change cannot enter. Such clients could
+already be blocked through the code budget, and updating the app removes
+both.
+The per-IP limit is a separate bound.
 
 **Registration code issuance:** each registration code admits four guesses, and
 a password takeover of a pending registration carries the replaced row's
@@ -39,6 +44,14 @@ to be sent to it, and delay that address's registration for up to the pending
 TTL. The account-wide bound stays
 for the same reason as recovery's: a limit tied to a pending row would let a
 caller cancel, re-register and restart guessing.
+
+**Registration code binding:** a registration verification code is
+evidence for its canonical pending UUID and normalized recipient email. The
+control plane carries that recipient through verification and compares it with
+the pending row while locked before promotion. Email rotation invalidates current
+code material before the row changes, preserves the pending registration's attempt
+budget, and leaves a newer racing code intact. A code record with no bound
+recipient is refused, so a code issued before this binding must be resent.
 
 #2553 assumes CP user authentication is sound (ADR-0045 decision-table row D21, `0045:672`) and freezes its protocol-v1 contract at #3587 PR-A, so any factor this design needs must be named first.
 

@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
