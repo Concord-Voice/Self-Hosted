@@ -2213,8 +2213,9 @@ func (h *Handler) refuseWrongCode(ctx context.Context, c *gin.Context, method, u
 	if attempt >= failedAttemptLimit {
 		lockErr = h.lockOutVerify(ctx, lockoutKey)
 	}
-	outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-	middleware.MarkAuthFailureOutcome(c, outcome)
+	if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+		return
+	}
 	if lockErr != nil {
 		h.verifyDependencyFailed(c, userID, lockErr)
 		return
@@ -2351,8 +2352,8 @@ func (h *Handler) completeVerifiedChallenge(ctx context.Context, c *gin.Context,
 		return
 	}
 	// A stale count only brings the next lockout closer.
+	// Only the account's counter clears; the shared source counter decays.
 	h.delBestEffort(ctx, "Failed to clear MFA verification attempt counter", claims.UserID, attemptsKey)
-	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
 	if h.completeVerifyPurpose(ctx, c, claims, purpose, rememberMe, method) {
 		h.emitHTTPEvent(c, mfaChallengeVerifiedEvent(method))
 	}

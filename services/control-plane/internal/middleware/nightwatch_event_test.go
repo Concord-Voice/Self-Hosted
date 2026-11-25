@@ -85,10 +85,9 @@ func TestNightwatchVerdictsComeFromRealControlBranches(t *testing.T) {
 		AuthBanCheck(rdb)(c)
 		requireVerdict(t, c, securityevent.ReasonSourceBanned)
 
-		created := RecordAuthFailure(context.Background(), rdb, "198.51.100.44", AuthBanConfig{Threshold: 1, Window: time.Minute, Duration: time.Minute})
-		require.Equal(t, AuthFailureBanCreated, created)
 		createdContext := newContext()
-		MarkAuthFailureOutcome(createdContext, created)
+		createdContext.Request.RemoteAddr = "198.51.100.44:1234"
+		require.True(t, RecordAuthFailure(createdContext, rdb, AuthBanConfig{Threshold: 1, Window: time.Minute, Duration: time.Minute}))
 		requireVerdict(t, createdContext, securityevent.ReasonSourceBanCreated)
 	})
 	t.Run("cloudflare and attestation rejection", func(t *testing.T) {
