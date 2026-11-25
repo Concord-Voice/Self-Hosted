@@ -22,6 +22,12 @@ export const MAX_TRACKED_IPS = 10_000;
 export const EVICTION_SCAN_LIMIT = 64;
 /** Hard ceiling on tracked buckets; the store may overshoot MAX_TRACKED_IPS up to here. */
 export const HARD_MAX_TRACKED_IPS = MAX_TRACKED_IPS * 2;
+/**
+ * Ceiling multiplier for the proxy-peer fallback bucket. Every client behind a
+ * proxy that drops X-Real-IP lands in that one bucket, so the per-source ceiling
+ * would deny voice deployment-wide. It is still counted, with headroom.
+ */
+export const PROXY_FALLBACK_BURST_MULTIPLIER = 10;
 /** Minimum spacing of the "trusted proxy sent no client address" warning. */
 export const PROXY_FALLBACK_WARN_INTERVAL_MS = 60_000;
 
@@ -287,7 +293,11 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
     // client behind it into the proxy's own bucket. That fails closed, but a
     // dropped header would then deny voice deployment-wide, so make it visible.
     const peer = req.socket?.remoteAddress;
-    if (ip && ip === peer && peer && trustedProxies.has(peer)) {
+    const proxyFallback = Boolean(ip && ip === peer && peer && trustedProxies.has(peer));
+    const burst = proxyFallback
+      ? HANDSHAKE_BURST * PROXY_FALLBACK_BURST_MULTIPLIER
+      : HANDSHAKE_BURST;
+    if (proxyFallback) {
       const nowForWarn = now();
       if (nowForWarn - lastProxyFallbackWarnMs >= PROXY_FALLBACK_WARN_INTERVAL_MS) {
         lastProxyFallbackWarnMs = nowForWarn;
@@ -366,7 +376,7 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
       entry.windowStartMs = nowMs;
     }
 
-    if (entry.previous + entry.current >= HANDSHAKE_BURST) {
+    if (entry.previous + entry.current >= burst) {
       options.onReject?.();
       callback(null, false);
       return;

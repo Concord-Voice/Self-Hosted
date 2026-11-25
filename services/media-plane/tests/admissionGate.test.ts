@@ -11,6 +11,7 @@ import {
   EVICTION_SCAN_LIMIT,
   HARD_MAX_TRACKED_IPS,
   PROXY_FALLBACK_WARN_INTERVAL_MS,
+  PROXY_FALLBACK_BURST_MULTIPLIER,
   type AdmissionRequest,
 } from '../src/lib/admissionGate.js';
 
@@ -488,6 +489,24 @@ describe('createAdmissionGate', () => {
     clock.advance(PROXY_FALLBACK_WARN_INTERVAL_MS);
     gate(req({}), vi.fn());
     expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  // A dropped X-Real-IP puts every client in the proxy peer's bucket, so that
+  // bucket gets a larger ceiling instead of denying voice deployment-wide. It is
+  // still counted: past the larger ceiling it denies.
+  it('gives the proxy-peer fallback bucket a larger ceiling, and still bounds it', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({
+      now: clock.now,
+      trustedProxies: ['10.0.0.9'],
+      warn: () => {},
+    });
+    const cb = vi.fn();
+    const ceiling = HANDSHAKE_BURST * PROXY_FALLBACK_BURST_MULTIPLIER;
+    for (let i = 0; i < ceiling; i += 1) gate(req({}), cb);
+    expect(cb.mock.calls.every(([, ok]) => ok === true)).toBe(true);
+    gate(req({}), cb);
+    expect(cb).toHaveBeenLastCalledWith(null, false);
   });
 
   it('does not warn when the proxy forwards a usable client address', () => {
