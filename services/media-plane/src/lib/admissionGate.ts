@@ -238,6 +238,30 @@ interface WindowCounters {
   previous: number;
 }
 
+// Defence in depth: resolveClientIp validates, but a throw inside engine.io's
+// allowRequest would otherwise take the process down. null means reject.
+function safeBucket(ip: string): string | null {
+  try {
+    return bucketClientIp(ip);
+  } catch {
+    return null;
+  }
+}
+
+/** Slide the alternating windows forward to nowMs. */
+function rollWindow(entry: WindowCounters, nowMs: number): void {
+  const elapsed = nowMs - entry.windowStartMs;
+  if (elapsed >= HANDSHAKE_WINDOW_MS * 2) {
+    entry.previous = 0;
+    entry.current = 0;
+    entry.windowStartMs = nowMs;
+  } else if (elapsed >= HANDSHAKE_WINDOW_MS) {
+    entry.previous = entry.current;
+    entry.current = 0;
+    entry.windowStartMs = nowMs;
+  }
+}
+
 /**
  * Callback shape of engine.io's `allowRequest` option
  * (`engine.io/build/server.d.ts`: `fn: (err: string | null | undefined,
@@ -286,96 +310,83 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
     nowMs - entry.windowStartMs < HANDSHAKE_WINDOW_MS * 2 &&
     entry.previous + entry.current >= HANDSHAKE_BURST;
 
-  const gate = ((req, callback) => {
-    const ip = resolveClientIp(req, trustedProxies);
+  // A trusted proxy that forwards no usable client address collapses every
+  // client behind it into the proxy's own bucket. That bucket gets a larger
+  // ceiling, and the fallback is made visible at most once a minute.
+  const noteProxyFallback = (ip: string | null, peer: string | undefined): boolean => {
+    if (!ip || !peer || ip !== peer || !trustedProxies.has(peer)) return false;
+    const nowForWarn = now();
+    if (nowForWarn - lastProxyFallbackWarnMs >= PROXY_FALLBACK_WARN_INTERVAL_MS) {
+      lastProxyFallbackWarnMs = nowForWarn;
+      warn(
+        'Admission gate: a trusted proxy forwarded no usable client address, so its ' +
+          'requests share the proxy peer bucket. Check that the proxy sets X-Real-IP.'
+      );
+    }
+    return true;
+  };
 
-    // A trusted proxy that forwards no usable client address collapses every
-    // client behind it into the proxy's own bucket. That fails closed, but a
-    // dropped header would then deny voice deployment-wide, so make it visible.
-    const peer = req.socket?.remoteAddress;
-    const proxyFallback = Boolean(ip && ip === peer && peer && trustedProxies.has(peer));
-    const burst = proxyFallback
-      ? HANDSHAKE_BURST * PROXY_FALLBACK_BURST_MULTIPLIER
-      : HANDSHAKE_BURST;
-    if (proxyFallback) {
-      const nowForWarn = now();
-      if (nowForWarn - lastProxyFallbackWarnMs >= PROXY_FALLBACK_WARN_INTERVAL_MS) {
-        lastProxyFallbackWarnMs = nowForWarn;
-        warn(
-          'Admission gate: a trusted proxy forwarded no usable client address, so its ' +
-            'requests share the proxy peer bucket. Check that the proxy sets X-Real-IP.'
-        );
+  // Bounded store: evict rather than growing without limit under an
+  // IPv6-source flood. Never evict a bucket that is currently over budget,
+  // because that would reset it. Scan a bounded number of the oldest buckets:
+  // evict the first under-budget one, and rotate the over-budget ones to the
+  // back so the next eviction starts past them. If a whole scan finds only
+  // limited buckets, let the store overshoot MAX_TRACKED_IPS (bounded by
+  // HARD_MAX_TRACKED_IPS) instead of resetting a limited bucket; only at the
+  // hard ceiling does the oldest bucket go.
+  const makeRoomForBucket = (nowMs: number): void => {
+    if (counters.size < MAX_TRACKED_IPS) return;
+    let victim: string | undefined;
+    const rotate: string[] = [];
+    for (const [key, candidate] of counters) {
+      if (!isOverBudget(candidate, nowMs)) {
+        victim = key;
+        break;
+      }
+      rotate.push(key);
+      if (rotate.length >= EVICTION_SCAN_LIMIT) break;
+    }
+    for (const key of rotate) {
+      const limited = counters.get(key);
+      if (limited) {
+        counters.delete(key);
+        counters.set(key, limited);
       }
     }
-
-    // A genuinely peerless request has no source identity and cannot enter an
-    // admission budget.
-    if (!ip) {
-      options.onReject?.();
-      callback(null, false);
-      return;
+    if (victim === undefined && counters.size >= HARD_MAX_TRACKED_IPS) {
+      victim = counters.keys().next().value;
     }
-    let bucket: string;
-    try {
-      bucket = bucketClientIp(ip);
-    } catch {
-      // Defence in depth: resolveClientIp validates, but a throw inside
-      // engine.io's allowRequest would otherwise take the process down.
-      options.onReject?.();
-      callback(null, false);
-      return;
-    }
+    if (victim !== undefined) counters.delete(victim);
+  };
 
-    const nowMs = now();
+  const entryFor = (bucket: string, nowMs: number): WindowCounters => {
     let entry = counters.get(bucket);
-
     if (!entry) {
-      // Bounded store: evict rather than growing without limit under an
-      // IPv6-source flood. Never evict a bucket that is currently over budget,
-      // because that would reset it. Scan a bounded number of the oldest buckets:
-      // evict the first under-budget one, and rotate the over-budget ones to the
-      // back so the next eviction starts past them. If a whole scan finds only
-      // limited buckets, let the store overshoot MAX_TRACKED_IPS (bounded by
-      // HARD_MAX_TRACKED_IPS) instead of resetting a limited bucket; only at the
-      // hard ceiling does the oldest bucket go.
-      if (counters.size >= MAX_TRACKED_IPS) {
-        let victim: string | undefined;
-        const rotate: string[] = [];
-        for (const [key, candidate] of counters) {
-          if (!isOverBudget(candidate, nowMs)) {
-            victim = key;
-            break;
-          }
-          rotate.push(key);
-          if (rotate.length >= EVICTION_SCAN_LIMIT) break;
-        }
-        for (const key of rotate) {
-          const limited = counters.get(key);
-          if (limited) {
-            counters.delete(key);
-            counters.set(key, limited);
-          }
-        }
-        if (victim === undefined && counters.size >= HARD_MAX_TRACKED_IPS) {
-          victim = counters.keys().next().value;
-        }
-        if (victim !== undefined) counters.delete(victim);
-      }
+      makeRoomForBucket(nowMs);
       entry = { windowStartMs: nowMs, current: 0, previous: 0 };
       counters.set(bucket, entry);
     }
+    rollWindow(entry, nowMs);
+    return entry;
+  };
 
-    const elapsed = nowMs - entry.windowStartMs;
-    if (elapsed >= HANDSHAKE_WINDOW_MS * 2) {
-      entry.previous = 0;
-      entry.current = 0;
-      entry.windowStartMs = nowMs;
-    } else if (elapsed >= HANDSHAKE_WINDOW_MS) {
-      entry.previous = entry.current;
-      entry.current = 0;
-      entry.windowStartMs = nowMs;
+  const gate = ((req, callback) => {
+    const ip = resolveClientIp(req, trustedProxies);
+    const proxyFallback = noteProxyFallback(ip, req.socket?.remoteAddress);
+    const burst = proxyFallback
+      ? HANDSHAKE_BURST * PROXY_FALLBACK_BURST_MULTIPLIER
+      : HANDSHAKE_BURST;
+
+    // A genuinely peerless request has no source identity and cannot enter an
+    // admission budget.
+    const bucket = ip ? safeBucket(ip) : null;
+    if (!bucket) {
+      options.onReject?.();
+      callback(null, false);
+      return;
     }
 
+    const entry = entryFor(bucket, now());
     if (entry.previous + entry.current >= burst) {
       options.onReject?.();
       callback(null, false);
