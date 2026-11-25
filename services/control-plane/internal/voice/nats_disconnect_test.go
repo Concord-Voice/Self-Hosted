@@ -10,6 +10,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
@@ -33,16 +34,10 @@ func natsTestURL() string {
 // NATS server (dev env / CI); skips if NATS is unreachable.
 func TestPublishForceDisconnect_PublishesPayload(t *testing.T) {
 	// Control-side client passed into the subscriber (the publisher).
-	pubClient, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live publish test (runs in CI)", err)
-	}
-	t.Cleanup(func() { _ = pubClient.Close() })
+	pubClient := natstest.Connect(t, natsTestURL())
 
 	// Observer client subscribes to capture the published message.
-	obsClient, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = obsClient.Close() })
+	obsClient := natstest.Connect(t, natsTestURL())
 
 	ts := testhelpers.SetupTestServer(t)
 	sub := voice.NewNATSSubscriber(ts.DB, logger.New("test"), ts.Hub, pubClient, ts.Redis, nil, nil)
@@ -85,14 +80,8 @@ func TestPublishForceDisconnect_NilNATSNoop(t *testing.T) {
 }
 
 func TestVoiceJoinedPublishesCompleteRevisionedEnforcementSnapshot(t *testing.T) {
-	pubClient, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live publish test", err)
-	}
-	t.Cleanup(func() { _ = pubClient.Close() })
-	obsClient, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = obsClient.Close() })
+	pubClient := natstest.Connect(t, natsTestURL())
+	obsClient := natstest.Connect(t, natsTestURL())
 
 	t.Run("server", func(t *testing.T) {
 		ts := testhelpers.SetupTestServer(t)

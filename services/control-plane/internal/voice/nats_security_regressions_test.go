@@ -14,7 +14,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
-	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -259,14 +259,8 @@ func TestUpsertPrivateVoiceParticipantRejectsBlockedOrPendingGroupMember(t *test
 }
 
 func TestHandleJoined_BlockedGroupMemberEjectsOnlyJoiningPeer(t *testing.T) {
-	publisher, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping Private Call block ejection test", err)
-	}
-	t.Cleanup(func() { _ = publisher.Close() })
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	publisher := natstest.Connect(t, natsTestURL())
+	observer := natstest.Connect(t, natsTestURL())
 	disconnects := make(chan map[string]interface{}, 2)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnectForTest, func(data []byte) {
 		var payload map[string]interface{}
@@ -311,14 +305,8 @@ func TestHandleJoined_BlockedGroupMemberEjectsOnlyJoiningPeer(t *testing.T) {
 }
 
 func TestHandleJoined_PreCommitLeaseFailureEjectsJoiningPeer(t *testing.T) {
-	publisher, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping Private Call pre-commit ejection test", err)
-	}
-	t.Cleanup(func() { _ = publisher.Close() })
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	publisher := natstest.Connect(t, natsTestURL())
+	observer := natstest.Connect(t, natsTestURL())
 	disconnects := make(chan map[string]interface{}, 1)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnectForTest, func(data []byte) {
 		var payload map[string]interface{}
@@ -366,14 +354,8 @@ func TestHandleJoined_PreCommitLeaseFailureEjectsJoiningPeer(t *testing.T) {
 }
 
 func TestHandleJoined_RejectsMismatchedOrExpiredPendingAdmission(t *testing.T) {
-	publisher, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping pending-admission rejection test", err)
-	}
-	t.Cleanup(func() { _ = publisher.Close() })
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	publisher := natstest.Connect(t, natsTestURL())
+	observer := natstest.Connect(t, natsTestURL())
 	disconnects := make(chan map[string]interface{}, 2)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnectForTest, func(data []byte) {
 		var payload map[string]interface{}

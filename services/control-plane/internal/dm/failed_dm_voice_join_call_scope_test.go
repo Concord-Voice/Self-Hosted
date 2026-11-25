@@ -12,9 +12,9 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,11 +26,7 @@ func newCallScopedDMVoiceHandler(t *testing.T, ts *testhelpers.TestServer) *dm.H
 	if configured := os.Getenv("NATS_URL"); configured != "" {
 		url = configured
 	}
-	bus, err := natsclient.Connect(url)
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live DM enforcement test", err)
-	}
-	t.Cleanup(func() { _ = bus.Close() })
+	bus := natstest.Connect(t, url)
 	return dm.NewHandler(dm.HandlerDeps{
 		DB:       ts.DB,
 		Log:      logger.New("test"),

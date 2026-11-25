@@ -408,6 +408,64 @@ Measured after the Redis fix landed: seven packages run concurrently **without**
 Postgres test — and pass cleanly with it. Dropping the flag for wall clock is a
 separate, measured change.
 
+## Live NATS in tests — connect through `natstest`
+
+A test that needs the live NATS server gets every client from
+`internal/testhelpers/natstest`:
+
+```go
+publisher := natstest.Connect(t, natsTestURL())
+observer := natstest.Connect(t, natsTestURL())
+```
+
+`natstest.Connect` returns a connected client and closes it at cleanup. When the
+client is not connected it ends the test: a skip on a developer machine, a
+failure in CI. CI starts NATS for these tests
+(`scripts/ci/start-control-plane-services.sh`), so a skip there would report a
+broken service as a pass.
+
+- **Do not write `if err != nil { t.Skipf(...) }` after `natsclient.Connect`.**
+  `natsclient.Connect` sets `RetryOnFailedConnect`, so with the server down it
+  returns a client that is still dialing and a **nil** error. That guard cannot
+  fire for an outage. Most of the guarded call sites had no other check: with
+  NATS down their tests waited for a message on a connection that never opened
+  and failed after about ten seconds.
+- **Every client goes through `natstest.Connect`, the second one in a test as
+  much as the first.** A later `natsclient.Connect` gets the same nil error from
+  an outage, so `require.NoError` on it proves nothing. `require.NoError` also
+  prints the connect error, and that error can quote the URL.
+- **Keep a checked `Flush` after subscribing.** A connected client is not a
+  registered subscription. A test that publishes right after it subscribes
+  flushes the subscriber first and checks the error.
+- **A URL the client refuses fails the test everywhere.** That is a
+  configuration fault, not an outage, and a skip would hide a mistyped
+  `NATS_URL`.
+- **"In CI" means `CI` is set, or `CI_PACKAGE_DB_ISOLATION` is `1`.** This
+  repository's own Go test step sets the second, so the decision does not rest on
+  one variable the runner owns. To run the strict mode by hand, use
+  `CI=1 go test ...`. Do that before you trust a green local run of a test that
+  enforces something over NATS: with the server down and neither variable set,
+  those tests skip, and `go test` without `-v` prints only `ok`.
+- **A test on the raw `nats.go` client** gets a real error from its first dial.
+  It passes the decision to `natstest.Unavailable(t, "<fixed phrase>")`, so it
+  skips and fails on the same rule.
+- **Never put the connect error or the URL in the message.** A NATS URL can carry
+  credentials, and the error can quote the URL. `natstest` prints fixed phrases.
+- **A test that checks the result of `Close` keeps its own cleanup.** That
+  cleanup runs first, and the helper's close then does nothing.
+- `natstest` is a leaf package: the standard library and `pkg/nats`. It takes the
+  test as an interface, so it does not import `testing` either. The reason is the
+  one `redistest` has: `internal/testhelpers` imports the packages whose tests
+  need it.
+
+Two places require NATS outright and do not use the helper:
+`TestLoginFamilyA2FinalAuthorityAfterPrepare` in `internal/voice` and
+`runtimeNATS` in `internal/api`. Each dials the raw client with a hard
+requirement, and that dial does fail at once with no server, so neither can
+skip. That is a decision for those tests. A test that only calls
+`natsclient.Connect` and `require.NoError` does not get it: it fails late, on its
+own timeout.
+
 ## TypeScript/React Tests
 - Vitest + @testing-library/react
 - **Always call `resetAllStores()` in `beforeEach`** — state leakage causes flaky tests

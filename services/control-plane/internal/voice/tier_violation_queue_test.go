@@ -16,6 +16,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
@@ -48,14 +49,7 @@ func totalViolationCalls(sinks ...*countingViolationSink) int {
 // replica also holds receives the same report and must add nothing.
 func TestTierViolationReportIsCountedByExactlyOneReplica(t *testing.T) {
 	natsURL := natsTestURL()
-	connect := func() *natsclient.Client {
-		c, err := natsclient.Connect(natsURL)
-		if err != nil {
-			t.Skipf("NATS unavailable (%v); skipping live queue-group test (runs in CI)", err)
-		}
-		t.Cleanup(func() { _ = c.Close() })
-		return c
-	}
+	connect := func() *natsclient.Client { return natstest.Connect(t, natsURL) }
 	replicaClientA, replicaClientB, publisher := connect(), connect(), connect()
 
 	// The UNIQUE QUEUE GROUP below is what makes the count hold: every other

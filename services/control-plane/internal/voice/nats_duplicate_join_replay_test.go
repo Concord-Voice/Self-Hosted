@@ -9,6 +9,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -32,11 +33,7 @@ type duplicateJoinFixture struct {
 
 func newDuplicateJoinFixture(t *testing.T) duplicateJoinFixture {
 	t.Helper()
-	publisher, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping duplicate-join replay test", err)
-	}
-	t.Cleanup(func() { _ = publisher.Close() })
+	publisher := natstest.Connect(t, natsTestURL())
 	ts := testhelpers.SetupTestServer(t)
 	user := ts.CreateTestUser(t, "dup_join_replay_user")
 	serverID := ts.CreateTestServer(t, user.ID, "Dup Join Replay")
@@ -44,9 +41,7 @@ func newDuplicateJoinFixture(t *testing.T) duplicateJoinFixture {
 
 	// Keep only this test's user, so a late disconnect from another test on the
 	// shared subject cannot land in the window. Never block the NATS callback.
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	observer := natstest.Connect(t, natsTestURL())
 	disconnects := make(chan map[string]interface{}, 4)
 	subscription, err := observer.Subscribe(natsSubjectEnforceDisconnectForTest, func(data []byte) {
 		var payload map[string]interface{}

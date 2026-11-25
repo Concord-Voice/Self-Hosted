@@ -17,6 +17,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 )
@@ -64,25 +65,8 @@ func observeErasureClear(t *testing.T, expectedUserID uuid.UUID) (*natsclient.Cl
 	if natsURL == "" {
 		natsURL = "nats://localhost:4222"
 	}
-	publisher, err := natsclient.Connect(natsURL)
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live erasure-clear assertion (runs in CI)", err)
-	}
-	if !publisher.IsConnected() {
-		_ = publisher.Close()
-		t.Skip("NATS unavailable; skipping live erasure-clear assertion (runs in CI)")
-	}
-	t.Cleanup(func() { _ = publisher.Close() })
-
-	observer, err := natsclient.Connect(natsURL)
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live erasure-clear assertion (runs in CI)", err)
-	}
-	if !observer.IsConnected() {
-		_ = observer.Close()
-		t.Skip("NATS unavailable; skipping live erasure-clear assertion (runs in CI)")
-	}
-	t.Cleanup(func() { _ = observer.Close() })
+	publisher := natstest.Connect(t, natsURL)
+	observer := natstest.Connect(t, natsURL)
 	clears := make(chan map[string]interface{}, 1)
 	subscription, err := observer.Subscribe(NATSSubjectPresenceErasureCleared, func(data []byte) {
 		var payload map[string]interface{}
@@ -97,7 +81,7 @@ func observeErasureClear(t *testing.T, expectedUserID uuid.UUID) (*natsclient.Cl
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = subscription.Unsubscribe() })
 	if err := observer.FlushTimeout(2 * time.Second); err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live erasure-clear assertion (runs in CI)", err)
+		natstest.Unavailable(t, "the server did not answer a flush")
 	}
 
 	return publisher, clears

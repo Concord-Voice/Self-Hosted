@@ -11,7 +11,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
-	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -236,11 +236,7 @@ func TestUpdateChannel_CanonicalizesRouteIDBeforePermissionRecheck(t *testing.T)
 		natsURL = "nats://localhost:4222"
 	}
 	t.Setenv("NATS_URL", natsURL)
-	observer, err := natsclient.Connect(natsURL)
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live enforcement test (runs in CI)", err)
-	}
-	t.Cleanup(func() { _ = observer.Close() })
+	observer := natstest.Connect(t, natsURL)
 	msgs := make(chan map[string]interface{}, 8)
 	sub, err := observer.Subscribe("voice.enforce.permissions", func(data []byte) {
 		var payload map[string]interface{}

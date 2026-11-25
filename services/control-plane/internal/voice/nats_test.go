@@ -17,6 +17,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
 	concordws "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
@@ -803,17 +804,13 @@ func TestHandleHeartbeat_RemovesStaleParticipant(t *testing.T) {
 }
 
 func TestHandleHeartbeat_PrivateCallRetriesDisconnectForReportedNonMember(t *testing.T) {
-	publisher, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping heartbeat revocation retry test", err)
-	}
+	publisher := natstest.Connect(t, natsTestURL())
 	t.Cleanup(func() {
 		if err := publisher.Close(); err != nil {
 			t.Logf("close NATS publisher: %v", err)
 		}
 	})
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
+	observer := natstest.Connect(t, natsTestURL())
 	t.Cleanup(func() {
 		if err := observer.Close(); err != nil {
 			t.Logf("close NATS observer: %v", err)

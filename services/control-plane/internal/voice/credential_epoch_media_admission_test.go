@@ -9,8 +9,8 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
-	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -99,9 +99,7 @@ func TestVoiceNATSEffectRejectsModeratorDemotedAfterPreflight(t *testing.T) {
 	_, err := ts.DB.Exec(`INSERT INTO voice_participants (channel_id, user_id) VALUES ($1, $2)`, channelID, target.ID)
 	require.NoError(t, err)
 	seedOutboxVoiceSession(t, ts, channelID, target.ID)
-	observer, err := natsclient.Connect(natsTestURL())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = observer.Close() })
+	observer := natstest.Connect(t, natsTestURL())
 	delivered := make(chan struct{}, 1)
 	_, err = observer.Subscribe("voice.user_mute", func([]byte) { delivered <- struct{}{} })
 	require.NoError(t, err)

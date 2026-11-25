@@ -26,10 +26,10 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/natstest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
@@ -86,11 +86,7 @@ func subscribeDMVoiceEnforcement(t *testing.T, subject string) chan map[string]i
 	if natsURL == "" {
 		natsURL = "nats://localhost:4222"
 	}
-	observer, err := natsclient.Connect(natsURL)
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live DM enforcement test", err)
-	}
-	t.Cleanup(func() { _ = observer.Close() })
+	observer := natstest.Connect(t, natsURL)
 	messages := make(chan map[string]interface{}, 8)
 	subscription, err := observer.Subscribe(subject, func(data []byte) {
 		var payload map[string]interface{}
