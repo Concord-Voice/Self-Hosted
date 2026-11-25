@@ -126,7 +126,7 @@ func TestMintPasswordToken_WrongPasswordFailsClosedWithoutCounterBackend(t *test
 	w, _ := m.mint(t, mintBody("not-the-password", PurposeDMClear))
 
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
-	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+	assert.Contains(t, []string{"2", "3", "4"}, w.Header().Get("Retry-After"), "the auth source-budget 503 jitters its Retry-After")
 	assert.NotContains(t, w.Body.String(), ErrMsgInvalidPassword)
 	assert.Zero(t, tokenRows(t, m.db, m.userID))
 }
