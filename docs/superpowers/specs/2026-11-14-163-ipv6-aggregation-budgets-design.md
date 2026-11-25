@@ -60,7 +60,7 @@ func ClientIPBucket(c *gin.Context) string
 
 `IPBucket` parses with `net/netip`, clears an IPv6 zone, calls `Unmap`, preserves canonical IPv4, and returns the masked native IPv6 /64 address. Invalid or empty input returns the fixed sentinel `unattributed`; it never returns attacker text. `ClientIPBucket` applies it to `c.ClientIP()`. The sentinel deliberately makes unattributable requests share a bounded bucket rather than bypass the control.
 
-Every Redis key builder owns normalization. Callers may continue passing a raw observed address to `RecordAuthFailure`, `ClearAuthFailures`, and the admin lockout; those implementations bucket before composing or hashing the key. This prevents a newly added caller from silently restoring /128 behavior. Existing IPv4 keys retain their current suffix, avoiding a gratuitous reset of live IPv4 budgets during rollout.
+Every Redis key builder owns normalization. Callers may continue passing a raw observed address to `RecordAuthFailure` and the admin lockout; those implementations bucket before composing or hashing the key. A successful sign-in, MFA verification or recovery reset never clears the shared source failure counter: it decays with its window, because one account's success says nothing about the other clients in the bucket. This prevents a newly added caller from silently restoring /128 behavior. Existing IPv4 keys retain their current suffix, avoiding a gratuitous reset of live IPv4 budgets during rollout.
 
 ### 3.2 Fail closed at both auth middleware gates
 

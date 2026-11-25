@@ -16,10 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const (
-	pathAuthBanTest = "/auth-ban-test"
-	testIPClearAuth = "10.0.0.15"
-)
+const pathAuthBanTest = "/auth-ban-test"
 
 // assertAuthBudgetRetryAfter checks the jittered 2-4 second delay the public
 // auth source-budget 503 carries.
@@ -162,12 +159,6 @@ func TestRecordAuthFailureNilRedisFailsClosed(t *testing.T) {
 	assert.False(t, recordAuthFailure(t, nil, "10.0.0.6", testBanConfig))
 }
 
-func TestClearAuthFailuresNilRedisNoOp(t *testing.T) {
-	ctx := context.Background()
-	// Should not panic
-	require.NoError(t, middleware.ClearAuthFailures(ctx, nil, "10.0.0.7"))
-}
-
 func TestRecordAuthFailureBackendErrorFailsClosedWith503(t *testing.T) {
 	// A live client that cannot reach Redis exercises the Incr-error branch,
 	// unlike the nil-client case above.
@@ -182,26 +173,6 @@ func TestRecordAuthFailureBackendErrorFailsClosedWith503(t *testing.T) {
 	assert.False(t, middleware.RecordAuthFailure(c, dead, testBanConfig))
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assertAuthBudgetRetryAfter(t, w.Header().Get("Retry-After"))
-}
-
-func TestClearAuthFailuresReturnsBackendError(t *testing.T) {
-	dead := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: time.Millisecond, MaxRetries: -1})
-	t.Cleanup(func() { _ = dead.Close() })
-	require.Error(t, middleware.ClearAuthFailures(context.Background(), dead, "10.0.0.9"))
-}
-
-func TestClearAuthFailuresBucketsIPv6(t *testing.T) {
-	ts := setupTS(t)
-	ctx := context.Background()
-	const bucket = "2001:db8:7:8::"
-
-	require.NoError(t, ts.Redis.Set(ctx, "auth_failures:ip:"+bucket, 3, time.Minute).Err())
-	// A different host in the same /64 clears the shared counter.
-	require.NoError(t, middleware.ClearAuthFailures(ctx, ts.Redis, "2001:db8:7:8::beef"))
-
-	exists, err := ts.Redis.Exists(ctx, "auth_failures:ip:"+bucket).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists)
 }
 
 func TestRecordAuthFailureIncrementsCounter(t *testing.T) {
@@ -271,22 +242,6 @@ func TestRecordAuthFailureResetsCounterOnBan(t *testing.T) {
 	exists, err := ts.Redis.Exists(ctx, "auth_failures:ip:10.0.0.14").Result()
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), exists, "failure counter should be cleared after ban")
-}
-
-func TestClearAuthFailuresRemovesCounter(t *testing.T) {
-	ts := setupTS(t)
-	ctx := context.Background()
-
-	// Record some failures
-	require.True(t, recordAuthFailure(t, ts.Redis, testIPClearAuth, testBanConfig))
-	require.True(t, recordAuthFailure(t, ts.Redis, testIPClearAuth, testBanConfig))
-
-	// Clear
-	require.NoError(t, middleware.ClearAuthFailures(ctx, ts.Redis, testIPClearAuth))
-
-	exists, err := ts.Redis.Exists(ctx, "auth_failures:ip:"+testIPClearAuth).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists, "failure counter should be removed after clear")
 }
 
 func TestAuthBanDifferentIPsIndependent(t *testing.T) {

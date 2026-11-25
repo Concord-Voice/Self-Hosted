@@ -46,6 +46,11 @@ func DefaultAuthBanConfig() AuthBanConfig {
 // backend yields the fixed 503 rather than a stalled request.
 const authBudgetTimeout = 2 * time.Second
 
+// The failure counter is never cleared by a successful authentication. Its key
+// is a shared IPv4 /32 or IPv6 /64 bucket, and one account's success says
+// nothing about the other clients in it: clearing it would let any account
+// holder in the bucket fail Threshold-1 times, sign in, and repeat without
+// reaching the ban. It decays only with its Window.
 const (
 	authBanKeyPrefix     = "auth_ban:ip:"
 	authFailureKeyPrefix = "auth_failures:ip:"
@@ -166,14 +171,4 @@ func MarkAuthFailureOutcome(c *gin.Context, outcome AuthFailureOutcome) {
 	case AuthFailureBackendUnavailable:
 		MarkNightwatchVerdict(c, NightwatchVerdict{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityMedium, Reason: securityevent.ReasonRateLimitBackendUnavailable})
 	}
-}
-
-// ClearAuthFailures removes the failure counter for an IP's source bucket on
-// successful authentication. A failed delete only leaves a stale count, which
-// fails toward more limiting, so callers log the error and continue.
-func ClearAuthFailures(ctx context.Context, redisClient *redis.Client, ip string) error {
-	if redisClient == nil {
-		return nil
-	}
-	return redisClient.Del(ctx, authFailureKeyPrefix+IPBucket(ip)).Err()
 }
