@@ -2088,12 +2088,10 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool, 
 	c.Header(middleware.SessionIssuedHeader, "true")
 	c.Header(middleware.SessionIDHeader, tokenID)
 
-	// Clear cumulative IP auth failures only after full auth completion
-	// (credentials + MFA if enabled). This prevents resetting the counter
-	// by repeatedly passing the credential step while brute-forcing MFA.
-	if err := middleware.ClearAuthFailures(c.Request.Context(), h.redis, c.ClientIP()); err != nil {
-		h.log.Warn("Failed to clear auth failure counter")
-	}
+	// A completed sign-in leaves the shared source failure counter alone. Its
+	// key is a /32 or /64 bucket shared by other clients, so clearing it would
+	// let any account holder there fail, sign in and repeat without a ban. It
+	// decays with its window.
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonAuthenticationSucceeded, AuthMethod: primaryAuthMethod, RouteTemplate: securityevent.RouteAuthLogin})
 
 	h.log.Info("User logged in (MFA verified)", "user_id", userID)
@@ -4795,9 +4793,6 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		return
 	}
 
-	if err := middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP()); err != nil {
-		h.log.Warn("Failed to clear auth failure counter")
-	}
 	h.log.Info("Password reset via recovery", "operation", "forced_security_clear")
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonRecoveryReset, AuthMethod: securityevent.AuthRecovery, RouteTemplate: securityevent.RouteRecoveryResetPassword})
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully. Please sign in with your new password."})
