@@ -274,7 +274,7 @@ func resolveRateLimitTTL(
 
 func abortRateLimitExceeded(c *gin.Context, config RateLimitConfig, ttl time.Duration) {
 	MarkNightwatchVerdict(c, NightwatchVerdict{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, Reason: securityevent.ReasonRateLimitExceeded})
-	c.Header("Retry-After", fmt.Sprintf("%d", int(ttl.Seconds())))
+	c.Header(RetryAfterHeader, fmt.Sprintf("%d", int(ttl.Seconds())))
 	if config.ExceededHandler != nil {
 		config.ExceededHandler(c)
 	} else {
@@ -292,7 +292,7 @@ func abortOnRateLimitBackendError(c *gin.Context, config RateLimitConfig) bool {
 		return false
 	}
 	if config.BackendErrorHandler != nil {
-		c.Header("Retry-After", "1")
+		c.Header(RetryAfterHeader, "1")
 		config.BackendErrorHandler(c)
 		c.Abort()
 		return true
@@ -306,7 +306,7 @@ func abortOnRateLimitBackendError(c *gin.Context, config RateLimitConfig) bool {
 // abortBackendUnavailable writes the one fixed fail-closed response shared by
 // the rate limiters and the auth source budget.
 func abortBackendUnavailable(c *gin.Context, retryAfter string) {
-	c.Header("Retry-After", retryAfter)
+	c.Header(RetryAfterHeader, retryAfter)
 	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 		"error":   "service unavailable",
 		"message": "rate-limit backend unavailable; please retry shortly",
