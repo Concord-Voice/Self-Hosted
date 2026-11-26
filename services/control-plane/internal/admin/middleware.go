@@ -2,6 +2,8 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -14,6 +16,20 @@ import (
 // c.GetString(adminIDContextKey) — it is the ADMIN identity, never a user_id.
 const adminIDContextKey = "admin_id"
 
+// adminSessionContextKey is the gin.Context key under which AdminAuthRequired
+// stores adminSessionBinding(sid) for the session that passed. It names the
+// session without carrying the session id, so a handler can bind state to one
+// session (the create_admin step-up does) and never hold the cookie value.
+const adminSessionContextKey = "admin_session_binding"
+
+// adminSessionBinding is a domain-separated SHA-256 of a session id. The id is
+// 256 random bits, so the digest cannot be reversed or guessed, and the
+// domain keeps it distinct from the sign-in notice's session digest.
+func adminSessionBinding(sid string) string {
+	digest := sha256.Sum256([]byte("admin_session_binding\x00v1\x00" + sid))
+	return hex.EncodeToString(digest[:])
+}
+
 // SessionGenerationResolver resolves the generation that is authorized for an active admin.
 type SessionGenerationResolver interface {
 	ActiveSessionGeneration(ctx context.Context, adminID string) (int64, error)
@@ -24,7 +40,8 @@ type SessionGenerationResolver interface {
 // SessionStore — it NEVER consults the user-facing Authorization header / JWT,
 // keeping the admin identity fully isolated from end-user accounts (#1688 §6).
 //
-// On a valid session it sets c.Set("admin_id", <adminID>) and calls c.Next().
+// On a valid session it sets c.Set("admin_id", <adminID>) and the session's
+// binding (adminSessionContextKey), then calls c.Next().
 // On any failure (no cookie, unknown/expired/malformed sid) it aborts with 401
 // and never reaches the wrapped handler — the deny-by-default posture verified by
 // the reflective routes_test.
@@ -57,6 +74,7 @@ func AdminAuthRequired(sessions *SessionStore, authority SessionGenerationResolv
 		}
 
 		c.Set(adminIDContextKey, sess.AdminID)
+		c.Set(adminSessionContextKey, adminSessionBinding(sid))
 		c.Next()
 	}
 }
