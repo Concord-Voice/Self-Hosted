@@ -51,7 +51,7 @@ func TestCreateAdmin_WithoutStepUp_RefusedAndCreatesNoRow(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			username := uniqueAdminUsername("nostepup")
 			body["username"] = username
-			body["password"] = adminTestPassword
+			body["password"] = adminTestPassword // pragma: allowlist secret
 			rec := postJSON(engine, "/admin/api/v1/admins", body)
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 			assert.NotContains(t, rec.Body.String(), "enrollment_token")
@@ -144,7 +144,12 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	as := actingID
-	engine.Use(func(c *gin.Context) { c.Set("admin_id", as); c.Next() })
+	session := testAdminSessionBinding
+	engine.Use(func(c *gin.Context) {
+		c.Set("admin_id", as)
+		c.Set("admin_session_binding", session)
+		c.Next()
+	})
 	engine.POST("/admin/api/v1/admins", h.CreateAdmin)
 	engine.POST("/admin/api/v1/admins/stepup", h.CreateAdminStepUpBegin)
 	engine.POST("/server/stepup", h.ServerStepUpBegin)
@@ -153,7 +158,7 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 		t.Helper()
 		username := uniqueAdminUsername("misuse")
 		body["username"] = username
-		body["password"] = adminTestPassword
+		body["password"] = adminTestPassword // pragma: allowlist secret
 		rec := postJSON(engine, "/admin/api/v1/admins", body)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.JSONEq(t, `{"error":"`+want+`"}`, rec.Body.String())
@@ -208,9 +213,27 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 		handle, challenge := stepUpBegin(t, engine, "/server/stepup", map[string]string{"action": "stop"})
 		refused(t, proof(handle, signStepUp(t, va, challenge, flagUP|flagUV)), "stepup_failed")
 	})
+	t.Run("handle begun in another session of this admin", func(t *testing.T) {
+		session = "other-session-binding"
+		handle, challenge := stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
+		session = testAdminSessionBinding
+		refused(t, proof(handle, signStepUp(t, va, challenge, flagUP|flagUV)), "stepup_failed")
+	})
 
 	assert.Equal(t, 1, adminCreatedRows(t, db, actingID, admin.AuditSuccess))
-	assert.Equal(t, 7, adminCreatedRows(t, db, actingID, admin.AuditDenied), "one denied row per refusal above")
+	assert.Equal(t, 8, adminCreatedRows(t, db, actingID, admin.AuditDenied), "one denied row per refusal above")
+	// Each refusal records why, in the order of the subtests above; the
+	// response stays a uniform stepup_failed.
+	assert.Equal(t, []string{
+		"stepup_required",
+		"stepup_unknown_handle",     // single-use
+		"stepup_assertion_rejected", // no user verification
+		"stepup_assertion_rejected", // tampered signature
+		"stepup_clone_warning",      // counter did not advance
+		"stepup_unknown_handle",     // another admin's handle is not reachable
+		"stepup_unknown_handle",     // server-action handle, other prefix
+		"stepup_wrong_session",      // another session of this admin
+	}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditDenied))
 }
 
 // Input that is refused before the step-up does not spend the handle: a weak
@@ -229,7 +252,7 @@ func TestCreateAdmin_StepUpOrdering(t *testing.T) {
 	handle, challenge := stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
 	assertion := signStepUp(t, va, challenge, flagUP|flagUV)
 	weak := createBody(uniqueAdminUsername("weak"), handle, assertion)
-	weak["password"] = "short"
+	weak["password"] = "short" // pragma: allowlist secret
 	assert.Equal(t, http.StatusBadRequest, postJSON(engine, "/admin/api/v1/admins", weak).Code)
 
 	// A taken username is a 409 with or without a step-up.
@@ -289,7 +312,8 @@ func TestCreateAdmin_UsernameTakenAfterEarlyCheck_ConflictAfterStepUp(t *testing
 		require.FailNow(t, "the creation did not finish after the lock holder committed")
 	}
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Equal(t, 1, adminCreatedRows(t, db, actingID, admin.AuditFailure), "the spent step-up is audited")
+	assert.Equal(t, []string{"username_taken"}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditFailure),
+		"the spent step-up is audited")
 	rec = postJSON(engine, "/admin/api/v1/admins", createBody(uniqueAdminUsername("reuse"), handle, assertion))
 	assert.Equal(t, http.StatusForbidden, rec.Code, "the step-up was spent: %s", rec.Body.String())
 }

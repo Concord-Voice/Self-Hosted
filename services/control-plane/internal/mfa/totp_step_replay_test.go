@@ -14,8 +14,6 @@ package mfa_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -294,9 +292,13 @@ func TestTOTPStepReplay_VerifySetupDoubleSubmitPersistsOnlyOneWinner(t *testing.
 		wg.Wait()
 		close(done)
 	}()
+	// This bound catches a hang, not a slow run. Each request derives eight
+	// Argon2id v2 backup-code hashes (19 MiB, two passes) before its UPDATE,
+	// so five concurrent requests under -race on a loaded runner can take more
+	// than 10 s without anything being wrong.
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("TOTPStepReplay: concurrent TOTPVerifySetup calls did not complete within timeout")
 	}
 
@@ -324,9 +326,9 @@ func TestTOTPStepReplay_VerifySetupDoubleSubmitPersistsOnlyOneWinner(t *testing.
 		for _, c := range codes {
 			codeStr, isString := c.(string)
 			require.True(t, isString, "each backup code must be a string")
-			sum := sha256.Sum256([]byte(codeStr))
-			hexSum := hex.EncodeToString(sum[:])
-			assert.Contains(t, storedHashes, hexSum,
+			_, matched, verifyErr := mfa.VerifyBackupCode(context.Background(), codeStr, storedHashes, make([]bool, len(storedHashes)))
+			require.NoError(t, verifyErr)
+			assert.True(t, matched,
 				"TOTPStepReplay: a 200 TOTPVerifySetup response's backup codes must match what is actually stored in user_mfa_totp.backup_codes_hash")
 		}
 	}

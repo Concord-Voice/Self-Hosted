@@ -126,7 +126,8 @@ func (h *Handler) storeServerImage(c *gin.Context, up serverImageUpload) {
 func (h *Handler) storeServerImageGated(c *gin.Context, up serverImageUpload) (string, error) {
 	ctx := c.Request.Context()
 	budget := stepup.DangerousActionBudget(h.sessionRedis)
-	if e := stepup.Charge(ctx, budget, up.userID, up.code); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, budget, up.userID, up.code)
+	if e != nil {
 		return "", e
 	}
 	graceStore := stepup.NewGraceStore(h.sessionRedis)
@@ -147,6 +148,12 @@ func (h *Handler) storeServerImageGated(c *gin.Context, up serverImageUpload) (s
 		return err
 	})
 	if err != nil {
+		// The gate transaction has rolled back. A busy backup-code check was
+		// never judged, so it returns the attempt it was charged (#164); any
+		// other error keeps its charge.
+		if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil {
+			h.log.Warn("Could not refund a step-up attempt after a busy verification", "error", rErr)
+		}
 		return "", err
 	}
 	mfaenforce.Settle(ctx, h.log, outcome, budget, graceStore, grace, up.userID)

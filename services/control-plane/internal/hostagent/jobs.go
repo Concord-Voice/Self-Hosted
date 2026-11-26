@@ -194,8 +194,11 @@ func (j *jobs) start(action string, cmds [][]string, budget time.Duration) (*Job
 		// Copy so evicted jobs are freed; only the newest can be running.
 		j.list = append([]*Job(nil), j.list[len(j.list)-maxJobs:]...)
 	}
+	// Snapshot before the goroutine starts: the 202 reports the just-started
+	// job, even if it finishes before the handler encodes the response.
+	snap := j.snapshot(job, false)
 	go j.execute(job, cmds, budget)
-	return job, nil
+	return &snap, nil
 }
 
 // execute runs cmds in order, stopping at the first failure. The run is not
@@ -310,9 +313,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 		log.Printf("concord-agent: action=%s outcome=busy", name)
 		return
 	}
-	s.writes.mu.Lock()
-	snap := s.writes.snapshot(job, false)
-	s.writes.mu.Unlock()
+	snap := *job
 	log.Printf("concord-agent: action=%s outcome=started job=%s", name, job.ID)
 	w.Header().Set(contentType, "application/json")
 	w.WriteHeader(http.StatusAccepted)

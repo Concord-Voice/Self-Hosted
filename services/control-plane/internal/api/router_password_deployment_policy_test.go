@@ -47,7 +47,7 @@ func TestNewRouter_SelfHostedNativePasswordPolicy(t *testing.T) {
 	}, headers)
 	require.Equal(t, http.StatusForbidden, patch.Code, patch.Body.String())
 	assert.JSONEq(t, `{"error_code":"password_login_required_self_hosted"}`, patch.Body.String())
-	unlink := ts.DoRequest(http.MethodDelete, "/api/v1/users/me/sso-identities/google", nil, headers)
+	unlink := ts.DoRequest(http.MethodDelete, "/api/v1/users/me/sso-identities/google", map[string]any{"password": user.Password}, headers)
 	require.Equal(t, http.StatusOK, unlink.Code, unlink.Body.String())
 
 	var storedDisabled, trust bool

@@ -61,6 +61,13 @@ type RecoveryClaims struct {
 	UserID         string
 	JTI            string
 	ExpiresAt      time.Time // Verified JWT expiry; only the device ceremony uses this lifetime.
+	// CredentialEpoch is the users.credential_epoch the token was issued
+	// against; empty means the account had never rotated.
+	CredentialEpoch string
+	// EpochBound is set only by ValidateRecoveryToken after it verified a
+	// recovery_v3 token. ValidateRecoveryClaimsTx refuses claims without it, so
+	// a hand-built or zero-value RecoveryClaims authorizes nothing.
+	EpochBound bool
 }
 
 // ErrRecoveryPolicyUnavailable means current recovery policy could not be evaluated.
@@ -97,8 +104,11 @@ type MFAChecker interface {
 	// in Redis keyed by the challenge JTI. Returns credential request options for the client.
 	// Returns nil options if user has no WebAuthn credentials.
 	BeginWebAuthnLogin(ctx context.Context, userID, jti string) (options interface{}, err error)
-	// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
-	GenerateRecoveryToken(userID, verifiedFactor string) (token string, jti string, err error)
+	// IssueRecoveryTokenTx locks the users row, re-evaluates recovery policy for
+	// verifiedFactor and mints a RecoveryTokenTTL token stamped with the
+	// credential epoch read under that lock. Errors wrap ErrRecoveryProofInvalid
+	// or ErrRecoveryPolicyUnavailable when policy refused or could not be read.
+	IssueRecoveryTokenTx(ctx context.Context, tx *sql.Tx, userID, verifiedFactor string) (token string, jti string, err error)
 	// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
 	ValidateRecoveryToken(ctx context.Context, tokenString string) (*RecoveryClaims, error)
 	ValidateRecoveryClaimsTx(ctx context.Context, tx *sql.Tx, claims *RecoveryClaims) error
@@ -1708,9 +1718,10 @@ func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, 
 	}
 	if !valid {
 		h.recordCheckedFailure(ctx, email)
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return false
+		}
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return false
 	}
@@ -1854,9 +1865,10 @@ func (h *Handler) Login(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 			return
 		}
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
@@ -2086,10 +2098,10 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool, 
 	c.Header(middleware.SessionIssuedHeader, "true")
 	c.Header(middleware.SessionIDHeader, tokenID)
 
-	// Clear cumulative IP auth failures only after full auth completion
-	// (credentials + MFA if enabled). This prevents resetting the counter
-	// by repeatedly passing the credential step while brute-forcing MFA.
-	middleware.ClearAuthFailures(c.Request.Context(), h.redis, c.ClientIP())
+	// A completed sign-in leaves the shared source failure counter alone. Its
+	// key is a /32 or /64 bucket shared by other clients, so clearing it would
+	// let any account holder there fail, sign in and repeat without a ban. It
+	// decays with its window.
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonAuthenticationSucceeded, AuthMethod: primaryAuthMethod, RouteTemplate: securityevent.RouteAuthLogin})
 
 	h.log.Info("User logged in (MFA verified)", "user_id", userID)
@@ -3204,6 +3216,10 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 	revoked := h.revokeLogoutSession(c, claims, c.GetHeader(refreshTokenHeader), c.GetHeader("X-Session-ID"))
 	if revoked.err != nil {
+		if errors.Is(revoked.err, errInvalidLogoutTarget) {
+			c.JSON(http.StatusForbidden, gin.H{"error_code": "invalid_logout_target"})
+			return
+		}
 		// An unknown commit may have terminalized the family: fence what committed.
 		h.closeCommittedFamilies(c.Request.Context(), revoked.result)
 		writeLoginFamilyError(c, revoked.err, errMsgInvalidCredentials, errMsgInternalError)
@@ -3255,6 +3271,10 @@ type logoutRevocation struct {
 	result              loginfamily.RevocationResult
 	err                 error
 }
+
+// errInvalidLogoutTarget marks an attempt to select another live family with
+// an otherwise valid bearer. It is not an idempotent missing-session case.
+var errInvalidLogoutTarget = errors.New("invalid logout target")
 
 type logoutSelection struct {
 	sid              string
@@ -3370,55 +3390,18 @@ func (h *Handler) revokeLogoutSession(c *gin.Context, claims *Claims, refreshTok
 			result = logoutRevocation{err: errors.Join(result.err, loginfamily.NewError(loginfamily.ReasonSQLUnavailable, rollbackErr))}
 		}
 	}()
-	user, err := lockMintUserTx(ctx, tx, userID)
-	if errors.Is(err, loginfamily.ErrDenied) {
-		return result
-	}
-	if err != nil {
+	user, sid, family, found, err := lockLogoutSelectionTx(ctx, tx, userID, selection, claims)
+	if err != nil || !found {
 		result.err = err
 		return result
 	}
-	lockedUser, sid, family, err := resolveLogoutSelection(ctx, tx, selection, claims)
-	if errors.Is(err, sql.ErrNoRows) {
-		return result
-	}
-	if err != nil {
-		result.err = loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
-		return result
-	}
-	if lockedUser != userID {
-		return result
-	}
-	// Never query another user's authority while holding this user's prefix.
-	bearerFamily := uuid.Nil
-	if claims != nil && claims.UserID == userID {
-		bearerFamily, err = logoutBearerFamilyTx(ctx, tx, claims, family)
-		if errors.Is(err, loginfamily.ErrDenied) {
-			bearerFamily, err = uuid.Nil, nil
-		}
-		if err != nil {
-			result.err = err
-			return result
-		}
-	}
-	if selection.bearerAuthorized && bearerFamily == uuid.Nil {
-		return result
-	}
-	sidID, err := uuid.Parse(sid)
-	if err != nil {
-		result.err = loginfamily.NewError(loginfamily.ReasonOwnershipInvalid, err)
-		return result
-	}
-	targets, err := loginfamily.ResolveTargetSIDTx(ctx, tx, user, sidID)
-	if errors.Is(err, loginfamily.ErrTargetNotFound) {
-		return result
-	}
-	if err != nil {
+	bearerFamily, proceed, err := logoutBearerAuthorityTx(ctx, tx, claims, userID, family, selection.bearerAuthorized)
+	if err != nil || !proceed {
 		result.err = err
 		return result
 	}
-	revoked, err := loginfamily.RevokeFamiliesTx(ctx, tx, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeSession, Reason: loginfamily.ReasonLogout})
-	if err != nil {
+	revoked, found, err := revokeLogoutTargetTx(ctx, tx, user, sid)
+	if err != nil || !found {
 		result.err = err
 		return result
 	}
@@ -3436,14 +3419,100 @@ func (h *Handler) revokeLogoutSession(c *gin.Context, claims *Claims, refreshTok
 	return result
 }
 
+// lockLogoutSelectionTx takes the selected user's lock and re-resolves the
+// selection under it. found is false when the user is denied, the selection
+// no longer resolves, or it now names another user, all of which end the
+// logout quietly.
+func lockLogoutSelectionTx(
+	ctx context.Context, tx *sql.Tx, userID string, selection logoutSelection, claims *Claims,
+) (user loginfamily.UserAuthority, sid string, family uuid.UUID, found bool, err error) {
+	user, err = lockMintUserTx(ctx, tx, userID)
+	if errors.Is(err, loginfamily.ErrDenied) {
+		return user, "", uuid.Nil, false, nil
+	}
+	if err != nil {
+		return user, "", uuid.Nil, false, err
+	}
+	lockedUser, sid, family, err := resolveLogoutSelection(ctx, tx, selection, claims)
+	if errors.Is(err, sql.ErrNoRows) {
+		return user, "", uuid.Nil, false, nil
+	}
+	if err != nil {
+		return user, "", uuid.Nil, false, loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+	}
+	if lockedUser != userID {
+		return user, "", uuid.Nil, false, nil
+	}
+	return user, sid, family, true, nil
+}
+
+// logoutBearerAuthorityTx resolves the bearer's live family under the user
+// lock and decides whether a bearer-authorized logout may revoke family. It
+// never queries another user's authority while holding this user's prefix. A
+// bearer with no live family ends the logout quietly; a bearer naming another
+// family of the same account is refused with errInvalidLogoutTarget.
+func logoutBearerAuthorityTx(
+	ctx context.Context, tx *sql.Tx, claims *Claims, userID string, family uuid.UUID, bearerAuthorized bool,
+) (uuid.UUID, bool, error) {
+	bearerFamily := uuid.Nil
+	if claims != nil && claims.UserID == userID {
+		var err error
+		bearerFamily, err = logoutBearerFamilyTx(ctx, tx, claims, family)
+		if errors.Is(err, loginfamily.ErrDenied) {
+			bearerFamily, err = uuid.Nil, nil
+		}
+		if err != nil {
+			return uuid.Nil, false, err
+		}
+	}
+	if !bearerAuthorized {
+		return bearerFamily, true, nil
+	}
+	if bearerFamily == uuid.Nil {
+		return uuid.Nil, false, nil
+	}
+	if bearerFamily != family {
+		return uuid.Nil, false, errInvalidLogoutTarget
+	}
+	return bearerFamily, true, nil
+}
+
+// revokeLogoutTargetTx terminalizes the family owning sid. found is false when
+// the session no longer resolves to a target, which ends the logout quietly.
+func revokeLogoutTargetTx(
+	ctx context.Context, tx *sql.Tx, user loginfamily.UserAuthority, sid string,
+) (loginfamily.RevocationResult, bool, error) {
+	sidID, err := uuid.Parse(sid)
+	if err != nil {
+		return loginfamily.RevocationResult{}, false, loginfamily.NewError(loginfamily.ReasonOwnershipInvalid, err)
+	}
+	targets, err := loginfamily.ResolveTargetSIDTx(ctx, tx, user, sidID)
+	if errors.Is(err, loginfamily.ErrTargetNotFound) {
+		return loginfamily.RevocationResult{}, false, nil
+	}
+	if err != nil {
+		return loginfamily.RevocationResult{}, false, err
+	}
+	revoked, err := loginfamily.RevokeFamiliesTx(ctx, tx, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeSession, Reason: loginfamily.ReasonLogout})
+	if err != nil {
+		return loginfamily.RevocationResult{}, false, err
+	}
+	return revoked, true, nil
+}
+
 // ── Account Recovery Endpoints ──────────────────────────────────────────────
 
 const (
-	recoveryMaxAttempts   = 5              // Legacy code: max wrong-code attempts before invalidating
-	recoveryTokenUsedTTL  = 25 * time.Hour // Must match or exceed mfa.recoveryTTL
-	recoveryFailureLimit  = 10             // Legacy code: failures per address per window
+	recoveryMaxAttempts   = 5  // Legacy code: max wrong-code attempts before invalidating
+	recoveryFailureLimit  = 10 // Legacy code: failures per address per window
 	recoveryFailureWindow = 24 * time.Hour
 )
+
+// RecoveryTokenTTL is the lifetime of final recovery authority and of its
+// spent marker (ADR-0046 decision 7). The device ceremony and the reset share
+// it. Social recovery needed 24 hours and is paused; un-pausing it needs a
+// request-scoped credential, not a longer token.
+const RecoveryTokenTTL = 15 * time.Minute
 
 const recoveryFailureKeyPrefix = "recovery_fail:"
 
@@ -3991,8 +4060,9 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	record, err := h.consumeRecoveryCode(ctx, recoveryRedisKey(req.Email), req.Code)
 	if errors.Is(err, redis.Nil) {
 		h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		middleware.MarkAuthFailureOutcome(c, outcome)
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
 		return
 	}
@@ -4029,34 +4099,15 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
-	var addr string
-	err = h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, record.UserID).Scan(&addr)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		h.log.Error("Failed to read account for recovery key", "failure_class", "recovery_key_account_lookup")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
-		return
-	}
-	if err != nil || addr != record.Addr {
-		// The account is gone or no longer uses the address the key was sent
-		// to. Discard the key and answer as for any other unusable key.
-		if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
-			h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
-		}
-		h.refuseRecoveryEmailToken(ctx, c)
+	addr, ok := h.recoveryKeyAccountAddr(ctx, c, token, record.UserID, record.Addr)
+	if !ok {
 		return
 	}
 	methods, ok := h.recoveryMethods(ctx, c, record.UserID)
 	if !ok {
 		return
 	}
-	if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil {
-		if errors.Is(err, redis.Nil) {
-			// A concurrent request redeemed the key first.
-			h.refuseRecoveryEmailToken(ctx, c)
-			return
-		}
-		h.log.Error("Failed to redeem recovery key", "failure_class", recoveryKeyReadFailureClass(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+	if !h.redeemRecoveryEmailToken(ctx, c, token) {
 		return
 	}
 	if len(methods) > 0 {
@@ -4068,12 +4119,51 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 	}
 }
 
+// recoveryKeyAccountAddr returns the account's current address when it still
+// matches the one the key was sent to. Otherwise it answers the request, and
+// for a gone or moved account it discards the key and refuses it like any
+// other unusable key.
+func (h *Handler) recoveryKeyAccountAddr(ctx context.Context, c *gin.Context, token, userID, sentTo string) (string, bool) {
+	var addr string
+	err := h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, userID).Scan(&addr)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		h.log.Error("Failed to read account for recovery key", "failure_class", "recovery_key_account_lookup")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return "", false
+	}
+	if err == nil && addr == sentTo {
+		return addr, true
+	}
+	if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
+		h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+	}
+	h.refuseRecoveryEmailToken(ctx, c)
+	return "", false
+}
+
+// redeemRecoveryEmailToken spends the key. A key a concurrent request already
+// redeemed is refused like any other unusable key.
+func (h *Handler) redeemRecoveryEmailToken(ctx context.Context, c *gin.Context, token string) bool {
+	_, err := h.consumeRecoveryEmailToken(ctx, token)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, redis.Nil) {
+		h.refuseRecoveryEmailToken(ctx, c)
+		return false
+	}
+	h.log.Error("Failed to redeem recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+	c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+	return false
+}
+
 // refuseRecoveryEmailToken answers an unusable recovery key. The client
 // address auth ban still counts it.
-func (h *Handler) refuseRecoveryEmailToken(ctx context.Context, c *gin.Context) {
+func (h *Handler) refuseRecoveryEmailToken(_ context.Context, c *gin.Context) {
+	if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+		return
+	}
 	h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
-	outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-	middleware.MarkAuthFailureOutcome(c, outcome)
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode})
 }
 
@@ -4223,15 +4313,21 @@ func (h *Handler) CompleteRecovery(c *gin.Context, userID, verifiedFactor string
 		return false
 	}
 	// The email or MFA verifier supplies this proof before final token issuance.
-	tx := h.beginRecoveryPolicyTx(c, &RecoveryClaims{UserID: userID, RecoveryFactor: verifiedFactor})
-	if tx == nil {
+	tx, err := h.db.BeginTx(c.Request.Context(), &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		writeRecoveryPolicyError(c, ErrRecoveryPolicyUnavailable)
 		return false
 	}
 	defer h.rollbackRecoveryPolicyTx(tx)
 
-	recoveryToken, _, err := h.mfaChecker.GenerateRecoveryToken(userID, verifiedFactor)
+	// Policy, the users lock and the stamped credential epoch are one decision.
+	recoveryToken, _, err := h.mfaChecker.IssueRecoveryTokenTx(c.Request.Context(), tx, userID, verifiedFactor)
 	if err != nil {
-		h.log.Error("Failed to generate recovery token", "error", err)
+		h.rollbackRecoveryPolicyTx(tx)
+		if writeRecoveryPolicyError(c, err) {
+			return false
+		}
+		h.log.Error("Failed to generate recovery token", "error_class", "recovery_token_issue")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return false
 	}
@@ -4306,15 +4402,17 @@ func (h *Handler) validateAndConsumeRecoveryToken(c *gin.Context, tokenStr strin
 	}
 	if err != nil {
 		if recordAuthFailure {
-			middleware.MarkAuthFailureOutcome(c, middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig()))
+			if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+				return nil, ""
+			}
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return nil, ""
 	}
 
 	ctx := c.Request.Context()
-	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
-	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: recoveryTokenUsedTTL, Mode: "NX"}).Result()
+	recoveryUsedKey := recoveryTokenUsedKey(claims.JTI)
+	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: RecoveryTokenTTL, Mode: "NX"}).Result()
 	if errors.Is(err, redis.Nil) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
 		return nil, ""
@@ -4787,7 +4885,6 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		return
 	}
 
-	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
 	h.log.Info("Password reset via recovery", "operation", "forced_security_clear")
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonRecoveryReset, AuthMethod: securityevent.AuthRecovery, RouteTemplate: securityevent.RouteRecoveryResetPassword})
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully. Please sign in with your new password."})
@@ -4930,8 +5027,29 @@ func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, row.Wire())
 }
 
-// Device routes use Bearer recovery-purpose authentication only. They deliberately
-// do not consume reset tokens or apply access-token credential epochs.
+// recoveryTokenUsedKey names the spent marker a reset reserves for a token jti.
+func recoveryTokenUsedKey(jti string) string {
+	return "recovery_token_used:" + jti
+}
+
+// recoveryTokenSpent reads the spent marker without setting, deleting or
+// extending it. A missing client or any Redis error is an error, never false.
+func (h *Handler) recoveryTokenSpent(ctx context.Context, jti string) (bool, error) {
+	if h.redis == nil {
+		return false, errors.New("recovery spent state unavailable")
+	}
+	n, err := h.redis.Exists(ctx, recoveryTokenUsedKey(jti)).Result()
+	if err != nil {
+		return false, fmt.Errorf("read recovery spent state: %w", err)
+	}
+	return n > 0, nil
+}
+
+// Device routes use Bearer recovery-purpose authentication only and never spend
+// the token, but refuse one a reset has spent. The spent read stays outside SQL
+// because the epoch comparison in recoveryGuard is the linearization point: a
+// reset that reserves the marker after this read either commits first, so the
+// guard sees the rotated epoch, or commits after the device operation.
 func (h *Handler) validateDeviceRecoveryToken(c *gin.Context, token string) *RecoveryClaims {
 	if token == "" || len(token) > 4096 {
 		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
@@ -4946,6 +5064,16 @@ func (h *Handler) validateDeviceRecoveryToken(c *gin.Context, token string) *Rec
 		return nil
 	}
 	if err != nil || claims == nil || !devicerecovery.CanonicalUUID(claims.UserID) || claims.JTI == "" || claims.ExpiresAt.IsZero() {
+		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
+		return nil
+	}
+	spent, err := h.recoveryTokenSpent(c.Request.Context(), claims.JTI)
+	if err != nil {
+		h.log.Error("Failed to read recovery token spent state", "error_class", "token_usage_check")
+		writeRecoveryPolicyError(c, ErrRecoveryPolicyUnavailable)
+		return nil
+	}
+	if spent {
 		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
 		return nil
 	}

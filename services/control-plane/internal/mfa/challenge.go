@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -29,8 +30,11 @@ const (
 	PurposeLogin             ChallengePurpose = "login"
 	PurposeSuspiciousRefresh ChallengePurpose = "suspicious_refresh"
 	PurposeMFAUpgrade        ChallengePurpose = "mfa_upgrade"
-	// Versioned so pre-policy email-only recovery tokens cannot authorize resets.
-	PurposeRecovery          ChallengePurpose = "recovery_v2"
+	// Versioned so older recovery tokens cannot authorize anything: v2 added the
+	// recovery policy, and v3 marks a token whose mint stamped the credential
+	// epoch it was issued against. An empty v3 epoch means "never rotated", which
+	// a v2 token could not distinguish from "minted by code that stamps nothing".
+	PurposeRecovery          ChallengePurpose = "recovery_v3"
 	PurposeRecoveryChallenge ChallengePurpose = "recovery_challenge"
 )
 
@@ -40,10 +44,6 @@ const (
 // as a challenge — and it was previously a bare literal at both the mint and the
 // read, one careless edit from letting the two disagree.
 const ChallengeTokenIssuer = "concordvoice-mfa"
-
-// recoveryTTL is the lifetime of recovery tokens. Must exceed the longest recovery
-// flow (social recovery requests expire after 24 hours, device requests after 15 minutes).
-const recoveryTTL = 25 * time.Hour
 
 // ChallengeClaims are the JWT claims for an MFA challenge token.
 type ChallengeClaims struct {
@@ -58,8 +58,10 @@ type ChallengeClaims struct {
 	// challenge was issued (#2418). Redemption compares it against the epoch current
 	// at mint time, so a challenge issued before a destructive reset cannot complete
 	// into a post-reset session. Empty on challenges that never reach a mint
-	// (recovery, MFA upgrade) and on pre-#2418 tokens; auth.CompleteLogin rejects an
-	// empty claim for a user who has rotated.
+	// (MFA upgrade) and on pre-#2418 tokens; auth.CompleteLogin rejects an
+	// empty claim for a user who has rotated. A recovery_v3 token always carries
+	// the epoch it was issued against, empty only when the account never rotated,
+	// and every recovery consumer compares it for strict equality.
 	//
 	// Deliberately NOT validated in a Claims.Validate() method: golang-jwt v5
 	// auto-invokes that during ParseWithClaims, where the current durable epoch is
@@ -103,14 +105,29 @@ func GenerateChallengeToken(userID string, purpose ChallengePurpose, jwtSecret J
 	if purpose == PurposeLogin {
 		return "", "", fmt.Errorf("login challenges require Handler.GenerateLoginChallenge")
 	}
+	if purpose == PurposeRecovery {
+		return "", "", fmt.Errorf("recovery tokens require GenerateRecoveryToken")
+	}
 	return generateChallengeTokenWithTTL(ChallengeClaims{UserID: userID, Purpose: purpose, CredentialEpoch: string(credEpoch)}, jwtSecret, challengeTTL)
 }
 
-// GenerateRecoveryToken creates email-proved recovery authority with a 25-hour TTL.
-// Recovery tokens authorize a destructive reset rather than a session mint, so they
-// carry no epoch — binding one to a pre-reset epoch would be incoherent.
-func GenerateRecoveryToken(userID string, jwtSecret JWTSecret) (string, string, error) {
-	return generateChallengeTokenWithTTL(ChallengeClaims{UserID: userID, Purpose: PurposeRecovery, RecoveryFactor: "email"}, jwtSecret, recoveryTTL)
+// GenerateRecoveryToken signs final recovery authority for a server-verified
+// factor, valid for auth.RecoveryTokenTTL. The token names the credential epoch
+// it was issued against, and the reset it authorizes rotates that epoch, which
+// revokes it and its siblings. credEpoch must be read under the users row lock
+// that also evaluated recovery policy (Handler.IssueRecoveryTokenTx).
+func GenerateRecoveryToken(userID, verifiedFactor string, jwtSecret JWTSecret, credEpoch CredEpoch) (string, string, error) {
+	if !isRecoveryFactor(verifiedFactor) {
+		return "", "", fmt.Errorf("invalid recovery proof")
+	}
+	return generateChallengeTokenWithTTL(ChallengeClaims{
+		UserID: userID, Purpose: PurposeRecovery, RecoveryFactor: verifiedFactor, CredentialEpoch: string(credEpoch),
+	}, jwtSecret, auth.RecoveryTokenTTL)
+}
+
+// isRecoveryFactor reports whether factor is one a recovery verifier proves.
+func isRecoveryFactor(factor string) bool {
+	return factor == "email" || factor == "totp" || factor == "webauthn"
 }
 
 // generateChallengeTokenWithTTL creates a purpose-bound JWT with a configurable TTL.

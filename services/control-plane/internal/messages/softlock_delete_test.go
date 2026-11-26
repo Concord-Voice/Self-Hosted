@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 
@@ -443,4 +444,34 @@ func TestDeleteSoftLock_ClosedFlipOnIsOneUncountedDelete(t *testing.T) {
 
 	s.deleteN(t, w.moderator.ID, ids[1:])
 	assert.Equal(t, "1", s.counter(burstKey(w.moderator.ID, w.serverID)))
+}
+
+// TestDeleteSoftLock_BusyVerificationNeverCharges: a busy backup-code check
+// (backuphash.ErrBusy) judged no code, so the over-threshold delete answers
+// 503 with Retry-After: 1 and returns the attempt it charged, under the server
+// rule (mfaenforce.ConfirmTx) and the own rule (stepup.VerifyOwnRuleTx) alike.
+//
+// Mutant killed: dropping the refund after the delete transaction (the budget
+// climbs on each busy answer and the fourth one is a 429).
+func TestDeleteSoftLock_BusyVerificationNeverCharges(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		enforcing bool
+	}{
+		{"server rule", true},
+		{"own rule", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSoftLockHarness(t)
+			w := s.world(t, tc.enforcing)
+			s.enroll(t, w.author.ID)
+			id := s.seed(t, w.channelID, w.author, 1)[0]
+			require.NoError(t, s.mr.Set(burstKey(w.author.ID, w.serverID), "15"))
+
+			s.requireBusyNeverCharges(t, w.author.ID, func(code string) *httptest.ResponseRecorder {
+				return s.deleteMessage(t, w.author.ID, id, map[string]string{"mfa_code": code})
+			})
+			assert.False(t, s.messageExists(t, id))
+		})
+	}
 }

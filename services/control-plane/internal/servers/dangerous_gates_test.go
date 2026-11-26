@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
@@ -635,5 +636,135 @@ func waitForCrossOwnerUsersLock(t *testing.T, observer *sql.DB, done <-chan stru
 			t.Fatalf("no cross-owner users-row lock wait within %s", lockProofBound)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// gateBusyBody is the busy-verification refusal, byte for byte.
+const gateBusyBody = `{"error":"Verification is busy. Try again.","verification_busy":true}`
+
+// busyGateCase is one route whose step-up charges the shared budget: send a
+// code, read the budget, and report whether the write landed.
+type busyGateCase struct {
+	call    func(code string) *httptest.ResponseRecorder
+	budget  func() int
+	applied func() bool
+	// resetRouteLimit clears the route's own per-user request limiter, so more
+	// than BudgetLimit attempts reach the step-up budget.
+	resetRouteLimit func()
+	// wrong and ok judge a wrong code's and the valid code's answers.
+	wrong, ok func(w *httptest.ResponseRecorder, msg string)
+}
+
+// requireBusyCostsNothing drives c through the #164 sequence: while every
+// backup-code derivation slot is held, the valid code is answered 503 with
+// Retry-After: 1, nothing is written, and the budget is exactly what it was,
+// even across more than BudgetLimit attempts (never a 429); then a wrong code
+// burns exactly one attempt, and the valid code, never judged while busy,
+// still succeeds.
+func requireBusyCostsNothing(t *testing.T, c busyGateCase) {
+	t.Helper()
+	before := c.budget()
+	release := backuphash.HoldAllSlots(10 * time.Millisecond)
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			release()
+		}
+	})
+	for i := range stepup.BudgetLimit + 1 {
+		c.resetRouteLimit()
+		w := c.call(mfaBackupCode)
+		msg := fmt.Sprintf("busy attempt %d", i+1)
+		require.Equal(t, http.StatusServiceUnavailable, w.Code, "%s: %s", msg, w.Body.String())
+		require.JSONEq(t, gateBusyBody, w.Body.String(), msg)
+		require.Equal(t, "1", w.Header().Get("Retry-After"), msg)
+		require.Equal(t, before, c.budget(), "%s: a busy check must not cost an attempt", msg)
+		require.False(t, c.applied(), "%s: a busy check writes nothing", msg)
+	}
+	release()
+	released = true
+
+	c.wrong(c.call(mfaWrongCode), "wrong code after busy")
+	require.Equal(t, before+1, c.budget(), "a wrong code burns exactly one attempt")
+	require.False(t, c.applied(), "a wrong code writes nothing")
+
+	c.ok(c.call(mfaBackupCode), "valid code after busy")
+	require.True(t, c.applied(), "the valid code, never judged while busy, still succeeds")
+}
+
+// A busy backup-code check on UpdateServer and DeleteServer (#164).
+// Kills: the RefundIfBusy call removed from updateServerGated or DeleteServer
+// (the budget rises by one per busy attempt and the sixth answers 429).
+func TestDangerousGate_BusyVerificationCostsNoAttempt(t *testing.T) {
+	env := setupMFAEnforcementEnv(t)
+	for _, r := range gateRoutes() {
+		t.Run(r.name, func(t *testing.T) {
+			f := newGateFixture(t, env, true, true)
+			useArgon2BackupCode(t, env, f.owner.ID)
+			requireBusyCostsNothing(t, busyGateCase{
+				call: func(code string) *httptest.ResponseRecorder {
+					return r.call(env, f.owner.AccessToken, f.serverID, code)
+				},
+				budget:          func() int { return budgetCount(t, env, f.owner.ID) },
+				resetRouteLimit: func() { clearRouteRateLimits(t, env, f.owner.ID) },
+				applied:         func() bool { return r.applied(t, env, f.serverID) },
+				wrong: func(w *httptest.ResponseRecorder, msg string) {
+					require.Equal(t, gateInvalidCode, classifyGate(t, r, w, msg), w.Body.String())
+				},
+				ok: func(w *httptest.ResponseRecorder, msg string) {
+					require.Equal(t, gateOK, classifyGate(t, r, w, msg), w.Body.String())
+				},
+			})
+		})
+	}
+}
+
+// A busy backup-code check on the MFA-enforcement OFF toggle (#164).
+// Kills: the RefundIfBusy call removed from PutMFAEnforcement.
+func TestMFAEnforcement_BusyVerificationCostsNoAttempt(t *testing.T) {
+	env := setupMFAEnforcementEnv(t)
+	f := newGateFixture(t, env, true, true)
+	useArgon2BackupCode(t, env, f.owner.ID)
+	requireBusyCostsNothing(t, busyGateCase{
+		call:            func(code string) *httptest.ResponseRecorder { return putMFA(env, f.owner, f.serverID, bodyOff(code)) },
+		budget:          func() int { return budgetCount(t, env, f.owner.ID) },
+		resetRouteLimit: func() { clearRouteRateLimits(t, env, f.owner.ID) },
+		applied:         func() bool { return !readMFAFlag(t, env, f.serverID) },
+		wrong: func(w *httptest.ResponseRecorder, msg string) {
+			require.Equal(t, http.StatusForbidden, w.Code, msg)
+			require.JSONEq(t, mfaErrorBody(stepup.ErrMsgInvalidMFACode), w.Body.String(), msg)
+		},
+		ok: func(w *httptest.ResponseRecorder, msg string) {
+			require.Equal(t, http.StatusOK, w.Code, "%s: %s", msg, w.Body.String())
+			require.JSONEq(t, mfaValueBody(false), w.Body.String(), msg)
+		},
+	})
+}
+
+// useArgon2BackupCode replaces userID's single backup code with an Argon2id
+// (v2) hash of mfaBackupCode. enrollMFATOTP stores a legacy SHA-256 digest,
+// which never takes a derivation slot and so can never be busy.
+func useArgon2BackupCode(t *testing.T, env *mfaEnv, userID string) {
+	t.Helper()
+	hash, err := backuphash.NewV2(context.Background(), mfaBackupCode)
+	require.NoError(t, err)
+	res, err := env.ts.DB.Exec(`UPDATE user_mfa_totp
+		SET backup_codes_hash = ARRAY[$2]::text[], backup_codes_used = ARRAY[FALSE] WHERE user_id = $1`, userID, hash)
+	require.NoError(t, err)
+	n, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+}
+
+// clearRouteRateLimits deletes userID's per-route request limiter keys
+// (middleware.RateLimitByUser), and nothing else. The step-up budget is a
+// different key and is left alone.
+func clearRouteRateLimits(t *testing.T, env *mfaEnv, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	keys, err := env.ts.Redis.Keys(ctx, "ratelimit:user:"+userID+":*").Result()
+	require.NoError(t, err)
+	if len(keys) > 0 {
+		require.NoError(t, env.ts.Redis.Del(ctx, keys...).Err())
 	}
 }

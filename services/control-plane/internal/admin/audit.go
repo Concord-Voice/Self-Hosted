@@ -87,9 +87,21 @@ func (a *AuditLog) Write(ctx context.Context, ev AuditEvent) error {
 	return a.WriteWith(ctx, ev, nil)
 }
 
-// errAuditWrite marks a WriteWith failure in the audit step (begin, role,
-// insert or commit), as opposed to an error returned by its before function.
+// errAuditWrite marks a WriteWith failure in the audit step (encode, begin,
+// lock, role or insert), as opposed to an error returned by its before
+// function. Nothing was committed.
 var errAuditWrite = errors.New("admin audit write failed")
+
+// isAuditStoreError reports an audit failure in the store itself: one in the
+// audit step (errAuditWrite) or a commit of unknown outcome (errAuditCommit).
+func isAuditStoreError(err error) bool {
+	return errors.Is(err, errAuditWrite) || errors.Is(err, errAuditCommit)
+}
+
+// errAuditCommit marks a failed Commit. Its outcome is unknown: the server may
+// have committed the transaction and lost only the acknowledgement, so the
+// rows before wrote and the audit row may exist.
+var errAuditCommit = errors.New("admin audit commit outcome unknown")
 
 // WriteWith runs before (when not nil) and then inserts ev in ONE transaction,
 // so the rows before writes and the audit row commit together or not at all.
@@ -97,10 +109,12 @@ var errAuditWrite = errors.New("admin audit write failed")
 // records the created admin's id). The detail is encoded before the
 // transaction opens, so a detail that cannot be encoded writes nothing, and
 // again after before returns. An error from before is returned as is and
-// writes no audit row; an error in the audit step wraps errAuditWrite.
+// writes no audit row; an error in the audit step wraps errAuditWrite, and a
+// failed Commit wraps errAuditCommit, after which the caller must not assume
+// the rows are absent.
 // before runs under the connecting role; the audit INSERT then runs under
 // the restricted role.
-func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sql.Tx, *AuditEvent) error) error {
+func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sql.Tx, *AuditEvent) error) (retErr error) {
 	detailJSON, err := a.marshalDetail(ctx, ev.Detail)
 	if err != nil {
 		return err
@@ -111,8 +125,13 @@ func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sq
 		a.emitAuditWriteFailure(ctx)
 		return fmt.Errorf("%w: begin audit tx: %w", errAuditWrite, err)
 	}
-	// Roll back on any error path; a successful Commit makes Rollback a no-op.
-	defer func() { _ = tx.Rollback() }()
+	// Roll back on any error path. After Commit, Rollback returns
+	// sql.ErrTxDone, which is not an error here.
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			retErr = errors.Join(retErr, fmt.Errorf("rollback audit tx: %w", rollbackErr))
+		}
+	}()
 
 	if before != nil {
 		if err := before(tx, &ev); err != nil {
@@ -160,7 +179,7 @@ func (a *AuditLog) WriteWith(ctx context.Context, ev AuditEvent, before func(*sq
 
 	if err := tx.Commit(); err != nil {
 		a.emitAuditWriteFailure(ctx)
-		return fmt.Errorf("%w: commit audit row: %w", errAuditWrite, err)
+		return fmt.Errorf("%w: commit audit row: %w", errAuditCommit, err)
 	}
 	a.emitAuditCommitted(ctx, ev.EventType, ev.Result)
 	return nil
@@ -260,8 +279,8 @@ var signInNoticeLockKey = advisoryKey("admin_signin_notice\x00v1")
 const signInNoticeLockTimeout = "5s"
 
 // errNoticeRead marks a RecordSignIn failure before its row was inserted:
-// the lock wait or the count. An insert or commit failure wraps errAuditWrite
-// instead.
+// the lock wait or the count. An insert failure wraps errAuditWrite instead,
+// and a commit failure errAuditCommit.
 var errNoticeRead = errors.New("admin sign-in notice read failed")
 
 // Errors of AcknowledgeSignInNotice.
@@ -314,7 +333,8 @@ type SignInRecord struct {
 	// login_success row, so the caller may show it.
 	Shown bool
 	// NoticeErr is why the count could not be shown: it wraps errNoticeRead
-	// (lock wait or count) or errAuditWrite (insert or commit). Nil when Shown.
+	// (lock wait or count), errAuditWrite (insert) or errAuditCommit
+	// (commit). Nil when Shown.
 	NoticeErr error
 }
 
@@ -482,10 +502,19 @@ func signInNoticeFor(ctx context.Context, db auditRowQuerier, adminID string) (S
 // When the count cannot be read, or that transaction fails for any other
 // reason, the row is written again without the lock and without a count. It
 // moves no window, so a failed read never drops a creation.
-func (a *AuditLog) RecordSignIn(ctx context.Context, adminID, actor, sessionID string) (SignInRecord, error) {
+//
+// When deliver is false the response carries no notice (a portal tab that did
+// not send signin_notice), so the row is written in that same uncounted form:
+// it records no cursor this session could acknowledge, and a notice it never
+// received cannot be acknowledged away.
+func (a *AuditLog) RecordSignIn(ctx context.Context, adminID, actor, sessionID string, deliver bool) (SignInRecord, error) {
 	id := adminID
 	binding := noticeSessionBinding(sessionID)
 	ev := AuditEvent{AdminID: &id, Actor: actor, EventType: EventLoginSuccess, Result: AuditSuccess}
+	if !deliver {
+		ev.Detail = map[string]any{detailNoticeSession: binding}
+		return SignInRecord{}, a.Write(ctx, ev)
+	}
 	var notice SignInNotice
 	noticeErr := a.WriteWith(ctx, ev, func(tx *sql.Tx, ev *AuditEvent) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '"+signInNoticeLockTimeout+"'"); err != nil {

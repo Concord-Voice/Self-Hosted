@@ -43,11 +43,33 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 )
 
 // ErrMsgVerificationFailed is the opaque 500 body. Byte-identical to the DM
 // purge original so no caller's copy diverges.
 const ErrMsgVerificationFailed = "Verification failed"
+
+// ErrMsgVerificationBusy is the 503 body when backup-code hashing had no free
+// slot, so the code was never judged. The body also carries
+// "verification_busy": true, and the response carries Retry-After: 1.
+const ErrMsgVerificationBusy = "Verification is busy. Try again."
+
+// BusyError answers a verification that backuphash refused with ErrBusy: no
+// code was judged, so the caller must refund the attempt it charged
+// (RefundIfBusy) and answer 503. cause keeps ErrBusy reachable by errors.Is.
+func BusyError(cause error) *Error {
+	return &Error{
+		Status:            http.StatusServiceUnavailable,
+		Body:              gin.H{"error": ErrMsgVerificationBusy, "verification_busy": true},
+		Cause:             cause,
+		retryAfterSeconds: 1,
+	}
+}
+
+// IsBusy reports whether err, or anything it wraps, is backuphash.ErrBusy.
+func IsBusy(err error) bool { return errors.Is(err, backuphash.ErrBusy) }
 
 // ErrMsgInvalidPassword and ErrMsgInvalidMFACode are the 403 refusal bodies.
 // The desktop's classifyStepUpRefusal matches them byte-for-byte to place the
@@ -172,7 +194,12 @@ func (e *Error) Error() string {
 }
 
 // Unwrap exposes Cause to errors.Is/errors.As.
-func (e *Error) Unwrap() error { return e.Cause }
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
 
 // Write emits the error onto a gin context.
 func (e *Error) Write(c *gin.Context) {
@@ -336,6 +363,9 @@ func verifyMFA(
 		}}
 	}
 	valid, err := verify()
+	if IsBusy(err) {
+		return BusyError(fmt.Errorf("mfa verify: %w", err))
+	}
 	if err != nil {
 		// Safe to surface: this is an MFA BACKEND failure (store unreachable,
 		// TOTP subsystem down), not anything derived from the submitted code.

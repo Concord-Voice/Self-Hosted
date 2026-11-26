@@ -1099,6 +1099,8 @@ func (h *Handler) refuseSelfPurge(c *gin.Context, o selfPurgeOutcome) bool {
 	if a == nil || a.err == nil {
 		return false
 	}
+	// The admission transaction has rolled back by the time Run returns.
+	h.refundBusyStepUp(c.Request.Context(), a.err, a)
 	if len(a.d1) > 0 {
 		h.respondD1AdmissionError(c, a.err, a.forbidden, a.notFound)
 		return true
@@ -1280,7 +1282,7 @@ func (h *Handler) armD1Purge(ctx context.Context, c *gin.Context, p selfPurge, o
 		a = &deleteAdmission{gate: p.gate(), notFound: p.notFound}
 	}
 	if !a.softLockCharged() &&
-		!h.admitStepUpCharge(c, stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), p.userID, p.input.MFACode)) {
+		!h.admitD1Charge(ctx, c, a, p) {
 		return selfPurgeOutcome{}, false
 	}
 	a.d1, a.authorize, a.forbidden = d1, p.authorize, p.forbidden
@@ -1292,4 +1294,12 @@ func (h *Handler) armD1Purge(ctx context.Context, c *gin.Context, p selfPurge, o
 	}
 	o.admission = a
 	return o, true
+}
+
+// admitD1Charge charges D1's mfa_code on the shared budget and records the
+// charge on the admission, so a busy confirmation can refund it.
+func (h *Handler) admitD1Charge(ctx context.Context, c *gin.Context, a *deleteAdmission, p selfPurge) bool {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), p.userID, p.input.MFACode)
+	a.gate.charged = charged
+	return h.admitStepUpCharge(c, e)
 }

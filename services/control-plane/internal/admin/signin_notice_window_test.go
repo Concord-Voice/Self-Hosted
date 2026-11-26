@@ -29,7 +29,7 @@ type signInResult struct {
 }
 
 func recordSignIn(ctx context.Context, audit *admin.AuditLog, adminID, sessionID string) signInResult {
-	rec, err := audit.RecordSignIn(ctx, adminID, "viewer", sessionID)
+	rec, err := audit.RecordSignIn(ctx, adminID, "viewer", sessionID, true)
 	return signInResult{n: rec.Notice.AdminsAdded, cursor: rec.Notice.Cursor, read: rec.Shown, err: err}
 }
 

@@ -37,7 +37,7 @@ func faultCreateEngine(t *testing.T, rdb *redis.Client, actingID string, fault d
 	t.Helper()
 	h := faultHandler(t, rdb, fault)
 	r := gin.New()
-	r.Use(func(c *gin.Context) { c.Set("admin_id", actingID); c.Next() })
+	r.Use(asAdminSession(actingID))
 	r.POST("/admin/api/v1/admins", h.CreateAdmin)
 	r.POST("/admin/api/v1/admins/stepup", h.CreateAdminStepUpBegin)
 	return r

@@ -68,6 +68,7 @@ const (
 	failureClassSoftLockConfirm     = "delete_softlock_confirm_failed"
 	failureClassSoftLockReset       = "delete_softlock_reset_failed"
 	failureClassSoftLockClear       = "delete_softlock_budget_clear_failed"
+	failureClassSoftLockRefund      = "delete_softlock_budget_refund_failed"
 	failureClassDeleteLockConflict  = "delete_lock_conflict"
 )
 
@@ -92,6 +93,8 @@ type softLockGate struct {
 	purpose stepup.Purpose
 	input   stepup.Input
 	epoch   string
+	// charged is the budget charge this request made, for a busy refund.
+	charged stepup.Charged
 	// grace is the delete-scope grace read before the transaction, over the
 	// threshold only (armSoftLockConfirmation). The zero value covers nothing,
 	// so every other path is prompted as before.
@@ -304,6 +307,28 @@ func (a *deleteAdmission) softLockCharged() bool {
 	return a.mode == confirmOverThreshold && a.gate.hasFactor()
 }
 
+// budgetCharged reports whether this request charged the shared budget at
+// all: the soft-lock did (softLockCharged), or D1 did, which it does for an
+// mfa_code when the soft-lock had not (armD1Purge). Both charge one key once.
+func (a *deleteAdmission) budgetCharged() bool {
+	return a.softLockCharged() || (len(a.d1) > 0 && a.gate.input.MFACode != "")
+}
+
+// refundBusyStepUp returns the one attempt a request charged when its
+// confirmation failed on a busy backup-code check (stepup.IsBusy), which
+// judged no code. Any other failure keeps its charge. Call it only after the
+// confirming transaction has ended: it is a Redis call. Best-effort: a
+// failure leaves the counter high, which fails toward more limiting.
+func (h *Handler) refundBusyStepUp(ctx context.Context, err error, a *deleteAdmission) {
+	if !a.budgetCharged() {
+		return
+	}
+	if refundErr := stepup.RefundIfBusy(ctx, err, a.gate.charged); refundErr != nil {
+		h.log.Warn("Could not refund a busy delete soft-lock step-up attempt",
+			"failure_class", failureClassSoftLockRefund, "error", refundErr)
+	}
+}
+
 // lockSoftLockGateTx takes the soft-lock's locks — the actor's users row,
 // fenced against the token's epoch, then the servers row — and re-reads the
 // enforcement flag under them.
@@ -373,7 +398,7 @@ func (h *Handler) chargeMessageDelete(ctx context.Context, c *gin.Context, g *so
 // reads as no grace, so the actor is prompted. On a budget refusal it has
 // written the 429 or 503 and returns false.
 func (h *Handler) armSoftLockConfirmation(ctx context.Context, c *gin.Context, g *softLockGate) bool {
-	if !h.consumeSoftLockBudget(ctx, c, *g) {
+	if !h.consumeSoftLockBudget(ctx, c, g) {
 		return false
 	}
 	// chargeSoftLock has already parsed the same inputs, so this cannot fail;
@@ -414,11 +439,13 @@ func (h *Handler) writeSoftLockUnavailable(c *gin.Context, cause error) {
 // confirmation transaction opens, and only when the request carries a factor:
 // a factor-less request learns nothing but the refusal every member gets
 // (X4, H4). On a refusal it has written the 429 or 503 and returns false.
-func (h *Handler) consumeSoftLockBudget(ctx context.Context, c *gin.Context, g softLockGate) bool {
+func (h *Handler) consumeSoftLockBudget(ctx context.Context, c *gin.Context, g *softLockGate) bool {
 	if !g.hasFactor() {
 		return true
 	}
-	return h.admitStepUpCharge(c, stepup.NewBudget(h.redis, stepup.MFASettingsBudgetPrefix).Consume(ctx, g.userID))
+	charged, e := stepup.NewBudget(h.redis, stepup.MFASettingsBudgetPrefix).ConsumeAttempt(ctx, g.userID)
+	g.charged = charged
+	return h.admitStepUpCharge(c, e)
 }
 
 // admitStepUpCharge answers a budget charge's outcome e: nil admits; a 429 or

@@ -45,9 +45,9 @@ func TestLoginUnknownEmail_SpoofedForwardingKeysPeer(t *testing.T) {
 	testhelpers.RequireAuthFailureKeyedToPeer(t, ts.Redis, testhelpers.TestPeerIP)
 }
 
-// A successful login clears the counter of the real peer, not of the address
-// the request claims (ClearAuthFailures shares the key with RecordAuthFailure).
-func TestLoginSuccess_SpoofedForwardingClearsPeerCounter(t *testing.T) {
+// A successful login leaves the real peer's shared counter in place (it decays
+// with its window), and writes nothing under the address the request claims.
+func TestLoginSuccess_SpoofedForwardingKeepsPeerCounter(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "peeripclear")
 	ctx := context.Background()
@@ -65,7 +65,7 @@ func TestLoginSuccess_SpoofedForwardingClearsPeerCounter(t *testing.T) {
 
 	n, err := ts.Redis.Exists(ctx, "auth_failures:ip:"+testhelpers.TestPeerIP).Result()
 	require.NoError(t, err)
-	assert.Zero(t, n, "a successful login must clear the real peer's failure counter")
+	assert.Equal(t, int64(1), n, "a successful login must not clear the shared source failure counter")
 	testhelpers.RequireNoRedisKeyMentions(t, ts.Redis, testhelpers.SpoofedClientIP)
 }
 

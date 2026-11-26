@@ -1,10 +1,12 @@
 package mfa
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +17,7 @@ import (
 // never on the restricted list. Found as C50 of the MFA factor picker design
 // ([internal]specs/2026-09-26-mfa-factor-picker-design.md, PR #3540).
 func TestVerifyRefusesTOTPFamilyCodesWhenTOTPIsRecoveryOnly(t *testing.T) {
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	used := "{" + strings.TrimSuffix(strings.Repeat("f,", len(hashes)), ",") + "}"
 
@@ -49,7 +51,7 @@ func TestVerifyRefusesTOTPFamilyCodesWhenTOTPIsRecoveryOnly(t *testing.T) {
 			f := newVerifyFixture(t)
 			f.state.mfaMethods = tc.mfaMethods
 			f.state.recoveryOnly = tc.recoveryOnly
-			f.state.backupHashes = "{" + strings.Join(hashes, ",") + "}"
+			f.state.backupHashes = textArray(t, hashes)
 			f.state.backupUsed = used
 			code := f.right
 			if tc.backup {
@@ -83,11 +85,11 @@ func TestVerifyRefusesTOTPFamilyCodesWhenTOTPIsRecoveryOnly(t *testing.T) {
 // A refused restricted code is a failed attempt like any wrong code: it counts
 // toward the lockout, so restricted backup codes cannot be tried without limit.
 func TestVerifyRestrictedBackupCodesArmTheLockout(t *testing.T) {
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	f := newVerifyFixture(t)
 	f.state.recoveryOnly = "{totp}"
-	f.state.backupHashes = "{" + strings.Join(hashes, ",") + "}"
+	f.state.backupHashes = textArray(t, hashes)
 	f.state.backupUsed = "{" + strings.TrimSuffix(strings.Repeat("f,", len(hashes)), ",") + "}"
 
 	for i := 0; i < failedAttemptLimit; i++ {
@@ -110,4 +112,16 @@ func backupCodesSpent(state *mfaEventDB) int {
 		}
 	}
 	return n
+}
+
+// textArray renders hashes as the PostgreSQL text-array literal the driver
+// would send. A v2 hash holds commas ("m=19456,t=2,p=1"), so each element must
+// be quoted; joining them bare would split one hash into several.
+func textArray(t *testing.T, hashes []string) string {
+	t.Helper()
+	literal, err := pq.StringArray(hashes).Value()
+	require.NoError(t, err)
+	text, ok := literal.(string)
+	require.True(t, ok, "pq.StringArray.Value returned %T", literal)
+	return text
 }

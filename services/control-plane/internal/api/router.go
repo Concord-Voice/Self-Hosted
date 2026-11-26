@@ -1319,6 +1319,7 @@ func NewRouter(
 	updatesHandler := updates.NewHandler(cfg, log)
 	privacyHandler, accountService := buildPrivacyHandler(
 		db, redis, log, usersHandler, hub,
+		erasureStepUpWiring{mfaVerifier: mfaHandler, emailSender: emailSvc},
 		erasureClearWiring{capture: graphPresenceCapture, nats: natsClient, secret: cfg.MFAEncryptionKey})
 
 	// The erasure drain (#2448). Wired here rather than beside the DM rail for
@@ -1453,7 +1454,7 @@ func NewRouter(
 			// e2e suite's ~18 single-IP registrations don't trip the cap. See
 			// #1274 and authFlowTestRateLimit().
 			authRoutes.POST("/register",
-				middleware.RateLimitByIP(redis, authFlowTestRateLimit(5), 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, authFlowTestRateLimit(5), 15*time.Minute),
 				authHandler.Register,
 			)
 
@@ -1462,25 +1463,25 @@ func NewRouter(
 			// CONCORD_ENV=test alongside /register — the e2e suite also drives
 			// ~18 confirmations. See #1274.
 			authRoutes.POST("/register/confirm",
-				middleware.RateLimitByIP(redis, authFlowTestRateLimit(10), 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, authFlowTestRateLimit(10), 15*time.Minute),
 				authHandler.ConfirmRegistration,
 			)
 
 			// Resend verification code: 20 attempts per 15 minutes. See #621.
 			authRoutes.POST("/register/resend",
-				middleware.RateLimitByIP(redis, 20, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 20, 15*time.Minute),
 				authHandler.ResendRegistrationCode,
 			)
 
 			// Change email mid-registration: 10 attempts per 15 minutes. See #621.
 			authRoutes.POST("/register/change-email",
-				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 10, 15*time.Minute),
 				authHandler.ChangeRegistrationEmail,
 			)
 
 			// Abandon pending registration: 20 attempts per 15 minutes. See #621.
 			authRoutes.DELETE("/register/:pending_id",
-				middleware.RateLimitByIP(redis, 20, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 20, 15*time.Minute),
 				authHandler.AbandonRegistration,
 			)
 
@@ -1490,75 +1491,75 @@ func NewRouter(
 			// which registration does not), exceeding 10/15min from one CI IP.
 			// See #1274.
 			authRoutes.POST("/login",
-				middleware.RateLimitByIP(redis, authFlowTestRateLimit(10), 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, authFlowTestRateLimit(10), 15*time.Minute),
 				authHandler.Login,
 			)
 
 			// Refresh: 30 attempts per minute (normal usage, but prevent abuse)
 			authRoutes.POST("/refresh",
-				middleware.RateLimitByIP(redis, 30, 1*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 30, 1*time.Minute),
 				authHandler.Refresh,
 			)
 
 			// Logout: 10 attempts per minute
 			authRoutes.POST("/logout",
-				middleware.RateLimitByIP(redis, 10, 1*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 10, 1*time.Minute),
 				authHandler.Logout,
 			)
 
 			// MFA verify (unauthenticated — uses challenge token from login)
 			authRoutes.POST("/mfa/verify",
-				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 10, 15*time.Minute),
 				mfaHandler.Verify,
 			)
 
 			// MFA email code delivery (unauthenticated — uses challenge token)
 			authRoutes.POST("/mfa/email/send",
-				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 3, 15*time.Minute),
 				mfaHandler.SendEmailMFACode,
 			)
 
 			// Account recovery (unauthenticated — uses email verification + recovery tokens)
 			authRoutes.POST("/recovery/begin",
-				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 3, 15*time.Minute),
 				authHandler.RecoveryBegin,
 			)
 			authRoutes.POST("/recovery/verify-code",
-				middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 5, 15*time.Minute),
 				authHandler.RecoveryVerifyCode,
 			)
 			authRoutes.POST("/recovery/reset-password",
-				middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 5, 15*time.Minute),
 				authHandler.RecoveryResetPassword,
 			)
 			authRoutes.POST("/recovery/reset-account",
-				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 3, 15*time.Minute),
 				authHandler.RecoveryResetAccount,
 			)
 
 			// Trusted device recovery (unauthenticated — uses recovery token)
 			authRoutes.POST("/recovery/device-request",
-				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 3, 15*time.Minute),
 				authHandler.CreateDeviceRecoveryRequest,
 			)
 			authRoutes.GET("/recovery/device-request/:id",
-				middleware.RateLimitByIP(redis, 60, time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 60, time.Minute),
 				authHandler.PollDeviceRecoveryRequest,
 			)
 			authRoutes.POST("/recovery/device-request/:id/complete",
-				middleware.RateLimitByIP(redis, 5, time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 5, time.Minute),
 				authHandler.CompleteDeviceRecoveryRequest,
 			)
 
 			// Social recovery (unauthenticated — uses recovery token)
 			authRoutes.POST("/recovery/social-request",
 				middleware.RecoveryCirclePaused,
-				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 3, 15*time.Minute),
 				authHandler.CreateSocialRecoveryRequest,
 			)
 			authRoutes.GET("/recovery/social-request/:id",
 				middleware.RecoveryCirclePaused,
-				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				middleware.RateLimitByIPFailClosed(redis, 10, 15*time.Minute),
 				authHandler.PollSocialRecoveryRequest,
 			)
 
@@ -1587,23 +1588,23 @@ func NewRouter(
 			ssoRoutes.Use(requireSSODeployment(cfg))
 			{
 				ssoRoutes.GET("/:provider",
-					middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+					middleware.RateLimitByIPFailClosed(redis, 10, 15*time.Minute),
 					oauthHandler.Initiate,
 				)
 				ssoRoutes.POST("/:provider/complete-registration",
-					middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+					middleware.RateLimitByIPFailClosed(redis, 5, 15*time.Minute),
 					oauthHandler.CompleteRegistration,
 				)
 				ssoRoutes.POST("/:provider/complete-link",
-					middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+					middleware.RateLimitByIPFailClosed(redis, 5, 15*time.Minute),
 					oauthHandler.CompleteLink,
 				)
 				ssoRoutes.POST("/:provider/sign-client-secret",
-					middleware.RateLimitByIP(redis, 5, time.Minute),
+					middleware.RateLimitByIPFailClosed(redis, 5, time.Minute),
 					oauthHandler.SignAppleClientSecret,
 				)
 				ssoRoutes.POST("/:provider/session",
-					middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+					middleware.RateLimitByIPFailClosed(redis, 10, 15*time.Minute),
 					oauthHandler.ProviderSession,
 				)
 			}
@@ -1793,6 +1794,10 @@ func NewRouter(
 			// even before email verification completes.
 			privacyRoutes := authRequired.Group("/privacy")
 			{
+				privacyRoutes.GET("/erase-account/owned-servers",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					privacyHandler.ListOwnedServers,
+				)
 				privacyRoutes.POST("/erase-account",
 					middleware.RateLimitByUser(redis, 3, 24*time.Hour),
 					privacyHandler.EraseAccount,
@@ -3491,9 +3496,9 @@ const (
 // cheaper password oracle than /login:
 //
 //   - AuthBanCheck, /login's per-IP auth-failure ban, which the handler feeds;
-//   - the per-IP limit /login has, but FAIL-CLOSED: a Redis outage that lets
-//     /login fall back on the email lockout must not leave this route open to
-//     unbounded Argon2 guesses from a live session;
+//   - the per-IP limit /login has, FAIL-CLOSED like /login: a Redis outage
+//     must not leave this route open to unbounded Argon2 guesses from a live
+//     session;
 //   - a fail-closed per-user limit, so a session cannot spread its guesses
 //     across addresses. /login has no session to key one on.
 //

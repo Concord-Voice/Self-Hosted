@@ -25,8 +25,9 @@ const (
 	// audit row, so the budget is tighter than the metrics one.
 	adminServerRateLimit = 30
 	// Creating an admin is rare and mints a step-up-capable identity, so its
-	// budget is the tightest (VULN-139). The step-up begin route has its own
-	// bucket of the same size.
+	// budget is the tightest (VULN-139). It is counted per acting admin and
+	// client IP, so another admin behind the same address cannot spend it.
+	// The step-up begin route has its own bucket of the same size.
 	adminCreateRateLimit  = 5
 	adminCreateRateWindow = time.Hour
 )
@@ -60,7 +61,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 	api := grp.Group("/api/v1")
 	{
 		authRoutes := api.Group("/auth")
-		authRoutes.Use(middleware.RateLimitByIP(rdb, adminAuthRateLimit, adminAuthRateWindow))
+		authRoutes.Use(middleware.RateLimitByIPFailClosed(rdb, adminAuthRateLimit, adminAuthRateWindow))
 		{
 			authRoutes.POST("/password", h.PasswordLogin)
 			authRoutes.POST("/webauthn", h.WebAuthnLogin)
@@ -68,7 +69,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 		}
 
 		enrollRoutes := api.Group("/enroll")
-		enrollRoutes.Use(middleware.RateLimitByIP(rdb, adminEnrollRateLimit, adminAuthRateWindow))
+		enrollRoutes.Use(middleware.RateLimitByIPFailClosed(rdb, adminEnrollRateLimit, adminAuthRateWindow))
 		{
 			enrollRoutes.POST("/begin", h.EnrollBegin)
 			enrollRoutes.POST("/finish", h.EnrollFinish)
@@ -80,13 +81,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 		{
 			// Fail closed: a limiter that cannot count refuses the request.
 			adminRoutes := gated.Group("/admins")
-			adminRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
-				rdb,
-				adminCreateRateLimit,
-				adminCreateRateWindow,
-				adminRateLimited,
-				adminRateLimitUnavailable,
-			))
+			adminRoutes.Use(rateLimitAdminCreate(rdb, adminCreateRateLimit, adminCreateRateWindow))
 			{
 				adminRoutes.POST("", h.CreateAdmin)
 				adminRoutes.POST("/stepup", h.CreateAdminStepUpBegin)

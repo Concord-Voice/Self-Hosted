@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -445,4 +446,37 @@ func TestSignInNotice_CountsLegacyConsoleCreationRow(t *testing.T) {
 	n, err := admin.NewAuditLog(db).AdminsAddedSinceLastSignIn(t.Context(), viewerID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
+}
+
+// A sign-in that did not opt in delivered no notice, so its session cannot
+// acknowledge one at any cursor, and the notice is still shown at the next
+// opted-in sign-in. Before the fix the unflagged session acknowledged the
+// cursor RecordSignIn recorded for it and this fails.
+func TestSignInNotice_UnflaggedSessionCannotAck(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	_, username, va := enrolledAdmin(t, db, rdb)
+	actingID, _, _ := enrolledAdmin(t, db, rdb)
+	engine := noticeEngine(t, db, rdb)
+
+	n, _, _ := signedIn(t, engine, username, va)
+	require.Equal(t, 0, n, "first sign-in")
+	addAdmin(t, db, actingID, "unflagged-ack")
+
+	code, body, cookie := signInAdminWith(t, engine, username, va, false)
+	require.Equal(t, http.StatusOK, code, string(body))
+	require.JSONEq(t, `{"status":"authenticated"}`, string(body))
+
+	var shown int64
+	require.NoError(t, db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM admin_audit_log`).Scan(&shown))
+	for c := int64(1); c <= shown; c++ {
+		rec := postAck(engine, cookie, ackBody(strconv.FormatInt(c, 10)), nil)
+		require.NotEqual(t, http.StatusNoContent, rec.Code, "cursor %d acknowledged by a session never shown it", c)
+	}
+
+	n, _, _ = signedIn(t, engine, username, va)
+	assert.Equal(t, 1, n, "the undelivered notice is still shown")
 }

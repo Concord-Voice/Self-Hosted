@@ -604,14 +604,13 @@ def settled_jobs(api, path):
     return jobs
 
 
-def settled_proof_inventory(api, run_id, name, earliest):
+def settled_proof_inventory(api, run_id, name):
     # The upload can succeed before the separately dispatched workflow sees
-    # the artifact in GitHub's inventory. Retry only an absent exact match.
+    # the artifact in GitHub's inventory. Retry only an absent exact name; a
+    # present one, stale or not, is judged by api.artifact, which rejects it.
     inventory = api.artifacts(run_id)
     for _ in range(ARTIFACT_SETTLE_ATTEMPTS - 1):
-        matches = [a for a in inventory if isinstance(a, dict) and a.get("name") == name
-                   and timestamp(a.get("created_at")) >= earliest]
-        if matches:
+        if any(isinstance(a, dict) and a.get("name") == name for a in inventory):
             return inventory
         time.sleep(ARTIFACT_SETTLE_DELAY)
         inventory = api.artifacts(run_id)
@@ -627,7 +626,7 @@ def prepare(candidate, directory, api):
         raise Reject("caller attempt unavailable")
     started = timestamp(run["run_started_at"])
     name = f"protected-sonar-caller-proof-{run_id}-{attempt}"
-    inventory = settled_proof_inventory(api, run_id, name, started)
+    inventory = settled_proof_inventory(api, run_id, name)
     proof_zip = api.artifact(inventory, name, run_id, started, MAX_PROOF_ZIP)
     proof_bytes = one_zip(proof_zip, "proof.json", MAX_PROOF)
     with tempfile.TemporaryDirectory(prefix="sonar-proof-", dir=directory.parent) as temporary:

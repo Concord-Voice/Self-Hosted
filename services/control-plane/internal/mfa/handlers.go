@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,7 +38,8 @@ const (
 	// Redis key patterns. A login challenge's remember-me key is
 	// auth.MFAChallengeRememberMeKey, since auth discards it too.
 	redisKeyMFAChallengeUsed     = "mfa_challenge_used:%s"
-	redisKeyMFAVerifyAttempts    = "mfa_verify_attempts:%s"
+	verifyAttemptsPrefix         = "mfa_verify_attempts:"
+	redisKeyMFAVerifyAttempts    = verifyAttemptsPrefix + "%s"
 	redisKeyMFAVerifyLockout     = "mfa_verify_lockout:%s"
 	redisKeyEmailSmsEnabled      = "mfa_emailsms_enabled:%s:%s"
 	redisKeyEmailSmsEnabledEmail = "mfa_emailsms_enabled:%s:email"
@@ -463,7 +465,7 @@ func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID,
 		return false, fmt.Errorf("read backup codes: %w", err)
 	}
 
-	idx, matched, err := VerifyBackupCode(code, hashes, used)
+	idx, matched, err := VerifyBackupCode(ctx, code, hashes, used)
 	if err != nil {
 		return false, fmt.Errorf("verify stored backup code: %w", err)
 	}
@@ -621,30 +623,6 @@ func (h *Handler) verifyUserPassword(ctx context.Context, userID, password strin
 		return false, fmt.Errorf("fetch password hash: %w", err)
 	}
 	return auth.VerifyPasswordWithLockout(ctx, h.redis, email, password, passwordHash)
-}
-
-// verifyFactorRemovalPassword is the password leg of a factor removal, on the
-// subject the caller's locked transaction read. attempt is the guess's
-// shared /auth/login lockout reservation, taken before BeginTx; this makes no
-// Redis call. On refusal it writes the response and returns false.
-func (h *Handler) verifyFactorRemovalPassword(
-	c *gin.Context, subj stepup.Subject, attempt *stepup.PasswordAttempt, password, failureLog string,
-) bool {
-	match, err := attempt.Check(password, subj.PasswordHash)
-	switch {
-	case err != nil:
-		// err is stepup.ErrPasswordNotReserved or ErrPasswordVerification,
-		// never the argon2 decode error that can embed the hash
-		// (observability.md principle 1).
-		h.log.Error(failureLog, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": stepup.ErrMsgVerificationFailed})
-	case !match:
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword})
-		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidPassword})
-	default:
-		return true
-	}
-	return false
 }
 
 func containsStr(ss []string, target string) bool {
@@ -1257,10 +1235,10 @@ func (h *Handler) TOTPVerifySetup(c *gin.Context) {
 	}
 
 	// Code valid — generate backup codes
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(ctx)
 	if err != nil {
 		h.log.Error(errMsgFailedBackupCodes, "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBackupCodes})
+		writeBackupHashFailure(c, err, errMsgFailedBackupCodes)
 		return
 	}
 
@@ -1427,14 +1405,16 @@ func (h *Handler) grantTOTPEnrollmentUpgrade(c *gin.Context, userID string, firs
 	}
 }
 
-// totpDisableRequest is TOTPDisable's body. Its bodies predate the step-up
-// seam and are unchanged; only the transaction around them is new.
+// totpDisableRequest is TOTPDisable's body. Code intentionally has no binding
+// requirement: a missing fresh proof reaches the gate and receives its
+// actionable 403 response rather than a validation 400.
 type totpDisableRequest struct {
 	Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
-	Code     string `json:"code" binding:"required"`
+	Code     string `json:"code"`
 }
 
-// TOTPDisable disables TOTP MFA. Requires password + a valid MFA code.
+// TOTPDisable disables TOTP MFA. Removing an enrolled factor requires password
+// and a valid MFA code; an absent factor is an idempotent no-op.
 //
 // The enrollment probe and any attempt-budget admission run before the
 // transaction. The transaction then takes the users row FOR NO KEY UPDATE:
@@ -1451,16 +1431,21 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	}
 	// Probe enrollment before beginning the locked transaction. A Redis charge
 	// while LockSubjectTx holds the users row would let a slow Redis consume a
-	// scarce SQL connection and block factor writers. The locked recheck below
-	// is still authoritative.
+	// scarce SQL connection and block factor writers. A missing factor is an
+	// idempotent no-op that judges no code, so it is not charged; the locked
+	// recheck below is still authoritative.
 	var preflightTOTPExists bool
 	if err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&preflightTOTPExists); err != nil {
 		h.log.Error("Failed to read TOTP enrollment", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	if preflightTOTPExists && !h.chargeMFASettingsCode(c, userID, req.Code) {
-		return
+	var charged stepup.Charged
+	if preflightTOTPExists {
+		var admitted bool
+		if charged, admitted = h.chargeMFASettingsCode(c, userID, req.Code); !admitted {
+			return
+		}
 	}
 
 	es := h.readEmailSmsForSync(ctx, userID)
@@ -1493,8 +1478,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		return
 	}
 	// Row gone but mfa_methods may still list 'totp': the sync below cleans
-	// the denormalized flags either way.
-	mfaVerified := false
+	// the denormalized flags either way, and removes no factor.
 	if totpExists {
 		// A factor appearing after the preflight has not been charged. Refuse it
 		// for a retry instead of offering a free verifier guess; charging here
@@ -1503,8 +1487,11 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "TOTP enrollment changed; retry"})
 			return
 		}
-		var verified bool
-		if verified, mfaVerified = h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, req, es); !verified {
+		if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, stepUpCharge{attempt, charged}, mfaStepUpCredentials{Password: req.Password, MFACode: req.Code}, stepup.PurposeTOTPDisable); e != nil {
+			h.refuseMFASettingsStepUp(c, e, factorRemovalStage(e, req.Password, req.Code))
+			return
+		}
+		if !h.deleteTOTPTx(c, tx, userID, es) {
 			return
 		}
 	}
@@ -1521,7 +1508,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	if mfaVerified {
+	if totpExists && subj.MFAEnabled {
 		h.clearTxStepUpAfterCommit(c, userID)
 	}
 
@@ -1531,37 +1518,18 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "TOTP MFA has been disabled"})
 }
 
-// verifyAndDeleteTOTPTx is TOTPDisable's verified delete, on the caller's
-// locked transaction. On refusal or failure it has written the response and
-// returns false; the caller's deferred rollback undoes the delete.
-func (h *Handler) verifyAndDeleteTOTPTx(
-	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, attempt *stepup.PasswordAttempt,
-	req totpDisableRequest, es emailSmsState,
-) (proceed, mfaVerified bool) {
+// deleteTOTPTx deletes TOTP on the caller's locked transaction. On refusal or
+// failure it has written the response and returns false; the caller's deferred
+// rollback undoes the delete.
+func (h *Handler) deleteTOTPTx(c *gin.Context, tx *sql.Tx, userID string, es emailSmsState) bool {
 	ctx := c.Request.Context()
-
-	if !h.verifyFactorRemovalPassword(c, subj, attempt, req.Password, "Password verification failed during TOTP disable") {
-		return false, false
-	}
-
-	valid, err := h.VerifyCodeTx(ctx, tx, userID, stepup.PurposeTOTPDisable, req.Code)
-	if err != nil {
-		h.log.Error("MFA code verification error during TOTP disable", "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed because of a server error. Contact support if this continues."})
-		return false, false
-	}
-	if !valid {
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid})
-		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidMFACode})
-		return false, false
-	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_mfa_totp WHERE user_id = $1`, userID); err != nil {
 		h.log.Error("Failed to disable TOTP MFA", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
-		return false, false
+		return false
 	}
-	return !h.refuseLastInlineFactorTx(c, tx, userID, es, errMsgFailedDisableMFA), true
+	return !h.refuseLastInlineFactorTx(c, tx, userID, es, errMsgFailedDisableMFA)
 }
 
 // RegenerateBackupCodes generates new backup codes. Requires password + TOTP code.
@@ -1624,7 +1592,8 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidTOTPCode})
 		return
 	}
-	if !h.chargeMFASettingsCode(c, userID, req.Code) {
+	charged, admitted := h.chargeMFASettingsCode(c, userID, req.Code)
+	if !admitted {
 		return
 	}
 	step, matched := MatchCodeStep(string(secret), req.Code)
@@ -1633,11 +1602,13 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 		return
 	}
 
-	// Generate new backup codes
-	codes, hashes, err := GenerateBackupCodes()
+	// Generate new backup codes. A busy hasher refunds the charge: the
+	// matched code changed nothing, so it must not cost an attempt.
+	codes, hashes, err := GenerateBackupCodes(ctx)
 	if err != nil {
+		h.refundBusyStepUp(ctx, charged, err)
 		h.log.Error(errMsgFailedBackupCodes, "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBackupCodes})
+		writeBackupHashFailure(c, err, errMsgFailedBackupCodes)
 		return
 	}
 
@@ -1918,9 +1889,14 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 
 	var req struct {
 		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
+		MFACode  string `json:"mfa_code"`                    //nolint:gosec // request field, not a secret
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
+		return
+	}
+	charged, admitted := h.chargeMFASettingsCode(c, userID, req.MFACode)
+	if !admitted {
 		return
 	}
 
@@ -1945,8 +1921,11 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 		h.refuseMFASettingsStepUp(c, e, subjectStage(e))
 		return
 	}
-	if !h.verifyFactorRemovalPassword(c, subj, attempt, req.Password, "Password verification failed during WebAuthn delete") ||
-		!h.deleteWebAuthnTx(c, tx, userID, credentialID, es) {
+	if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, stepUpCharge{attempt, charged}, mfaStepUpCredentials{Password: req.Password, MFACode: req.MFACode}, stepup.PurposeWebAuthnDelete); e != nil {
+		h.refuseMFASettingsStepUp(c, e, factorRemovalStage(e, req.Password, req.MFACode))
+		return
+	}
+	if !h.deleteWebAuthnTx(c, tx, userID, credentialID, es) {
 		return
 	}
 	if err := syncMFAFlagsTx(ctx, tx, userID, es); err != nil {
@@ -1961,6 +1940,9 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 		h.log.Error("Failed to commit WebAuthn delete", "error", commitErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteCredential})
 		return
+	}
+	if req.MFACode != "" {
+		h.clearTxStepUpAfterCommit(c, userID)
 	}
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonFactorDisabled, AuthMethod: securityevent.AuthWebAuthn})
 
@@ -2092,7 +2074,7 @@ func (h *Handler) Verify(c *gin.Context) {
 	}
 
 	attemptsKey := fmt.Sprintf(redisKeyMFAVerifyAttempts, claims.UserID)
-	attempt, ok := h.reserveVerifyAttempt(ctx, c, claims, attemptsKey)
+	attempt, charged, ok := h.reserveVerifyAttempt(ctx, c, claims, attemptsKey, lockoutKey)
 	if !ok {
 		return
 	}
@@ -2101,7 +2083,7 @@ func (h *Handler) Verify(c *gin.Context) {
 		h.refuseWrongCode(ctx, c, req.Method, claims.UserID, lockoutKey, attempt)
 		return
 	}
-	verified, matchedMethod, responded := h.verifyByMethod(ctx, c, req, claims, purpose != PurposeRecoveryChallenge && containsStr(restricted, "totp"))
+	verified, matchedMethod, responded := h.verifyByMethod(ctx, c, req, claims, purpose != PurposeRecoveryChallenge && containsStr(restricted, "totp"), charged)
 	if responded {
 		return // Early return already sent a response (e.g. bad request)
 	}
@@ -2172,23 +2154,40 @@ func answeredFactor(requested, matched string) string {
 // attempt and later attempts, refused ones included, do not extend it, so a
 // trickle of requests cannot hold an account's MFA locked. NX also gives a
 // count left without an expiry (an INCR whose EXPIRE failed) one on the next
-// attempt, so a missed expiry is never permanent.
-func (h *Handler) reserveVerifyAttempt(ctx context.Context, c *gin.Context, claims *ChallengeClaims, attemptsKey string) (int64, bool) {
-	attempt, err := h.redis.Incr(ctx, attemptsKey).Result()
+// attempt, so a missed expiry is never permanent. The count, the window and
+// the returned charge come from one script, so a busy refund returns the
+// attempt only to the window it was counted in (stepup.ChargeKey).
+//
+// An attempt refused past the limit judges nothing, so it gives its own
+// charge back and arms no lockout: only a judged wrong code arms the lockout
+// (refuseWrongCode). The bound holds because a judged charge is never
+// refunded, so at most failedAttemptLimit codes are judged per window. If the
+// refusal's refund fails, SET NX arms the lockout instead (keeping any
+// existing expiry), and if that write fails too the request fails closed with
+// a 500.
+func (h *Handler) reserveVerifyAttempt(ctx context.Context, c *gin.Context, claims *ChallengeClaims, attemptsKey, lockoutKey string) (int64, stepup.Charged, bool) {
+	attempt, charged, err := stepup.ChargeKey(ctx, h.redis, attemptsKey, verifyAttemptWindow)
 	if err != nil {
 		h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("count MFA verify attempt: %w", err))
-		return 0, false
-	}
-	if err := h.redis.ExpireNX(ctx, attemptsKey, verifyAttemptWindow).Err(); err != nil {
-		h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("set MFA verify attempt window: %w", err))
-		return 0, false
+		return 0, stepup.Charged{}, false
 	}
 	if attempt > failedAttemptLimit {
+		// A refused attempt judges nothing, so it gives its own charge back and
+		// arms no lockout: only a wrong code may lock the account out, or
+		// concurrent busy answers could lock out a user holding the right code.
+		// A refund that cannot be made would leave the count past the limit,
+		// so that case arms the lockout instead and fails closed without it.
+		if rErr := charged.Refund(ctx); rErr != nil {
+			if err := h.redis.SetNX(ctx, lockoutKey, "1", verifyLockoutDuration).Err(); err != nil {
+				h.verifyDependencyFailed(c, claims.UserID, errors.Join(rErr, fmt.Errorf("lock out MFA verify attempts: %w", err)))
+				return 0, stepup.Charged{}, false
+			}
+		}
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeLocked, RouteTemplate: securityevent.RouteAuthMFAVerify})
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": errMsgTooManyAttempts})
-		return 0, false
+		return 0, stepup.Charged{}, false
 	}
-	return attempt, true
+	return attempt, charged, true
 }
 
 // releaseOwnedScript deletes each key only while it still holds ARGV[1], the
@@ -2213,8 +2212,9 @@ func (h *Handler) refuseWrongCode(ctx context.Context, c *gin.Context, method, u
 	if attempt >= failedAttemptLimit {
 		lockErr = h.lockOutVerify(ctx, lockoutKey)
 	}
-	outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-	middleware.MarkAuthFailureOutcome(c, outcome)
+	if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+		return
+	}
 	if lockErr != nil {
 		h.verifyDependencyFailed(c, userID, lockErr)
 		return
@@ -2324,7 +2324,19 @@ func (h *Handler) challengeRefused(ctx context.Context, c *gin.Context, claims *
 func (h *Handler) verifyDependencyFailed(c *gin.Context, userID string, err error) {
 	h.log.Error("MFA verification could not reach a dependency", "user_id", userID, "error", err)
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventDependency, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonDependencyUnavailable, RouteTemplate: securityevent.RouteAuthMFAVerify})
-	c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationUnavailable})
+	writeBackupHashFailure(c, err, errMsgMFAVerificationUnavailable)
+}
+
+// writeBackupHashFailure answers a failure that may come from backup-code
+// hashing. A saturated hasher (backuphash.ErrBusy) is a 503 the client can
+// retry; anything else is a 500. Both carry the same body.
+func writeBackupHashFailure(c *gin.Context, err error, body string) {
+	if errors.Is(err, backuphash.ErrBusy) {
+		c.Header("Retry-After", "1")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": body})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": body})
 }
 
 // completeVerifiedChallenge records only the outcome of a completed challenge
@@ -2351,8 +2363,8 @@ func (h *Handler) completeVerifiedChallenge(ctx context.Context, c *gin.Context,
 		return
 	}
 	// A stale count only brings the next lockout closer.
+	// Only the account's counter clears; the shared source counter decays.
 	h.delBestEffort(ctx, "Failed to clear MFA verification attempt counter", claims.UserID, attemptsKey)
-	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
 	if h.completeVerifyPurpose(ctx, c, claims, purpose, rememberMe, method) {
 		h.emitHTTPEvent(c, mfaChallengeVerifiedEvent(method))
 	}
@@ -2422,7 +2434,7 @@ func (h *Handler) parseChallengeToken(tokenStr string) (*ChallengeClaims, Challe
 // verifyByMethod dispatches verification to the appropriate method handler.
 // Returns (verified, matchedMethod, responded) — responded is true if an HTTP
 // response was already written.
-func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verifyRequest, claims *ChallengeClaims, totpRestricted bool) (bool, string, bool) {
+func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verifyRequest, claims *ChallengeClaims, totpRestricted bool, charged stepup.Charged) (bool, string, bool) {
 	switch req.Method {
 	case "totp", "backup_code":
 		// Backup codes belong to TOTP, so a recovery-only TOTP restricts them
@@ -2433,7 +2445,7 @@ func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verify
 		if totpRestricted && req.Code != "" {
 			return false, "", false
 		}
-		return h.verifyTOTPOrBackup(ctx, c, req.Code, claims.UserID)
+		return h.verifyTOTPOrBackup(ctx, c, req.Code, claims.UserID, charged)
 	case "webauthn":
 		verified, responded := h.verifyWebAuthnChallenge(ctx, c, req.Assertion, claims)
 		return verified, "webauthn", responded
@@ -2447,7 +2459,7 @@ func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verify
 }
 
 // verifyTOTPOrBackup verifies a TOTP or backup code.
-func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, userID string) (bool, string, bool) {
+func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, userID string, charged stepup.Charged) (bool, string, bool) {
 	if code == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCodeRequired})
 		return false, "", true
@@ -2455,6 +2467,12 @@ func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, 
 	// Login never accepts a WebAuthn inline token (see noInlinePurpose).
 	valid, matchedMethod, err := h.verifyCodeMatchedMethod(ctx, h.db, userID, noInlinePurpose, code)
 	if err != nil {
+		// A busy hasher judged nothing (VerifyBackupCode derives under one
+		// slot before comparing, and only an 8-character code reaches it, which
+		// no 6-digit TOTP matches), so it returns the attempt Verify counted.
+		if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil {
+			h.log.Warn("Could not refund a busy MFA verify attempt", "error", rErr)
+		}
 		h.verifyDependencyFailed(c, userID, err)
 		return false, "", true
 	}
@@ -3087,11 +3105,50 @@ func strandsSignIn(enabledMethods, recoveryOnlyMethods []string) bool {
 		countLoginEligible(enabledMethods, recoveryOnlyMethods) == 0
 }
 
-// filterValidRecoveryOnly returns only those requested methods that are actually enabled.
+// The closed method sets of the two method-list routes (VULN-028). Each route's
+// raw cap equals its set size: a longer list must repeat a value, so it is
+// refused on its length before any entry is read.
+var (
+	recoveryOnlyMethodSet  = []string{"totp", "webauthn", "email", "sms"}
+	emailSmsSetupMethodSet = []string{"email", "sms"}
+)
+
+const (
+	maxRecoveryOnlyMethods  = 4
+	maxEmailSmsSetupMethods = 2
+
+	errMsgRecoveryOnlyMethods = "methods must be at most 4 of 'totp', 'webauthn', 'email' and 'sms'"
+	errMsgEmailSmsMethods     = "methods must be 'email' and/or 'sms'"
+)
+
+var errEmailSmsMethodSet = errors.New("email/SMS setup methods are not a bounded set")
+
+// normalizeMethodSet bounds a client-supplied MFA method list. It refuses a
+// list longer than maxRaw before reading any entry and any value outside
+// allowed, and returns the first-seen unique values. The result is never nil,
+// so an empty list binds as '{}', not NULL.
+func normalizeMethodSet(raw, allowed []string, maxRaw int) ([]string, bool) {
+	if len(raw) > maxRaw {
+		return nil, false
+	}
+	unique := make([]string, 0, len(raw))
+	for _, m := range raw {
+		if !slices.Contains(allowed, m) {
+			return nil, false
+		}
+		if !slices.Contains(unique, m) {
+			unique = append(unique, m)
+		}
+	}
+	return unique, true
+}
+
+// filterValidRecoveryOnly returns the requested methods that are actually
+// enabled, each once, so the stored list is bounded by the enabled set.
 func filterValidRecoveryOnly(requested []string, enabled map[string]bool) []string {
 	var valid []string
 	for _, m := range requested {
-		if enabled[m] {
+		if enabled[m] && !slices.Contains(valid, m) {
 			valid = append(valid, m)
 		}
 	}
@@ -3124,13 +3181,15 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequest})
 		return
 	}
-
-	if _, ok := h.requirePasswordAndMFA(c, userID, req.mfaStepUpCredentials, recoveryOnlyStepUp); !ok {
+	// Bound the list before step-up spends any budget or touches Redis.
+	requested, valid := normalizeMethodSet(req.Methods, recoveryOnlyMethodSet, maxRecoveryOnlyMethods)
+	if !valid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgRecoveryOnlyMethods})
 		return
 	}
 
-	if req.Methods == nil {
-		req.Methods = []string{}
+	if _, ok := h.requirePasswordAndMFA(c, userID, req.mfaStepUpCredentials, recoveryOnlyStepUp); !ok {
+		return
 	}
 
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -3151,7 +3210,7 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 		return
 	}
 
-	if strandsSignIn(enabledMethods, req.Methods) {
+	if strandsSignIn(enabledMethods, requested) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one MFA method must remain eligible for login"})
 		return
 	}
@@ -3160,7 +3219,7 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 	for _, m := range enabledMethods {
 		enabled[m] = true
 	}
-	validRecoveryOnly := filterValidRecoveryOnly(req.Methods, enabled)
+	validRecoveryOnly := filterValidRecoveryOnly(requested, enabled)
 	// Clearing sends `methods: []`, which filters to a nil slice; pq.Array(nil)
 	// binds SQL NULL and the NOT NULL column refuses it. Clearing stores '{}'.
 	if validRecoveryOnly == nil {
@@ -3242,23 +3301,28 @@ func generateNumericCode(digits int) (string, error) {
 	return fmt.Sprintf("%0*d", digits, n), nil
 }
 
-// validateEmailSmsMethods checks that all requested methods are valid and available.
-// Returns (errorMessage, httpStatusCode). Empty errorMessage means OK.
-func (h *Handler) validateEmailSmsMethods(methods []string) (string, int) {
-	for _, m := range methods {
-		if m == "sms" && !h.devCodesAllowed() {
-			return "SMS MFA is not yet available. Requires SMS provider integration.", http.StatusForbidden
-		}
-		if m != "email" && m != "sms" {
-			return "methods must be 'email' and/or 'sms'", http.StatusBadRequest
-		}
+// validateEmailSmsMethods normalizes the requested methods to at least one of
+// email and SMS, each once, and checks that they are available. It returns the
+// normalized methods, or an error message and HTTP status.
+func (h *Handler) validateEmailSmsMethods(raw []string) ([]string, string, int) {
+	methods, ok := normalizeMethodSet(raw, emailSmsSetupMethodSet, maxEmailSmsSetupMethods)
+	if !ok || len(methods) == 0 {
+		return nil, errMsgEmailSmsMethods, http.StatusBadRequest
 	}
-	return "", 0
+	if slices.Contains(methods, "sms") && !h.devCodesAllowed() {
+		return nil, "SMS MFA is not yet available. Requires SMS provider integration.", http.StatusForbidden
+	}
+	return methods, "", 0
 }
 
 // generateAndStoreEmailSmsCodes generates codes for each method and stores them in Redis.
+// It refuses anything but a bounded set before generating or storing any code.
 func (h *Handler) generateAndStoreEmailSmsCodes(ctx context.Context, userID string, methods []string) (map[string]string, error) {
-	codes := make(map[string]string)
+	methods, ok := normalizeMethodSet(methods, emailSmsSetupMethodSet, maxEmailSmsSetupMethods)
+	if !ok || len(methods) == 0 {
+		return nil, errEmailSmsMethodSet
+	}
+	codes := make(map[string]string, len(methods))
 	for _, method := range methods {
 		code, err := generateNumericCode(6)
 		if err != nil {
@@ -3326,7 +3390,8 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		return
 	}
 
-	if errMsg, status := h.validateEmailSmsMethods(req.Methods); errMsg != "" {
+	methods, errMsg, status := h.validateEmailSmsMethods(req.Methods)
+	if errMsg != "" {
 		c.JSON(status, gin.H{"error": errMsg})
 		return
 	}
@@ -3343,7 +3408,7 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		return
 	}
 
-	for _, method := range req.Methods {
+	for _, method := range methods {
 		if method == "email" && !h.canSendSetupEmail() {
 			h.log.Error("Email MFA setup requested with no email delivery configured")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgEmailNotConfigured})
@@ -3358,7 +3423,7 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		return
 	}
 
-	codes, err := h.generateAndStoreEmailSmsCodes(ctx, userID, req.Methods)
+	codes, err := h.generateAndStoreEmailSmsCodes(ctx, userID, methods)
 	if err != nil {
 		h.log.Error("Failed to prepare email/SMS setup codes", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to prepare verification codes"})
@@ -3372,7 +3437,7 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 	h.clearStepUpAfterSuccess(c, userID)
 	resp := gin.H{
 		"message":    "Verification codes sent",
-		"methods":    req.Methods,
+		"methods":    methods,
 		"expires_in": "10 minutes",
 	}
 	if h.devCodesAllowed() {
@@ -3673,13 +3738,13 @@ func (h *Handler) EmailSmsDisable(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequest})
 		return
 	}
-	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForNoKeyUpdate)
+	tx, subj, attempt, charged, ok := h.openMFASettingsTx(c, userID, creds, lockForNoKeyUpdate)
 	if !ok {
 		return
 	}
 	defer h.endMFASettingsTx(tx, attempt)
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, emailSmsDisableStepUp, attempt); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, emailSmsDisableStepUp, stepUpCharge{attempt, charged}); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}
@@ -3816,7 +3881,7 @@ func (h *Handler) SetBackupEmail(c *gin.Context) {
 		return
 	}
 
-	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, req.mfaStepUpCredentials, lockForNoKeyUpdate)
+	tx, subj, attempt, charged, ok := h.openMFASettingsTx(c, userID, req.mfaStepUpCredentials, lockForNoKeyUpdate)
 	if !ok {
 		return
 	}
@@ -3824,7 +3889,7 @@ func (h *Handler) SetBackupEmail(c *gin.Context) {
 	ctx := c.Request.Context()
 	// Gated on the requested action, set or clear alike; the prior value is
 	// never read.
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, req.mfaStepUpCredentials, backupEmailStepUp, attempt); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, req.mfaStepUpCredentials, backupEmailStepUp, stepUpCharge{attempt, charged}); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}
@@ -3864,18 +3929,8 @@ func isValidEmail(email string) bool {
 
 // ── Recovery Token Methods ──────────────────────────────────────────────────
 
-// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
-// Implements auth.MFAChecker interface.
-func (h *Handler) GenerateRecoveryToken(userID, verifiedFactor string) (string, string, error) {
-	if verifiedFactor != "email" && verifiedFactor != "totp" && verifiedFactor != "webauthn" {
-		return "", "", errors.New("invalid recovery proof")
-	}
-	return generateChallengeTokenWithTTL(ChallengeClaims{
-		UserID: userID, Purpose: PurposeRecovery, RecoveryFactor: verifiedFactor,
-	}, JWTSecret(h.jwtSecret), recoveryTTL)
-}
-
-// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
+// ValidateRecoveryToken validates a recovery_v3 JWT against current policy and
+// the stored credential epoch, and returns epoch-bound claims.
 // Implements auth.MFAChecker interface.
 func (h *Handler) ValidateRecoveryToken(ctx context.Context, tokenString string) (*auth.RecoveryClaims, error) {
 	claims, err := ValidateChallengeToken(tokenString, h.jwtSecret, PurposeRecovery)
@@ -3885,17 +3940,26 @@ func (h *Handler) ValidateRecoveryToken(ctx context.Context, tokenString string)
 	if claims.ExpiresAt == nil {
 		return nil, errors.New("recovery expiry missing")
 	}
-	if claims.RecoveryFactor != "email" && claims.RecoveryFactor != "totp" && claims.RecoveryFactor != "webauthn" {
+	if !isRecoveryFactor(claims.RecoveryFactor) {
 		return nil, errors.New("recovery proof missing")
 	}
-	methods, err := h.GetRecoveryMethods(ctx, claims.UserID)
+	methods, credEpoch, err := h.readRecoveryPolicy(ctx, claims.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
+	}
+	// Unlocked pre-check, so a stale token is refused before any side effect
+	// (spent-marker reservation, credential fence, hashing). The comparison
+	// under the users lock in ValidateRecoveryClaimsTx stays the authority.
+	if !sameRecoveryEpoch(claims.CredentialEpoch, credEpoch) {
+		return nil, errors.New("recovery token predates a credential change")
 	}
 	if len(methods) > 0 && !containsStr(methods, claims.RecoveryFactor) {
 		return nil, errors.New("recovery proof no longer satisfies policy")
 	}
-	return &auth.RecoveryClaims{RecoveryFactor: claims.RecoveryFactor, UserID: claims.UserID, JTI: claims.ID, ExpiresAt: claims.ExpiresAt.Time}, nil
+	return &auth.RecoveryClaims{
+		RecoveryFactor: claims.RecoveryFactor, UserID: claims.UserID, JTI: claims.ID, ExpiresAt: claims.ExpiresAt.Time,
+		CredentialEpoch: claims.CredentialEpoch, EpochBound: true,
+	}, nil
 }
 
 // ── Recovery Key Endpoints ──────────────────────────────────────────────────
@@ -3974,7 +4038,7 @@ type recoveryKeyMaterial struct {
 // upload) needs no credentials; an overwrite, which can do everything
 // DeleteRecoveryKey can, needs the same step-up. It always writes the response.
 func (h *Handler) storeRecoveryKey(c *gin.Context, userID string, creds mfaStepUpCredentials, m recoveryKeyMaterial) {
-	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
+	tx, subj, attempt, charged, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
 	if !ok {
 		return
 	}
@@ -4003,7 +4067,7 @@ func (h *Handler) storeRecoveryKey(c *gin.Context, userID string, creds mfaStepU
 	if replacing && !creds.sent() && h.answerRepeatedFirstStoreTx(c, tx, userID, m) {
 		return
 	}
-	if replacing && !h.replaceRecoveryKeyTx(c, tx, userID, subj, creds, m, attempt) {
+	if replacing && !h.replaceRecoveryKeyTx(c, tx, userID, subj, creds, m, stepUpCharge{attempt, charged}) {
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -4099,11 +4163,10 @@ func sameRecoveryColumn(a, b []byte) int {
 // statement still leaves the caller's key stored. On refusal or failure it has
 // written the response and returns false.
 func (h *Handler) replaceRecoveryKeyTx(
-	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, creds mfaStepUpCredentials, m recoveryKeyMaterial,
-	attempt *stepup.PasswordAttempt,
+	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, creds mfaStepUpCredentials, m recoveryKeyMaterial, charge stepUpCharge,
 ) bool {
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyReplaceStepUp, attempt); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyReplaceStepUp, charge); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return false
 	}
@@ -4160,13 +4223,13 @@ func (h *Handler) DeleteRecoveryKey(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequest})
 		return
 	}
-	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
+	tx, subj, attempt, charged, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
 	if !ok {
 		return
 	}
 	defer h.endMFASettingsTx(tx, attempt)
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyRemoveStepUp, attempt); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyRemoveStepUp, stepUpCharge{attempt, charged}); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}
@@ -4193,7 +4256,7 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	userID := c.GetString("user_id")
 
 	rows, err := h.db.QueryContext(c.Request.Context(),
-		`SELECT id, device_name, machine_id, designated_at, last_seen_at
+		`SELECT id, device_name, designated_at, last_seen_at
 		 FROM trusted_recovery_devices WHERE user_id = $1
 		 ORDER BY designated_at DESC`, userID,
 	)
@@ -4204,10 +4267,11 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	}
 	defer func() { _ = rows.Close() }()
 
+	// The machine identifier is a responder credential input, so a list never
+	// returns it; only the designating device learns its own value.
 	type trustedDevice struct {
 		ID           string     `json:"id"`
 		DeviceName   string     `json:"device_name"`
-		MachineID    string     `json:"machine_id"`
 		DesignatedAt time.Time  `json:"designated_at"`
 		LastSeenAt   *time.Time `json:"last_seen_at"`
 	}
@@ -4216,7 +4280,7 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	var scanErr error
 	for rows.Next() {
 		var d trustedDevice
-		if err := rows.Scan(&d.ID, &d.DeviceName, &d.MachineID, &d.DesignatedAt, &d.LastSeenAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.DeviceName, &d.DesignatedAt, &d.LastSeenAt); err != nil {
 			h.log.Error("Failed to scan trusted device row", "user_id", userID, "error", err)
 			scanErr = err
 			break
@@ -4275,7 +4339,7 @@ func (h *Handler) DesignateTrustedDevice(c *gin.Context) {
 		return
 	}
 
-	h.log.Info("Trusted device designated", "user_id", userID, "device_id", deviceID, "machine_id", machineID)
+	h.log.Info("Trusted device designated", "user_id", userID, "device_id", deviceID)
 	h.clearStepUpAfterSuccess(c, userID)
 	c.JSON(http.StatusOK, gin.H{
 		"id":            deviceID,

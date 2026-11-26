@@ -2,6 +2,8 @@ package stepup
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,8 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
-
-	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 )
 
 // Budget bounds are const, never configuration: a configurable security bound
@@ -94,39 +94,111 @@ func DangerousActionBudget(rdb *redis.Client) Budget {
 // the 429 flagged step_up_budget_exhausted, and the 503 flagged
 // step_up_budget_unavailable with Cause set.
 func Charge(ctx context.Context, b Budget, userID, mfaCode string) *Error {
+	_, e := ChargeAttempt(ctx, b, userID, mfaCode)
+	return e
+}
+
+// ChargeAttempt is Charge that also returns the charge, for RefundIfBusy.
+// With no code it charges nothing and returns the zero Charged.
+func ChargeAttempt(ctx context.Context, b Budget, userID, mfaCode string) (Charged, *Error) {
 	if mfaCode == "" {
-		return nil
+		return Charged{}, nil
 	}
-	return b.Consume(ctx, userID)
+	return b.ConsumeAttempt(ctx, userID)
 }
 
 // Consume charges one attempt. It returns nil when the attempt is admitted,
 // a 429 when the budget is exhausted, and a 503 — with Cause set, for the
 // caller to log — when the budget cannot be evaluated at all.
 func (b Budget) Consume(ctx context.Context, userID string) *Error {
+	_, e := b.ConsumeAttempt(ctx, userID)
+	return e
+}
+
+// ConsumeAttempt is Consume that also returns the admitted charge, which
+// RefundIfBusy needs: a refund is bound to the window it was charged in.
+func (b Budget) ConsumeAttempt(ctx context.Context, userID string) (Charged, *Error) {
 	if b.rdb == nil {
-		return budgetUnavailable(errBudgetUnwired)
+		return Charged{}, budgetUnavailable(errBudgetUnwired)
 	}
-	allowed, err := middleware.AllowUserAction(ctx, b.rdb, b.Key(userID), BudgetLimit, BudgetWindow)
+	count, charged, err := ChargeKey(ctx, b.rdb, b.Key(userID), BudgetWindow)
 	if err != nil {
-		return budgetUnavailable(fmt.Errorf("consume step-up attempt: %w", err))
+		return Charged{}, budgetUnavailable(fmt.Errorf("consume step-up attempt: %w", err))
 	}
-	if !allowed {
+	if count > BudgetLimit {
 		ttl, ttlErr := b.rdb.PTTL(ctx, b.Key(userID)).Result()
 		if ttlErr != nil {
-			return budgetUnavailable(fmt.Errorf("read step-up attempt PTTL: %w", ttlErr))
+			return Charged{}, budgetUnavailable(fmt.Errorf("read step-up attempt PTTL: %w", ttlErr))
 		}
 		if ttl <= 0 {
-			return budgetUnavailable(fmt.Errorf("read step-up attempt PTTL: non-positive PTTL %s", ttl))
+			return Charged{}, budgetUnavailable(fmt.Errorf("read step-up attempt PTTL: non-positive PTTL %s", ttl))
 		}
-		return &Error{
+		return Charged{}, &Error{
 			Status:            http.StatusTooManyRequests,
 			Body:              gin.H{"error": ErrMsgTooManyAttempts, "step_up_budget_exhausted": true},
 			retryAfterSeconds: int((ttl + time.Second - 1) / time.Second),
 		}
 	}
-	return nil
+	return charged, nil
 }
+
+// chargeScript counts one attempt on KEYS[1], starts the window when the key
+// has no expiry (a new key, or one whose earlier expiry write was lost), and
+// returns the count with the window's ID, held in KEYS[2] with the counter's
+// TTL. A count of 1 starts a new window, so it takes the new ID ARGV[2]: no
+// earlier charge on this counter is still outstanding, since an unrefunded
+// charge keeps the count above zero. Any other count keeps the stored ID, or
+// sets ARGV[2] if a counter written before IDs existed has none.
+var chargeScript = redis.NewScript(`
+local n = redis.call('INCR', KEYS[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[1], 'NX')
+local ttl = redis.call('PTTL', KEYS[1])
+if n == 1 then
+	redis.call('SET', KEYS[2], ARGV[2], 'PX', ttl)
+else
+	redis.call('SET', KEYS[2], ARGV[2], 'PX', ttl, 'NX')
+end
+return {n, redis.call('GET', KEYS[2])}
+`)
+
+// windowKey holds the ID of the window a counter key is counting.
+func windowKey(key string) string { return key + ":window" }
+
+// ChargeKey counts one attempt on key in a window that starts at the first
+// attempt, and returns the count and the charge. Counting and reading the
+// window ID in one script means the charge always names the window it was
+// counted in, so its refund cannot reach a later window.
+func ChargeKey(ctx context.Context, rdb *redis.Client, key string, window time.Duration) (int64, Charged, error) {
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return 0, Charged{}, fmt.Errorf("charge %q: window id: %w", key, err)
+	}
+	res, err := chargeScript.Run(ctx, rdb, []string{key, windowKey(key)}, window.Milliseconds(), hex.EncodeToString(nonce)).Slice()
+	if err != nil {
+		return 0, Charged{}, err
+	}
+	var count int64
+	var id string
+	if len(res) == 2 {
+		count, _ = res[0].(int64)
+		id, _ = res[1].(string)
+	}
+	if count <= 0 || id == "" {
+		return 0, Charged{}, fmt.Errorf("charge %q: unexpected reply %v", key, res)
+	}
+	return count, Charged{rdb: rdb, key: key, window: id}, nil
+}
+
+// Charged is one admitted attempt and the window it was counted in. The zero
+// value charged nothing and refunds nothing.
+type Charged struct {
+	rdb    *redis.Client
+	key    string
+	window string // the window's ID (windowKey)
+}
+
+// Made reports whether this is a real charge rather than the zero value.
+func (ch Charged) Made() bool { return ch.rdb != nil }
 
 // Clear resets the budget after a verified, committed success. It is
 // best-effort by design: a failure leaves the counter high, which fails
@@ -148,4 +220,48 @@ func budgetUnavailable(cause error) *Error {
 		Body:   gin.H{"error": ErrMsgBudgetUnavailable, "step_up_budget_unavailable": true},
 		Cause:  cause,
 	}
+}
+
+// refundScript returns one attempt only to the window it was charged in
+// (ARGV[1], that window's ID). A request that waited out its window must not
+// take back a charge another request made in the next one: that would let a
+// request straddling each boundary keep every window short of its limit. It
+// never creates the key or takes it below zero, and DECRBY keeps the expiry.
+var refundScript = redis.NewScript(`
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
+local n = tonumber(redis.call('GET', KEYS[1]) or '0')
+if n > 0 then return redis.call('DECRBY', KEYS[1], 1) end
+return 0
+`)
+
+// Refund returns this charge when its code was never judged: on a busy check
+// (RefundIfBusy) or on an MFA sign-in refused past the limit (the mfa
+// package's reserveVerifyAttempt). A wrong code, or any other failure, keeps
+// its charge.
+// It runs on SettleContext so a client that hangs up after a busy answer still
+// gets the attempt back. A charge whose window has ended refunds nothing.
+func (ch Charged) Refund(ctx context.Context) error {
+	if ch.rdb == nil {
+		return nil
+	}
+	sctx, cancel := SettleContext(ctx)
+	defer cancel()
+	if err := refundScript.Run(sctx, ch.rdb, []string{ch.key, windowKey(ch.key)}, ch.window).Err(); err != nil {
+		return fmt.Errorf("refund step-up attempt: %w", err)
+	}
+	return nil
+}
+
+// RefundIfBusy refunds each charge when err is a busy backup-code check
+// (IsBusy) and does nothing otherwise. Call it with every charge the request
+// made, once the verification result is known.
+func RefundIfBusy(ctx context.Context, err error, charges ...Charged) error {
+	if !IsBusy(err) {
+		return nil
+	}
+	var errs []error
+	for _, ch := range charges {
+		errs = append(errs, ch.Refund(ctx))
+	}
+	return errors.Join(errs...)
 }
