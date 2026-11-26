@@ -12,6 +12,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/privacy"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
 )
 
 const (
@@ -157,4 +158,69 @@ func mapValues(values map[string]string) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+func TestEmailConfirmationStoreWithoutRedisIsUnavailable(t *testing.T) {
+	binding := emailConfirmationTestBinding()
+	for name, store := range map[string]*privacy.EmailConfirmationStore{
+		"nil store": nil, "nil client": privacy.NewEmailConfirmationStore(nil),
+	} {
+		_, err := store.Issue(t.Context(), binding)
+		require.ErrorIs(t, err, privacy.ErrEmailConfirmationUnavailable, name)
+		_, err = store.Claim(t.Context(), emailConfirmationTestUserID, strings.Repeat("A", 43), binding)
+		require.ErrorIs(t, err, privacy.ErrEmailConfirmationUnavailable, name)
+	}
+	var claim *privacy.EmailConfirmationClaim
+	require.ErrorIs(t, claim.Release(t.Context()), privacy.ErrEmailConfirmationUnavailable)
+	require.ErrorIs(t, claim.Commit(t.Context()), privacy.ErrEmailConfirmationUnavailable)
+}
+
+func TestEmailConfirmationClaimRejectsMalformedInput(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	store := privacy.NewEmailConfirmationStore(rdb)
+	binding := emailConfirmationTestBinding()
+	intent, err := store.Issue(t.Context(), binding)
+	require.NoError(t, err)
+
+	for name, requestID := range map[string]string{
+		"short":         "00000000-0000-4000-8000",
+		"missing dash":  "00000000x0000-4000-8000-000000000001"[:36],
+		"uppercase hex": strings.ToUpper(intent.RequestID),
+		"non-hex":       "g" + intent.RequestID[1:],
+	} {
+		_, err := store.Claim(t.Context(), requestID, intent.Token, binding)
+		require.ErrorIs(t, err, privacy.ErrEmailConfirmationStale, name)
+	}
+	for name, token := range map[string]string{
+		"not base64":    strings.Repeat("!", 43),
+		"wrong length":  intent.Token[:42],
+		"non-canonical": intent.Token[:42] + "B",
+	} {
+		_, err := store.Claim(t.Context(), intent.RequestID, token, binding)
+		require.ErrorIs(t, err, privacy.ErrEmailConfirmationStale, name)
+	}
+
+	claim, err := store.Claim(t.Context(), intent.RequestID, intent.Token, binding)
+	require.NoError(t, err, "every malformed attempt left the intent claimable")
+	require.NoError(t, claim.Commit(t.Context()))
+	require.ErrorIs(t, claim.Release(t.Context()), privacy.ErrEmailConfirmationStale, "a settled claim cannot settle again")
+}
+
+func TestEmailConfirmationStoreRedisFailureIsUnavailable(t *testing.T) {
+	binding := emailConfirmationTestBinding()
+	client := redistest.Client(t)
+	store := privacy.NewEmailConfirmationStore(client)
+	intent, err := store.Issue(t.Context(), binding)
+	require.NoError(t, err)
+	claim, err := store.Claim(t.Context(), intent.RequestID, intent.Token, binding)
+	require.NoError(t, err)
+
+	require.NoError(t, client.Close())
+	_, err = store.Issue(t.Context(), binding)
+	require.ErrorIs(t, err, privacy.ErrEmailConfirmationUnavailable)
+	_, err = store.Claim(t.Context(), intent.RequestID, intent.Token, binding)
+	require.ErrorIs(t, err, privacy.ErrEmailConfirmationUnavailable)
+	require.ErrorIs(t, claim.Release(t.Context()), privacy.ErrEmailConfirmationUnavailable)
+	require.ErrorIs(t, claim.Commit(t.Context()), privacy.ErrEmailConfirmationUnavailable)
 }

@@ -386,16 +386,36 @@ func TestSendAccountErasureConfirmationProd(t *testing.T) {
 }
 
 func TestSendAccountErasureConfirmationRejectsUnexpectedLink(t *testing.T) {
-	addr, _ := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
+	addr, capture := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
 	svc := newProdService(addr)
+	const (
+		prefix = "concord://account-erasure/confirm/"
+		id     = "00000000-0000-4000-8000-000000000001"
+		token  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	)
 
-	for _, link := range []string{
-		"https://example.test/not-an-erasure-link",
-		"javascript:alert(1)",
-		"concord://account-erasure/confirm/00000000-0000-0000-0000-000000000000/x\"onmouseover=\"alert(1)",
+	for name, link := range map[string]string{
+		"other scheme":          "https://example.test/not-an-erasure-link",
+		"javascript":            "javascript:alert(1)",
+		"attribute break-out":   prefix + id + "/x\"onmouseover=\"alert(1)",
+		"too long":              prefix + id + "/" + token + strings.Repeat("A", 200),
+		"line break":            prefix + id + "/" + token + "\r\n",
+		"other host":            "concord://other/confirm/" + id + "/" + token,
+		"user info":             "concord://user@account-erasure/confirm/" + id + "/" + token,
+		"query":                 prefix + id + "/" + token + "?x=1",
+		"fragment":              prefix + id + "/" + token + "#x",
+		"escaped path":          prefix + id + "/" + token[:40] + "%41AA",
+		"other action":          "concord://account-erasure/verify/" + id + "/" + token,
+		"missing token":         prefix + id,
+		"short request id":      prefix + id[:35] + "/" + token,
+		"request id dash moved": prefix + "00000000a0000-4000-8000-000000000001/" + token,
+		"uppercase request id":  prefix + strings.ToUpper("0000000a-0000-4000-8000-000000000001") + "/" + token,
+		"short token":           prefix + id + "/" + token[:42],
+		"token bad character":   prefix + id + "/" + token[:42] + "+",
 	} {
-		require.Error(t, svc.SendAccountErasureConfirmation(testUserEmail, link), link)
+		require.Error(t, svc.SendAccountErasureConfirmation(testUserEmail, link), name)
 	}
+	assert.Empty(t, capture.last(), "a refused link sends no email")
 }
 
 // ── Sanitization Tests ──────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ package privacy_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/activepresence"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
@@ -38,35 +40,46 @@ type stubAccountDeleter struct {
 	calledWithUser  string
 	emailUnverified bool
 	emailPrepared   users.EmailErasureConfirmation
+	// Per-method failures; nil means success.
+	prepareErr      *stepup.Error
+	verifiedErr     error
+	bindingErr      error
+	prepareEmailErr error
 }
 
 func (s *stubAccountDeleter) PrepareAccountErasure(
 	_ context.Context, _, _, _ string,
 ) (*stepup.PasswordAttempt, *stepup.Error) {
+	if s.prepareErr != nil {
+		return nil, s.prepareErr
+	}
 	return &stepup.PasswordAttempt{}, nil
 }
 
 func (s *stubAccountDeleter) EmailVerified(context.Context, string) (bool, error) {
-	return !s.emailUnverified, nil
+	return !s.emailUnverified, s.verifiedErr
 }
 
 func (s *stubAccountDeleter) EmailErasureConfirmationBinding(
 	context.Context, users.AccountErasureRequest,
 ) (users.EmailErasureConfirmation, error) {
-	return s.emailPrepared, nil
+	return s.emailPrepared, s.bindingErr
 }
 
 func (s *stubAccountDeleter) PrepareEmailErasureConfirmation(
 	context.Context, users.AccountErasureRequest,
 ) (users.EmailErasureConfirmation, error) {
-	return s.emailPrepared, nil
+	return s.emailPrepared, s.prepareEmailErr
 }
 
-type recordingErasureEmailSender struct{ to, url string }
+type recordingErasureEmailSender struct {
+	to, url string
+	err     error
+}
 
 func (s *recordingErasureEmailSender) SendAccountErasureConfirmation(to, confirmationURL string) error {
 	s.to, s.url = to, confirmationURL
-	return nil
+	return s.err
 }
 
 func (s *stubAccountDeleter) DeleteAccount(_ context.Context, request users.AccountErasureRequest) error {
@@ -472,4 +485,222 @@ func TestEraseAccount_PreCommitFailureStill500(t *testing.T) {
 	h.EraseAccount(c)
 
 	assert.Equal(t, http.StatusInternalServerError, c.Writer.Status())
+}
+
+// ── Request validation and refusal mapping ────────────────────────────────
+
+func TestEraseAccount_RejectsMalformedRequests(t *testing.T) {
+	ordered := []string{"00000000-0000-0000-0000-00000000000a", "00000000-0000-0000-0000-00000000000b"}
+	cases := map[string]string{
+		"trailing document":       `{"password":"p","confirmed_owned_server_ids":[]}{}`,
+		"unknown field":           `{"password":"p","confirmed_owned_server_ids":[],"extra":1}`,
+		"proof without the array": `{"password":"p"}`,
+		"code without the array":  `{"mfa_code":"123456"}`,
+		"confirmation alone":      `{"email_confirmation":{"request_id":"r","token":"t"}}`,
+		"not a uuid":              `{"password":"p","confirmed_owned_server_ids":["not-a-uuid"]}`,
+		"nil uuid":                `{"password":"p","confirmed_owned_server_ids":["00000000-0000-0000-0000-000000000000"]}`,
+		"non-canonical uuid":      `{"password":"p","confirmed_owned_server_ids":["00000000-0000-0000-0000-00000000000A"]}`,
+		"out of order":            fmt.Sprintf(`{"password":"p","confirmed_owned_server_ids":["%s","%s"]}`, ordered[1], ordered[0]),
+		"duplicate":               fmt.Sprintf(`{"password":"p","confirmed_owned_server_ids":["%s","%s"]}`, ordered[0], ordered[0]),
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			stub := &stubAccountDeleter{}
+			h := privacy.NewHandler(stub, nil, logger.New("test"))
+			c, w := newTestContext(t, body, "malformed-user")
+			h.EraseAccount(c)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.JSONEq(t, `{"error":"invalid_request"}`, w.Body.String())
+			assert.False(t, stub.called)
+		})
+	}
+}
+
+func TestEraseAccount_AcceptsOrderedConfirmedServers(t *testing.T) {
+	stub := &stubAccountDeleter{}
+	h := privacy.NewHandler(stub, nil, logger.New("test"))
+	c, w := newTestContext(t, `{"password":"p","confirmed_owned_server_ids":["00000000-0000-0000-0000-00000000000a","00000000-0000-0000-0000-00000000000b"]}`, "ordered-user")
+	h.EraseAccount(c)
+	assert.Equal(t, http.StatusNoContent, c.Writer.Status(), w.Body.String())
+	assert.True(t, stub.called)
+}
+
+func TestEraseAccount_RefusesIdentityForAnotherUser(t *testing.T) {
+	stub := &stubAccountDeleter{}
+	h := privacy.NewHandler(stub, nil, logger.New("test"))
+	c, w := newTestContext(t, "", "identity-user")
+	c.Set("user_id", uuid.NewString())
+	h.EraseAccount(c)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.JSONEq(t, `{"error":"authentication required"}`, w.Body.String())
+	assert.False(t, stub.called)
+}
+
+func TestEraseAccount_WritesPreparationRefusal(t *testing.T) {
+	stub := &stubAccountDeleter{prepareErr: &stepup.Error{Status: http.StatusTooManyRequests, Body: gin.H{"error": "Too many verification attempts"}}}
+	h := privacy.NewHandler(stub, nil, logger.New("test"))
+	c, w := newTestContext(t, "", "budget-user")
+	h.EraseAccount(c)
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.JSONEq(t, `{"error":"Too many verification attempts"}`, w.Body.String())
+	assert.False(t, stub.called)
+}
+
+func TestEraseAccount_EmailStatusUnavailableIs503(t *testing.T) {
+	stub := &stubAccountDeleter{verifiedErr: errors.New("db down")}
+	h := privacy.NewHandler(stub, nil, logger.New("test"))
+	c, w := newTestContext(t, "", "status-user")
+	h.EraseAccount(c)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.JSONEq(t, `{"error":"email confirmation status unavailable"}`, w.Body.String())
+	assert.False(t, stub.called)
+}
+
+func TestEraseAccount_VerifiedAccountRefusesEmailConfirmation(t *testing.T) {
+	stub := &stubAccountDeleter{}
+	h := privacy.NewHandler(stub, nil, logger.New("test"))
+	c, w := newTestContext(t, `{"password":"p","confirmed_owned_server_ids":[],"email_confirmation":{"request_id":"r","token":"t"}}`, "verified-user")
+	h.EraseAccount(c)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.JSONEq(t, `{"error":"invalid_request"}`, w.Body.String())
+	assert.False(t, stub.called)
+}
+
+// erasurePreparationRefusals is every preparation error class and the
+// response it must produce, shared by the issue and claim paths.
+var erasurePreparationRefusals = []struct {
+	name       string
+	err        error
+	wantStatus int
+	wantBody   string
+}{
+	{"step-up refusal", &stepup.Error{Status: http.StatusForbidden, Body: gin.H{"error": stepup.ErrMsgInvalidPassword}}, http.StatusForbidden, `{"error":"` + stepup.ErrMsgInvalidPassword + `"}`},
+	{"owned set drift", &users.ErrErasureOwnedServerSetDrifted{RequiredOwnedServerIDs: []string{"00000000-0000-0000-0000-00000000000a"}}, http.StatusConflict,
+		`{"error_code":"owned_server_confirmation_stale","required_owned_server_ids":["00000000-0000-0000-0000-00000000000a"]}`},
+	{"already verified", users.ErrErasureEmailAlreadyVerified, http.StatusConflict, `{"error_code":"email_confirmation_stale"}`},
+	{"epoch mismatch", fmt.Errorf("wrap: %w", credepoch.ErrEpochMismatch), http.StatusUnauthorized, `{"error":"authentication required"}`},
+	{"unknown", errors.New("db down"), http.StatusServiceUnavailable, `{"error":"email confirmation unavailable"}`},
+}
+
+func TestEraseAccount_IssueMapsPreparationErrors(t *testing.T) {
+	for _, tc := range erasurePreparationRefusals {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubAccountDeleter{emailUnverified: true, prepareEmailErr: tc.err}
+			h := privacy.NewHandler(stub, redistest.Client(t), logger.New("test"))
+			sender := &recordingErasureEmailSender{}
+			h.SetErasureEmailSender(sender)
+			c, w := newTestContext(t, "", "issue-refusal-user")
+			h.EraseAccount(c)
+			assert.Equal(t, tc.wantStatus, w.Code)
+			assert.JSONEq(t, tc.wantBody, w.Body.String())
+			assert.Empty(t, sender.to, "a refused preparation sends no email")
+			assert.False(t, stub.called)
+		})
+	}
+}
+
+func TestEraseAccount_ClaimMapsPreparationErrors(t *testing.T) {
+	for _, tc := range erasurePreparationRefusals {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubAccountDeleter{emailUnverified: true, bindingErr: tc.err}
+			h := privacy.NewHandler(stub, redistest.Client(t), logger.New("test"))
+			c, w := newTestContext(t, `{"password":"p","confirmed_owned_server_ids":[],"email_confirmation":{"request_id":"r","token":"t"}}`, "claim-refusal-user")
+			h.EraseAccount(c)
+			assert.Equal(t, tc.wantStatus, w.Code)
+			assert.JSONEq(t, tc.wantBody, w.Body.String())
+			assert.False(t, stub.called)
+		})
+	}
+}
+
+func TestEraseAccount_EmailConfirmationDeliveryFailures(t *testing.T) {
+	prepared := users.EmailErasureConfirmation{
+		Recipient: "unverified@example.test", FamilyID: uuid.NewString(), CredentialEpoch: "test", OwnedServerIDs: []string{},
+	}
+	t.Run("no sender wired", func(t *testing.T) {
+		stub := &stubAccountDeleter{emailUnverified: true, emailPrepared: prepared}
+		h := privacy.NewHandler(stub, redistest.Client(t), logger.New("test"))
+		c, w := newTestContext(t, "", "no-sender-user")
+		h.EraseAccount(c)
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.JSONEq(t, `{"error":"email confirmation unavailable"}`, w.Body.String())
+	})
+	t.Run("send fails", func(t *testing.T) {
+		stub := &stubAccountDeleter{emailUnverified: true, emailPrepared: prepared}
+		h := privacy.NewHandler(stub, redistest.Client(t), logger.New("test"))
+		h.SetErasureEmailSender(&recordingErasureEmailSender{err: errors.New("smtp down")})
+		c, w := newTestContext(t, "", "send-fails-user")
+		h.EraseAccount(c)
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.JSONEq(t, `{"error":"email confirmation unavailable"}`, w.Body.String())
+		assert.False(t, stub.called)
+	})
+	t.Run("store unavailable", func(t *testing.T) {
+		stub := &stubAccountDeleter{emailUnverified: true, emailPrepared: prepared}
+		h := privacy.NewHandler(stub, nil, logger.New("test"))
+		sender := &recordingErasureEmailSender{}
+		h.SetErasureEmailSender(sender)
+		c, w := newTestContext(t, "", "store-down-user")
+		h.EraseAccount(c)
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.JSONEq(t, `{"error":"email confirmation unavailable"}`, w.Body.String())
+		assert.Empty(t, sender.to)
+	})
+}
+
+func TestEraseAccount_StaleOrIncompleteEmailConfirmation(t *testing.T) {
+	prepared := users.EmailErasureConfirmation{
+		Recipient: "unverified@example.test", FamilyID: uuid.NewString(), CredentialEpoch: "test", OwnedServerIDs: []string{},
+	}
+	for name, confirmation := range map[string]string{ //nolint:gosec // pragma: allowlist secret — malformed test tokens
+		"empty request id": `{"request_id":"","token":"t"}`,
+		"empty token":      `{"request_id":"r","token":""}`,
+		"unknown intent":   `{"request_id":"00000000-0000-0000-0000-00000000000a","token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &stubAccountDeleter{emailUnverified: true, emailPrepared: prepared}
+			h := privacy.NewHandler(stub, redistest.Client(t), logger.New("test"))
+			c, w := newTestContext(t, `{"password":"p","confirmed_owned_server_ids":[],"email_confirmation":`+confirmation+`}`, "stale-user")
+			h.EraseAccount(c)
+			assert.Equal(t, http.StatusConflict, w.Code)
+			assert.JSONEq(t, `{"error_code":"email_confirmation_stale"}`, w.Body.String())
+			assert.False(t, stub.called)
+		})
+	}
+}
+
+// An unresolved commit may have erased the account, so the claim is neither
+// committed nor released: a retry of the same link stays refused.
+func TestEraseAccount_UnresolvedCommitKeepsEmailConfirmationClaimed(t *testing.T) {
+	rdb := redistest.Client(t)
+	const recipient = "unverified@example.test"
+	familyID := uuid.NewString()
+	stub := &stubAccountDeleter{emailUnverified: true, err: presencecapture.ErrCommitUnresolved, emailPrepared: users.EmailErasureConfirmation{
+		Recipient: recipient, FamilyID: familyID, CredentialEpoch: "test", OwnedServerIDs: []string{},
+	}}
+	h := privacy.NewHandler(stub, rdb, logger.New("test"))
+	userID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("unresolved-user")).String()
+	binding := privacy.EmailConfirmationBinding{Recipient: recipient, UserID: userID, FamilyID: familyID, CredentialEpoch: "test", OwnedServerIDs: []string{}}
+	intent, err := privacy.NewEmailConfirmationStore(rdb).Issue(context.Background(), binding)
+	require.NoError(t, err)
+
+	c, _ := newTestContext(t, fmt.Sprintf(`{"password":"p","confirmed_owned_server_ids":[],"email_confirmation":{"request_id":"%s","token":"%s"}}`, intent.RequestID, intent.Token), "unresolved-user")
+	h.EraseAccount(c)
+	require.True(t, stub.called)
+
+	_, err = privacy.NewEmailConfirmationStore(rdb).Claim(context.Background(), intent.RequestID, intent.Token, binding)
+	require.Error(t, err, "an unresolved commit must leave the confirmation unusable")
+}
+
+func TestOwnedServerPreviewDatabaseFailureIs503(t *testing.T) {
+	db, err := sql.Open("postgres", "host=127.0.0.1 port=1 user=test dbname=missing sslmode=disable connect_timeout=1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	h := privacy.NewHandler(&stubAccountDeleter{}, nil, logger.New("test"))
+	h.SetOwnedServersDB(db)
+	c, w := newTestContext(t, "", "preview-db-user")
+	c.Request.Method = http.MethodGet
+	h.ListOwnedServers(c)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.JSONEq(t, `{"error":"owned_server_list_unavailable"}`, w.Body.String())
 }

@@ -107,3 +107,57 @@ func assertOwnershipTransferPending(t *testing.T, ts *testhelpers.TestServer, se
 	assert.Equal(t, ownerID, currentOwner)
 	assert.Equal(t, keyPending, status)
 }
+
+// startOwnershipTransfer creates a pending transfer from owner to a new member
+// and returns the server ID.
+func startOwnershipTransfer(t *testing.T, ts *testhelpers.TestServer, owner testhelpers.TestUser, name string) string {
+	t.Helper()
+	target := ts.CreateTestUser(t, name+"-target")
+	serverID := ts.CreateTestServer(t, owner.ID, name)
+	ts.AddMemberToServer(t, serverID, target.ID, keyMember)
+	w := ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
+		keyTargetUserID: target.ID, keyPassword: testhelpers.TestAuthPlaintext,
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	return serverID
+}
+
+func TestOwnershipConfirmStepUpRefusesWrongPassword(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "confirm-wrong-password-owner")
+	serverID := startOwnershipTransfer(t, ts, owner, "confirm-wrong-password")
+
+	w := ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{
+		keyPassword: "not-the-password",
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.JSONEq(t, `{"error":"`+stepup.ErrMsgInvalidPassword+`"}`, w.Body.String())
+	assertOwnershipTransferPending(t, ts, serverID, owner.ID)
+}
+
+func TestOwnershipConfirmStepUpRefusesLockedAccount(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "confirm-locked-owner")
+	serverID := startOwnershipTransfer(t, ts, owner, "confirm-locked")
+	require.NoError(t, ts.Redis.Set(context.Background(), "login_lockout:"+owner.Email, "1", 0).Err())
+
+	w := ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{
+		keyPassword: owner.Password,
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusLocked, w.Code, w.Body.String())
+	assertOwnershipTransferPending(t, ts, serverID, owner.ID)
+}
+
+func TestOwnershipConfirmStepUpRefusesWrongMFACode(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "confirm-wrong-mfa-owner")
+	serverID := startOwnershipTransfer(t, ts, owner, "confirm-wrong-mfa")
+	enableMFAForUser(t, ts, owner.ID)
+
+	w := ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{
+		keyPassword: owner.Password, "mfa_code": "rejected-code",
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.JSONEq(t, `{"error":"`+stepup.ErrMsgInvalidMFACode+`"}`, w.Body.String())
+	assertOwnershipTransferPending(t, ts, serverID, owner.ID)
+}
