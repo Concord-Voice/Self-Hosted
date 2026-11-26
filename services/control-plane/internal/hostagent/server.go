@@ -68,7 +68,7 @@ type Server struct {
 	managedBy       string // an appliance that owns writes; see SetManagedBy
 	writesDisabled  bool   // writes are off because audit or trust is missing
 	denials         denialLimiter
-	alerts          *Alerter // nil when no alert destination is configured
+	alerts          *Alerter // nil when no alert destination is configured; writes are then refused
 	// writeGrace is how long past an action's budget a response may take to
 	// write before the connection is cut.
 	writeGrace time.Duration
@@ -115,6 +115,7 @@ func (s *Server) SetAudit(audit *Audit) error {
 	s.audit = audit
 	if s.writes != nil {
 		s.writes.audit = audit
+		s.writes.admission = backupAdmissionPath(audit)
 	}
 	return nil
 }
@@ -267,6 +268,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.writes == nil && s.writesDisabled && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {
 		refuse(w, http.StatusServiceUnavailable, "writes_disabled")
+		return
+	}
+	// With one key for login and host actions, the out-of-band alert is the
+	// only detection control for a control plane that spends a harvested
+	// login tap on a host action: no write, and no key tap for one, without it.
+	if s.writes != nil && s.alerts == nil && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {
+		refuse(w, http.StatusServiceUnavailable, "alerts_not_configured")
 		return
 	}
 	if s.handleWriteRoute(w, r) {

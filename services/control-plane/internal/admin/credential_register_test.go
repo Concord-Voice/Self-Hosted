@@ -22,10 +22,10 @@ import (
 )
 
 const (
-	credentialsPath         = "/admin/api/v1/credentials"
-	credentialStepUpPath    = "/admin/api/v1/credentials/stepup"
-	credentialRegBeginPath  = "/admin/api/v1/credentials/register/begin"
-	credentialRegFinishPath = "/admin/api/v1/credentials/register/finish"
+	credentialsPath         = "/admin/api/v1/credentials"                 //nolint:gosec // G101 false positive: URL path, not a credential
+	credentialStepUpPath    = "/admin/api/v1/credentials/stepup"          //nolint:gosec // G101 false positive: URL path, not a credential
+	credentialRegBeginPath  = "/admin/api/v1/credentials/register/begin"  //nolint:gosec // G101 false positive: URL path, not a credential
+	credentialRegFinishPath = "/admin/api/v1/credentials/register/finish" //nolint:gosec // G101 false positive: URL path, not a credential
 	credentialTestIP        = "192.0.2.10"
 )
 

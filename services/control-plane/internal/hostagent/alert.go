@@ -40,8 +40,8 @@ const (
 	denialAlertQueueSize = 4
 )
 
-// ErrAlertNotConfigured means no alert file exists: actions are audited but
-// not alerted out of band.
+// ErrAlertNotConfigured means no alert file exists. Without an alert
+// destination the agent refuses every write (alerts_not_configured).
 var ErrAlertNotConfigured = errors.New("host-agent alerts not configured")
 
 // AlertEvent is what one notification says. Like AuditEvent it holds only

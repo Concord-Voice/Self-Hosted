@@ -27,7 +27,8 @@ import (
 
 const (
 	maxAuthorizerFileBytes = 1 << 20
-	// shortcut: retained revoked IDs count toward this 64-record lifetime cap.
+	// maxAuthorizers caps active records only. Revoked records stay for their
+	// counters; the file size limit bounds them (encodeAuthorizerFile).
 	maxAuthorizers        = 64
 	maxAuthorizerIDBytes  = 1024
 	maxAuthorizerKeyBytes = 4096
@@ -231,7 +232,13 @@ func decodeAuthorizerField(encoded string, maxBytes int) ([]byte, error) {
 }
 
 func validateAuthorizerFile(doc authorizerFile) error {
-	if doc.Schema != 1 || doc.Generation == 0 || doc.UpdatedAt.IsZero() || !validAuthorizerRPID(doc.RPID) || len(doc.Origins) == 0 || len(doc.Origins) > 8 || len(doc.Authorizers) > maxAuthorizers {
+	active := 0
+	for _, entry := range doc.Authorizers {
+		if !entry.Revoked {
+			active++
+		}
+	}
+	if doc.Schema != 1 || doc.Generation == 0 || doc.UpdatedAt.IsZero() || !validAuthorizerRPID(doc.RPID) || len(doc.Origins) == 0 || len(doc.Origins) > 8 || active > maxAuthorizers {
 		return errors.New("invalid authorizer schema")
 	}
 	seenOrigins := make(map[string]bool, len(doc.Origins))
@@ -389,11 +396,27 @@ func (s *AuthorizerStore) mutate(fn func(*authorizerFile) (bool, error)) error {
 	if err := validateAuthorizerFile(doc); err != nil {
 		return err
 	}
-	data, err := json.Marshal(doc)
-	if err != nil || len(data) > maxAuthorizerFileBytes {
-		return errors.New("encode authorizer file")
+	data, err := encodeAuthorizerFile(&doc)
+	if err != nil {
+		return err
 	}
 	return s.writeAtomic(data)
+}
+
+// encodeAuthorizerFile refuses a snapshot past the file size limit. Revoked
+// records are never dropped to make room: a revoked record keeps its root
+// counter moving at login (clone detection) and stops a re-import from
+// bringing back an old sign count. Reaching the limit needs thousands of
+// records; an operator clears it as root by removing revoked records by hand.
+func encodeAuthorizerFile(doc *authorizerFile) ([]byte, error) {
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return nil, errors.New("encode authorizer file")
+	}
+	if len(data) > maxAuthorizerFileBytes {
+		return nil, errors.New("authorizer file size limit reached: remove revoked records as root")
+	}
+	return data, nil
 }
 
 // AdvanceCounter refuses stale counters and revoked credentials, and writes a

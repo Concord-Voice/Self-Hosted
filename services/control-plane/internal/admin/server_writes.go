@@ -47,7 +47,7 @@ var agentRefusals = map[string]bool{
 	"appliance_managed": true, "backup_rate_limited": true,
 	"authorization_denied": true, "authorizer_unavailable": true,
 	"peer_forbidden": true, "authorization_busy": true, "invalid_authorization": true,
-	"writes_disabled":          true,
+	"writes_disabled": true, "alerts_not_configured": true,
 	"update_downgrade_refused": true, "running_version_unknown": true,
 }
 

@@ -274,6 +274,7 @@ func TestAuthorizationBeginRouteIsPeerGatedAndReturnsNoActionAuthority(t *testin
 	marker := filepath.Join(t.TempDir(), "write-in-progress")
 	server.EnableWrites(runner, t.TempDir(), marker)
 	require.NoError(t, server.SetAuthorizationStore(store))
+	server.SetAlerter(testAlerter())
 	response := post(t, server, "/v1/authorizations", `{"admin_id":"`+adminID+`","action":"start","arguments":{}}`)
 	require.Equal(t, http.StatusOK, response.Code)
 	var body struct {

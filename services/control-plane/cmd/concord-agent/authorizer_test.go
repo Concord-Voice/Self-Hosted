@@ -366,3 +366,9 @@ func TestAuthorizerImportTrustsEveryExportedCredential(t *testing.T) {
 		t.Fatal("usage still documents the removed purpose split")
 	}
 }
+
+func TestAuthorizerUsageDocumentsRevokeAllowMissing(t *testing.T) {
+	if !strings.Contains(authorizerUsage, "revoke --admin-id <uuid> [--allow-missing]") {
+		t.Fatalf("revoke usage omits --allow-missing:\n%s", authorizerUsage)
+	}
+}

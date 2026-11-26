@@ -27,8 +27,10 @@ const (
          authorizes root actions, on one root counter
          --reinstate restores a credential that was revoked; without it an
          export holding a revoked credential is refused
-  revoke --admin-id <uuid>
-         exits non-zero when the admin has no active credential to revoke`
+  revoke --admin-id <uuid> [--allow-missing]
+         an admin already revoked exits 0; one the store never held exits
+         non-zero unless --allow-missing, which only an operator who has
+         confirmed the ID should pass`
 )
 
 type authorizerStore interface {

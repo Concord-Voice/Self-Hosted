@@ -35,7 +35,7 @@ func TestConfigureAlertsWarnsWhenNoDestinationExists(t *testing.T) {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	configureAlerts(context.Background(), hostagent.NewServer(nil))
-	if !strings.Contains(logs.String(), "host actions are not alerted out of band") || strings.Count(logs.String(), "\n") != 1 {
+	if !strings.Contains(logs.String(), "host writes are refused until an out-of-band alert destination is configured") || strings.Count(logs.String(), "\n") != 1 {
 		t.Fatalf("want one startup warning, got %q", logs.String())
 	}
 }

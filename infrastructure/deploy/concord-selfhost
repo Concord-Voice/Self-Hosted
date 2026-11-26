@@ -135,19 +135,36 @@ no_host_agent_installed() {
     && ! getent group concord-agent >/dev/null 2>&1
 }
 
+# stdin_is_terminal — the reset's confirmation mode; a function so tests can
+# drive the interactive branch.
+stdin_is_terminal() { [[ -t 0 ]]; }
+
 verb_admin() {
-  if [[ $# -ne 3 || "$1" != reset-enrollment || "$2" != --username || -z "$3" ]]; then
-    echo 'concord-selfhost: expected admin reset-enrollment --username <handle>' >&2
+  local uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  if [[ ($# -ne 3 && $# -ne 5) || "$1" != reset-enrollment || "$2" != --username || -z "$3" ]] \
+    || [[ $# -eq 5 && ("$4" != --admin-id || ! "$5" =~ $uuid_re) ]]; then
+    echo 'concord-selfhost: expected admin reset-enrollment --username <handle> [--admin-id <uuid>]' >&2
     return 1
   fi
   require_root || return 1
-  local username="$3" admin_id agent_bin
+  local username="$3" expected_id="${5:-}" interactive=0 admin_id agent_bin
+  stdin_is_terminal && interactive=1
+  # Without a terminal nobody can confirm the account below, so the caller
+  # must name the admin ID it expects and the lookup must agree.
+  if (( ! interactive )) && [[ -z "$expected_id" ]]; then
+    echo 'concord-selfhost: without a terminal, pass --admin-id <uuid> as shown by concord-agent authorizer list; enrollment unchanged' >&2
+    return 1
+  fi
   if ! admin_id="$(compose exec -T control-plane ./main admin lookup-id --username "$username")"; then
     echo 'concord-selfhost: admin ID lookup failed; enrollment unchanged' >&2
     return 1
   fi
-  if [[ ! "$admin_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  if [[ ! "$admin_id" =~ $uuid_re ]]; then
     echo 'concord-selfhost: admin ID lookup returned an invalid UUID; enrollment unchanged' >&2
+    return 1
+  fi
+  if [[ -n "$expected_id" && "$admin_id" != "$expected_id" ]]; then
+    echo "concord-selfhost: '${username}' resolves to admin ${admin_id}, not --admin-id ${expected_id}; enrollment unchanged" >&2
     return 1
   fi
   if no_host_agent_installed; then
@@ -163,7 +180,7 @@ verb_admin() {
       return 1
     }
     local allow_missing=()
-    if [[ -t 0 ]]; then
+    if (( interactive )); then
       local answer
       read -r -p "Type the username to confirm this is the account being reset: " answer
       if [[ "$answer" != "$username" ]]; then
@@ -174,7 +191,7 @@ verb_admin() {
       allow_missing=(--allow-missing)
     fi
     # Without a terminal confirmation the agent exits non-zero when that admin
-    # had no credential to revoke, so a wrong or unknown ID cannot silently pass.
+    # had no credential to revoke, so an unknown ID cannot silently pass.
     if ! "$agent_bin" authorizer revoke ${allow_missing[@]+"${allow_missing[@]}"} --admin-id "$admin_id"; then
       echo 'concord-selfhost: Host Agent revocation failed or revoked nothing; enrollment unchanged' >&2
       return 1
@@ -259,10 +276,11 @@ Verbs:
                if the authority does not stay up, keep it and fix the cause.
                --rotate-tls also gives the authority a new TLS key, listed
                beside the old one, which the next renew drops
-  admin reset-enrollment --username HANDLE
+  admin reset-enrollment --username HANDLE [--admin-id UUID]
                as root: resolve the admin ID, revoke its Host Agent authorizer,
                then reset its enrollment in the control plane; any failure
-               before reset leaves enrollment unchanged
+               before reset leaves enrollment unchanged. Without a terminal,
+               --admin-id is required and must match the resolved ID
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.

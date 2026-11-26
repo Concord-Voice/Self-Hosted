@@ -42,11 +42,12 @@ const (
 	// writeMarkerFile exists while a write action runs; the package scripts
 	// read it so an upgrade does not restart the agent mid-restore.
 	writeMarkerFile = "write-in-progress"
-	// backupAdmissionFile survives agent restarts so backup admission remains
-	// rate limited across processes. It shares the dedicated socket directory.
+	// backupAdmissionFile is where earlier releases kept the backup admission
+	// state. It now lives beside the host-agent audit, which survives a reboot;
+	// a copy left here by an upgrade is tolerated and no longer read.
 	backupAdmissionFile = "backup-last-admitted"
-	// backupAdmissionTempPrefix is the CreateTemp prefix hostagent uses while
-	// publishing backupAdmissionFile; a crash can leave one behind.
+	// backupAdmissionTempPrefix is the CreateTemp prefix earlier releases used
+	// while publishing backupAdmissionFile here; a crash can leave one behind.
 	backupAdmissionTempPrefix = ".backup-admission-"
 	// setupMaxConns bounds the TLS connections a LAN client can hold open.
 	setupMaxConns          = 16
@@ -158,18 +159,20 @@ func run() int {
 	return 0
 }
 
-// configureAlerts installs the out-of-band alert destination. Alerts are
-// best-effort detection: a missing or unsafe alert file never stops the agent
-// or its writes, it is reported once here.
+// configureAlerts installs the out-of-band alert destination. The alert is the
+// only detection control for a control plane that spends a harvested login tap
+// on a host action, so a missing, unsafe or invalid alert file leaves no
+// alerter and the agent refuses every write with alerts_not_configured; reads
+// and login keep working. It is reported once here.
 func configureAlerts(ctx context.Context, agent *hostagent.Server) {
 	alerts, err := hostagent.LoadAlerter(ctx)
 	switch {
 	case errors.Is(err, hostagent.ErrAlertNotConfigured):
-		log.Printf("concord-agent: warning: no %s; host actions are not alerted out of band", hostagent.AlertConfigPath)
+		log.Printf("concord-agent: warning: no %s; host writes are refused until an out-of-band alert destination is configured", hostagent.AlertConfigPath)
 		return
 	case err != nil:
 		// The loader's errors are fixed strings; the URL never reaches them.
-		log.Printf("concord-agent: warning: alert destination unavailable; host actions are not alerted out of band: %v", err)
+		log.Printf("concord-agent: warning: alert destination unavailable; host writes are refused: %v", err)
 		return
 	}
 	agent.SetAlerter(alerts)

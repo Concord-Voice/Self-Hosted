@@ -45,14 +45,14 @@ import (
 const (
 	// actionAddCredential is the step-up action that authorises one
 	// registration begin.
-	actionAddCredential = "add_credential"
+	actionAddCredential = "add_credential" //nolint:gosec // G101 false positive: step-up action name, not a credential
 	// credentialRegisterPrefix keys a pending registration challenge.
-	credentialRegisterPrefix = "admin_credential_register:"
+	credentialRegisterPrefix = "admin_credential_register:" //nolint:gosec // G101 false positive: Redis key prefix, not a credential
 	// maxCredentialRegisterBody bounds both bodies: one assertion or one
 	// attestation and a short name.
 	maxCredentialRegisterBody = 64 << 10
 	// errCodeCredentialLimit is the 409 body when the admin holds the cap.
-	errCodeCredentialLimit = "credential_limit_reached"
+	errCodeCredentialLimit = "credential_limit_reached" //nolint:gosec // G101 false positive: error code, not a credential
 )
 
 // credentialRegistration is the value stored under a registration handle.

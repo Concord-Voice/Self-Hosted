@@ -178,6 +178,8 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 		{http.StatusConflict, `{"error":"security_log_boundary_missing"}`, http.StatusConflict, "security_log_boundary_missing"},
 		{http.StatusConflict, `{"error":"update_downgrade_refused"}`, http.StatusConflict, "update_downgrade_refused"},
 		{http.StatusConflict, `{"error":"running_version_unknown"}`, http.StatusConflict, "running_version_unknown"},
+		{http.StatusServiceUnavailable, `{"error":"writes_disabled"}`, http.StatusServiceUnavailable, "writes_disabled"},
+		{http.StatusServiceUnavailable, `{"error":"alerts_not_configured"}`, http.StatusServiceUnavailable, "alerts_not_configured"},
 		{http.StatusConflict, `{"appliance":"truenas","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
 		{http.StatusConflict, `{"appliance":"<script>","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
 		{http.StatusConflict, `{"error":"<script>"}`, http.StatusBadGateway, "agent_error"},
@@ -348,7 +350,8 @@ func TestServerStepUpBeginPassesAgentRefusalsThrough(t *testing.T) {
 		{http.StatusConflict, "untrusted_backups", AuditFailure},
 		{http.StatusBadRequest, "invalid_authorization", AuditFailure},
 		{http.StatusTooManyRequests, "authorization_busy", AuditFailure},
-		{http.StatusForbidden, "writes_disabled", AuditFailure},
+		{http.StatusServiceUnavailable, "writes_disabled", AuditFailure},
+		{http.StatusServiceUnavailable, "alerts_not_configured", AuditFailure},
 		{http.StatusForbidden, "authorization_denied", AuditDenied},
 		{http.StatusServiceUnavailable, "authorizer_unavailable", AuditFailure},
 		{http.StatusTooManyRequests, "backup_rate_limited", AuditFailure},
@@ -359,7 +362,7 @@ func TestServerStepUpBeginPassesAgentRefusalsThrough(t *testing.T) {
 			sock, calls := recordingAgent(t, tc.status, `{"error":"`+tc.code+`"}`)
 			audit := &fakeAudit{}
 			rec := send(writeEngine(sock, audit), "/server/stepup", `{"action":"backup"}`)
-			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), `"error":"`+tc.code+`"`) {
+			if rec.Code != tc.status || strings.TrimSpace(rec.Body.String()) != `{"error":"`+tc.code+`"}` {
 				t.Fatalf("got %d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.code)
 			}
 			if strings.Contains(rec.Body.String(), "stepup_failed") || strings.Contains(rec.Body.String(), "stepup_unavailable") {

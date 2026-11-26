@@ -138,15 +138,8 @@ func (s *AuthorizationStore) Begin(adminID, action string, req actionRequest) (s
 	return handle, options, nil
 }
 
-// Consume removes the handle before checking the assertion. Failed, expired,
+// consume removes the handle before checking the assertion. Failed, expired,
 // wrong-action and replayed proofs therefore never regain authority.
-//
-//nolint:revive // The closed job parser's actionRequest is intentionally package-private.
-func (s *AuthorizationStore) Consume(handle, action string, assertion []byte) (actionRequest, error) {
-	req, _, err := s.consume(handle, action, assertion)
-	return req, err
-}
-
 func (s *AuthorizationStore) consume(handle, action string, assertion []byte) (actionRequest, string, error) {
 	if s == nil || s.authorizers == nil || s.webauthn == nil {
 		return actionRequest{}, "", ErrAuthorizerUnavailable

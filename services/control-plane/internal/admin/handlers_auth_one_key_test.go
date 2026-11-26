@@ -110,7 +110,7 @@ func TestWebAuthnLogin_EveryKeyLogsInThroughRootCounter(t *testing.T) {
 			assert.Equal(t, adminID, got[0].AdminID)
 			parsed, err := protocol.ParseCredentialRequestResponseBytes(got[0].Assertion)
 			require.NoError(t, err)
-			assert.Equal(t, key.credID, []byte(parsed.RawID), "the agent verifies the key that signed")
+			assert.Equal(t, key.credID, parsed.RawID, "the agent verifies the key that signed")
 		})
 	}
 }
