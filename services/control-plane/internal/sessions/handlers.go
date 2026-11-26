@@ -564,42 +564,64 @@ func (h *Handler) authenticateForRevokeWithMFA(ctx context.Context, c *gin.Conte
 		return true, false
 	}
 
-	if hasMFA {
-		if mfaCode == "" {
-			methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
-			if err != nil {
-				h.log.Error("Failed to read MFA methods during session revoke", "error", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-				return true, false
-			}
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":   "auth_required",
-				"message": "Authentication required to " + action.desc,
-				"methods": methods,
-			})
-			return true, false
-		}
-		if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), uid, mfaCode); e != nil {
-			if e.Cause != nil {
-				h.log.Error("Session-revoke MFA budget unavailable", "error", e.Cause)
-			}
-			e.Write(c)
-			return true, false
-		}
-		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
-		if mfaErr != nil {
-			h.log.Error("MFA verification error during session revoke", "error", mfaErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-			return true, false
-		}
-		if !valid {
-			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
-			return true, false
-		}
-		mfaVerified = true
+	if !hasMFA {
+		return false, false
 	}
-	return false, mfaVerified
+	if h.verifyRevokeMFA(ctx, c, uid, mfaCode, action) {
+		return true, false
+	}
+	return false, true
+}
+
+// verifyRevokeMFA is the MFA leg of authenticateForRevokeWithMFA, for an
+// account that has an inline factor. It charges the shared budget, verifies
+// the code and refunds a busy check. It returns true once it has written a
+// refusal.
+func (h *Handler) verifyRevokeMFA(ctx context.Context, c *gin.Context, uid, mfaCode string, action revokeAction) (blocked bool) {
+	if mfaCode == "" {
+		methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+		if err != nil {
+			h.log.Error("Failed to read MFA methods during session revoke", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+			return true
+		}
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "auth_required",
+			"message": "Authentication required to " + action.desc,
+			"methods": methods,
+		})
+		return true
+	}
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), uid, mfaCode)
+	if e != nil {
+		if e.Cause != nil {
+			h.log.Error("Session-revoke MFA budget unavailable", "error", e.Cause)
+		}
+		e.Write(c)
+		return true
+	}
+	valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
+	if mfaErr != nil {
+		// A busy backup-code check judged nothing: give the attempt back
+		// and answer a retryable 503. No transaction is open here.
+		if stepup.IsBusy(mfaErr) {
+			if err := stepup.RefundIfBusy(ctx, mfaErr, charged); err != nil {
+				h.log.Warn("Could not refund a busy session-revoke MFA attempt", "error", err)
+			}
+			stepup.BusyError(mfaErr).Write(c)
+			return true
+		}
+		h.log.Error("MFA verification error during session revoke", "error", mfaErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+		return true
+	}
+	if !valid {
+		route := action.route
+		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
+		return true
+	}
+	return false
 }
 
 // clearRevokeMFABudget resets the budget after a committed revocation, on a

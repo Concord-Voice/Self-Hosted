@@ -206,7 +206,7 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgAuthenticationRequired})
 		return
 	}
-	attempt, stepErr := h.account.PrepareAccountErasure(c.Request.Context(), userID, request.Password, request.MFACode)
+	attempt, mfaCharge, stepErr := h.account.PrepareAccountErasure(c.Request.Context(), userID, request.Password, request.MFACode)
 	if stepErr != nil {
 		stepErr.Write(c)
 		return
@@ -216,6 +216,7 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 		Password:                request.Password,
 		MFACode:                 request.MFACode,
 		PasswordAttempt:         attempt,
+		MFACharge:               mfaCharge,
 		ConfirmedOwnedServerIDs: request.ConfirmedOwnedServerIDs,
 	}
 	verifiedEmail, err := h.account.EmailVerified(c.Request.Context(), userID)

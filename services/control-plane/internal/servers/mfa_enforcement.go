@@ -266,8 +266,10 @@ func (h *Handler) PutMFAEnforcement(c *gin.Context) {
 	enabled := *req.Enabled
 
 	budget := newMFAEnforcementBudget(h.redis)
+	var charged stepup.Charged
 	if !enabled && req.MFACode != "" {
-		if e := budget.Consume(ctx, userID); e != nil {
+		var e *stepup.Error
+		if charged, e = budget.ConsumeAttempt(ctx, userID); e != nil {
 			if e.Cause != nil {
 				h.log.Error("MFA enforcement step-up budget unavailable", "error", e.Cause)
 			}
@@ -278,6 +280,9 @@ func (h *Handler) PutMFAEnforcement(c *gin.Context) {
 
 	changed, err := h.applyMFAEnforcement(ctx, c, serverID, userID, enabled, req.MFACode)
 	if err != nil {
+		// applyMFAEnforcement has rolled its transaction back by now. Only a
+		// code-bearing OFF was charged, and only it reaches the verifier.
+		h.refundBusyCharge(ctx, err, charged)
 		h.respondMFAEnforcementError(c, err)
 		return
 	}

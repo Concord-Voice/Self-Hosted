@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/messages"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
@@ -52,6 +54,17 @@ const softLockValidCode = "314159"
 type softLockVerifier struct {
 	mu       sync.Mutex
 	purposes []stepup.Purpose
+	// err, when set, is returned in place of a verdict: a busy backup-code
+	// check (backuphash.ErrBusy) judges no code.
+	err error
+}
+
+// setErr sets the error every later VerifyCodeTx returns; nil restores
+// verdicts.
+func (v *softLockVerifier) setErr(err error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.err = err
 }
 
 func (v *softLockVerifier) GetEnabledMethods(context.Context, string) ([]string, error) {
@@ -61,7 +74,11 @@ func (v *softLockVerifier) GetEnabledMethods(context.Context, string) ([]string,
 func (v *softLockVerifier) VerifyCodeTx(ctx context.Context, tx *sql.Tx, userID string, purpose stepup.Purpose, code string) (bool, error) {
 	v.mu.Lock()
 	v.purposes = append(v.purposes, purpose)
+	err := v.err
 	v.mu.Unlock()
+	if err != nil {
+		return false, err
+	}
 	if tx == nil || code != softLockValidCode {
 		return false, nil
 	}
@@ -345,4 +362,38 @@ func (s *softLockHarness) requireNoPopulationField(t *testing.T, w softLockWorld
 			require.NotContains(t, line, forbidden, "C7: a soft-lock log line carried %q", forbidden)
 		}
 	}
+}
+
+// errVerifyBusy is what a verifier returns when backup-code hashing had no
+// free slot: no code was judged.
+var errVerifyBusy = fmt.Errorf("verify: %w", backuphash.ErrBusy)
+
+// requireBusyNeverCharges runs the busy-verification protocol against one
+// route. send makes one request carrying code. Starting from a budget already
+// charged twice: a busy check answers 503 with Retry-After: 1 and leaves the
+// budget at 2, and BudgetLimit+1 busy requests in a row never reach the 429;
+// then a wrong code is charged exactly once; then the correct code succeeds.
+func (s *softLockHarness) requireBusyNeverCharges(t *testing.T, userID string, send func(code string) *httptest.ResponseRecorder) {
+	t.Helper()
+	key := budgetKey(userID)
+	require.NoError(t, s.mr.Set(key, "2"))
+
+	s.verifier.setErr(errVerifyBusy)
+	for i := range stepup.BudgetLimit + 1 {
+		w := send(softLockValidCode)
+		require.Equalf(t, http.StatusServiceUnavailable, w.Code, "busy attempt %d: %s", i+1, w.Body.String())
+		require.Equal(t, "1", w.Header().Get("Retry-After"), "a busy check asks for a retry in one second")
+		body := decode(t, w)
+		require.Equal(t, true, body["verification_busy"], body)
+		require.Equal(t, stepup.ErrMsgVerificationBusy, body["error"])
+		require.Equalf(t, "2", s.counter(key), "busy attempt %d must not cost an attempt", i+1)
+	}
+
+	s.verifier.setErr(nil)
+	wrong := send("000000")
+	require.Equal(t, http.StatusForbidden, wrong.Code, wrong.Body.String())
+	require.Equal(t, "3", s.counter(key), "a wrong code keeps its charge")
+
+	ok := send(softLockValidCode)
+	require.Equal(t, http.StatusOK, ok.Code, ok.Body.String())
 }

@@ -16,6 +16,7 @@ import (
 	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
@@ -631,6 +632,76 @@ func TestAuthenticateForRevoke_VerifierResultControlsRevocation(t *testing.T) {
 	}
 }
 
+// busyRevokeMFAVerifier answers busy while busy is set, then judges codes:
+// acceptCode verifies, anything else is wrong.
+type busyRevokeMFAVerifier struct {
+	busy       bool
+	acceptCode string
+}
+
+func (*busyRevokeMFAVerifier) IsEnabled(context.Context, string) bool { return true }
+func (v *busyRevokeMFAVerifier) VerifyCode(_ context.Context, _ string, _ stepup.Purpose, code string) (bool, error) {
+	if v.busy {
+		return false, fmt.Errorf("verify: %w", backuphash.ErrBusy)
+	}
+	return code == v.acceptCode, nil
+}
+func (*busyRevokeMFAVerifier) GetEnabledMethods(context.Context, string) ([]string, error) {
+	return []string{"totp"}, nil
+}
+
+// A busy backup-code check judged nothing, so it answers 503 with
+// Retry-After: 1 and gives the shared budget its attempt back: repeated busy
+// answers never reach 429, while a wrong code still costs exactly one.
+func TestAuthenticateForRevoke_BusyVerifierRefundsSharedBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	require.NoError(t, err)
+	db := sql.OpenDB(execConnector{passwordHash: passwordHash})
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	rdb := redis.NewClient(&redis.Options{Addr: miniredis.RunT(t).Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	verifier := &busyRevokeMFAVerifier{busy: true, acceptCode: "123456"}
+	h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, verifier)
+	key := stepup.DangerousActionBudget(rdb).Key(privacyUserID)
+	budget := func() int {
+		n, err := rdb.Get(context.Background(), key).Int()
+		if errors.Is(err, redis.Nil) {
+			return 0
+		}
+		require.NoError(t, err)
+		return n
+	}
+	request := func(code string) (*httptest.ResponseRecorder, bool, bool) {
+		response := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(response)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+		blocked, verified := h.authenticateForRevokeWithMFA(context.Background(), c, privacyUserID, privacyPassword, code, revokeAllSessionsAction)
+		return response, blocked, verified
+	}
+
+	for i := 0; i <= stepup.BudgetLimit; i++ {
+		before := budget()
+		response, blocked, verified := request("BACKUP01")
+		require.True(t, blocked)
+		require.False(t, verified)
+		require.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
+		require.Equal(t, "1", response.Header().Get("Retry-After"))
+		require.JSONEq(t, `{"error":"Verification is busy. Try again.","verification_busy":true}`, response.Body.String())
+		require.Equal(t, before, budget(), "a busy check must not cost an attempt")
+	}
+
+	verifier.busy = false
+	response, blocked, _ := request("000000")
+	require.True(t, blocked)
+	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
+	require.Equal(t, 1, budget(), "a wrong code costs exactly one attempt")
+
+	response, blocked, verified := request("123456")
+	require.False(t, blocked, response.Body.String())
+	require.True(t, verified)
+}
+
 func TestUpdateRevocationMode_ValidMFAClearsSharedBudget(t *testing.T) {
 	rig := newSecurityEventFamilyRig(t)
 	key := stepup.DangerousActionBudget(rig.redis).Key(rig.user)
@@ -651,14 +722,10 @@ func (revokeBudgetIncrFaultHook) DialHook(next redis.DialHook) redis.DialHook { 
 
 func (h revokeBudgetIncrFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == "incr" {
-			if args := cmd.Args(); len(args) >= 2 {
-				if key, ok := args[1].(string); ok && key == h.key {
-					err := errors.New("forced session MFA budget failure")
-					cmd.SetErr(err)
-					return err
-				}
-			}
+		if stepup.ChargeCommandKey(cmd) == h.key {
+			err := errors.New("forced session MFA budget failure")
+			cmd.SetErr(err)
+			return err
 		}
 		return next(ctx, cmd)
 	}

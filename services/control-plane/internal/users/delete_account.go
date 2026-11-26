@@ -55,10 +55,13 @@ func (e *ErrErasureOwnedServerSetDrifted) Error() string {
 // handler charges MFA and reserves PasswordAttempt before opening the service
 // transaction; this request carries that admitted work to its transaction owner.
 type AccountErasureRequest struct {
-	Actor                   loginfamily.AccessIdentity
-	Password                string
-	MFACode                 string
-	PasswordAttempt         *stepup.PasswordAttempt
+	Actor           loginfamily.AccessIdentity
+	Password        string
+	MFACode         string
+	PasswordAttempt *stepup.PasswordAttempt
+	// MFACharge is the shared budget charge PrepareAccountErasure took, so a
+	// busy backup-code check can give it back once the transaction has ended.
+	MFACharge               stepup.Charged
 	ConfirmedOwnedServerIDs []uuid.UUID
 	// testBypassProof is only set by DeleteAccountForTest in a _test.go file,
 	// preserving legacy data-cleanup test coverage without a proofless exported
@@ -85,7 +88,7 @@ type erasureCandidateQuerier interface {
 // Declared here so privacy can import it without pulling the concrete
 // service (and its database handle) into the handler's test surface.
 type AccountDeleter interface {
-	PrepareAccountErasure(ctx context.Context, userID, password, mfaCode string) (*stepup.PasswordAttempt, *stepup.Error)
+	PrepareAccountErasure(ctx context.Context, userID, password, mfaCode string) (*stepup.PasswordAttempt, stepup.Charged, *stepup.Error)
 	EmailVerified(ctx context.Context, userID string) (bool, error)
 	EmailErasureConfirmationBinding(ctx context.Context, request AccountErasureRequest) (EmailErasureConfirmation, error)
 	PrepareEmailErasureConfirmation(ctx context.Context, request AccountErasureRequest) (EmailErasureConfirmation, error)
@@ -279,11 +282,22 @@ func (s *AccountService) SetMFAVerifier(verifier stepup.MFATxCodeVerifier) { s.m
 // transaction: shared MFA attempt charge and password-lockout reservation.
 func (s *AccountService) PrepareAccountErasure(
 	ctx context.Context, userID, password, mfaCode string,
-) (*stepup.PasswordAttempt, *stepup.Error) {
-	if err := stepup.Charge(ctx, stepup.DangerousActionBudget(s.redis), userID, mfaCode); err != nil {
-		return nil, err
+) (*stepup.PasswordAttempt, stepup.Charged, *stepup.Error) {
+	charged, err := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(s.redis), userID, mfaCode)
+	if err != nil {
+		return nil, stepup.Charged{}, err
 	}
-	return stepup.ReserveUserPasswordAttempt(ctx, s.db, s.redis, userID, password)
+	attempt, err := stepup.ReserveUserPasswordAttempt(ctx, s.db, s.redis, userID, password)
+	return attempt, charged, err
+}
+
+// refundBusyErasure gives back the MFA charge when err is a busy backup-code
+// check. Callers run it only after the erasure transaction has ended, so its
+// Redis call holds no lock.
+func (s *AccountService) refundBusyErasure(ctx context.Context, err error, charged stepup.Charged) {
+	if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil && s.log != nil {
+		s.log.Warn("Could not refund a busy account-erasure MFA attempt", "error", rErr)
+	}
 }
 
 // EmailVerified is an advisory branch selector. The authoritative unverified
@@ -332,6 +346,8 @@ func (s *AccountService) PrepareEmailErasureConfirmation(
 		return EmailErasureConfirmation{}, errErasureActorMismatch()
 	}
 	defer s.settleErasurePasswordAttempt(request.PasswordAttempt, "Could not settle account-erasure email-confirmation password attempt")
+	// Deferred before the rollback below, so it runs after the transaction ends.
+	defer func() { s.refundBusyErasure(ctx, returnErr, request.MFACharge) }()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return EmailErasureConfirmation{}, fmt.Errorf("prepare erasure email confirmation: begin tx: %w", err)
@@ -458,6 +474,7 @@ func (s *AccountService) DeleteAccount(ctx context.Context, request AccountErasu
 	committed, operationErr := s.deleteAccountWithActivityCleanup(
 		ctx, request, creatorID, candidates, &survivorSubjects,
 	)
+	s.refundBusyErasure(ctx, operationErr, request.MFACharge)
 	s.finishCommittedErasure(ctx, creatorID.String(), request.MFACode, committed)
 	return operationErr
 }

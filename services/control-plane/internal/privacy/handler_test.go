@@ -49,11 +49,11 @@ type stubAccountDeleter struct {
 
 func (s *stubAccountDeleter) PrepareAccountErasure(
 	_ context.Context, _, _, _ string,
-) (*stepup.PasswordAttempt, *stepup.Error) {
+) (*stepup.PasswordAttempt, stepup.Charged, *stepup.Error) {
 	if s.prepareErr != nil {
-		return nil, s.prepareErr
+		return nil, stepup.Charged{}, s.prepareErr
 	}
-	return &stepup.PasswordAttempt{}, nil
+	return &stepup.PasswordAttempt{}, stepup.Charged{}, nil
 }
 
 func (s *stubAccountDeleter) EmailVerified(context.Context, string) (bool, error) {

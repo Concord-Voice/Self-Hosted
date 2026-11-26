@@ -64,14 +64,21 @@ func (h *Handler) UpdateExpiration(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
 		return
 	}
-	defer func() {
+	rollback := func() {
 		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
 			h.log.Error("Failed to roll back channel expiration transaction", "error", rollbackErr)
 		}
-	}()
+	}
+	defer rollback()
 
-	outcome, ok := h.authorizeChannelExpirationTx(c, tx, channelID, serverID, userID, request.Request, confirm)
+	outcome, ok, gateErr := h.authorizeChannelExpirationTx(c, tx, channelID, serverID, userID, request.Request, confirm)
 	if !ok {
+		if gateErr != nil {
+			// A busy check is refunded only once the transaction has rolled
+			// back: the refund is a Redis call (A-2, A-9).
+			rollback()
+			h.refundChannelGateIfBusy(c.Request.Context(), gateErr, confirm)
+		}
 		return
 	}
 
@@ -152,7 +159,9 @@ func (h *Handler) resolveChannelExpirationServer(c *gin.Context, channelID strin
 
 // authorizeChannelExpirationTx takes the transaction's locks, resolves the
 // actor's authority for this mutation, and runs the dangerous-action gate. It
-// writes its own response and returns false when the caller must stop.
+// writes its own response and returns false when the caller must stop; when
+// the gate itself refused, it also returns that refusal, which the caller
+// refunds once the transaction has rolled back (refundChannelGateIfBusy).
 //
 // Order: the gate's locks (lockChannelExpirationGateTx), the channel lock,
 // the channel-scope ManageChannels check (I7), the channel-type check, then
@@ -165,43 +174,43 @@ func (h *Handler) authorizeChannelExpirationTx(
 	channelID, serverID, userID string,
 	request expiration.Request,
 	confirm channelGateConfirm,
-) (mfaenforce.Outcome, bool) {
+) (mfaenforce.Outcome, bool, error) {
 	ctx := c.Request.Context()
 	g, ok := h.lockChannelExpirationGateTx(c, tx, serverID, userID)
 	if !ok {
-		return mfaenforce.Unconfirmed, false
+		return mfaenforce.Unconfirmed, false, nil
 	}
 	locked, ok := h.lockChannelExpirationScopeTx(c, tx, channelID, serverID)
 	if !ok {
-		return mfaenforce.Unconfirmed, false
+		return mfaenforce.Unconfirmed, false, nil
 	}
 
 	permissions, err := h.resolver.ResolveChannelPermissionsTx(ctx, tx, serverID, userID, channelID)
 	if errors.Is(err, rbac.ErrNotMember) {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
-		return mfaenforce.Unconfirmed, false
+		return mfaenforce.Unconfirmed, false, nil
 	}
 	if err != nil {
 		h.log.Error("Failed to resolve channel expiration permission", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
-		return mfaenforce.Unconfirmed, false
+		return mfaenforce.Unconfirmed, false, nil
 	}
 	if !permissions.Has(rbac.PermManageChannels) {
 		// RS5 at channel scope, on tx: the check above resolved this channel.
 		h.respondChannelExpirationError(c, manageChannelsDenial(ctx, tx, serverID, channelID, userID))
-		return mfaenforce.Unconfirmed, false
+		return mfaenforce.Unconfirmed, false, nil
 	}
 	if request.Mode == "set" && locked.channelType != "text" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Expiration is only available for text channels"})
-		return mfaenforce.Unconfirmed, false
+		return mfaenforce.Unconfirmed, false, nil
 	}
 	outcome, err := h.requireChannelGate(ctx, tx, g, userID, stepup.PurposeChannelExpirationShorten, confirm,
 		expirationGateFires(locked, request))
 	if err != nil {
 		h.respondChannelExpirationError(c, err)
-		return mfaenforce.Unconfirmed, false
+		return mfaenforce.Unconfirmed, false, err
 	}
-	return outcome, true
+	return outcome, true, nil
 }
 
 // lockChannelExpirationGateTx takes the expiration transaction's server-level

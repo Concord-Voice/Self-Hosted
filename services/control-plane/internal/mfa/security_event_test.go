@@ -19,6 +19,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
@@ -695,7 +696,7 @@ func TestVerifyTOTPOrBackupEmitsDependencyEventOnVerificationFailure(t *testing.
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/mfa/verify", nil)
 
 	require.NoError(t, db.Close())
-	valid, method, responded := h.verifyTOTPOrBackup(c.Request.Context(), c, "123456", "user-fixture")
+	valid, method, responded := h.verifyTOTPOrBackup(c.Request.Context(), c, "123456", "user-fixture", stepup.Charged{})
 	require.False(t, valid)
 	require.Empty(t, method)
 	require.True(t, responded)

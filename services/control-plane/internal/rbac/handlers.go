@@ -810,6 +810,7 @@ func (h *Handler) CreateRole(c *gin.Context) {
 	}
 	shifted, outcome, err := h.createRoleTx(c.Request.Context(), userID, req, confirm, &role)
 	if err != nil {
+		h.refundRoleGateIfBusy(c.Request.Context(), err, confirm) // createRoleTx has rolled back
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
 			c.JSON(http.StatusConflict, gin.H{"error": "A role with that name already exists in this server"})
@@ -1087,6 +1088,7 @@ func (h *Handler) UpdateRole(c *gin.Context) {
 		return err
 	}
 	plan, mutation, err := h.runRoleUpdate(c.Request.Context(), txRequest, writeRole)
+	h.refundRoleGateIfBusy(c.Request.Context(), err, confirm) // the transaction has ended
 	if errors.Is(err, ErrChannelAuthorityChannelLimit) {
 		c.JSON(http.StatusConflict, gin.H{"error": errMsgChannelKeyCleanupLimit})
 		return
@@ -1439,6 +1441,7 @@ func (h *Handler) DeleteRole(c *gin.Context) {
 			return deleteErr
 		},
 	)
+	h.refundRoleGateIfBusy(c.Request.Context(), err, confirm) // the transaction has ended
 	if errors.Is(err, ErrChannelAuthorityChannelLimit) {
 		c.JSON(http.StatusConflict, gin.H{"error": errMsgChannelKeyCleanupLimit})
 		return
@@ -2405,6 +2408,7 @@ func (h *Handler) UpsertChannelOverride(c *gin.Context) {
 		}, append(principalIDs, lifecyclePrincipalIDs...)...,
 	)
 	if err != nil {
+		h.refundRoleGateIfBusy(c.Request.Context(), err, req.confirm) // the transaction has ended
 		h.respondChannelOverrideWriteError(c, req.serverID, req.channelID, state, err)
 		return
 	}
@@ -3140,6 +3144,7 @@ func (h *Handler) UpsertCategoryOverride(c *gin.Context) {
 		c.Request.Context(), authority, req, confirm, &state,
 	)
 	if err != nil {
+		h.refundRoleGateIfBusy(c.Request.Context(), err, confirm) // the transaction has ended
 		h.respondCategoryOverrideWriteError(c, err, serverID, channelIDs)
 		return
 	}

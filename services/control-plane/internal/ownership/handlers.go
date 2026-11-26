@@ -487,7 +487,8 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 	// The password lockout and MFA guess budget both make Redis calls, before
 	// the coordinator transaction takes its user/server locks. Charge MFA first:
 	// an exhausted budget must not leave an unchecked password guess reserved.
-	if stepErr := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, req.MFACode); stepErr != nil {
+	charged, stepErr := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, req.MFACode)
+	if stepErr != nil {
 		h.writeOwnershipConfirmStepUpError(c, stepErr)
 		return
 	}
@@ -507,6 +508,11 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 	if err != nil {
 		var proofErr *stepup.Error
 		if errors.As(err, &proofErr) {
+			// The coordinator transaction has ended, so a busy check's refund
+			// runs under no lock.
+			if rErr := stepup.RefundIfBusy(ctx, proofErr, charged); rErr != nil {
+				h.log.Warn("Could not refund a busy ownership confirmation attempt", "error", rErr)
+			}
 			h.writeOwnershipConfirmStepUpError(c, proofErr)
 			return
 		}
@@ -1800,7 +1806,8 @@ func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpos
 		return false, fmt.Errorf("MFA required")
 	}
 
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode)
+	if e != nil {
 		if e.Cause != nil {
 			h.log.Error("Ownership MFA budget unavailable", "error", e.Cause)
 		}
@@ -1810,6 +1817,16 @@ func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpos
 
 	valid, err := h.mfaVerifier.VerifyCode(ctx, userID, purpose, mfaCode)
 	if err != nil {
+		// A busy backup-code check judged nothing: give the attempt back and
+		// answer a retryable 503. No transaction is open here.
+		if stepup.IsBusy(err) {
+			if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil {
+				h.log.Warn("Could not refund a busy ownership MFA attempt", "error", rErr)
+			}
+			busy := stepup.BusyError(err)
+			busy.Write(c)
+			return false, busy
+		}
 		h.log.Error(errMsgFailedVerifyMFACode, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyMFACode})
 		return false, err

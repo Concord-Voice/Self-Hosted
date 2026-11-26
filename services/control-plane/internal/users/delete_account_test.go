@@ -52,7 +52,7 @@ func TestPrepareAccountErasure_ExhaustedMFABudgetDoesNotReservePassword(t *testi
 
 	require.NoError(t, ts.Redis.Set(ctx, stepup.DangerousActionBudget(ts.Redis).Key(user.ID), stepup.BudgetLimit, stepup.BudgetWindow).Err())
 	for i := 0; i < stepup.BudgetLimit; i++ {
-		attempt, stepErr := service.PrepareAccountErasure(ctx, user.ID, user.Password, "rejected-code")
+		attempt, _, stepErr := service.PrepareAccountErasure(ctx, user.ID, user.Password, "rejected-code")
 		require.Nil(t, attempt)
 		require.NotNil(t, stepErr)
 		require.Equal(t, http.StatusTooManyRequests, stepErr.Status)
@@ -283,11 +283,11 @@ func erasureRequest(
 	ctx := ts.ActorContext(context.Background(), t, user.ID)
 	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
 	require.True(t, ok)
-	attempt, stepErr := service.PrepareAccountErasure(ctx, user.ID, password, mfaCode)
+	attempt, mfaCharge, stepErr := service.PrepareAccountErasure(ctx, user.ID, password, mfaCode)
 	require.Nil(t, stepErr)
 	return ctx, users.AccountErasureRequest{
 		Actor: identity, Password: password, MFACode: mfaCode,
-		PasswordAttempt: attempt, ConfirmedOwnedServerIDs: confirmed,
+		PasswordAttempt: attempt, MFACharge: mfaCharge, ConfirmedOwnedServerIDs: confirmed,
 	}
 }
 
