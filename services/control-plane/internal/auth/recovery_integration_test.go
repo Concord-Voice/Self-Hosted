@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/api"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
@@ -481,11 +482,25 @@ func TestRecoveryResetPasswordTokenSingleUse(t *testing.T) {
 	w = ts.DoRequest("POST", pathRecoveryResetPwd, resetPayload, nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	// Second reset with same token should fail (single-use)
+	// The reset rotated the credential epoch, so the same token is now stale and
+	// is refused with the generic body before its spent marker is consulted.
 	w = ts.DoRequest("POST", pathRecoveryResetPwd, resetPayload, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 
 	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Invalid or expired recovery token", body["error"])
+
+	// The spent marker alone still refuses a token whose epoch is current, which
+	// is what serializes two resets racing past the unlocked epoch pre-check.
+	current := recoveryTokenFor(t, ts, user)
+	claims, err := mfa.ValidateChallengeToken(current, testhelpers.TestJWTSecret, mfa.PurposeRecovery)
+	require.NoError(t, err)
+	require.NoError(t, ts.Redis.Set(context.Background(), "recovery_token_used:"+claims.ID, "1", time.Minute).Err())
+	resetPayload["recovery_token"] = current
+	w = ts.DoRequest("POST", pathRecoveryResetPwd, resetPayload, nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	body = nil
 	testhelpers.ParseJSON(t, w, &body)
 	assert.Contains(t, body["error"], "already been used")
 }

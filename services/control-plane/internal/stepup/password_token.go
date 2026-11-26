@@ -223,9 +223,10 @@ func (h *PasswordTokenHandler) verifyPassword(c *gin.Context, userID, password s
 		h.emit(c, mintAccountLockedEvent)
 		c.JSON(http.StatusLocked, gin.H{"error": ErrMsgStepUpLocked, "error_code": errCodeAccountLocked})
 	case errors.Is(err, auth.ErrInvalidCredentials):
-		outcome := middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return false
+		}
 		h.emit(c, mintRefusedEvent)
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusForbidden, gin.H{"error": ErrMsgInvalidPassword})
 	default:
 		// err is deliberately not logged: a hash decode failure can embed the

@@ -61,7 +61,7 @@ func (h *Handler) AcknowledgeSignInNotice(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_cursor"})
 	case errors.Is(err, ErrNoticeCursorStale):
 		c.JSON(http.StatusConflict, gin.H{"error": "stale_cursor"})
-	case errors.Is(err, errAuditWrite):
+	case isAuditStoreError(err):
 		h.log.Error("admin sign-in notice acknowledgement not recorded", "error", err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "audit_unavailable"})
 	default:

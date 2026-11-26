@@ -3,10 +3,15 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   compileTrustedProxies,
   createAdmissionGate,
+  bucketClientIp,
   parseTrustedProxyEntry,
   resolveClientIp,
   HANDSHAKE_BURST,
   MAX_TRACKED_IPS,
+  EVICTION_SCAN_LIMIT,
+  HARD_MAX_TRACKED_IPS,
+  PROXY_FALLBACK_WARN_INTERVAL_MS,
+  PROXY_FALLBACK_BURST_MULTIPLIER,
   type AdmissionRequest,
 } from '../src/lib/admissionGate.js';
 
@@ -64,16 +69,17 @@ describe('resolveClientIp', () => {
     expect(resolveClientIp(peerlessReq({}), trust('10.0.0.9'))).toBeNull();
   });
 
-  // A trusted peer that sends invalid forwarding headers cannot nominate an
-  // arbitrary counter key. nginx normally supplies a valid address.
-  // Behaviour change (#2793 Gitar review): a TRUSTED peer with no attributable
-  // client address now fails OPEN rather than falling through to the proxy's own
-  // address. The old form put every such request in one shared bucket, so a
-  // handful of clients could trip the ceiling deployment-wide — the exact
-  // fail-shared outcome createAdmissionGate refuses when no proxy is configured.
-  it('fails OPEN when a trusted peer sends an X-Real-IP that is not an address', () => {
+  it('falls back to a trusted peer for an invalid X-Real-IP', () => {
     const r = req({ 'x-real-ip': 'not-an-ip' });
-    expect(resolveClientIp(r, trust('10.0.0.9'))).toBeNull();
+    expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('10.0.0.9');
+  });
+
+  it('treats an IPv4-compatible X-Real-IP that ipaddr.js rejects as unusable', () => {
+    expect(resolveClientIp(req({ 'x-real-ip': '::1.2.3.4' }), trust('10.0.0.9'))).toBe('10.0.0.9');
+  });
+
+  it('returns null for an unparseable untrusted peer', () => {
+    expect(resolveClientIp(req({}, '::1.2.3.4'), trust('10.0.0.8'))).toBeNull();
   });
 
   it('ignores an unparseable X-Real-IP but still honours a valid X-Forwarded-For', () => {
@@ -81,13 +87,13 @@ describe('resolveClientIp', () => {
     expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('203.0.113.7');
   });
 
-  it('fails OPEN when the X-Forwarded-For last hop is not an address', () => {
+  it('falls back to a trusted peer for an invalid X-Forwarded-For last hop', () => {
     const r = req({ 'x-forwarded-for': '203.0.113.7, not-an-ip' });
-    expect(resolveClientIp(r, trust('10.0.0.9'))).toBeNull();
+    expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('10.0.0.9');
   });
 
-  it('fails OPEN when a trusted peer forwards no client headers at all', () => {
-    expect(resolveClientIp(req({}), trust('10.0.0.9'))).toBeNull();
+  it('falls back to a trusted peer when it forwards no client headers', () => {
+    expect(resolveClientIp(req({}), trust('10.0.0.9'))).toBe('10.0.0.9');
   });
 
   // The untrusted case is unchanged and must stay that way: an untrusted peer
@@ -99,6 +105,27 @@ describe('resolveClientIp', () => {
   it('still accepts an IPv6 X-Real-IP', () => {
     const r = req({ 'x-real-ip': '2001:db8::1' });
     expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('2001:db8::1');
+  });
+});
+
+describe('bucketClientIp', () => {
+  it('uses canonical IPv4 and native IPv6 /64 buckets', () => {
+    expect(bucketClientIp('198.51.100.7')).toBe('198.51.100.7');
+    expect(bucketClientIp('::ffff:198.51.100.7')).toBe('198.51.100.7');
+    expect(bucketClientIp('2001:DB8:1:2:abcd::1')).toBe('2001:db8:1:2::');
+  });
+
+  it('collapses 256 addresses in one /64 and separates adjacent /64s', () => {
+    const buckets = new Set<string>();
+    for (let suffix = 0; suffix < 256; suffix += 1) {
+      buckets.add(bucketClientIp(`2001:db8:1:2::${suffix.toString(16)}`));
+    }
+    expect(buckets).toEqual(new Set(['2001:db8:1:2::']));
+    expect(bucketClientIp('2001:db8:1:3::1')).not.toBe('2001:db8:1:2::');
+  });
+
+  it('throws for malformed direct-helper input', () => {
+    expect(() => bucketClientIp('not-an-ip')).toThrow();
   });
 });
 
@@ -296,19 +323,37 @@ describe('createAdmissionGate', () => {
     expect(cb).toHaveBeenLastCalledWith(null, true);
   });
 
-  // DELIBERATE ASSERTION: fail-open is the specified behaviour here and nowhere
-  // else in #2032. A mis-resolved IP is an operator/topology error; failing
-  // closed on it is a total outage against a threat the rate and structural
-  // layers still bound. A future "hardening" change must argue with this test.
-  it('ALLOWS when the client IP cannot be resolved (documented fail-open)', () => {
+  it('denies a genuinely peerless request before it can enter a counter', () => {
+    const clock = makeClock();
+    const onReject = vi.fn();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'], onReject });
+    const cb = vi.fn();
+    gate(peerlessReq({}), cb);
+    expect(cb).toHaveBeenCalledWith(null, false);
+    expect(onReject).toHaveBeenCalledTimes(1);
+    expect(gate.trackedCount()).toBe(0);
+  });
+
+  it('shares one budget across addresses in the same /64', () => {
     const clock = makeClock();
     const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
     const cb = vi.fn();
-    gate(peerlessReq({}), cb);
-    expect(cb).toHaveBeenCalledWith(null, true);
-    // Falsifiability: an unresolvable address must short-circuit BEFORE the
-    // counter store, so the allow cannot be the ordinary under-ceiling allow.
-    expect(gate.trackedCount()).toBe(0);
+    for (let i = 0; i < HANDSHAKE_BURST; i += 1) {
+      gate(req({ 'x-real-ip': `2001:db8:1:2::${(i + 1).toString(16)}` }), cb);
+    }
+    gate(req({ 'x-real-ip': '2001:db8:1:2:ffff::1' }), cb);
+    expect(cb).toHaveBeenLastCalledWith(null, false);
+    expect(gate.trackedCount()).toBe(1);
+  });
+
+  it('does not throw, and does not crash the handshake, for address forms ipaddr.js rejects', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    const cb = vi.fn();
+    // node:net accepts the IPv4-compatible form; ipaddr.process throws on it.
+    expect(() => gate(req({ 'x-real-ip': '::1.2.3.4' }), cb)).not.toThrow();
+    expect(() => gate(req({}, '::1.2.3.4'), cb)).not.toThrow();
+    expect(cb).toHaveBeenCalledTimes(2);
   });
 
   // Fail INERT, not fail-shared. With no trusted proxy configured every client
@@ -316,6 +361,14 @@ describe('createAdmissionGate', () => {
   // deployment on one reconnect storm. The misconfiguration must degrade to the
   // pre-gate behaviour instead.
   describe('with no trusted proxies configured', () => {
+    it('rejects required configuration with no valid entries', () => {
+      expect(() => createAdmissionGate({ trustedProxies: [], required: true, warn: () => {} })).toThrow(
+        'Admission gate requires at least one valid trusted proxy.'
+      );
+      expect(() => createAdmissionGate({ trustedProxies: ['not-an-ip', '::/0'], required: true, warn: () => {} })).toThrow(
+        'Admission gate requires at least one valid trusted proxy.'
+      );
+    });
     it('allows unconditionally and tracks nothing', () => {
       const clock = makeClock();
       const gate = createAdmissionGate({ now: clock.now, trustedProxies: [], warn: () => {} });
@@ -375,5 +428,93 @@ describe('createAdmissionGate', () => {
     }
     expect(gate.trackedCount()).toBeLessThanOrEqual(MAX_TRACKED_IPS);
     expect(cb).toHaveBeenLastCalledWith(null, true);
+  });
+
+  it('does not evict an over-budget bucket, so cycling buckets cannot reset it', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    const cb = vi.fn();
+    const limited = { 'x-real-ip': '198.51.100.9' };
+    // The limited bucket is the OLDEST insertion, the first eviction candidate.
+    for (let i = 0; i < HANDSHAKE_BURST + 1; i += 1) gate(req(limited), cb);
+    expect(cb).toHaveBeenLastCalledWith(null, false);
+
+    for (let i = 0; i < MAX_TRACKED_IPS + 500; i += 1) {
+      gate(req({ 'x-real-ip': `203.0.${Math.floor(i / 256)}.${i % 256}` }), vi.fn());
+    }
+
+    gate(req(limited), cb);
+    expect(cb).toHaveBeenLastCalledWith(null, false);
+  });
+
+  it('keeps many over-budget buckets through eviction, even beyond one scan window', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    const limitedIps = Array.from(
+      { length: EVICTION_SCAN_LIMIT * 2 },
+      (_, i) => `198.51.${Math.floor(i / 256)}.${i % 256}`
+    );
+    for (const ip of limitedIps) {
+      for (let n = 0; n <= HANDSHAKE_BURST; n += 1) gate(req({ 'x-real-ip': ip }), vi.fn());
+    }
+    for (let i = 0; i < MAX_TRACKED_IPS + 500; i += 1) {
+      gate(req({ 'x-real-ip': `203.0.${Math.floor(i / 256)}.${i % 256}` }), vi.fn());
+    }
+    for (const ip of limitedIps) {
+      const cb = vi.fn();
+      gate(req({ 'x-real-ip': ip }), cb);
+      expect(cb).toHaveBeenLastCalledWith(null, false);
+    }
+    expect(gate.trackedCount()).toBeLessThanOrEqual(HARD_MAX_TRACKED_IPS);
+  });
+
+  it('still bounds the store when every tracked bucket is over budget', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'] });
+    // One shared callback: a spy per call (600k of them) timed out on CI runners.
+    const noop = () => {};
+    for (let i = 0; i < MAX_TRACKED_IPS + 10; i += 1) {
+      const headers = { 'x-real-ip': `203.0.${Math.floor(i / 256)}.${i % 256}` };
+      for (let n = 0; n < HANDSHAKE_BURST; n += 1) gate(req(headers), noop);
+    }
+    expect(gate.trackedCount()).toBeLessThanOrEqual(HARD_MAX_TRACKED_IPS);
+  });
+
+  it('warns, at most once a minute and without an address, when a trusted proxy forwards no client address', () => {
+    const clock = makeClock();
+    const warn = vi.fn();
+    const gate = createAdmissionGate({ now: clock.now, trustedProxies: ['10.0.0.9'], warn });
+    gate(req({}), vi.fn());
+    gate(req({}), vi.fn());
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).not.toContain('10.0.0.9');
+    clock.advance(PROXY_FALLBACK_WARN_INTERVAL_MS);
+    gate(req({}), vi.fn());
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  // A dropped X-Real-IP puts every client in the proxy peer's bucket, so that
+  // bucket gets a larger ceiling instead of denying voice deployment-wide. It is
+  // still counted: past the larger ceiling it denies.
+  it('gives the proxy-peer fallback bucket a larger ceiling, and still bounds it', () => {
+    const clock = makeClock();
+    const gate = createAdmissionGate({
+      now: clock.now,
+      trustedProxies: ['10.0.0.9'],
+      warn: () => {},
+    });
+    const cb = vi.fn();
+    const ceiling = HANDSHAKE_BURST * PROXY_FALLBACK_BURST_MULTIPLIER;
+    for (let i = 0; i < ceiling; i += 1) gate(req({}), cb);
+    expect(cb.mock.calls.every(([, ok]) => ok === true)).toBe(true);
+    gate(req({}), cb);
+    expect(cb).toHaveBeenLastCalledWith(null, false);
+  });
+
+  it('does not warn when the proxy forwards a usable client address', () => {
+    const warn = vi.fn();
+    const gate = createAdmissionGate({ trustedProxies: ['10.0.0.9'], warn });
+    gate(req({ 'x-real-ip': '203.0.113.7' }), vi.fn());
+    expect(warn).not.toHaveBeenCalled();
   });
 });

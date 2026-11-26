@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/protocol"
@@ -33,7 +34,9 @@ import (
 // another action; if an assertion without user verification is accepted; or
 // if a token is minted when the audit row was not written. The handles live
 // under their own key prefix, so a server-action step-up handle can never be
-// redeemed here, nor a create_admin handle for a server action.
+// redeemed here, nor a create_admin handle for a server action, and the key
+// names the admin who began it, so another admin's attempt neither redeems
+// nor spends it.
 
 const (
 	adminStepUpPrefix = "admin_create_stepup:"
@@ -46,6 +49,13 @@ const (
 )
 
 var adminStepUpHandle = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// adminStepUpKey is the Redis key of a handle. It names the admin who began
+// it, so a redeem by any other admin looks up a key that does not exist and
+// cannot spend that admin's handle.
+func adminStepUpKey(adminID, handle string) string {
+	return adminStepUpPrefix + adminID + ":" + handle
+}
 
 // adminStepUp is the value stored under a create_admin step-up handle.
 type adminStepUp struct {
@@ -61,35 +71,66 @@ type adminStepUpProof struct {
 }
 
 // CreateAdminStepUpBegin starts a WebAuthn assertion that authorises one
-// admin creation and returns its handle. POST {} (an empty body is accepted).
+// admin creation and returns its handle. POST {} (an empty body is accepted;
+// any field, or a body over 1 KiB, is a 400). An admin with no enrolled key
+// gets 403 stepup_unavailable and a denied row; a storage or ceremony fault
+// gets a 5xx and a failure row.
 func (h *Handler) CreateAdminStepUpBegin(c *gin.Context) {
 	ctx := c.Request.Context()
 	adminID := c.GetString(adminIDContextKey)
 	var req struct{}
-	if decodeStrict(c, &req, maxAdminStepUpBeginBody) != nil {
+	if err := decodeStrict(c, &req, maxAdminStepUpBeginBody); err != nil {
+		h.log.Warn("admin create step-up begin body refused", "admin_id", adminID, "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return
 	}
 	user, err := h.webAuthnUserForAdmin(ctx, adminID)
-	if err != nil {
-		h.log.Warn("admin create step-up user build failed", "error", err)
-		h.auditCreateAdmin(ctx, adminID, "", AuditDenied, "stepup_unavailable")
+	switch {
+	case errors.Is(err, errNoAdminCredentials):
+		h.log.Warn("admin create step-up refused: no enrolled key", "admin_id", adminID)
+		h.auditCreateAdmin(ctx, adminID, "", AuditDenied, "stepup_unavailable", "")
 		c.JSON(http.StatusForbidden, gin.H{"error": "stepup_unavailable"})
+		return
+	case err != nil:
+		h.log.Error("admin create step-up credential lookup failed", "admin_id", adminID, "error", err)
+		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_unavailable", "")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errServiceUnavailable})
 		return
 	}
 	assertion, session, err := h.webauthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
-		h.log.Error("admin create step-up begin failed", "error", err)
+		h.log.Error("admin create step-up begin failed", "admin_id", adminID, "error", err)
+		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_failed", "")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 	handle, err := h.storeAdminStepUp(ctx, adminStepUp{AdminID: adminID, Action: actionCreateAdmin, Session: *session})
 	if err != nil {
-		h.log.Error("admin create step-up store failed", "error", err)
+		h.log.Error("admin create step-up store failed", "admin_id", adminID, "error", err)
+		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_failed", "")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 	c.JSON(http.StatusOK, passwordResponse{Handle: handle, PublicKey: assertion})
+}
+
+// errServiceUnavailable is the 503 body when a step-up cannot be checked
+// because storage failed.
+const errServiceUnavailable = "service_unavailable"
+
+// stepUpRefusal says why a create_admin step-up was not accepted. reason is
+// the audit row's reason; unavailable marks a storage fault (503 and a
+// failure row) as opposed to a proof that did not verify (403 stepup_failed
+// and a denied row). Every refusal fails closed.
+type stepUpRefusal struct {
+	reason      string
+	unavailable bool
+}
+
+func stepUpDenied(reason string) *stepUpRefusal { return &stepUpRefusal{reason: reason} }
+
+func stepUpUnavailable(reason string) *stepUpRefusal {
+	return &stepUpRefusal{reason: reason, unavailable: true}
 }
 
 // requireCreateAdminStepUp redeems the request's step-up and writes the
@@ -97,65 +138,84 @@ func (h *Handler) CreateAdminStepUpBegin(c *gin.Context) {
 func (h *Handler) requireCreateAdminStepUp(c *gin.Context, username string, proof *adminStepUpProof) bool {
 	ctx := c.Request.Context()
 	adminID := c.GetString(adminIDContextKey)
-	reason := ""
-	switch {
-	case proof == nil:
-		reason = "stepup_required"
-	case !h.redeemAdminStepUp(ctx, adminID, actionCreateAdmin, proof.Handle, proof.Assertion):
-		reason = "stepup_failed"
-	default:
-		return true
+	if proof == nil {
+		h.auditCreateAdmin(ctx, adminID, username, AuditDenied, "stepup_required", "")
+		c.JSON(http.StatusForbidden, gin.H{"error": "stepup_required"})
+		return false
 	}
-	h.auditCreateAdmin(ctx, adminID, username, AuditDenied, reason)
-	c.JSON(http.StatusForbidden, gin.H{"error": reason})
+	refusal := h.redeemAdminStepUp(ctx, adminID, actionCreateAdmin, proof.Handle, proof.Assertion)
+	switch {
+	case refusal == nil:
+		return true
+	case refusal.unavailable:
+		h.auditCreateAdmin(ctx, adminID, username, AuditFailure, refusal.reason, "")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errServiceUnavailable})
+	default:
+		h.auditCreateAdmin(ctx, adminID, username, AuditDenied, refusal.reason, "")
+		c.JSON(http.StatusForbidden, gin.H{"error": "stepup_failed"})
+	}
 	return false
 }
 
 // redeemAdminStepUp redeems a step-up handle once. It must belong to this
 // admin and this action, and the assertion must verify with user
 // verification, advance the credential's counter and raise no clone warning.
-func (h *Handler) redeemAdminStepUp(ctx context.Context, adminID, action, handle string, assertion json.RawMessage) bool {
+// It returns nil only when all of that holds.
+func (h *Handler) redeemAdminStepUp(ctx context.Context, adminID, action, handle string, assertion json.RawMessage) *stepUpRefusal {
 	if adminID == "" || !adminStepUpHandle.MatchString(handle) || len(assertion) == 0 {
-		return false
+		return stepUpDenied("stepup_malformed")
 	}
-	raw, err := h.redis.GetDel(ctx, adminStepUpPrefix+handle).Result()
-	if err != nil {
-		if !errors.Is(err, redis.Nil) {
-			h.log.Warn("admin create step-up load failed", "error", err)
-		}
-		return false
+	raw, err := h.redis.GetDel(ctx, adminStepUpKey(adminID, handle)).Result()
+	switch {
+	case errors.Is(err, redis.Nil):
+		// Expired, already redeemed, never issued, or begun by another
+		// admin (whose key this lookup cannot reach, so it stays usable).
+		return stepUpDenied("stepup_unknown_handle")
+	case err != nil:
+		h.log.Error("admin create step-up load failed", "admin_id", adminID, "error", err)
+		return stepUpUnavailable("stepup_store_unavailable")
 	}
 	var ch adminStepUp
+	if err := json.Unmarshal([]byte(raw), &ch); err != nil {
+		h.log.Error("admin create step-up record unreadable", "admin_id", adminID, "error", err)
+		return stepUpUnavailable("stepup_record_unreadable")
+	}
 	switch {
-	case json.Unmarshal([]byte(raw), &ch) != nil:
-		h.log.Warn("admin create step-up record unreadable")
-		return false
 	case ch.AdminID != adminID:
-		h.log.Warn("admin create step-up handle used by another admin")
-		return false
+		h.log.Warn("admin create step-up handle used by another admin", "admin_id", adminID)
+		return stepUpDenied("stepup_wrong_admin")
 	case ch.Action != action:
-		h.log.Warn("admin create step-up handle used for another action")
-		return false
+		h.log.Warn("admin create step-up handle used for another action", "admin_id", adminID)
+		return stepUpDenied("stepup_wrong_action")
 	}
 	user, err := h.webAuthnUserForAdmin(ctx, adminID)
-	if err != nil {
-		h.log.Warn("admin create step-up user build failed", "error", err)
-		return false
+	switch {
+	case errors.Is(err, errNoAdminCredentials):
+		h.log.Warn("admin create step-up refused: no enrolled key", "admin_id", adminID)
+		return stepUpDenied("stepup_no_credentials")
+	case err != nil:
+		h.log.Error("admin create step-up credential lookup failed", "admin_id", adminID, "error", err)
+		return stepUpUnavailable("stepup_credential_lookup_failed")
 	}
 	cred, err := h.webauthn.FinishLoginWithBytes(user, ch.Session, assertion)
 	if err != nil {
-		h.log.Warn("admin create step-up assertion rejected", "error", err)
-		return false
+		h.log.Warn("admin create step-up assertion rejected", "admin_id", adminID, "error", err)
+		return stepUpDenied("stepup_assertion_rejected")
 	}
 	if cred.Authenticator.CloneWarning {
-		h.log.Warn("admin create step-up clone warning")
-		return false
+		h.log.Warn("admin create step-up clone warning", "admin_id", adminID)
+		return stepUpDenied("stepup_clone_warning")
 	}
-	if err := h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount)); err != nil {
-		h.log.Warn("admin create step-up sign-count persist failed", "error", err)
-		return false
+	err = h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount))
+	switch {
+	case errors.Is(err, errSignCountNotAdvanced):
+		h.log.Warn("admin create step-up counter did not advance", "admin_id", adminID)
+		return stepUpDenied("stepup_counter_not_advanced")
+	case err != nil:
+		h.log.Error("admin create step-up sign-count persist failed", "admin_id", adminID, "error", err)
+		return stepUpUnavailable("stepup_sign_count_persist_failed")
 	}
-	return true
+	return nil
 }
 
 func (h *Handler) storeAdminStepUp(ctx context.Context, ch adminStepUp) (string, error) {
@@ -168,27 +228,49 @@ func (h *Handler) storeAdminStepUp(ctx context.Context, ch adminStepUp) (string,
 	if err != nil {
 		return "", fmt.Errorf("marshal admin step-up: %w", err)
 	}
-	if err := h.redis.Set(ctx, adminStepUpPrefix+handle, payload, adminStepUpTTL).Err(); err != nil {
+	if err := h.redis.Set(ctx, adminStepUpKey(ch.AdminID, handle), payload, adminStepUpTTL).Err(); err != nil {
 		return "", fmt.Errorf("store admin step-up: %w", err)
 	}
 	return handle, nil
 }
 
-// auditCreateAdmin records one admin_created refusal or failure against the
-// acting admin. These rows are best-effort, like every other admin audit row.
-// The success row is not written here: CreateAdmin commits it in the same
-// transaction as the pending admin, so no admin exists without one, and it
-// carries the new admin's id (detail.created_admin_id), by which the sign-in
-// notice counts it. The rows written here carry no id, and the notice reads
-// only success rows. A success row can outlive its admin: when the
-// enrollment-token mint then fails, the pending admin is removed and a
-// token_mint_failed row written here records that the creation did not
-// complete; the notice then finds no admin with that id and skips it.
-func (h *Handler) auditCreateAdmin(ctx context.Context, actingAdminID, username, result, reason string) {
+// auditCreateAdmin records one admin_created denied or failure row against
+// the acting admin, best-effort like every other admin audit row: when the
+// write fails it is logged at Error and the request goes on. The success row
+// is not written here: it commits with the pending admin inside CreateAdmin's
+// WriteWith transaction, so no admin exists without one, and it carries the
+// new admin's id (detail.created_admin_id), by which the sign-in notice
+// counts it. The notice reads only success rows, so the rows written here
+// are never counted, even when they name the created admin's id (a mint or
+// commit failure does, so the record shows which admin was removed). A
+// success row can outlive its admin: when the enrollment-token mint fails
+// after it committed, the pending admin is removed and a token_mint_failed
+// row is written here; the notice then finds no admin with that id and
+// skips it. The actor is truncated to the username limit.
+func (h *Handler) auditCreateAdmin(ctx context.Context, actingAdminID, username, result, reason, createdAdminID string) {
 	acting := actingAdminID
-	ev := AuditEvent{AdminID: &acting, Actor: username, EventType: EventAdminCreated, Result: result}
-	if reason != "" {
-		ev.Detail = map[string]any{"reason": reason}
+	actor := truncateRunes(username, MaxAdminUsernameLength)
+	ev := AuditEvent{AdminID: &acting, Actor: actor, EventType: EventAdminCreated, Result: result}
+	if reason != "" || createdAdminID != "" {
+		ev.Detail = map[string]any{}
+		if reason != "" {
+			ev.Detail["reason"] = reason
+		}
+		if createdAdminID != "" {
+			ev.Detail[detailCreatedAdminID] = createdAdminID
+		}
 	}
-	h.writeAudit(ctx, ev)
+	if err := h.audit.Write(ctx, ev); err != nil {
+		h.log.Error("admin create audit row not written",
+			"admin_id", actingAdminID, "created_admin_id", createdAdminID,
+			"username", sanitizeAuditString(actor), "result", result, "reason", reason, "error", err)
+	}
+}
+
+// truncateRunes returns s cut to at most n runes.
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n])
 }

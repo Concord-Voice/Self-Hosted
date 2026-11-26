@@ -81,6 +81,16 @@ During certificate rotation, trust the old and new public CA bundles together,
 switch Cloudflare to the new client certificate, verify the probes, then remove
 the old CA.
 
+Pre-auth source controls use an IPv4 `/32` or native IPv6 `/64` identity across
+nginx, control-plane Redis budgets, Admin Console lockout, and media admission.
+`TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES` must therefore be established before
+those controls can safely count a forwarded address. In production the media
+plane refuses startup if it has no valid exact trusted-proxy host route. A Redis
+failure on `/api/v1/auth/*` returns 503 with a jittered `Retry-After` of 2 to 4 seconds rather than
+admitting an uncounted credential attempt. Every address in one native IPv6
+`/64` shares those budgets and bans, so one abusive host can lock out its
+neighbours on the same `/64`, the same trade-off an IPv4 NAT already carries.
+
 ### WebSocket event-budget preparation
 
 The fresh installer prepares `WS_EVENT_BUDGET_ENABLED=false` and

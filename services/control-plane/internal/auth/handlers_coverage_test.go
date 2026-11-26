@@ -1740,6 +1740,7 @@ func TestPollDeviceRecoveryApproved(t *testing.T) {
 	requestID := createBody["request_id"].(string)
 
 	digest, payload := deviceOfferV2(t, ts, user.ID, requestID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	w = ts.DoRequest("POST", "/api/v1/mfa/recovery-requests/"+requestID+"/respond", map[string]any{"action": "approve", "protocol_version": 2, "transcript_hash": digest, "encrypted_payload": payload}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 

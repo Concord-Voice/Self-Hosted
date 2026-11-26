@@ -88,7 +88,7 @@ func TestValidateAccessToken(t *testing.T) {
 
 	t.Run("recovery token is rejected", func(t *testing.T) {
 		h, userID := renewalValidatorHandler(t)
-		token, _, err := mfa.GenerateRecoveryToken(userID, mfa.JWTSecret(testJWTSecret))
+		token, _, err := mfa.GenerateRecoveryToken(userID, "email", mfa.JWTSecret(testJWTSecret), mfa.CredEpoch(""))
 		require.NoError(t, err)
 		_, err = h.validateAccessToken(ctx, token)
 		require.ErrorContains(t, err, "invalid authentication")
