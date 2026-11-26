@@ -1127,6 +1127,7 @@ async function main() {
 
   const socketAdmissionGate = createAdmissionGate({
     trustedProxies: config.trustedProxies,
+    required: config.environment === 'production',
     onReject: () => {
       mediaMetrics.incrementAdmissionRejected();
       securityEvents.emit({

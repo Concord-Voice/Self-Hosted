@@ -263,7 +263,7 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 	})
 	switch {
 	case err == nil:
-	case errors.Is(err, errAuditWrite):
+	case isAuditStoreError(err):
 		return fmt.Errorf("audit bootstrap: %w", err)
 	default:
 		return fmt.Errorf("create pending admin: %w", err)
