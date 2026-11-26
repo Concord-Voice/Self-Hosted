@@ -402,3 +402,48 @@ func TestBusyBackupCheck_SignInRefundAfterTheWindowStillLetsTheLockoutArm(t *tes
 	require.Equal(t, http.StatusForbidden, verify("totp", "ZZZZZZ").Code)
 	require.True(t, mr.Exists(lockoutKey), "the fifth wrong code in the window arms the lockout")
 }
+
+// A busy fifth attempt is refunded after a sixth was refused at the limit. No
+// judged attempt then ever held the fifth slot, so the 429 path itself must arm
+// the lockout, or the window would expire and hand out more guesses.
+func TestBusyBackupCheck_SignInRefundAfterRefusalStillArmsTheLockout(t *testing.T) {
+	db := iuNewTestDB(t)
+	kr := iuKeyring(t)
+	rdb, mr := iuLockoutRedis(t)
+	h := iuHandler(db, rdb, kr)
+	h.SetLoginCompleter(&recordingLoginCompleter{})
+	userID, _, codes := busyBackupUser(t, db, kr)
+	token, _, err := h.GenerateLoginChallenge(context.Background(), userID, false, "", securityevent.AuthPassword)
+	require.NoError(t, err)
+	attemptsKey := fmt.Sprintf(redisKeyMFAVerifyAttempts, userID)
+	lockoutKey := fmt.Sprintf(redisKeyMFAVerifyLockout, userID)
+	verify := func(method, code string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/mfa/verify",
+			strings.NewReader(`{"mfa_challenge_token":"`+token+`","method":"`+method+`","code":"`+code+`"}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Verify(c)
+		return w
+	}
+
+	for range failedAttemptLimit - 1 {
+		require.Equal(t, http.StatusForbidden, verify("totp", "ZZZZZZ").Code)
+	}
+	free := backuphash.HoldAllSlots(2 * time.Second)
+	t.Cleanup(free)
+	busy := make(chan *httptest.ResponseRecorder, 1)
+	go func() { busy <- verify("backup_code", codes[0]) }()
+	require.Eventually(t, func() bool { got, _ := mr.Get(attemptsKey); return got == "5" },
+		time.Second, time.Millisecond, "the busy request holds the fifth slot")
+
+	require.Equal(t, http.StatusTooManyRequests, verify("totp", "ZZZZZZ").Code)
+	requireBusy(t, <-busy)
+	requireCharge(t, mr, attemptsKey, "5")
+	require.True(t, mr.Exists(lockoutKey), "the refused sixth attempt armed the lockout")
+
+	mr.FastForward(verifyAttemptWindow + time.Second)
+	require.True(t, mr.Exists(lockoutKey), "the lockout outlives the attempt window")
+	require.NotEqual(t, http.StatusForbidden, verify("totp", "ZZZZZZ").Code,
+		"no further code is judged while locked out")
+}

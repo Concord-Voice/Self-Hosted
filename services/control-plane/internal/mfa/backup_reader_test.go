@@ -65,7 +65,7 @@ func TestVerifyBackupCodeRejectsMalformedStoredHashesBeforeMatching(t *testing.T
 }
 
 // A row can hold every format at once during the B1/B2 overlap: bare codes a
-// B1 replica generated, v1 codes the 000205 migration prefixed, and v2 codes a
+// B1 replica generated, v1 codes the 000207 migration prefixed, and v2 codes a
 // B2 replica generated. The verifier is the B1 reader (only its Argon2id call
 // moved into backuphash.DeriveV2), so this matrix is also what a B1 binary
 // answers after an application rollback from B2.

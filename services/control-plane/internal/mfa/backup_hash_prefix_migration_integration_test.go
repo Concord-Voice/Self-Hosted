@@ -27,9 +27,9 @@ import (
 )
 
 // The migration under test. Renumber here if it moves at merge time.
-const backupHashPrefixMigration uint = 205
+const backupHashPrefixMigration uint = 207
 
-// TestBackupHashPrefixMigrationRoundTrip pins 000205: up prefixes only bare
+// TestBackupHashPrefixMigrationRoundTrip pins 000207: up prefixes only bare
 // SHA-256 elements and keeps order and used flags, the deployed reader still
 // verifies the result, a clean down restores the bare row exactly, and the
 // down refuses while any element has no bare form, such as a v2 code.
@@ -46,7 +46,7 @@ func TestBackupHashPrefixMigrationRoundTrip(t *testing.T) {
 	legacyUser := insertTOTPRow(t, db, bare, used)
 	emptyUser := insertTOTPRow(t, db, []string{}, []bool{})
 
-	require.NoError(t, m.Migrate(backupHashPrefixMigration), "000205 up")
+	require.NoError(t, m.Migrate(backupHashPrefixMigration), "000207 up")
 	hashes, gotUsed := readBackupRow(t, db, legacyUser)
 	require.Equal(t, []string{"v1$" + bare[0], "v1$" + bare[1], "v1$" + bare[2]}, hashes, "order is kept and each digest is unchanged")
 	require.Equal(t, used, gotUsed, "used flags are untouched")
@@ -61,7 +61,7 @@ func TestBackupHashPrefixMigrationRoundTrip(t *testing.T) {
 	emptyHashes, _ := readBackupRow(t, db, emptyUser)
 	require.Empty(t, emptyHashes)
 
-	require.NoError(t, m.Steps(-1), "000205 down succeeds while every element is bare or v1")
+	require.NoError(t, m.Steps(-1), "000207 down succeeds while every element is bare or v1")
 	hashes, gotUsed = readBackupRow(t, db, legacyUser)
 	require.Equal(t, bare, hashes, "down restores the bare row exactly")
 	require.Equal(t, used, gotUsed)
@@ -74,7 +74,7 @@ func TestBackupHashPrefixMigrationRoundTrip(t *testing.T) {
 	mixedBare := sha256Hex("mixedaa1")
 	mixedUser := insertTOTPRow(t, db, []string{mixedBare, v2Hashes[0], unreadable}, []bool{false, false, false})
 
-	require.NoError(t, m.Migrate(backupHashPrefixMigration), "000205 up again")
+	require.NoError(t, m.Migrate(backupHashPrefixMigration), "000207 up again")
 	hashes, _ = readBackupRow(t, db, mixedUser)
 	require.Equal(t, []string{"v1$" + mixedBare, v2Hashes[0], unreadable}, hashes, "only bare elements are prefixed")
 
@@ -83,7 +83,7 @@ func TestBackupHashPrefixMigrationRoundTrip(t *testing.T) {
 		before, beforeUsed := readBackupRow(t, db, legacyUser)
 		mixedBefore, _ := readBackupRow(t, db, mixedUser)
 		err := m.Steps(-1)
-		require.ErrorContains(t, err, "cannot roll back 000205", reason)
+		require.ErrorContains(t, err, "cannot roll back 000207", reason)
 		after, afterUsed := readBackupRow(t, db, legacyUser)
 		require.Equal(t, before, after, "a refused down leaves every row intact")
 		require.Equal(t, beforeUsed, afterUsed)
@@ -116,7 +116,7 @@ func TestBackupHashPrefixMigrationRoundTrip(t *testing.T) {
 // The down migration must hold its write-blocking lock before the guard reads
 // the table, or a v2 write could commit between the check and the rewrite.
 func TestBackupHashPrefixDownLocksBeforeChecking(t *testing.T) {
-	matches, err := filepath.Glob(filepath.Join("..", "..", "migrations", "000205_*.down.sql"))
+	matches, err := filepath.Glob(filepath.Join("..", "..", "migrations", "000207_*.down.sql"))
 	require.NoError(t, err)
 	require.Len(t, matches, 1)
 	body, err := os.ReadFile(matches[0])
@@ -157,7 +157,7 @@ func readBackupRow(t *testing.T, db *sql.DB, userID string) ([]string, []bool) {
 	return hashes, used
 }
 
-// priorBackupHashMigration returns the highest migration version below 000205,
+// priorBackupHashMigration returns the highest migration version below 000207,
 // read from the migrations directory so no neighbour's number is hard-coded.
 func priorBackupHashMigration(t *testing.T) uint {
 	t.Helper()

@@ -2108,7 +2108,7 @@ func (h *Handler) Verify(c *gin.Context) {
 	}
 
 	attemptsKey := fmt.Sprintf(redisKeyMFAVerifyAttempts, claims.UserID)
-	attempt, charged, ok := h.reserveVerifyAttempt(ctx, c, claims, attemptsKey)
+	attempt, charged, ok := h.reserveVerifyAttempt(ctx, c, claims, attemptsKey, lockoutKey)
 	if !ok {
 		return
 	}
@@ -2191,13 +2191,22 @@ func answeredFactor(requested, matched string) string {
 // attempt, so a missed expiry is never permanent. The count, the window and
 // the returned charge come from one script, so a busy refund returns the
 // attempt only to the window it was counted in (stepup.ChargeKey).
-func (h *Handler) reserveVerifyAttempt(ctx context.Context, c *gin.Context, claims *ChallengeClaims, attemptsKey string) (int64, stepup.Charged, bool) {
+//
+// An attempt past the limit arms the lockout itself. Otherwise a busy fifth
+// attempt could be refunded after a sixth was refused, so no judged attempt
+// ever held the fifth slot and the lockout never armed. SET NX keeps an
+// existing lockout's expiry, and a lockout that cannot be written fails closed.
+func (h *Handler) reserveVerifyAttempt(ctx context.Context, c *gin.Context, claims *ChallengeClaims, attemptsKey, lockoutKey string) (int64, stepup.Charged, bool) {
 	attempt, charged, err := stepup.ChargeKey(ctx, h.redis, attemptsKey, verifyAttemptWindow)
 	if err != nil {
 		h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("count MFA verify attempt: %w", err))
 		return 0, stepup.Charged{}, false
 	}
 	if attempt > failedAttemptLimit {
+		if err := h.redis.SetNX(ctx, lockoutKey, "1", verifyLockoutDuration).Err(); err != nil {
+			h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("lock out MFA verify attempts: %w", err))
+			return 0, stepup.Charged{}, false
+		}
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeLocked, RouteTemplate: securityevent.RouteAuthMFAVerify})
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": errMsgTooManyAttempts})
 		return 0, stepup.Charged{}, false

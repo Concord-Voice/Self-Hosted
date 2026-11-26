@@ -226,11 +226,11 @@ func budgetUnavailable(cause error) *Error {
 // (ARGV[1], that window's ID). A request that waited out its window must not
 // take back a charge another request made in the next one: that would let a
 // request straddling each boundary keep every window short of its limit. It
-// never creates the key or takes it below zero, and DECR keeps the expiry.
+// never creates the key or takes it below zero, and DECRBY keeps the expiry.
 var refundScript = redis.NewScript(`
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
 local n = tonumber(redis.call('GET', KEYS[1]) or '0')
-if n > 0 then return redis.call('DECR', KEYS[1]) end
+if n > 0 then return redis.call('DECRBY', KEYS[1], 1) end
 return 0
 `)
 

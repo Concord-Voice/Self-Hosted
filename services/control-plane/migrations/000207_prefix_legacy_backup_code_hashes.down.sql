@@ -1,4 +1,4 @@
--- Strip the v1$ prefix that 000205 added, back to bare SHA-256 digests.
+-- Strip the v1$ prefix that 000207 added, back to bare SHA-256 digests.
 -- A reader from before the versioned formats accepts only bare digests, so
 -- this rollback is safe only while every stored element is bare or v1. A v2
 -- element is a salted Argon2id hash: it has no bare form, and dropping or
@@ -24,7 +24,7 @@ BEGIN
                    OR (left(e.hash, 3) = 'v1$' AND substr(e.hash, 4) ~ '^[0-9a-f]{64}$'))
     ) THEN
         RAISE EXCEPTION
-            'cannot roll back 000205 while a backup-code hash is not a bare or v1 SHA-256 digest, such as a generated v2 code'
+            'cannot roll back 000207 while a backup-code hash is not a bare or v1 SHA-256 digest, such as a generated v2 code'
             USING ERRCODE = 'check_violation';
     END IF;
 END

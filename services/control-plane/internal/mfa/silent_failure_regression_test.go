@@ -737,6 +737,15 @@ func TestSilentFailureVerify_LockoutSetFault_FailsClosedAtThreshold(t *testing.T
 	sfRequireUnavailable(t, status, body, "the attempt that reaches the threshold must fail closed when the lockout cannot be written")
 }
 
+func TestSilentFailureVerify_LockoutSetFault_FailsClosedPastThreshold(t *testing.T) {
+	hook, hits := sfFault("set|setnx", "mfa_verify_lockout:")
+	f := sfNewVerifyFixture(t, hook)
+	require.NoError(t, f.clean.Set(context.Background(), "mfa_verify_attempts:"+f.userID, 5, 0).Err())
+	status, body := sfVerify(t, f, sfWrongCode(t, f.secret))
+	sfRequireFired(t, hits)
+	sfRequireUnavailable(t, status, body, "an attempt refused past the limit must fail closed when the lockout cannot be written")
+}
+
 // ── Round 2 — found by the class A–H fix, outside its brief ─────────────────
 //
 // I: login WebAuthn verification has the inline flow's two defects (class D):
