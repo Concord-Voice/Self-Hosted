@@ -38,7 +38,9 @@ func TestGetChannelPinsExposesStoredFormat(t *testing.T) {
 	require.Len(t, body.Pinned, 2)
 	byID := map[string]map[string]any{}
 	for _, m := range body.Pinned {
-		byID[m["id"].(string)] = m
+		id, ok := m["id"].(string)
+		require.True(t, ok, "pinned message id must be a string")
+		byID[id] = m
 	}
 	assert.Equal(t, "message-v1", byID[messageID]["e2ee_format"])
 	assert.NotContains(t, byID[legacyID], "e2ee_format")
