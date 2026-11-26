@@ -8,7 +8,14 @@ The root workspace now resolves minimatch 11.0.8 within the ranges declared by E
 
 The root workspace keeps the scoped `@microsoft/eslint-formatter-sarif` override to `$eslint`. The formatter declares `eslint@^8.9.0` and loads the host ESLint through `require.main.require('eslint')`. The override removes the unused nested ESLint 8 tree, which previously brought in four minimatch 3.1.5 copies and `glob@7`. The root baseline records the formatter’s exact resolution at ESLint 10.15.0.
 
-The admin and media workspaces each retain their minimatch override and three baseline rows. Both lockfiles already resolve ESLint 10.15.0 and TypeScript-ESLint 8.73.0. Before removing the workspace overrides, validate the dependency trees with the override-range check, a frozen npm install, and workspace lint. Both also pin `@typescript/native` at 7.0.2. TypeScript-ESLint 8.73.0 requires the optional peer range `npm:typescript@>=7.1.0-dev.20261009.1 || >=7.1.0-beta <7.1.0-dev`, and the lockfiles each contain four nested `typescript-estree` entries. Verify peer compatibility and resolve the duplicate entries when a supported compiler version is available.
+The admin and media workspaces each retain their minimatch override and three baseline rows.
+Their lockfiles resolve ESLint 10.15.0 and TypeScript-ESLint 8.73.0. Both lockfiles resolve
+`@typescript/native` to 7.0.2. Each of the four nested `@typescript-eslint/typescript-estree`
+8.73.0 entries declares the optional peer
+`npm:typescript@>=7.1.0-dev.20261009.1 || >=7.1.0-beta <7.1.0-dev`. The locked compiler version
+falls outside that range. Verify peer compatibility when a supported compiler is available.
+Before retiring either minimatch override, verify that workspace's dependency tree with the
+override-range check, a frozen npm install, and workspace lint.
 
 In an isolated install, the replacement checker returned byte-identical media production CSV to the old checker and matched its positive and negative allowlist outcomes. The CI workflow keeps the same license allowlist and still runs the NOTICE drift guard over each selected workspace. `scripts/update-notice-md.py` uses the same replacement binary for its installed-dependency inventory. Changes to the allowlist, private-package exclusion, CSV parsing, or NOTICE comparison require separate review; this dependency repair does not authorize weakening them.
 
