@@ -461,3 +461,15 @@ Stances on CodeQL rules whose mismatch with this project's idioms is **structura
 | Justification | On `origin/main` this finding was a real leak in effect: every `recheck()` call left one more set of ancestry descriptors in `self.fds` until `close()`. This PR fixes that. `recheck()` records `mark = len(self.fds)` before the re-walk, and its `finally` (line 271) pops every descriptor after `mark` from the list and closes it, on success and on refusal. `canonical` is one of those descriptors. CodeQL does not track the close through the list. An explicit `os.close(canonical)` would close it twice. |
 | Dismissal | The Code Quality findings API has no dismiss endpoint (2026-11-18), so the finding is dismissed in the repository UI. This entry is the record. |
 | Re-check | Reopen if `open_trusted_directory` stops appending to `self.fds`, or if `recheck()` stops closing the descriptors after `mark` in `finally`. `test-voice-boot-containment.py` fails if it does. |
+
+#### Alert #516 — `generic.html-templates.security.var-in-href.var-in-href` — `services/control-plane/internal/email/templates/account_erasure_confirmation.html`
+
+| Field | Value |
+|---|---|
+| Alert | Code Scanning #516 (Semgrep OSS), line 18 on PR #297 |
+| Location | `<a href="{{.ConfirmationURL}}">` in the account-erasure confirmation email |
+| Decided | 2026-11-24, in PR #297 |
+| Reason | `false positive` |
+| Justification | The template is `html/template`, and `ConfirmationURL` is a `template.URL` built only by `accountErasureConfirmationURL` in `internal/email/service.go`. That function accepts one closed shape, `concord://account-erasure/confirm/<canonical uuid>/<canonical token>`, with no user info, query, fragment, opaque part or escaped path, and refuses anything else, so a `javascript:` URI or an attribute break-out cannot reach the `href`. `TestSendAccountErasureConfirmationRejectsUnexpectedLink` pins those refusals. The line carries a `nosemgrep` template comment, which is not rendered into the email. |
+| Dismissal | Suppressed in source; the alert closes on the next scan. |
+| Re-check | Reopen if `ConfirmationURL` is filled from anything other than `accountErasureConfirmationURL`, or if that function stops enforcing the closed shape. |

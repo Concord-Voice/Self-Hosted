@@ -61,7 +61,7 @@ func TestEraseAccount_DeleteErrorMapping(t *testing.T) {
 				h.EraseAccount(c)
 
 				require.True(t, stub.called)
-				assert.Equal(t, "char-user", stub.calledWithUser)
+				assert.Equal(t, c.GetString("user_id"), stub.calledWithUser)
 				assert.Equal(t, tc.wantStatus, c.Writer.Status())
 				assert.JSONEq(t, tc.wantBody, w.Body.String())
 			})
@@ -85,7 +85,7 @@ func TestEraseAccount_PreDeleteRefusalsBodies(t *testing.T) {
 		c, w := newTestContext(t, `{bad`, "char-user")
 		h.EraseAccount(c)
 		assert.Equal(t, http.StatusBadRequest, c.Writer.Status())
-		assert.JSONEq(t, `{"error":"invalid body"}`, w.Body.String())
+		assert.JSONEq(t, `{"error":"invalid_request"}`, w.Body.String())
 		assert.False(t, stub.called)
 	})
 	t.Run("success has empty body", func(t *testing.T) {

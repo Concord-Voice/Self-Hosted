@@ -55,7 +55,7 @@ func TestOwnershipMutationsRejectResetFirstCredentialEpoch(t *testing.T) {
 
 		require.NoError(t, boundary.Arm(owner.AccessToken))
 		boundary.Hook.ArmArg([]string{`SELECT credential_epoch FROM users WHERE id = $1 FOR SHARE`}, owner.ID, nil, nil)
-		w = ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnershipConfirm, nil, testhelpers.AuthHeaders(owner.AccessToken))
+		w = ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{keyPassword: testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(owner.AccessToken))
 		require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
 		boundary.RequireRotated(t)
 		seen, guardErr := boundary.Hook.Report()
@@ -108,7 +108,7 @@ func TestOwnershipMutationsRejectResetFirstCredentialEpoch(t *testing.T) {
 			keyPassword:     testhelpers.TestAuthPlaintext,
 		}, testhelpers.AuthHeaders(owner.AccessToken))
 		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-		w = ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnershipConfirm, nil, testhelpers.AuthHeaders(owner.AccessToken))
+		w = ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnershipConfirm, map[string]interface{}{keyPassword: testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(owner.AccessToken))
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 		var reversalToken string

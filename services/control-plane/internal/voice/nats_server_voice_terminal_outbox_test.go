@@ -10,6 +10,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/erasuretest"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
@@ -452,7 +453,7 @@ func TestServerVoiceTerminalOutbox_AccountErasureCancelsPendingLeave(t *testing.
 	synchronizeVoiceWireClient(t, conn)
 
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
-	require.NoError(t, svc.DeleteAccount(testdb.ActorContext(context.Background(), t, ts.DB, erasedUser.ID), erasedUser.ID))
+	erasuretest.New(t, ts.DB).MustErase(testdb.ActorContext(context.Background(), t, ts.DB, erasedUser.ID), t, svc, erasedUser.ID)
 
 	sub := newTestSubscriberWithHub(ts, hub)
 	require.NoError(t, sub.DrainServerVoiceTerminalOutboxCandidateForTest(context.Background(), uuid.MustParse(channelID), uuid.MustParse(erasedUser.ID), op))

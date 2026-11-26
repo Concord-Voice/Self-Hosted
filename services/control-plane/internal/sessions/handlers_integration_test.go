@@ -749,7 +749,7 @@ func TestSimpleMode_AuthWindowAllowsSubsequentRevokes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	assertSessionFamilyRevoked(t, ts, user.ID, sessionID)
-	window, err := ts.Redis.Get(context.Background(), "session_revoke_auth:"+user.ID).Result()
+	window, err := ts.Redis.Get(context.Background(), simpleWindowKey(t, ts, user.ID, user.AccessToken)).Result()
 	require.NoError(t, err)
 	require.Equal(t, "v2:1", window)
 	// Second revoke within window should NOT require password
@@ -758,6 +758,17 @@ func TestSimpleMode_AuthWindowAllowsSubsequentRevokes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assertSessionFamilyRevoked(t, ts, user.ID, sessionID2)
 	assertSessionState(t, ts, user.ID, 0, true)
+}
+
+// simpleWindowKey names the Simple-mode window of the login family behind
+// accessToken; the window is scoped to the family that proved its password.
+func simpleWindowKey(t *testing.T, ts *testhelpers.TestServer, userID, accessToken string) string {
+	t.Helper()
+	claims, err := auth.ValidateAccessToken(accessToken, testhelpers.TestJWTSecret)
+	require.NoError(t, err)
+	var family string
+	require.NoError(t, ts.DB.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid = $1`, claims.SessionID).Scan(&family))
+	return "session_revoke_auth:" + userID + ":" + family
 }
 
 // ── RevokeAll resets tracking ────────────────────────────────────────────────
@@ -778,7 +789,8 @@ func TestRevokeAll_ResetsTracking(t *testing.T) {
 
 	assertSessionFamilyRevoked(t, ts, user.ID, s3)
 	assertSessionState(t, ts, user.ID, 3, true)
-	require.NoError(t, ts.Redis.Set(context.Background(), "session_revoke_auth:"+user.ID, "1", time.Minute).Err())
+	windowKey := simpleWindowKey(t, ts, user.ID, user.AccessToken)
+	require.NoError(t, ts.Redis.Set(context.Background(), windowKey, "1", time.Minute).Err())
 	// Revoke all (resets tracking)
 	payload := map[string]interface{}{
 		"password":        sessTestPassword,
@@ -788,7 +800,7 @@ func TestRevokeAll_ResetsTracking(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 
 	assertSessionState(t, ts, user.ID, 0, false)
-	exists, err := ts.Redis.Exists(context.Background(), "session_revoke_auth:"+user.ID).Result()
+	exists, err := ts.Redis.Exists(context.Background(), windowKey).Result()
 	require.NoError(t, err)
 	assert.Zero(t, exists)
 	claims, err := auth.ValidateAccessToken(user.AccessToken, testhelpers.TestJWTSecret)

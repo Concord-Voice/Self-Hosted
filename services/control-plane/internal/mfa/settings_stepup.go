@@ -235,9 +235,9 @@ func subjectStage(e *stepup.Error) gateStage {
 // pool or Redis.
 func (h *Handler) verifyMFASettingsStepUpTx(
 	ctx context.Context, tx *sql.Tx, userID string, subj stepup.Subject,
-	creds mfaStepUpCredentials, gate settingsStepUp, attempt *stepup.PasswordAttempt, charged stepup.Charged,
+	creds mfaStepUpCredentials, gate settingsStepUp, charge stepUpCharge,
 ) (*stepup.Error, gateStage) {
-	e, stage := verifyStepUpFactors(attempt, subj, creds, gate.wording, func() *stepup.Error {
+	e, stage := verifyStepUpFactors(charge.attempt, subj, creds, gate.wording, func() *stepup.Error {
 		// Tx form: backup-code redemption is a write that a rollback must be
 		// able to undo. The preloaded set keeps GetEnabledMethods (a pool
 		// read) from ever running under the lock.
@@ -248,7 +248,7 @@ func (h *Handler) verifyMFASettingsStepUpTx(
 		// its locks. The caller refuses and returns; its deferred end is then
 		// a no-op rollback.
 		h.rollbackQuietly(tx)
-		h.refundBusyStepUp(ctx, charged, e)
+		h.refundBusyStepUp(ctx, charge.charged, e)
 	}
 	return e, stage
 }
@@ -403,6 +403,13 @@ func (h *Handler) clearStepUpAfterSuccess(c *gin.Context, userID string) {
 	post, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), postCommitTimeout)
 	defer cancel()
 	h.clearMFASettingsStepUp(post, userID)
+}
+
+// stepUpCharge is what a gate took before its transaction opened: the
+// password's lockout reservation and the receipt of its MFA budget charge.
+type stepUpCharge struct {
+	attempt *stepup.PasswordAttempt
+	charged stepup.Charged
 }
 
 // refundBusyStepUp returns the shared budget's charge when err is a busy

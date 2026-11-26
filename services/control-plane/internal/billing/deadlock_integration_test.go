@@ -16,6 +16,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/redemption"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/erasuretest"
 	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
 )
@@ -154,15 +155,18 @@ func TestDeadlockProbe_RedemptionReconcileErasure(t *testing.T) {
 		codeThree := issuePremiumCode(t, env.DB, fmt.Sprintf("dl-%d-3", round))
 
 		eraserA, eraserC := probeActor(t, env.DB, userA), probeActor(t, env.DB, userC)
+		proof := erasuretest.New(t, env.DB)
+		proof.Enroll(t, userA.String())
+		proof.Enroll(t, userC.String())
 		results := runProbeRound(t, map[string]func(context.Context) error{
 			"redeem-a":    redeemOp(engine, userA, codeOne),
 			"redeem-b":    redeemOp(engine, userB, codeTwo),
 			"redeem-a2":   redeemOp(engine, userA, codeThree),
 			"reconcile-a": func(ctx context.Context) error { _, err := env.Svc.Reconcile(ctx, subA, "", ""); return err },
 			"reconcile-b": func(ctx context.Context) error { _, err := env.Svc.Reconcile(ctx, subB, "", ""); return err },
-			"erase-a":     func(ctx context.Context) error { return accounts.DeleteAccount(eraserA(ctx), userA.String()) },
+			"erase-a":     func(ctx context.Context) error { return proof.Erase(eraserA(ctx), accounts, userA.String()) },
 			"reconcile-c": func(ctx context.Context) error { _, err := env.Svc.Reconcile(ctx, subC, "", ""); return err },
-			"erase-c":     func(ctx context.Context) error { return accounts.DeleteAccount(eraserC(ctx), userC.String()) },
+			"erase-c":     func(ctx context.Context) error { return proof.Erase(eraserC(ctx), accounts, userC.String()) },
 		})
 		for _, r := range results {
 			assert.Falsef(t, isDeadlock(r.err), "round %d: %s hit SQLSTATE %s: %v", round, r.name, pgDeadlockDetected, r.err)

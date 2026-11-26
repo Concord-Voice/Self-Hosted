@@ -33,6 +33,9 @@ belongs in it, and write it if the section has none. Do not edit the
 New backup codes are stored as salted Argon2id hashes, and existing
 backup-code hashes move to an explicit versioned format.
 
+Factor removal, SSO unlinking and trust, account erasure and ownership
+transfer now require a fresh, route-bound proof, and a session can log out
+only its own login family.
 The server now returns stored E2EE format metadata for message and attachment reads as groundwork for a later client migration. Its internal create-request fingerprints stay out of history responses; no new writer or decrypt path is active.
 
 ### Added
@@ -41,6 +44,11 @@ The server now returns stored E2EE format metadata for message and attachment re
 
 ### Security
 
+- **Accounts:** Removing a TOTP or WebAuthn factor now requires a fresh, route-bound second-factor proof whenever the account has inline MFA; a password alone cannot remove the factor ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
+- **Accounts:** Unlinking an SSO identity and enabling SSO security trust now require a fresh, route-bound proof inside the protected transaction. Disabling that trust remains an ungated strengthening ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
+- **Accounts:** Erasing an account now requires fresh proof and explicit confirmation of any owned servers with other members. An unverified email address also requires a one-use confirmation link ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
+- **Servers:** Confirming an ownership transfer now requires a fresh proof ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
+- **Sessions:** A bearer session can log out only its own login family. Supplying another same-account family's session ID now returns 403 `invalid_logout_target` without revoking either family ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
 - **Encryption:** Added a dormant, permanent global reservation namespace and verified online-baseline gate for future message-v1 identifiers. No message writer or client behavior is enabled ([#403](https://github.com/Concord-Voice/Self-Hosted/pull/403)).
 - **MFA:** New backup codes are stored as salted Argon2id hashes, one random salt per code, so a database read no longer yields unsalted SHA-256 digests of them. Migration 000207 marks each existing hash with an explicit `v1$` prefix. Upgrade only from a release that already reads the versioned formats, or stop every older control-plane process before migrating. Rolling the schema back refuses once any new code has been generated.
 - **MFA:** At most four backup-code Argon2id hashes run at once across the control plane, so a burst of TOTP setup, backup-code regeneration or backup-code sign-in requests can no longer exhaust its memory. A request that cannot get a slot within 5 seconds gets 503 with `Retry-After: 1` on every MFA sign-in and step-up route, and the attempt it was charged is returned, so a busy check never counts toward the 5-attempt step-up budget or the sign-in attempt limit. The attempt goes back only to the window it was counted in, so a request that waits past the end of a window cannot cancel a wrong code counted in the next one and keep the lockout from arming. A sign-in attempt refused past the limit arms the lockout itself, so a busy attempt refunded after that refusal cannot skip it.
@@ -67,6 +75,7 @@ The media plane now admits encrypted media format v6 alongside earlier room vers
 
 ### Added
 
+- **Privacy:** The account-erasure screen can preview owned servers with other members before email verification, so users can review the servers they must acknowledge before deletion.
 - **Operations:** The nightly main-branch SonarQube Cloud scan now runs dependency analysis (SCA), and a daily `sonar-container-scan.yml` sends the service images and every digest-pinned image to SonarQube Cloud container scanning (beta). Neither blocks a pull request: OSV-Scanner and Dependabot keep the pull-request dependency checks, and Trivy keeps the image gate.
 - **Operations:** Added a default-off control-plane blue-green rail to `concord-ctl.sh` (`CONTROL_PLANE_DEPLOY_PROFILE=control-plane-bluegreen`, managed production and staging only, never self-host) that rebuilds the control plane without 502s when no migration is pending, plus a read-only `control-plane migrations status` subcommand and a `MIGRATIONS_MODE=verify` startup setting that refuses to start on a schema that is not current. Do not turn the rail on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 ship.
 - **Authentication:** Added `authority-ceremony`, an operator tool that signs account-key authority delegations and successions with two hardware keys, or with two key files on a self-hosted install (`--key-file`, `--yes`). It also writes a realm's anchors file (`make-anchors`) and prints a trust file's current delegation window (`show-trust`). Nothing runs it yet.

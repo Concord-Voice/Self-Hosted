@@ -6,6 +6,7 @@ package ownership
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -86,6 +87,9 @@ func (v *busyOwnershipMFAVerifier) VerifyCode(_ context.Context, _ string, _ ste
 		return false, fmt.Errorf("verify: %w", backuphash.ErrBusy)
 	}
 	return code == v.acceptCode, nil
+}
+func (v *busyOwnershipMFAVerifier) VerifyCodeTx(ctx context.Context, _ *sql.Tx, userID string, purpose stepup.Purpose, code string) (bool, error) {
+	return v.VerifyCode(ctx, userID, purpose, code)
 }
 func (*busyOwnershipMFAVerifier) GetEnabledMethods(context.Context, string) ([]string, error) {
 	return []string{"totp"}, nil

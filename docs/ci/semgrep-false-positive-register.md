@@ -262,6 +262,17 @@ _None yet._
 | Verification | The local community rulesets reported two findings on the line before the marker and none after it. Code Scanning alerts #494/#495 were dismissed as false positives on 2026-11-11 with Mark's approval, because the PR scan verifier does not honour in-source suppressions. |
 | Disposition | Rule-specific inline suppression for this test line only. A `$host` use in a shipped vhost is still a real finding. |
 
+#### `generic.html-templates.security.var-in-href.var-in-href` — account-erasure confirmation email (#297)
+
+| Field | Value |
+|---|---|
+| File | `services/control-plane/internal/email/templates/account_erasure_confirmation.html`, line 19 |
+| First recorded | 2026-11-25, PR #297 |
+| Suppressed by | `{{/* nosemgrep: ... */}}` template comment with the rule ID on the line above, which renders nothing |
+| Rationale | `{{.ConfirmationURL}}` comes only from `accountErasureConfirmationURL`, which accepts only `concord://account-erasure/confirm/<canonical uuid>/<canonical token>`: no userinfo, query, fragment, opaque part or escaping, at most 256 bytes, and no NUL, CR or LF. It cannot be a `javascript:` URL or leave the attribute. |
+| Verification | `TestSendAccountErasureConfirmationRejectsUnexpectedLink` covers each refusal branch of the validator. The community rule reports nothing locally with the marker. Code Scanning alert #516 was dismissed as a false positive on 2026-11-25 with Mark's approval, because the PR scan verifier does not honour in-source suppressions. |
+| Disposition | Rule-specific suppression for this template line only. Revisit if the confirmation link ever takes a value from a request or configuration. |
+
 ## Adding a new entry
 
 When suppressing a new Semgrep finding:
