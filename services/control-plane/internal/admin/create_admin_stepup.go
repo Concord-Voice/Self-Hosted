@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"time"
 	"unicode/utf8"
@@ -87,49 +88,58 @@ type adminStepUpProof struct {
 // gets 403 stepup_unavailable and a denied row; a storage or ceremony fault
 // gets a 5xx and a failure row.
 func (h *Handler) CreateAdminStepUpBegin(c *gin.Context) {
+	adminID := c.GetString(adminIDContextKey)
+	h.beginAdminStepUp(c, actionCreateAdmin, func(ctx context.Context, result, reason string) {
+		h.auditCreateAdmin(ctx, adminID, "", result, reason, "")
+	})
+}
+
+// beginAdminStepUp issues a step-up bound to (admin, session, action) and
+// answers the request. audit writes the action's own denied or failure row.
+func (h *Handler) beginAdminStepUp(c *gin.Context, action string, audit func(ctx context.Context, result, reason string)) {
 	ctx := c.Request.Context()
 	adminID := c.GetString(adminIDContextKey)
 	adminSession := c.GetString(adminSessionContextKey)
 	if adminSession == "" {
 		// AdminAuthRequired always sets it; without it the handle could not
 		// be bound to a session, so refuse rather than issue an unbound one.
-		h.log.Error("admin create step-up begin without a session binding", "admin_id", adminID)
-		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_no_session", "")
+		h.log.Error("admin step-up begin without a session binding", "admin_id", adminID, "action", action)
+		audit(ctx, AuditFailure, "stepup_begin_no_session")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 	var req struct{}
 	if err := decodeStrict(c, &req, maxAdminStepUpBeginBody); err != nil {
-		h.log.Warn("admin create step-up begin body refused", "admin_id", adminID, "error", err)
+		h.log.Warn("admin step-up begin body refused", "admin_id", adminID, "action", action, "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return
 	}
 	user, err := h.webAuthnUserForAdmin(ctx, adminID)
 	switch {
 	case errors.Is(err, errNoAdminCredentials):
-		h.log.Warn("admin create step-up refused: no enrolled key", "admin_id", adminID)
-		h.auditCreateAdmin(ctx, adminID, "", AuditDenied, "stepup_unavailable", "")
+		h.log.Warn("admin step-up refused: no enrolled key", "admin_id", adminID, "action", action)
+		audit(ctx, AuditDenied, "stepup_unavailable")
 		c.JSON(http.StatusForbidden, gin.H{"error": "stepup_unavailable"})
 		return
 	case err != nil:
-		h.log.Error("admin create step-up credential lookup failed", "admin_id", adminID, "error", err)
-		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_unavailable", "")
+		h.log.Error("admin step-up credential lookup failed", "admin_id", adminID, "action", action, "error", err)
+		audit(ctx, AuditFailure, "stepup_begin_unavailable")
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errServiceUnavailable})
 		return
 	}
 	assertion, session, err := h.webauthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
-		h.log.Error("admin create step-up begin failed", "admin_id", adminID, "error", err)
-		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_failed", "")
+		h.log.Error("admin step-up begin failed", "admin_id", adminID, "action", action, "error", err)
+		audit(ctx, AuditFailure, "stepup_begin_failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 	handle, err := h.storeAdminStepUp(ctx, adminStepUp{
-		AdminID: adminID, AdminSession: adminSession, Action: actionCreateAdmin, Session: *session,
+		AdminID: adminID, AdminSession: adminSession, Action: action, Session: *session,
 	})
 	if err != nil {
-		h.log.Error("admin create step-up store failed", "admin_id", adminID, "error", err)
-		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_failed", "")
+		h.log.Error("admin step-up store failed", "admin_id", adminID, "action", action, "error", err)
+		audit(ctx, AuditFailure, "stepup_begin_failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
@@ -233,6 +243,20 @@ func (h *Handler) redeemAdminStepUp(ctx context.Context, adminID, adminSession, 
 	if cred.Authenticator.CloneWarning {
 		h.log.Warn("admin create step-up clone warning", "admin_id", adminID)
 		return stepUpDenied("stepup_clone_warning")
+	}
+	if hostAgentProjectionEnabled(filepath.Dir(agentAuthorizerProjectionPath)) {
+		// One key, one counter: a key root imported is checked against, and
+		// advances, its root-owned counter here as at login, before the
+		// database counter. A never-imported key answers 404 and goes on.
+		switch err := h.verifyImportedCredential(ctx, adminID, assertion, ch.Session); {
+		case err == nil:
+		case errors.Is(err, errImportedCredentialRejected):
+			h.log.Warn("admin step-up imported credential rejected", "admin_id", adminID)
+			return stepUpDenied("stepup_root_counter_rejected")
+		default:
+			h.log.Warn("admin step-up imported credential verification unavailable", "admin_id", adminID)
+			return stepUpUnavailable("stepup_root_counter_unavailable")
+		}
 	}
 	err = h.repo.UpdateCredentialSignCount(ctx, cred.ID, int64(cred.Authenticator.SignCount))
 	switch {

@@ -113,6 +113,28 @@ type AdminRegistrationInput struct {
 // other fault while saving the credential returns an error wrapping
 // ErrCredentialPersist.
 func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo *AdminRepo, in AdminRegistrationInput) (AdminCredential, error) {
+	verified, err := verifyAdminRegistration(svc, in)
+	if err != nil {
+		return AdminCredential{}, err
+	}
+	stored, err := repo.CompleteEnrollment(ctx, in.CredentialGeneration, verified)
+	if err != nil {
+		// A reused credential ID, or a ceremony that a reset made stale, is
+		// rejected like any other bad attestation, not reported as a storage fault.
+		if errors.Is(err, ErrDuplicateCredential) ||
+			errors.Is(err, ErrEnrollmentStateChanged) ||
+			errors.Is(err, ErrAdminNotFound) {
+			return AdminCredential{}, err
+		}
+		return AdminCredential{}, fmt.Errorf("%w: %w", ErrCredentialPersist, err)
+	}
+	return stored, nil
+}
+
+// verifyAdminRegistration completes the registration ceremony and applies the
+// AAGUID allow-list, returning the credential to persist. It writes nothing,
+// so enrollment and a logged-in admin adding a key share one admission seam.
+func verifyAdminRegistration(svc *mfa.WebAuthnService, in AdminRegistrationInput) (AdminCredential, error) {
 	cred, err := svc.FinishRegistration(in.User, in.Session, in.Request)
 	if err != nil {
 		return AdminCredential{}, fmt.Errorf("finish admin registration: %w", err)
@@ -129,7 +151,7 @@ func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo
 		transports = append(transports, string(tr))
 	}
 
-	stored, err := repo.CompleteEnrollment(ctx, in.CredentialGeneration, AdminCredential{
+	return AdminCredential{
 		AdminID:        in.AdminID,
 		CredentialID:   cred.ID,
 		PublicKey:      cred.PublicKey,
@@ -137,16 +159,5 @@ func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo
 		SignCount:      int64(cred.Authenticator.SignCount),
 		CredentialName: in.CredentialName,
 		Transports:     transports,
-	})
-	if err != nil {
-		// A reused credential ID, or a ceremony that a reset made stale, is
-		// rejected like any other bad attestation, not reported as a storage fault.
-		if errors.Is(err, ErrDuplicateCredential) ||
-			errors.Is(err, ErrEnrollmentStateChanged) ||
-			errors.Is(err, ErrAdminNotFound) {
-			return AdminCredential{}, err
-		}
-		return AdminCredential{}, fmt.Errorf("%w: %w", ErrCredentialPersist, err)
-	}
-	return stored, nil
+	}, nil
 }
