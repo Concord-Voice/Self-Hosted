@@ -170,8 +170,9 @@ const NOTICE_CURSOR = /^[1-9]\d{0,17}$/;
 
 // The sign-in success carries the count beside its status, and the cursor
 // exactly when the count is above 0. The server leaves both out when it could
-// not read the count, rather than block the sign-in; the portal then shows no
-// notice. When present they must be valid.
+// not read the count, rather than block the sign-in, and when the request does
+// not set signin_notice, which this portal always does; the portal then shows
+// no notice. When present they must be valid.
 function signInResponse(value: unknown): SignInNotice {
   const data = record(value);
   if (data.status !== "authenticated") throw new ContractError();
