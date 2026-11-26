@@ -9,6 +9,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -149,14 +150,36 @@ func TestGraceRecovery_ExpiredSuccessorNotRecovered(t *testing.T) {
 	assert.Equal(t, 0, live)
 }
 
+// detachRedisCancellation runs every Redis command without the request's
+// cancellation, so a cancelled request still clears the fail-closed auth source
+// budgets and reaches the handler's database work.
+type detachRedisCancellation struct{}
+
+func (detachRedisCancellation) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (detachRedisCancellation) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		return next(context.WithoutCancel(ctx), cmd)
+	}
+}
+
+func (detachRedisCancellation) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		return next(context.WithoutCancel(ctx), cmds)
+	}
+}
+
 // A real DB/transaction error during recovery surfaces as 500, never a swallowed
 // 401 (Defect-1 silent-failure discipline). An already-cancelled request context
 // deterministically fails the recovery transaction's open without DB surgery.
+// Redis ignores that cancellation so the fail-closed source budgets in front of
+// the handler pass and the 500 comes from the handler's database error.
 func TestGraceRecovery_DBErrorReturns500(t *testing.T) {
 	ts := setupTS(t)
 	refreshToken, _ := registerAndGetRefreshToken(t, ts, "gracedberr", "")
 
 	require.Equal(t, http.StatusOK, doRefreshWithMachineID(ts, refreshToken, "", "").Code)
+	ts.Redis.AddHook(detachRedisCancellation{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

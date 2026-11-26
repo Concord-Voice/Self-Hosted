@@ -417,11 +417,19 @@ func (r *AdminRepo) UpdateCredentialSignCount(ctx context.Context, credentialID 
 	if err != nil {
 		return fmt.Errorf("update credential sign count rows: %w", err)
 	}
+	if n == 0 {
+		return errSignCountNotAdvanced
+	}
 	if n != 1 {
 		return fmt.Errorf("update credential sign count: expected 1 row, got %d", n)
 	}
 	return nil
 }
+
+// errSignCountNotAdvanced reports that no stored counter was below the new
+// one: the assertion replayed a counter (or the credential is gone), which
+// is a verification failure, not a storage fault.
+var errSignCountNotAdvanced = errors.New("update credential sign count: counter did not advance")
 
 // ListCredentials returns all WebAuthn credentials bound to an admin, ordered by
 // creation time. The slice is empty (not nil error) when the admin has none.

@@ -653,6 +653,7 @@ func TestListRecoveryRequestsEmpty(t *testing.T) {
 func TestRespondToRecoveryRequestNotFound(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recreqresp")
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	w := ts.DoRequest("POST", urlRecoveryRequests+"/nonexistent/respond", map[string]any{"action": "reject", "protocol_version": 2}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, 404, w.Code, w.Body.String())
 }
@@ -1576,12 +1577,44 @@ func TestListTrustedDevicesAfterDesignate(t *testing.T) {
 	assert.Len(t, devices, 1)
 }
 
+// TestListTrustedDevicesOmitsMachineID proves the list never returns the
+// machine identifier a responder check is keyed on; only the designating
+// response tells a device its own value.
+func TestListTrustedDevicesOmitsMachineID(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "listdevnomachine")
+	const machineID = "c2d3e4f5-a6b7-4890-abcd-ef1234567890"
+	headers := testhelpers.AuthHeaders(user.AccessToken)
+	headers.Set(headerMachineID, machineID)
+	headers.Set(headerDeviceName, "My Desktop")
+	designated := ts.DoRequest("POST", urlTrustedDevices, map[string]interface{}{
+		"password":    testPassword,
+		"device_name": "My Desktop",
+	}, headers)
+	require.Equal(t, http.StatusOK, designated.Code, designated.Body.String())
+	require.Contains(t, designated.Body.String(), machineID, "the designate response is unchanged")
+
+	w := ts.DoRequest("GET", urlTrustedDevices, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotContains(t, w.Body.String(), "machine_id")
+	require.NotContains(t, w.Body.String(), machineID)
+	var body struct {
+		Devices []map[string]any `json:"devices"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	require.Len(t, body.Devices, 1)
+	for _, key := range []string{"id", "device_name", "designated_at", "last_seen_at"} {
+		require.Contains(t, body.Devices[0], key)
+	}
+}
+
 // --- ListRecoveryRequests (more paths) ---
 
 func TestRespondToRecoveryRequestApprove(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveryv2")
 	r, offer, approve := recoveryV2Fixture(t, ts, user.ID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	route := urlRecoveryRequests + "/" + r.RequestID + respondSuffix
 	headers := testhelpers.AuthHeaders(user.AccessToken)
 	w := ts.DoRequest("POST", route, actionV2Map(offer), headers)
@@ -1594,6 +1627,7 @@ func TestRespondToRecoveryRequestReject(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveryv2")
 	r, offer, approve := recoveryV2Fixture(t, ts, user.ID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	route := urlRecoveryRequests + "/" + r.RequestID + respondSuffix
 	headers := testhelpers.AuthHeaders(user.AccessToken)
 	_ = offer
@@ -2780,12 +2814,15 @@ func TestRespondToRecoveryRequestNotOwner(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveryv2")
 	r, offer, approve := recoveryV2Fixture(t, ts, user.ID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	route := urlRecoveryRequests + "/" + r.RequestID + respondSuffix
 	headers := testhelpers.AuthHeaders(user.AccessToken)
 	_ = offer
 	_ = approve
 	_ = headers
 	other := ts.CreateTestUser(t, "recoveryother")
+	// The other account's own trusted device still cannot see this request.
+	testhelpers.TrustSession(t, ts.DB, other.ID, other.AccessToken)
 	w := ts.DoRequest("POST", route, map[string]any{"action": "reject", "protocol_version": 2}, testhelpers.AuthHeaders(other.AccessToken))
 	require.Equal(t, 404, w.Code, w.Body.String())
 }
@@ -2796,6 +2833,7 @@ func TestRespondToRecoveryRequestAlreadyResponded(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveryv2")
 	r, offer, approve := recoveryV2Fixture(t, ts, user.ID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	route := urlRecoveryRequests + "/" + r.RequestID + respondSuffix
 	headers := testhelpers.AuthHeaders(user.AccessToken)
 	w := ts.DoRequest("POST", route, actionV2Map(offer), headers)
@@ -2812,6 +2850,7 @@ func TestRespondToRecoveryRequestApproveWithoutPayload(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveryv2")
 	r, offer, approve := recoveryV2Fixture(t, ts, user.ID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	route := urlRecoveryRequests + "/" + r.RequestID + respondSuffix
 	headers := testhelpers.AuthHeaders(user.AccessToken)
 	_ = offer
@@ -3797,6 +3836,7 @@ func TestRespondToRecoveryRequestBadBase64Payload(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveryv2")
 	r, offer, approve := recoveryV2Fixture(t, ts, user.ID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	route := urlRecoveryRequests + "/" + r.RequestID + respondSuffix
 	headers := testhelpers.AuthHeaders(user.AccessToken)
 	_ = offer
@@ -3809,6 +3849,7 @@ func TestRespondToRecoveryRequestBadBase64PubKey(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveryv2")
 	r, offer, approve := recoveryV2Fixture(t, ts, user.ID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	route := urlRecoveryRequests + "/" + r.RequestID + respondSuffix
 	headers := testhelpers.AuthHeaders(user.AccessToken)
 	_ = approve
@@ -3835,6 +3876,7 @@ func TestListRecoveryRequestsWithData(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoverylist")
 	r, _, _ := recoveryV2Fixture(t, ts, user.ID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	w := ts.DoRequest("GET", urlRecoveryRequests, nil, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, 200, w.Code, w.Body.String())
 	var body struct {

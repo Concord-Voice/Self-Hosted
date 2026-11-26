@@ -61,6 +61,13 @@ type RecoveryClaims struct {
 	UserID         string
 	JTI            string
 	ExpiresAt      time.Time // Verified JWT expiry; only the device ceremony uses this lifetime.
+	// CredentialEpoch is the users.credential_epoch the token was issued
+	// against; empty means the account had never rotated.
+	CredentialEpoch string
+	// EpochBound is set only by ValidateRecoveryToken after it verified a
+	// recovery_v3 token. ValidateRecoveryClaimsTx refuses claims without it, so
+	// a hand-built or zero-value RecoveryClaims authorizes nothing.
+	EpochBound bool
 }
 
 // ErrRecoveryPolicyUnavailable means current recovery policy could not be evaluated.
@@ -97,8 +104,11 @@ type MFAChecker interface {
 	// in Redis keyed by the challenge JTI. Returns credential request options for the client.
 	// Returns nil options if user has no WebAuthn credentials.
 	BeginWebAuthnLogin(ctx context.Context, userID, jti string) (options interface{}, err error)
-	// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
-	GenerateRecoveryToken(userID, verifiedFactor string) (token string, jti string, err error)
+	// IssueRecoveryTokenTx locks the users row, re-evaluates recovery policy for
+	// verifiedFactor and mints a RecoveryTokenTTL token stamped with the
+	// credential epoch read under that lock. Errors wrap ErrRecoveryProofInvalid
+	// or ErrRecoveryPolicyUnavailable when policy refused or could not be read.
+	IssueRecoveryTokenTx(ctx context.Context, tx *sql.Tx, userID, verifiedFactor string) (token string, jti string, err error)
 	// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
 	ValidateRecoveryToken(ctx context.Context, tokenString string) (*RecoveryClaims, error)
 	ValidateRecoveryClaimsTx(ctx context.Context, tx *sql.Tx, claims *RecoveryClaims) error
@@ -1708,9 +1718,10 @@ func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, 
 	}
 	if !valid {
 		h.recordCheckedFailure(ctx, email)
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return false
+		}
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return false
 	}
@@ -1854,9 +1865,10 @@ func (h *Handler) Login(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 			return
 		}
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
@@ -2086,10 +2098,10 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool, 
 	c.Header(middleware.SessionIssuedHeader, "true")
 	c.Header(middleware.SessionIDHeader, tokenID)
 
-	// Clear cumulative IP auth failures only after full auth completion
-	// (credentials + MFA if enabled). This prevents resetting the counter
-	// by repeatedly passing the credential step while brute-forcing MFA.
-	middleware.ClearAuthFailures(c.Request.Context(), h.redis, c.ClientIP())
+	// A completed sign-in leaves the shared source failure counter alone. Its
+	// key is a /32 or /64 bucket shared by other clients, so clearing it would
+	// let any account holder there fail, sign in and repeat without a ban. It
+	// decays with its window.
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonAuthenticationSucceeded, AuthMethod: primaryAuthMethod, RouteTemplate: securityevent.RouteAuthLogin})
 
 	h.log.Info("User logged in (MFA verified)", "user_id", userID)
@@ -3491,11 +3503,16 @@ func revokeLogoutTargetTx(
 // ── Account Recovery Endpoints ──────────────────────────────────────────────
 
 const (
-	recoveryMaxAttempts   = 5              // Legacy code: max wrong-code attempts before invalidating
-	recoveryTokenUsedTTL  = 25 * time.Hour // Must match or exceed mfa.recoveryTTL
-	recoveryFailureLimit  = 10             // Legacy code: failures per address per window
+	recoveryMaxAttempts   = 5  // Legacy code: max wrong-code attempts before invalidating
+	recoveryFailureLimit  = 10 // Legacy code: failures per address per window
 	recoveryFailureWindow = 24 * time.Hour
 )
+
+// RecoveryTokenTTL is the lifetime of final recovery authority and of its
+// spent marker (ADR-0046 decision 7). The device ceremony and the reset share
+// it. Social recovery needed 24 hours and is paused; un-pausing it needs a
+// request-scoped credential, not a longer token.
+const RecoveryTokenTTL = 15 * time.Minute
 
 const recoveryFailureKeyPrefix = "recovery_fail:"
 
@@ -4043,8 +4060,9 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	record, err := h.consumeRecoveryCode(ctx, recoveryRedisKey(req.Email), req.Code)
 	if errors.Is(err, redis.Nil) {
 		h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		middleware.MarkAuthFailureOutcome(c, outcome)
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
 		return
 	}
@@ -4081,7 +4099,7 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
-	addr, ok := h.recoveryKeyAccountAddress(ctx, c, token, record.UserID, record.Addr)
+	addr, ok := h.recoveryKeyAccountAddr(ctx, c, token, record.UserID, record.Addr)
 	if !ok {
 		return
 	}
@@ -4101,10 +4119,11 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 	}
 }
 
-// recoveryKeyAccountAddress returns the account's current address when it is
-// still the one the key was sent to. When the account is gone or uses another
-// address, it discards the key and answers as for any other unusable key.
-func (h *Handler) recoveryKeyAccountAddress(ctx context.Context, c *gin.Context, token, userID, sentTo string) (string, bool) {
+// recoveryKeyAccountAddr returns the account's current address when it still
+// matches the one the key was sent to. Otherwise it answers the request, and
+// for a gone or moved account it discards the key and refuses it like any
+// other unusable key.
+func (h *Handler) recoveryKeyAccountAddr(ctx context.Context, c *gin.Context, token, userID, sentTo string) (string, bool) {
 	var addr string
 	err := h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, userID).Scan(&addr)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -4112,14 +4131,14 @@ func (h *Handler) recoveryKeyAccountAddress(ctx context.Context, c *gin.Context,
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return "", false
 	}
-	if err != nil || addr != sentTo {
-		if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
-			h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
-		}
-		h.refuseRecoveryEmailToken(ctx, c)
-		return "", false
+	if err == nil && addr == sentTo {
+		return addr, true
 	}
-	return addr, true
+	if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
+		h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+	}
+	h.refuseRecoveryEmailToken(ctx, c)
+	return "", false
 }
 
 // redeemRecoveryEmailToken spends the key. A key a concurrent request already
@@ -4140,10 +4159,11 @@ func (h *Handler) redeemRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 
 // refuseRecoveryEmailToken answers an unusable recovery key. The client
 // address auth ban still counts it.
-func (h *Handler) refuseRecoveryEmailToken(ctx context.Context, c *gin.Context) {
+func (h *Handler) refuseRecoveryEmailToken(_ context.Context, c *gin.Context) {
+	if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+		return
+	}
 	h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
-	outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-	middleware.MarkAuthFailureOutcome(c, outcome)
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode})
 }
 
@@ -4293,15 +4313,21 @@ func (h *Handler) CompleteRecovery(c *gin.Context, userID, verifiedFactor string
 		return false
 	}
 	// The email or MFA verifier supplies this proof before final token issuance.
-	tx := h.beginRecoveryPolicyTx(c, &RecoveryClaims{UserID: userID, RecoveryFactor: verifiedFactor})
-	if tx == nil {
+	tx, err := h.db.BeginTx(c.Request.Context(), &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		writeRecoveryPolicyError(c, ErrRecoveryPolicyUnavailable)
 		return false
 	}
 	defer h.rollbackRecoveryPolicyTx(tx)
 
-	recoveryToken, _, err := h.mfaChecker.GenerateRecoveryToken(userID, verifiedFactor)
+	// Policy, the users lock and the stamped credential epoch are one decision.
+	recoveryToken, _, err := h.mfaChecker.IssueRecoveryTokenTx(c.Request.Context(), tx, userID, verifiedFactor)
 	if err != nil {
-		h.log.Error("Failed to generate recovery token", "error", err)
+		h.rollbackRecoveryPolicyTx(tx)
+		if writeRecoveryPolicyError(c, err) {
+			return false
+		}
+		h.log.Error("Failed to generate recovery token", "error_class", "recovery_token_issue")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return false
 	}
@@ -4376,15 +4402,17 @@ func (h *Handler) validateAndConsumeRecoveryToken(c *gin.Context, tokenStr strin
 	}
 	if err != nil {
 		if recordAuthFailure {
-			middleware.MarkAuthFailureOutcome(c, middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig()))
+			if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+				return nil, ""
+			}
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return nil, ""
 	}
 
 	ctx := c.Request.Context()
-	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
-	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: recoveryTokenUsedTTL, Mode: "NX"}).Result()
+	recoveryUsedKey := recoveryTokenUsedKey(claims.JTI)
+	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: RecoveryTokenTTL, Mode: "NX"}).Result()
 	if errors.Is(err, redis.Nil) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
 		return nil, ""
@@ -4857,7 +4885,6 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		return
 	}
 
-	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
 	h.log.Info("Password reset via recovery", "operation", "forced_security_clear")
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonRecoveryReset, AuthMethod: securityevent.AuthRecovery, RouteTemplate: securityevent.RouteRecoveryResetPassword})
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully. Please sign in with your new password."})
@@ -5000,8 +5027,29 @@ func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, row.Wire())
 }
 
-// Device routes use Bearer recovery-purpose authentication only. They deliberately
-// do not consume reset tokens or apply access-token credential epochs.
+// recoveryTokenUsedKey names the spent marker a reset reserves for a token jti.
+func recoveryTokenUsedKey(jti string) string {
+	return "recovery_token_used:" + jti
+}
+
+// recoveryTokenSpent reads the spent marker without setting, deleting or
+// extending it. A missing client or any Redis error is an error, never false.
+func (h *Handler) recoveryTokenSpent(ctx context.Context, jti string) (bool, error) {
+	if h.redis == nil {
+		return false, errors.New("recovery spent state unavailable")
+	}
+	n, err := h.redis.Exists(ctx, recoveryTokenUsedKey(jti)).Result()
+	if err != nil {
+		return false, fmt.Errorf("read recovery spent state: %w", err)
+	}
+	return n > 0, nil
+}
+
+// Device routes use Bearer recovery-purpose authentication only and never spend
+// the token, but refuse one a reset has spent. The spent read stays outside SQL
+// because the epoch comparison in recoveryGuard is the linearization point: a
+// reset that reserves the marker after this read either commits first, so the
+// guard sees the rotated epoch, or commits after the device operation.
 func (h *Handler) validateDeviceRecoveryToken(c *gin.Context, token string) *RecoveryClaims {
 	if token == "" || len(token) > 4096 {
 		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
@@ -5016,6 +5064,16 @@ func (h *Handler) validateDeviceRecoveryToken(c *gin.Context, token string) *Rec
 		return nil
 	}
 	if err != nil || claims == nil || !devicerecovery.CanonicalUUID(claims.UserID) || claims.JTI == "" || claims.ExpiresAt.IsZero() {
+		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
+		return nil
+	}
+	spent, err := h.recoveryTokenSpent(c.Request.Context(), claims.JTI)
+	if err != nil {
+		h.log.Error("Failed to read recovery token spent state", "error_class", "token_usage_check")
+		writeRecoveryPolicyError(c, ErrRecoveryPolicyUnavailable)
+		return nil
+	}
+	if spent {
 		devicerecovery.WriteError(c, devicerecovery.ErrUnauthorized)
 		return nil
 	}

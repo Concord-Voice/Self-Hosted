@@ -97,8 +97,8 @@ All paths below are under `/api/v1`; `protocol_version` is integer `2`.
 | --- | --- |
 | POST `/auth/recovery/device-request` | Recovery token in the body; create validated immutable requester context in `pending` |
 | GET `/auth/recovery/device-request/{id}` | Recovery-purpose Bearer token scoped to the requester user and JTI hash; poll retained context, offer and approved ciphertext |
-| GET `/mfa/recovery-requests` | Access authentication; list owned, unexpired `pending`/`offered` requests without ciphertext |
-| POST `/mfa/recovery-requests/{id}/respond` | Access authentication; exact mutually exclusive `offer`, `approve` or `reject` body |
+| GET `/mfa/recovery-requests` | Access authentication from a session on a designated trusted device; list owned, unexpired `pending`/`offered` requests without ciphertext. Any other session gets 200 with an empty list |
+| POST `/mfa/recovery-requests/{id}/respond` | Access authentication from a session on a designated trusted device, else 403 before the request is looked up; exact mutually exclusive `offer`, `approve` or `reject` body |
 | POST `/auth/recovery/device-request/{id}/complete` | Recovery-purpose Bearer token; body exactly `{protocol_version,transcript_hash}`; acknowledge confirmed decrypt/import |
 
 The server recomputes account binding and the proposed offer's transcript hash.
@@ -121,10 +121,25 @@ stateDiagram-v2
     approved --> expired: deadline
 ```
 
-Transactions lock `users` before the recovery row. Responder writes enforce the
-authenticated credential epoch. Requester recovery tokens have no credential
-epoch, so completion uses recovery-purpose validation rather than access-token
-middleware or an empty-epoch guard. After locks, expiry is checked against
+Transactions lock `users`, then the responder's trusted-device designation row,
+then the recovery row. Responder writes enforce the authenticated credential
+epoch. A requester recovery token (purpose `recovery_v3`) names the credential
+epoch it was issued against and lives 15 minutes. The ceremony and the final
+reset share that one budget. Every requester route compares the token's epoch
+with `users.credential_epoch` under the users lock, so a password change,
+completed recovery or account-key replacement refuses the token. The requester
+routes also refuse a token whose JTI a reset already spent; when the spent state
+cannot be read they answer 503 before touching any row. The ceremony itself does
+not spend the token.
+
+Only a session whose machine identifier matches a designated trusted device can
+list or answer a request. This check is hardening, not device authentication:
+`machine_id` is asserted by the client, so a session that learns a designated
+device's identifier and can sign in again or pass the machine-change refresh
+gate can present it. The check stops an ordinary other session from answering.
+The boundary is the device-held key that Desktop issue 84 tracks.
+
+After locks, expiry is checked against
 `clock_timestamp()`. Each transition requires exactly one affected CAS row,
 matching ownership, version and immutable context; post-offer writes also match
 the offered key, nonce and digest. No transition renews expiry. Terminal
@@ -136,8 +151,10 @@ duplicate, null, wrongly typed, case-alias and action-incompatible fields are
 refused, as are trailing documents. Token length is at most 4096 characters,
 origin at most 512 UTF-8 bytes, and decoded ciphertext 30–8192 bytes with prefix
 `02`. Oversize bodies return 413; malformed or unsupported-version bodies 400;
-invalid/expired tokens 401; missing/unowned requests 404; transition/digest
-conflicts 409; dependency failures 500; rate limits 429 with `Retry-After`.
+invalid, expired, stale-epoch or spent tokens 401; a respond from a session that
+is not on a designated trusted device 403; missing/unowned requests 404;
+transition/digest conflicts 409; dependency failures 500; unreadable recovery
+policy or spent-token state 503; rate limits 429 with `Retry-After`.
 Unsupported versions include update/restart guidance.
 
 Poll every three seconds without overlap and honor `Retry-After`; the poll budget

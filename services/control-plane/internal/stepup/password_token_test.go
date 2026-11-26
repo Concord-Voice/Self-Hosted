@@ -61,7 +61,10 @@ func newMintHarness(t *testing.T) *mintHarness {
 	db := subjectTestDB(t)
 	logs := &bytes.Buffer{}
 	m := &mintHarness{db: db, userID: subjectTestUser(t, db), verifier: &fakePasswordVerifier{}, logs: logs}
-	m.handler = NewPasswordTokenHandler(db, m.verifier, nil, logger.NewWithWriter(logs))
+	// A wrong password records a source-budget failure, which fails closed
+	// without a counter backend, so the harness needs one.
+	rdb, _ := newBudgetRedis(t)
+	m.handler = NewPasswordTokenHandler(db, m.verifier, rdb, logger.NewWithWriter(logs))
 	return m
 }
 
@@ -109,6 +112,22 @@ func TestMintPasswordToken_WrongPassword(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, w.Code)
 	assert.Equal(t, map[string]any{"error": ErrMsgInvalidPassword}, body)
 	assert.Equal(t, 1, m.verifier.calls)
+	assert.Zero(t, tokenRows(t, m.db, m.userID))
+}
+
+// A wrong password whose source failure cannot be counted is the fixed 503,
+// never the ordinary 403, and mints nothing (VULN-194).
+//
+// Mutant killed: answering the ordinary refusal when RecordAuthFailure fails.
+func TestMintPasswordToken_WrongPasswordFailsClosedWithoutCounterBackend(t *testing.T) {
+	m := newMintHarness(t)
+	m.handler = NewPasswordTokenHandler(m.db, m.verifier, nil, logger.NewWithWriter(m.logs))
+
+	w, _ := m.mint(t, mintBody("not-the-password", PurposeDMClear))
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Contains(t, []string{"2", "3", "4"}, w.Header().Get("Retry-After"), "the auth source-budget 503 jitters its Retry-After")
+	assert.NotContains(t, w.Body.String(), ErrMsgInvalidPassword)
 	assert.Zero(t, tokenRows(t, m.db, m.userID))
 }
 

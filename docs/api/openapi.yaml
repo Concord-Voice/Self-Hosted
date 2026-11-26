@@ -43,7 +43,10 @@ info:
       `error` envelope; global header validation, account state, email verification,
       and client-attestation gates keep the distinct shapes documented per operation.
 
-    - Rate limits are documented per-endpoint; exceeded limits return 429
+    - Rate limits are documented per-endpoint; exceeded limits return 429.
+      Public `/auth` source-budget checks return the fixed 503 response with
+      a jittered `Retry-After` of 2 to 4 seconds when Redis is unavailable, rather than admitting an
+      uncounted authentication attempt.
 
 
     ## End-to-End Encryption (E2EE)
@@ -922,7 +925,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Invalid or expired role authentication
+          description: Invalid, expired, stale-epoch or spent recovery token (a reset already used its JTI, or the credential epoch changed since issuance)
           content:
             application/json:
               schema:
@@ -954,7 +957,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Recovery policy unavailable; token remains unconsumed and no authentication failure is recorded
+          description: Recovery policy or spent-token state unavailable; nothing is read or written, the token remains unconsumed and no authentication failure is recorded
           content:
             application/json:
               schema:
@@ -992,7 +995,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Invalid or expired role authentication
+          description: Invalid, expired, stale-epoch or spent recovery token (a reset already used its JTI, or the credential epoch changed since issuance)
           content:
             application/json:
               schema:
@@ -1024,7 +1027,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Recovery policy unavailable; token remains unconsumed and no authentication failure is recorded
+          description: Recovery policy or spent-token state unavailable; nothing is read or written, the token remains unconsumed and no authentication failure is recorded
           content:
             application/json:
               schema:
@@ -1182,7 +1185,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Invalid or expired role authentication
+          description: Invalid, expired, stale-epoch or spent recovery token (a reset already used its JTI, or the credential epoch changed since issuance)
           content:
             application/json:
               schema:
@@ -1214,7 +1217,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Recovery policy unavailable; token remains unconsumed and no authentication failure is recorded
+          description: Recovery policy or spent-token state unavailable; nothing is read or written, the token remains unconsumed and no authentication failure is recorded
           content:
             application/json:
               schema:
@@ -1225,10 +1228,10 @@ paths:
       - Auth
       summary: Social recovery request creation is temporarily paused
       description: >-
-        After the unchanged AuthBanCheck parent gate, always returns the exact Recovery Circle pause
+        After the AuthBanCheck parent gate, always returns the exact Recovery Circle pause
         response without reading the body or recovery token. Does not create a request or access
         recovery data. Runs before the route-specific limiter, whose counter is not advanced.
-        AuthBanCheck can still access Redis and return 429 with Retry-After. The pause itself sets no
+        AuthBanCheck can still access Redis and return 429 with Retry-After, or 503 with a Retry-After of 2 to 4 seconds when Redis is unavailable. The pause itself sets no
         Retry-After. Request definitions remain for dormant compatibility; no success response is reachable.
       operationId: createSocialRecoveryRequest
       security: []
@@ -1249,10 +1252,10 @@ paths:
       - Auth
       summary: Social recovery polling is temporarily paused
       description: >-
-        After the unchanged AuthBanCheck parent gate, always returns the exact Recovery Circle pause
+        After the AuthBanCheck parent gate, always returns the exact Recovery Circle pause
         response, regardless of request existence, status or recovery token. No shares are returned,
         including for complete requests. Runs before the route-specific limiter, whose counter is not
-        advanced. AuthBanCheck can still access Redis and return 429 with Retry-After. The pause itself
+        advanced. AuthBanCheck can still access Redis and return 429 with Retry-After, or 503 with a Retry-After of 2 to 4 seconds when Redis is unavailable. The pause itself
         sets no Retry-After. Stored requests remain unchanged; no success response is reachable.
       operationId: pollSocialRecoveryRequest
       security: []
@@ -1295,8 +1298,10 @@ paths:
         rechecked at MFA verification. Unknown policy or an enrolled SMS requirement fails closed;
         hardened mode remains dormant without enrolled SMS, which has no recovery verifier yet.
         Accounts needing no additional factor receive the existing recovery token and wrapped key data.
-        Final tokens use purpose recovery_v2 and carry signed recovery_factor provenance; legacy
-        recovery tokens must restart email verification. Final issuance rechecks current policy
+        Final tokens use purpose recovery_v3, live 15 minutes, carry signed recovery_factor provenance
+        and name the credential epoch they were issued against; a password change, completed recovery
+        or account-key replacement revokes them. recovery_v2 and other legacy recovery tokens must
+        restart email verification. Final issuance rechecks current policy
         under the user lock before returning a token or wrapped keys; every recovery-token consumer
         rechecks it again, so email-only authority cannot bypass a subsequently reserved inline factor.
 
@@ -12282,7 +12287,7 @@ paths:
       operationId: mfaListRecoveryRequests
       security:
       - BearerAuth: []
-      description: Owned, unexpired pending/offered rows only; never ciphertext. 10 per minute per user.
+      description: Owned, unexpired pending/offered rows only; never ciphertext. 10 per minute per user. Only a session on a designated trusted device sees requests; any other session gets 200 with an empty list.
       responses:
         '200':
           description: Owned v2 recovery state
@@ -12442,6 +12447,12 @@ paths:
                 $ref: '#/components/schemas/Error'
         '401':
           description: Invalid or expired role authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Session is not on a designated trusted device; refused before the request is looked up
           content:
             application/json:
               schema:
@@ -24044,9 +24055,6 @@ components:
           format: date-time
         remember_me:
           type: boolean
-        machine_id:
-          type: string
-          description: Machine identifier recorded on this refresh row, or empty when absent.
         is_current:
           type: boolean
     PastSession:
@@ -25640,8 +25648,6 @@ components:
           type: string
           format: uuid
         device_name:
-          type: string
-        machine_id:
           type: string
         designated_at:
           type: string
