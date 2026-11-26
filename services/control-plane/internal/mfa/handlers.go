@@ -3944,18 +3944,8 @@ func isValidEmail(email string) bool {
 
 // ── Recovery Token Methods ──────────────────────────────────────────────────
 
-// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
-// Implements auth.MFAChecker interface.
-func (h *Handler) GenerateRecoveryToken(userID, verifiedFactor string) (string, string, error) {
-	if verifiedFactor != "email" && verifiedFactor != "totp" && verifiedFactor != "webauthn" {
-		return "", "", errors.New("invalid recovery proof")
-	}
-	return generateChallengeTokenWithTTL(ChallengeClaims{
-		UserID: userID, Purpose: PurposeRecovery, RecoveryFactor: verifiedFactor,
-	}, JWTSecret(h.jwtSecret), recoveryTTL)
-}
-
-// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
+// ValidateRecoveryToken validates a recovery_v3 JWT against current policy and
+// the stored credential epoch, and returns epoch-bound claims.
 // Implements auth.MFAChecker interface.
 func (h *Handler) ValidateRecoveryToken(ctx context.Context, tokenString string) (*auth.RecoveryClaims, error) {
 	claims, err := ValidateChallengeToken(tokenString, h.jwtSecret, PurposeRecovery)
@@ -3965,17 +3955,26 @@ func (h *Handler) ValidateRecoveryToken(ctx context.Context, tokenString string)
 	if claims.ExpiresAt == nil {
 		return nil, errors.New("recovery expiry missing")
 	}
-	if claims.RecoveryFactor != "email" && claims.RecoveryFactor != "totp" && claims.RecoveryFactor != "webauthn" {
+	if !isRecoveryFactor(claims.RecoveryFactor) {
 		return nil, errors.New("recovery proof missing")
 	}
-	methods, err := h.GetRecoveryMethods(ctx, claims.UserID)
+	methods, credEpoch, err := h.readRecoveryPolicy(ctx, claims.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
+	}
+	// Unlocked pre-check, so a stale token is refused before any side effect
+	// (spent-marker reservation, credential fence, hashing). The comparison
+	// under the users lock in ValidateRecoveryClaimsTx stays the authority.
+	if !sameRecoveryEpoch(claims.CredentialEpoch, credEpoch) {
+		return nil, errors.New("recovery token predates a credential change")
 	}
 	if len(methods) > 0 && !containsStr(methods, claims.RecoveryFactor) {
 		return nil, errors.New("recovery proof no longer satisfies policy")
 	}
-	return &auth.RecoveryClaims{RecoveryFactor: claims.RecoveryFactor, UserID: claims.UserID, JTI: claims.ID, ExpiresAt: claims.ExpiresAt.Time}, nil
+	return &auth.RecoveryClaims{
+		RecoveryFactor: claims.RecoveryFactor, UserID: claims.UserID, JTI: claims.ID, ExpiresAt: claims.ExpiresAt.Time,
+		CredentialEpoch: claims.CredentialEpoch, EpochBound: true,
+	}, nil
 }
 
 // ── Recovery Key Endpoints ──────────────────────────────────────────────────
@@ -4273,7 +4272,7 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	userID := c.GetString("user_id")
 
 	rows, err := h.db.QueryContext(c.Request.Context(),
-		`SELECT id, device_name, machine_id, designated_at, last_seen_at
+		`SELECT id, device_name, designated_at, last_seen_at
 		 FROM trusted_recovery_devices WHERE user_id = $1
 		 ORDER BY designated_at DESC`, userID,
 	)
@@ -4284,10 +4283,11 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	}
 	defer func() { _ = rows.Close() }()
 
+	// The machine identifier is a responder credential input, so a list never
+	// returns it; only the designating device learns its own value.
 	type trustedDevice struct {
 		ID           string     `json:"id"`
 		DeviceName   string     `json:"device_name"`
-		MachineID    string     `json:"machine_id"`
 		DesignatedAt time.Time  `json:"designated_at"`
 		LastSeenAt   *time.Time `json:"last_seen_at"`
 	}
@@ -4296,7 +4296,7 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 	var scanErr error
 	for rows.Next() {
 		var d trustedDevice
-		if err := rows.Scan(&d.ID, &d.DeviceName, &d.MachineID, &d.DesignatedAt, &d.LastSeenAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.DeviceName, &d.DesignatedAt, &d.LastSeenAt); err != nil {
 			h.log.Error("Failed to scan trusted device row", "user_id", userID, "error", err)
 			scanErr = err
 			break
@@ -4355,7 +4355,7 @@ func (h *Handler) DesignateTrustedDevice(c *gin.Context) {
 		return
 	}
 
-	h.log.Info("Trusted device designated", "user_id", userID, "device_id", deviceID, "machine_id", machineID)
+	h.log.Info("Trusted device designated", "user_id", userID, "device_id", deviceID)
 	h.clearStepUpAfterSuccess(c, userID)
 	c.JSON(http.StatusOK, gin.H{
 		"id":            deviceID,

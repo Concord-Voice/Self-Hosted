@@ -11,8 +11,7 @@ import (
 )
 
 // Migrations 000203 and 000204 index admin_audit_log for the admin sign-in
-// notice (AuditLog.AdminsAddedSinceLastSignIn). 000201 belongs to another
-// change and 000202 is unused; these files stand at 000203 and 000204.
+// notice (AuditLog.AdminsAddedSinceLastSignIn).
 
 // migrationStatements returns the file's SQL statements, comments dropped.
 func migrationStatements(t *testing.T, path string) []string {
@@ -57,8 +56,10 @@ func TestMigration000203_000204_AreSingleConcurrentStatements(t *testing.T) {
 }
 
 // After the runner applies them, both indexes exist, are valid, and have the
-// pinned definitions, and the sign-in lookup uses the partial index.
-func TestMigration000203_000204_IndexesAreValidAndUsed(t *testing.T) {
+// pinned definitions. That the production notice query uses them is pinned in
+// internal/admin (TestSignInNoticeQuery_UsesIndexesUnderGenericPlan), which
+// can EXPLAIN the query itself.
+func TestMigration000203_000204_IndexesAreValid(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(cleanup)
 
@@ -76,23 +77,4 @@ func TestMigration000203_000204_IndexesAreValidAndUsed(t *testing.T) {
 		assert.Contains(t, got, "ON public.admin_audit_log USING btree "+def, name)
 	}
 
-	tx, err := db.Begin()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = tx.Rollback() })
-	// Planner choice only: no data is needed, so forbid the alternatives.
-	_, err = tx.Exec(`SET LOCAL enable_seqscan = off`)
-	require.NoError(t, err)
-	rows, err := tx.Query(`EXPLAIN SELECT ts FROM admin_audit_log
-		WHERE admin_id = '00000000-0000-0000-0000-000000000001' AND event_type = 'login_success' AND result = 'success'
-		ORDER BY ts DESC LIMIT 1`)
-	require.NoError(t, err)
-	defer func() { _ = rows.Close() }()
-	var plan strings.Builder
-	for rows.Next() {
-		var line string
-		require.NoError(t, rows.Scan(&line))
-		plan.WriteString(line + "\n")
-	}
-	require.NoError(t, rows.Err())
-	assert.Contains(t, plan.String(), "idx_admin_audit_login_success", plan.String())
 }

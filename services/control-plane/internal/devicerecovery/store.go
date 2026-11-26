@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
 	"github.com/google/uuid"
 )
 
@@ -21,8 +22,13 @@ var ErrConflict = &APIError{http.StatusConflict, "Recovery request state or tran
 // ErrUnauthorized rejects invalid role authentication.
 var ErrUnauthorized = &APIError{http.StatusUnauthorized, "Invalid or expired recovery token"}
 
+// ErrForbidden rejects a responder session that is not on a designated trusted device.
+var ErrForbidden = &APIError{http.StatusForbidden, "Only a designated trusted device can answer recovery requests"}
+
 // Row retains the exact database snapshot for all checked writes. The lock order
-// is users FOR UPDATE, then requests FOR UPDATE, then database wall-clock read.
+// is users FOR UPDATE, then (responder paths) the trusted-device designation FOR
+// SHARE, then requests FOR UPDATE, then database wall-clock read. Designation
+// writers take only the designation row, so no cycle exists.
 type Row struct {
 	Context
 	Offer
@@ -131,6 +137,33 @@ func checkRollback(rollbackErr error, resultErr *error) {
 		*resultErr = fmt.Errorf("rollback recovery: %w", rollbackErr)
 	}
 }
+
+// lockTrustedResponder requires the signed session in ctx to be recorded on a
+// machine designated as userID's trusted recovery device. FOR SHARE makes an
+// answer either commit before a designation is removed or see no row. There is
+// deliberately no revoked_at predicate: an access token minted before a refresh
+// rotation names the revoked but retained predecessor row, and session
+// liveness is the family guard's job. The machine id is client-reported, so
+// this is hardening that narrows who can answer, not device authentication.
+func lockTrustedResponder(ctx context.Context, tx *sql.Tx, userID string) error {
+	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
+	if !ok || identity.SID == uuid.Nil || identity.UserID.String() != userID {
+		return ErrForbidden
+	}
+	var designation string
+	err := tx.QueryRowContext(ctx, `SELECT d.id FROM trusted_recovery_devices d
+ JOIN refresh_tokens r ON r.user_id = d.user_id AND r.machine_id = d.machine_id
+ WHERE r.id = $1 AND r.user_id = $2
+ FOR SHARE OF d`, identity.SID, userID).Scan(&designation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return fmt.Errorf("lock trusted responder: %w", err)
+	}
+	return nil
+}
+
 func lockUser(ctx context.Context, tx *sql.Tx, userID string) error {
 	if !CanonicalUUID(userID) {
 		return ErrUnauthorized
@@ -354,6 +387,14 @@ func List(ctx context.Context, db *sql.DB, userID string) (requests []any, err e
 	if err = lockUser(ctx, tx, userID); err != nil {
 		return nil, err
 	}
+	// An ordinary session sees an empty list, not an error: the client poll
+	// treats any non-OK status as a failure.
+	if err = lockTrustedResponder(ctx, tx, userID); err != nil {
+		if errors.Is(err, ErrForbidden) {
+			return []any{}, nil
+		}
+		return nil, err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id, user_id, protocol_version, server_origin,
  account_binding, expires_at, requester_nonce, ephemeral_public_key, recovery_token_jti_hash,
  status, responder_public_key, responder_nonce, transcript_hash, encrypted_payload,
@@ -420,6 +461,11 @@ func Respond(ctx context.Context, db *sql.DB, userID, epoch, requestID string, b
 			return result, ErrUnauthorized
 		}
 		return result, fmt.Errorf("guard recovery response: %w", err)
+	}
+	// Before the request lookup, so an untrusted session learns nothing about
+	// whether a request exists and cannot trigger an expiry transition.
+	if err = lockTrustedResponder(ctx, tx, userID); err != nil {
+		return result, err
 	}
 	row, err := lockRequest(ctx, tx, userID, requestID, "")
 	if err != nil {
