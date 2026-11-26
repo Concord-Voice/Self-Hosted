@@ -79,7 +79,7 @@ calls with zero behavior change. When unsure, fetch — it is cheap.
 ## How (Context7 MCP — repo-portable)
 
 The caller dispatches a fresh researcher session with only the public library name,
-version and API question. Verify that the host gives the researcher only the two
+version and API question. Never include secrets, credentials or repository contents in the question; strip them before dispatch. Verify that the host gives the researcher only the two
 Context7 operations, with no checkout, source attachments or inherited conversation.
 Keep repository inspection with the caller.
 
