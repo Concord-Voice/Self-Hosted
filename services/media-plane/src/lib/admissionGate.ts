@@ -11,12 +11,25 @@
  */
 
 import { BlockList, isIPv4, isIPv6 } from 'node:net';
+import * as ipaddr from 'ipaddr.js';
 
 /** 60 handshakes per 10 s = 6/s sustained per source IP. */
 export const HANDSHAKE_BURST = 60;
 export const HANDSHAKE_WINDOW_MS = 10_000;
 /** Hard cap on tracked IPs — the store must not become the DoS it prevents. */
 export const MAX_TRACKED_IPS = 10_000;
+/** Most entries one eviction inspects, so a full store costs O(1) per request. */
+export const EVICTION_SCAN_LIMIT = 64;
+/** Hard ceiling on tracked buckets; the store may overshoot MAX_TRACKED_IPS up to here. */
+export const HARD_MAX_TRACKED_IPS = MAX_TRACKED_IPS * 2;
+/**
+ * Ceiling multiplier for the proxy-peer fallback bucket. Every client behind a
+ * proxy that drops X-Real-IP lands in that one bucket, so the per-source ceiling
+ * would deny voice deployment-wide. It is still counted, with headroom.
+ */
+export const PROXY_FALLBACK_BURST_MULTIPLIER = 10;
+/** Minimum spacing of the "trusted proxy sent no client address" warning. */
+export const PROXY_FALLBACK_WARN_INTERVAL_MS = 60_000;
 
 export interface AdmissionRequest {
   headers: Record<string, string | string[] | undefined>;
@@ -30,6 +43,8 @@ export interface AdmissionGateOptions {
    * nginx front). An EMPTY list makes the gate inert — see createAdmissionGate.
    */
   trustedProxies: readonly string[];
+  /** Production requires a usable trusted-proxy rule for address attribution. */
+  required?: boolean;
   /** PII-safe rejection hook — receives no address. */
   onReject?: () => void;
   /**
@@ -53,7 +68,11 @@ type IpFamily = 'ipv4' | 'ipv6';
 const ipv4AddressSpace = new BlockList();
 ipv4AddressSpace.addSubnet('0.0.0.0', 0, 'ipv4');
 
+// ipaddr.isValid keeps this guard and bucketClientIp's ipaddr.process in
+// agreement: node:net accepts forms (such as the deprecated IPv4-compatible
+// `::1.2.3.4`) that ipaddr.process throws on.
 function ipFamily(address: string): IpFamily | null {
+  if (!ipaddr.isValid(address)) return null;
   if (isIPv4(address)) return 'ipv4';
   if (isIPv6(address)) return 'ipv6';
   return null;
@@ -164,7 +183,7 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
  * forwarded headers only when the immediate peer is a known proxy — an
  * untrusted peer presenting X-Real-IP is spoofing.
  *
- * Returns null when nothing can be determined; callers MUST fail open on null.
+ * Returns null when nothing can be determined; the gate rejects such a request.
  */
 export function resolveClientIp(
   req: AdmissionRequest,
@@ -190,23 +209,26 @@ export function resolveClientIp(
       if (last && ipFamily(last)) return last;
     }
 
-    // Trusted peer, but nothing attributable to the actual client: fail OPEN.
-    //
-    // Falling through to `peer` here would return the PROXY's address, so every
-    // such request would land in ONE shared bucket and a handful of clients
-    // would trip the 60/10s ceiling for the whole deployment — the exact
-    // fail-shared outcome `createAdmissionGate` refuses when no proxy is
-    // configured at all. Latent in the shipped topology (nginx.conf always sets
-    // X-Real-IP), but a config change that dropped the header would otherwise
-    // convert a header omission into a service-wide denial. Returning null
-    // matches the documented posture for an unresolvable address: a
-    // topology/operator error degrades to pre-gate behaviour, never to a
-    // deployment-wide bucket. (#2793 Gitar review.)
-    return null;
+    // A verified proxy peer that omits usable forwarding headers still has an
+    // attributable observed source. Count it rather than creating an unmetered
+    // path; nginx normally overwrites these headers.
+    return peer;
   }
 
-  // Untrusted peer: it IS the client, so attribute the request to it directly.
-  return peer ?? null;
+  // Untrusted peer: it IS the client, so attribute the request to it directly,
+  // but only when it parses; an unparseable peer is treated as peerless.
+  return peer && ipFamily(peer) ? peer : null;
+}
+
+// bucketClientIp returns canonical IPv4 /32 identities and masks native IPv6
+// identities to /64. ipaddr.process also folds IPv4-mapped IPv6 into IPv4.
+export function bucketClientIp(address: string): string {
+  const parsed = ipaddr.process(address);
+  if (parsed.kind() === 'ipv4') return parsed.toString();
+
+  const bytes = parsed.toByteArray();
+  bytes.fill(0, 8);
+  return ipaddr.fromByteArray(bytes).toString();
 }
 
 interface WindowCounters {
@@ -214,6 +236,30 @@ interface WindowCounters {
   windowStartMs: number;
   current: number;
   previous: number;
+}
+
+// Defence in depth: resolveClientIp validates, but a throw inside engine.io's
+// allowRequest would otherwise take the process down. null means reject.
+function safeBucket(ip: string): string | null {
+  try {
+    return bucketClientIp(ip);
+  } catch {
+    return null;
+  }
+}
+
+/** Slide the alternating windows forward to nowMs. */
+function rollWindow(entry: WindowCounters, nowMs: number): void {
+  const elapsed = nowMs - entry.windowStartMs;
+  if (elapsed >= HANDSHAKE_WINDOW_MS * 2) {
+    entry.previous = 0;
+    entry.current = 0;
+    entry.windowStartMs = nowMs;
+  } else if (elapsed >= HANDSHAKE_WINDOW_MS) {
+    entry.previous = entry.current;
+    entry.current = 0;
+    entry.windowStartMs = nowMs;
+  }
 }
 
 /**
@@ -241,6 +287,9 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
   // storm. A misconfiguration must degrade to the pre-gate behaviour — the same
   // fail-open posture the design specifies for an unresolvable IP.
   if (trustedProxies.size === 0) {
+    if (options.required) {
+      throw new Error('Admission gate requires at least one valid trusted proxy.');
+    }
     warn(
       'Admission gate INACTIVE: no trusted proxies configured (TRUSTED_PROXIES). ' +
         'Every client would otherwise be attributed to the reverse proxy and share ' +
@@ -255,42 +304,90 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
   }
 
   const counters = new Map<string, WindowCounters>();
+  let lastProxyFallbackWarnMs = -PROXY_FALLBACK_WARN_INTERVAL_MS;
+
+  const isOverBudget = (entry: WindowCounters, nowMs: number): boolean =>
+    nowMs - entry.windowStartMs < HANDSHAKE_WINDOW_MS * 2 &&
+    entry.previous + entry.current >= HANDSHAKE_BURST;
+
+  // A trusted proxy that forwards no usable client address collapses every
+  // client behind it into the proxy's own bucket. That bucket gets a larger
+  // ceiling, and the fallback is made visible at most once a minute.
+  const noteProxyFallback = (ip: string | null, peer: string | undefined): boolean => {
+    if (!ip || !peer || ip !== peer || !trustedProxies.has(peer)) return false;
+    const nowForWarn = now();
+    if (nowForWarn - lastProxyFallbackWarnMs >= PROXY_FALLBACK_WARN_INTERVAL_MS) {
+      lastProxyFallbackWarnMs = nowForWarn;
+      warn(
+        'Admission gate: a trusted proxy forwarded no usable client address, so its ' +
+          'requests share the proxy peer bucket. Check that the proxy sets X-Real-IP.'
+      );
+    }
+    return true;
+  };
+
+  // Bounded store: evict rather than growing without limit under an
+  // IPv6-source flood. Never evict a bucket that is currently over budget,
+  // because that would reset it. Scan a bounded number of the oldest buckets:
+  // evict the first under-budget one, and rotate the over-budget ones to the
+  // back so the next eviction starts past them. If a whole scan finds only
+  // limited buckets, let the store overshoot MAX_TRACKED_IPS (bounded by
+  // HARD_MAX_TRACKED_IPS) instead of resetting a limited bucket; only at the
+  // hard ceiling does the oldest bucket go.
+  const makeRoomForBucket = (nowMs: number): void => {
+    if (counters.size < MAX_TRACKED_IPS) return;
+    let victim: string | undefined;
+    const rotate: string[] = [];
+    for (const [key, candidate] of counters) {
+      if (!isOverBudget(candidate, nowMs)) {
+        victim = key;
+        break;
+      }
+      rotate.push(key);
+      if (rotate.length >= EVICTION_SCAN_LIMIT) break;
+    }
+    for (const key of rotate) {
+      const limited = counters.get(key);
+      if (limited) {
+        counters.delete(key);
+        counters.set(key, limited);
+      }
+    }
+    if (victim === undefined && counters.size >= HARD_MAX_TRACKED_IPS) {
+      victim = counters.keys().next().value;
+    }
+    if (victim !== undefined) counters.delete(victim);
+  };
+
+  const entryFor = (bucket: string, nowMs: number): WindowCounters => {
+    let entry = counters.get(bucket);
+    if (!entry) {
+      makeRoomForBucket(nowMs);
+      entry = { windowStartMs: nowMs, current: 0, previous: 0 };
+      counters.set(bucket, entry);
+    }
+    rollWindow(entry, nowMs);
+    return entry;
+  };
 
   const gate = ((req, callback) => {
     const ip = resolveClientIp(req, trustedProxies);
+    const proxyFallback = noteProxyFallback(ip, req.socket?.remoteAddress);
+    const burst = proxyFallback
+      ? HANDSHAKE_BURST * PROXY_FALLBACK_BURST_MULTIPLIER
+      : HANDSHAKE_BURST;
 
-    // Documented fail-open. See the admissionGate test that asserts this.
-    if (!ip) {
-      callback(null, true);
+    // A genuinely peerless request has no source identity and cannot enter an
+    // admission budget.
+    const bucket = ip ? safeBucket(ip) : null;
+    if (!bucket) {
+      options.onReject?.();
+      callback(null, false);
       return;
     }
 
-    const nowMs = now();
-    let entry = counters.get(ip);
-
-    if (!entry) {
-      // Bounded store: evict the oldest insertion (Map preserves insertion
-      // order) rather than growing without limit under an IPv6-source flood.
-      if (counters.size >= MAX_TRACKED_IPS) {
-        const oldest = counters.keys().next();
-        if (!oldest.done) counters.delete(oldest.value);
-      }
-      entry = { windowStartMs: nowMs, current: 0, previous: 0 };
-      counters.set(ip, entry);
-    }
-
-    const elapsed = nowMs - entry.windowStartMs;
-    if (elapsed >= HANDSHAKE_WINDOW_MS * 2) {
-      entry.previous = 0;
-      entry.current = 0;
-      entry.windowStartMs = nowMs;
-    } else if (elapsed >= HANDSHAKE_WINDOW_MS) {
-      entry.previous = entry.current;
-      entry.current = 0;
-      entry.windowStartMs = nowMs;
-    }
-
-    if (entry.previous + entry.current >= HANDSHAKE_BURST) {
+    const entry = entryFor(bucket, now());
+    if (entry.previous + entry.current >= burst) {
       options.onReject?.();
       callback(null, false);
       return;

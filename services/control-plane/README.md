@@ -437,7 +437,7 @@ See `migrations/` for the full schema. Use `make migrate-version` to inspect the
 - [x] Username validation with profanity filtering and leetspeak detection
 - [x] E2EE key management (RSA-OAEP 4096-bit)
 - [x] Session management (list/revoke, device tracking, machine-ID dedup)
-- [x] Rate limiting (Redis-based, per-IP and per-user)
+- [x] Rate limiting (Redis-based, per-IP and per-user; the IP is an IPv4 address or a native IPv6 /64)
 - [x] Password strength validation
 - [x] Ticket-based WebSocket authentication (30s single-use)
 
