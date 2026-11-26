@@ -46,7 +46,11 @@ const REFUSALS: Record<string, string> = {
   invalid_authorization:
     "The host agent did not accept this authorization request. Reload the console and start again.",
   backup_rate_limited:
-    "Backups are limited to one attempt per hour. Wait until the hour has passed before trying again.",
+    "Backups and updates are limited to one attempt per hour, because an update takes a backup first. Wait until the hour has passed before trying again.",
+  update_downgrade_refused:
+    "That release is older than the one this server runs. The host agent does not move a server back to an older release.",
+  running_version_unknown:
+    "The host agent cannot read which release this server runs, so it refused the update. Ask a host-root operator to check the VERSION file in the install folder.",
   stepup_unavailable:
     "Your account has no security key this server can check, so this action is not available.",
   audit_unavailable:

@@ -362,6 +362,12 @@ describe("ServerActions", () => {
     [429, "authorization_busy", "Another host authorization is in progress"],
     [400, "invalid_authorization", "did not accept this authorization request"],
     [429, "backup_rate_limited", "one attempt per hour"],
+    [409, "update_downgrade_refused", "older than the one this server runs"],
+    [
+      409,
+      "running_version_unknown",
+      "cannot read which release this server runs",
+    ],
   ])("explains agent refusal %s %s", async (status, code, guidance) => {
     lists();
     server.use(

@@ -176,6 +176,8 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 		{http.StatusTooManyRequests, `{"error":"authorization_busy"}`, http.StatusTooManyRequests, "authorization_busy"},
 		{http.StatusBadRequest, `{"error":"invalid_authorization"}`, http.StatusBadRequest, "invalid_authorization"},
 		{http.StatusConflict, `{"error":"security_log_boundary_missing"}`, http.StatusConflict, "security_log_boundary_missing"},
+		{http.StatusConflict, `{"error":"update_downgrade_refused"}`, http.StatusConflict, "update_downgrade_refused"},
+		{http.StatusConflict, `{"error":"running_version_unknown"}`, http.StatusConflict, "running_version_unknown"},
 		{http.StatusConflict, `{"appliance":"truenas","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
 		{http.StatusConflict, `{"appliance":"<script>","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
 		{http.StatusConflict, `{"error":"<script>"}`, http.StatusBadGateway, "agent_error"},
@@ -350,6 +352,8 @@ func TestServerStepUpBeginPassesAgentRefusalsThrough(t *testing.T) {
 		{http.StatusForbidden, "authorization_denied", AuditDenied},
 		{http.StatusServiceUnavailable, "authorizer_unavailable", AuditFailure},
 		{http.StatusTooManyRequests, "backup_rate_limited", AuditFailure},
+		{http.StatusConflict, "update_downgrade_refused", AuditFailure},
+		{http.StatusConflict, "running_version_unknown", AuditFailure},
 	} {
 		t.Run(tc.code, func(t *testing.T) {
 			sock, calls := recordingAgent(t, tc.status, `{"error":"`+tc.code+`"}`)
