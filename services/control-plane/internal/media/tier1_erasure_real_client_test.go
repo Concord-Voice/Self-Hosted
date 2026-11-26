@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/erasuretest"
 	"image"
 	"image/color"
 	"image/png"
@@ -192,7 +193,7 @@ func TestRealClientAccountErasureKeepsLatePutFencedAndReclaimable(t *testing.T) 
 	assert.NotEqual(t, path.Join("avatars", userID), physicalKey,
 		"a canceled profile upload must use a fresh physical key, not the reusable canonical slot")
 
-	require.NoError(t, account.DeleteAccount(testdb.ActorContext(context.Background(), t, db, userID), userID))
+	erasuretest.New(t, db).MustErase(testdb.ActorContext(context.Background(), t, db, userID), t, account, userID)
 	waitForRealClientDeletes(t, deleteSeen, 3)
 	legacyAvatarKey := path.Join("avatars", userID)
 	bannerKey := path.Join("banners", userID)

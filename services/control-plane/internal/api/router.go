@@ -1319,6 +1319,7 @@ func NewRouter(
 	updatesHandler := updates.NewHandler(cfg, log)
 	privacyHandler, accountService := buildPrivacyHandler(
 		db, redis, log, usersHandler, hub,
+		erasureStepUpWiring{mfaVerifier: mfaHandler, emailSender: emailSvc},
 		erasureClearWiring{capture: graphPresenceCapture, nats: natsClient, secret: cfg.MFAEncryptionKey})
 
 	// The erasure drain (#2448). Wired here rather than beside the DM rail for
@@ -1793,6 +1794,10 @@ func NewRouter(
 			// even before email verification completes.
 			privacyRoutes := authRequired.Group("/privacy")
 			{
+				privacyRoutes.GET("/erase-account/owned-servers",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					privacyHandler.ListOwnedServers,
+				)
 				privacyRoutes.POST("/erase-account",
 					middleware.RateLimitByUser(redis, 3, 24*time.Hour),
 					privacyHandler.EraseAccount,
