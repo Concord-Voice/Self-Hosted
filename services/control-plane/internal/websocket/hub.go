@@ -3998,11 +3998,14 @@ func (h *Hub) validateAndLinkAttachment(ctx context.Context, tx *sql.Tx, link at
 		// and conversation_id NULL and verifyAttachmentAccess requires an exact
 		// match, so a tier-1 row cannot currently be linked to a message — but
 		// nothing in THIS query said so, and the filter is free.
-		`SELECT uploader_id, file_type, mime_type, file_size, channel_id, conversation_id
+		`SELECT uploader_id, file_type, mime_type, file_size, key_version, channel_id, conversation_id, e2ee_format
 		 FROM media_files WHERE id = $1 AND deleted_at IS NULL AND media_tier = 2
 		 FOR KEY SHARE`,
 		fileID,
-	).Scan(&uploaderID, &summary.FileType, &summary.MimeType, &summary.FileSize, &fileChannelID, &fileConvID)
+	).Scan(
+		&uploaderID, &summary.FileType, &summary.MimeType, &summary.FileSize,
+		&summary.KeyVersion, &fileChannelID, &fileConvID, &summary.E2EEFormat,
+	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			log.Printf("Attachment %s not found or deleted: %v", sanitizeLogValue(fileID), err)
@@ -4021,6 +4024,9 @@ func (h *Hub) validateAndLinkAttachment(ctx context.Context, tx *sql.Tx, link at
 	}
 
 	summary.ID = fileID
+	summary.UploaderID = uploaderID
+	summary.ChannelID = fileChannelID
+	summary.ConversationID = fileConvID
 	return summary, true, nil
 }
 
