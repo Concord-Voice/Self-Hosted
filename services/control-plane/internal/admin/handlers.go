@@ -263,6 +263,10 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 type webauthnRequest struct {
 	Handle    string          `json:"handle"`
 	Assertion json.RawMessage `json:"assertion"`
+	// SignInNotice opts in to the admins_added notice fields. A portal tab
+	// loaded before the notice existed accepts only {"status"} and treats any
+	// other field as a broken response, so the default stays status-only.
+	SignInNotice bool `json:"signin_notice"`
 }
 
 // WebAuthnLogin handles step 2 of admin login: redeem the opaque handle, finish
@@ -359,7 +363,7 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		h.log.Warn("admin audit write failed", "error", err)
 	}
 	resp := gin.H{"status": "authenticated"}
-	if rec.Shown {
+	if rec.Shown && req.SignInNotice {
 		resp["admins_added"] = rec.Notice.AdminsAdded
 		if rec.Notice.AdminsAdded > 0 {
 			// Opaque to the portal, which sends it back once it has shown the

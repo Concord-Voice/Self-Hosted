@@ -527,6 +527,7 @@ test("password plus WebAuthn signs in and explicit logout clears the session", a
         type: "public-key",
       },
       handle: "browser-login-handle",
+      signin_notice: true,
     });
     expect(
       await page.evaluate(() => ({

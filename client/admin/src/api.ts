@@ -260,7 +260,9 @@ export const api = {
   ): Promise<SignInNotice> {
     return request("/admin/api/v1/auth/webauthn", signInResponse, {
       ...options,
-      body: { handle, assertion },
+      // The server returns the notice fields only on request, because a tab
+      // loaded before they existed rejects any field beside status.
+      body: { handle, assertion, signin_notice: true },
     });
   },
   // Tells the server this session displayed its sign-in notice, so the next
