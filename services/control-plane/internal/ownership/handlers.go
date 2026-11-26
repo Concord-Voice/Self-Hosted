@@ -1583,8 +1583,19 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 		mutation, outcome, writeErr = h.executePendingOwnershipTransferTx(ctx, tx, transfer)
 		return outcome, writeErr
 	})
+	return h.finishOwnershipTransfer(ctx, transfer, plan, outcome, mutation, err)
+}
+
+// finishOwnershipTransfer maps a transfer transaction's result to its error
+// and, after a confirmed change, runs the post-commit reconciliation,
+// broadcast and audit record.
+func (h *Handler) finishOwnershipTransfer(
+	ctx context.Context, transfer expiredTransfer, plan rbac.PresenceRecheckPlan,
+	outcome ownershipWriteOutcome, mutation ownershipAuthorityMutation, err error,
+) error {
+	serverID, fromUserID, toUserID := transfer.serverID, transfer.fromUserID, transfer.toUserID
 	if err != nil {
-		return h.resolveTransferExecutionError(ctx, serverID, transferID, fromUserID, toUserID, mutation.channelIDs, err)
+		return h.resolveTransferExecutionError(ctx, serverID, transfer.id, fromUserID, toUserID, mutation.channelIDs, err)
 	}
 	if outcome == ownershipWriteStaleCancelled {
 		return errTransferOwnershipChanged
@@ -1642,66 +1653,51 @@ func (h *Handler) executeConfirmedTransfer(
 			if actorUserID != fromUserID {
 				return ownershipWriteUnchanged, errTransferOwnershipChanged
 			}
-
-			subj, proofErr := stepup.LockSubjectTx(ctx, tx, actorUserID, stepup.LockForShare, tokenEpoch)
+			verified, proofErr := h.verifyOwnershipConfirmProofTx(ctx, tx, actorUserID, tokenEpoch, req, attempt)
 			if proofErr != nil {
 				return ownershipWriteUnchanged, proofErr
 			}
-			if proofErr = stepup.VerifyPasswordFactor(attempt, subj, req.Password, ownershipConfirmStepUpCopy); proofErr != nil {
-				return ownershipWriteUnchanged, proofErr
-			}
-			if subj.MFAEnabled {
-				if h.mfaVerifier == nil {
-					return ownershipWriteUnchanged, &stepup.Error{
-						Status: http.StatusInternalServerError,
-						Body:   gin.H{"error": stepup.ErrMsgVerificationFailed},
-						Cause:  errors.New("MFA verifier is not configured for ownership confirmation"),
-					}
-				}
-				if proofErr = stepup.VerifyMFAFactorTx(ctx, tx, h.mfaVerifier, actorUserID,
-					stepup.PurposeOwnershipTransferConfirm, req.MFACode, subj.MFAMethods); proofErr != nil {
-					return ownershipWriteUnchanged, proofErr
-				}
-				mfaVerified = true
-			}
+			mfaVerified = verified
 
 			var writeErr error
 			mutation, outcome, writeErr = h.completePreparedOwnershipTransferTx(ctx, tx, transfer, pendingTransferID)
 			return outcome, writeErr
 		})
-	if err != nil {
-		return false, h.resolveTransferExecutionError(ctx, serverID, transferID, fromUserID, toUserID, mutation.channelIDs, err)
+	if err := h.finishOwnershipTransfer(ctx, transfer, plan, outcome, mutation, err); err != nil {
+		return false, err
 	}
-	if outcome == ownershipWriteStaleCancelled {
-		return false, errTransferOwnershipChanged
-	}
-	if outcome != ownershipWriteChanged {
-		return false, errTransferAlreadyCompleted
-	}
-
-	h.reconcileOwnershipPostCommit(serverID, fromUserID, toUserID, plan)
-	h.authority.CompleteChannelAuthorityMutationWithRotations(ctx, serverID, mutation.channelIDs, nil, mutation.rotations, mutation.deniedByChannel)
-	if serverUUID, err := uuid.Parse(serverID); err == nil {
-		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-			Type: "ownership_transferred",
-			Data: map[string]interface{}{
-				keyServerID:    serverID,
-				"old_owner_id": fromUserID,
-				"new_owner_id": toUserID,
-			},
-		})
-	}
-
-	auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), ownershipAuditTimeout)
-	defer cancelAudit()
-	if err := h.audit.Log(auditCtx, serverID, nil, "ownership_transferred", keyServer, &serverID, map[string]interface{}{
-		keyFromUserID: fromUserID,
-		keyToUserID:   toUserID,
-	}); err != nil {
-		h.log.Error("Failed to write audit log for ownership_transferred", "error", err, "server_id", serverID)
-	}
-
 	return mfaVerified, nil
+}
+
+// verifyOwnershipConfirmProofTx verifies the confirming owner's fresh proof
+// under the locked users row: the password always, and an MFA code when the
+// account has an inline factor. mfaVerified reports that a code was verified.
+func (h *Handler) verifyOwnershipConfirmProofTx(
+	ctx context.Context, tx *sql.Tx, actorUserID, tokenEpoch string,
+	req confirmTransferRequest, attempt *stepup.PasswordAttempt,
+) (mfaVerified bool, err error) {
+	subj, proofErr := stepup.LockSubjectTx(ctx, tx, actorUserID, stepup.LockForShare, tokenEpoch)
+	if proofErr != nil {
+		return false, proofErr
+	}
+	if proofErr = stepup.VerifyPasswordFactor(attempt, subj, req.Password, ownershipConfirmStepUpCopy); proofErr != nil {
+		return false, proofErr
+	}
+	if !subj.MFAEnabled {
+		return false, nil
+	}
+	if h.mfaVerifier == nil {
+		return false, &stepup.Error{
+			Status: http.StatusInternalServerError,
+			Body:   gin.H{"error": stepup.ErrMsgVerificationFailed},
+			Cause:  errors.New("MFA verifier is not configured for ownership confirmation"),
+		}
+	}
+	if proofErr = stepup.VerifyMFAFactorTx(ctx, tx, h.mfaVerifier, actorUserID,
+		stepup.PurposeOwnershipTransferConfirm, req.MFACode, subj.MFAMethods); proofErr != nil {
+		return false, proofErr
+	}
+	return true, nil
 }
 
 func (h *Handler) writeOwnershipConfirmStepUpError(c *gin.Context, e *stepup.Error) {

@@ -112,6 +112,11 @@ func (h *Handler) ListOwnedServers(c *gin.Context) {
 
 const maxEraseAccountRequestBytes int64 = 8192
 
+const (
+	errMsgAuthenticationRequired       = "authentication required"
+	errMsgEmailConfirmationUnavailable = "email confirmation unavailable"
+)
+
 type eraseAccountRequest struct {
 	Password                string   `json:"password"` //nolint:gosec // request field, not a stored secret
 	MFACode                 string   `json:"mfa_code"`
@@ -140,12 +145,7 @@ func bindEraseAccountRequest(c *gin.Context) (parsedEraseAccountRequest, bool) {
 	decoder.DisallowUnknownFields()
 	var body eraseAccountRequest
 	if err := decoder.Decode(&body); err != nil {
-		if !errors.Is(err, io.EOF) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
-		}
-		if errors.Is(err, io.EOF) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
-		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return parsedEraseAccountRequest{}, false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
@@ -193,7 +193,7 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 	// DELETE WHERE id = '' and the audit row would be written without a
 	// meaningful subject. Fail closed instead.
 	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgAuthenticationRequired})
 		return
 	}
 
@@ -203,7 +203,7 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 	}
 	identity, ok := loginfamily.AccessIdentityFromContext(c.Request.Context())
 	if !ok || identity.UserID.String() != userID {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgAuthenticationRequired})
 		return
 	}
 	attempt, stepErr := h.account.PrepareAccountErasure(c.Request.Context(), userID, request.Password, request.MFACode)
@@ -285,7 +285,7 @@ func (h *Handler) issueEmailErasureConfirmation(c *gin.Context, request users.Ac
 		return
 	}
 	if h.erasureEmailSender == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgEmailConfirmationUnavailable})
 		return
 	}
 	confirmationURL := "concord://account-erasure/confirm/" + intent.RequestID + "/" + intent.Token
@@ -293,7 +293,7 @@ func (h *Handler) issueEmailErasureConfirmation(c *gin.Context, request users.Ac
 		if h.log != nil {
 			h.log.Error("erase-account: email confirmation delivery failed", "error", err)
 		}
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgEmailConfirmationUnavailable})
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{
@@ -324,9 +324,6 @@ func (h *Handler) claimEmailErasureConfirmation(
 }
 
 func (h *Handler) settleEmailErasureConfirmation(claim *EmailConfirmationClaim, operationErr *error) {
-	if claim == nil {
-		return
-	}
 	if *operationErr == nil || errors.Is(*operationErr, presencecapture.ErrPostCommitDelivery) {
 		if err := claim.Commit(context.Background()); err != nil && h.log != nil {
 			h.log.Error("erase-account: email confirmation commit failed", "error", err)
@@ -360,10 +357,10 @@ func (h *Handler) writeErasurePreparationError(c *gin.Context, err error) bool {
 		return true
 	}
 	if errors.Is(err, credepoch.ErrEpochMismatch) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgAuthenticationRequired})
 		return true
 	}
-	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgEmailConfirmationUnavailable})
 	return true
 }
 
@@ -372,7 +369,7 @@ func (h *Handler) writeEmailConfirmationError(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, gin.H{"error_code": "email_confirmation_stale"})
 		return
 	}
-	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "email confirmation unavailable"})
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgEmailConfirmationUnavailable})
 }
 
 // writeDeleteAccountFailure classifies a DeleteAccount error. For every
@@ -402,7 +399,7 @@ func (h *Handler) writeDeleteAccountFailure(c *gin.Context, userID string, err e
 		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
 		return true
 	case errors.Is(err, credepoch.ErrEpochMismatch):
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgAuthenticationRequired})
 		return true
 	case errors.Is(err, users.ErrErasureCandidateSetDrifted):
 		c.JSON(http.StatusConflict, gin.H{

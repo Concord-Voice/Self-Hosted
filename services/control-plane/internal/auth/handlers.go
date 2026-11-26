@@ -3378,59 +3378,18 @@ func (h *Handler) revokeLogoutSession(c *gin.Context, claims *Claims, refreshTok
 			result = logoutRevocation{err: errors.Join(result.err, loginfamily.NewError(loginfamily.ReasonSQLUnavailable, rollbackErr))}
 		}
 	}()
-	user, err := lockMintUserTx(ctx, tx, userID)
-	if errors.Is(err, loginfamily.ErrDenied) {
-		return result
-	}
-	if err != nil {
+	user, sid, family, found, err := lockLogoutSelectionTx(ctx, tx, userID, selection, claims)
+	if err != nil || !found {
 		result.err = err
 		return result
 	}
-	lockedUser, sid, family, err := resolveLogoutSelection(ctx, tx, selection, claims)
-	if errors.Is(err, sql.ErrNoRows) {
-		return result
-	}
-	if err != nil {
-		result.err = loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
-		return result
-	}
-	if lockedUser != userID {
-		return result
-	}
-	// Never query another user's authority while holding this user's prefix.
-	bearerFamily := uuid.Nil
-	if claims != nil && claims.UserID == userID {
-		bearerFamily, err = logoutBearerFamilyTx(ctx, tx, claims, family)
-		if errors.Is(err, loginfamily.ErrDenied) {
-			bearerFamily, err = uuid.Nil, nil
-		}
-		if err != nil {
-			result.err = err
-			return result
-		}
-	}
-	if selection.bearerAuthorized && bearerFamily == uuid.Nil {
-		return result
-	}
-	if selection.bearerAuthorized && bearerFamily != family {
-		result.err = errInvalidLogoutTarget
-		return result
-	}
-	sidID, err := uuid.Parse(sid)
-	if err != nil {
-		result.err = loginfamily.NewError(loginfamily.ReasonOwnershipInvalid, err)
-		return result
-	}
-	targets, err := loginfamily.ResolveTargetSIDTx(ctx, tx, user, sidID)
-	if errors.Is(err, loginfamily.ErrTargetNotFound) {
-		return result
-	}
-	if err != nil {
+	bearerFamily, proceed, err := logoutBearerAuthorityTx(ctx, tx, claims, userID, family, selection.bearerAuthorized)
+	if err != nil || !proceed {
 		result.err = err
 		return result
 	}
-	revoked, err := loginfamily.RevokeFamiliesTx(ctx, tx, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeSession, Reason: loginfamily.ReasonLogout})
-	if err != nil {
+	revoked, found, err := revokeLogoutTargetTx(ctx, tx, user, sid)
+	if err != nil || !found {
 		result.err = err
 		return result
 	}
@@ -3446,6 +3405,87 @@ func (h *Handler) revokeLogoutSession(c *gin.Context, claims *Claims, refreshTok
 	result.blacklistBearer = bearerFamily == family
 	result.result = revoked
 	return result
+}
+
+// lockLogoutSelectionTx takes the selected user's lock and re-resolves the
+// selection under it. found is false when the user is denied, the selection
+// no longer resolves, or it now names another user, all of which end the
+// logout quietly.
+func lockLogoutSelectionTx(
+	ctx context.Context, tx *sql.Tx, userID string, selection logoutSelection, claims *Claims,
+) (user loginfamily.UserAuthority, sid string, family uuid.UUID, found bool, err error) {
+	user, err = lockMintUserTx(ctx, tx, userID)
+	if errors.Is(err, loginfamily.ErrDenied) {
+		return user, "", uuid.Nil, false, nil
+	}
+	if err != nil {
+		return user, "", uuid.Nil, false, err
+	}
+	lockedUser, sid, family, err := resolveLogoutSelection(ctx, tx, selection, claims)
+	if errors.Is(err, sql.ErrNoRows) {
+		return user, "", uuid.Nil, false, nil
+	}
+	if err != nil {
+		return user, "", uuid.Nil, false, loginfamily.NewError(loginfamily.ReasonSQLUnavailable, err)
+	}
+	if lockedUser != userID {
+		return user, "", uuid.Nil, false, nil
+	}
+	return user, sid, family, true, nil
+}
+
+// logoutBearerAuthorityTx resolves the bearer's live family under the user
+// lock and decides whether a bearer-authorized logout may revoke family. It
+// never queries another user's authority while holding this user's prefix. A
+// bearer with no live family ends the logout quietly; a bearer naming another
+// family of the same account is refused with errInvalidLogoutTarget.
+func logoutBearerAuthorityTx(
+	ctx context.Context, tx *sql.Tx, claims *Claims, userID string, family uuid.UUID, bearerAuthorized bool,
+) (uuid.UUID, bool, error) {
+	bearerFamily := uuid.Nil
+	if claims != nil && claims.UserID == userID {
+		var err error
+		bearerFamily, err = logoutBearerFamilyTx(ctx, tx, claims, family)
+		if errors.Is(err, loginfamily.ErrDenied) {
+			bearerFamily, err = uuid.Nil, nil
+		}
+		if err != nil {
+			return uuid.Nil, false, err
+		}
+	}
+	if !bearerAuthorized {
+		return bearerFamily, true, nil
+	}
+	if bearerFamily == uuid.Nil {
+		return uuid.Nil, false, nil
+	}
+	if bearerFamily != family {
+		return uuid.Nil, false, errInvalidLogoutTarget
+	}
+	return bearerFamily, true, nil
+}
+
+// revokeLogoutTargetTx terminalizes the family owning sid. found is false when
+// the session no longer resolves to a target, which ends the logout quietly.
+func revokeLogoutTargetTx(
+	ctx context.Context, tx *sql.Tx, user loginfamily.UserAuthority, sid string,
+) (loginfamily.RevocationResult, bool, error) {
+	sidID, err := uuid.Parse(sid)
+	if err != nil {
+		return loginfamily.RevocationResult{}, false, loginfamily.NewError(loginfamily.ReasonOwnershipInvalid, err)
+	}
+	targets, err := loginfamily.ResolveTargetSIDTx(ctx, tx, user, sidID)
+	if errors.Is(err, loginfamily.ErrTargetNotFound) {
+		return loginfamily.RevocationResult{}, false, nil
+	}
+	if err != nil {
+		return loginfamily.RevocationResult{}, false, err
+	}
+	revoked, err := loginfamily.RevokeFamiliesTx(ctx, tx, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeSession, Reason: loginfamily.ReasonLogout})
+	if err != nil {
+		return loginfamily.RevocationResult{}, false, err
+	}
+	return revoked, true, nil
 }
 
 // ── Account Recovery Endpoints ──────────────────────────────────────────────
@@ -4041,34 +4081,15 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
-	var addr string
-	err = h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, record.UserID).Scan(&addr)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		h.log.Error("Failed to read account for recovery key", "failure_class", "recovery_key_account_lookup")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
-		return
-	}
-	if err != nil || addr != record.Addr {
-		// The account is gone or no longer uses the address the key was sent
-		// to. Discard the key and answer as for any other unusable key.
-		if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
-			h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
-		}
-		h.refuseRecoveryEmailToken(ctx, c)
+	addr, ok := h.recoveryKeyAccountAddress(ctx, c, token, record.UserID, record.Addr)
+	if !ok {
 		return
 	}
 	methods, ok := h.recoveryMethods(ctx, c, record.UserID)
 	if !ok {
 		return
 	}
-	if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil {
-		if errors.Is(err, redis.Nil) {
-			// A concurrent request redeemed the key first.
-			h.refuseRecoveryEmailToken(ctx, c)
-			return
-		}
-		h.log.Error("Failed to redeem recovery key", "failure_class", recoveryKeyReadFailureClass(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+	if !h.redeemRecoveryEmailToken(ctx, c, token) {
 		return
 	}
 	if len(methods) > 0 {
@@ -4078,6 +4099,43 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 	if h.CompleteRecovery(c, record.UserID, "email") {
 		h.clearRecoveryFailureBudget(c, recoveryFailureKeyPrefix+addr)
 	}
+}
+
+// recoveryKeyAccountAddress returns the account's current address when it is
+// still the one the key was sent to. When the account is gone or uses another
+// address, it discards the key and answers as for any other unusable key.
+func (h *Handler) recoveryKeyAccountAddress(ctx context.Context, c *gin.Context, token, userID, sentTo string) (string, bool) {
+	var addr string
+	err := h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, userID).Scan(&addr)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		h.log.Error("Failed to read account for recovery key", "failure_class", "recovery_key_account_lookup")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return "", false
+	}
+	if err != nil || addr != sentTo {
+		if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
+			h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+		}
+		h.refuseRecoveryEmailToken(ctx, c)
+		return "", false
+	}
+	return addr, true
+}
+
+// redeemRecoveryEmailToken spends the key. A key a concurrent request already
+// redeemed is refused like any other unusable key.
+func (h *Handler) redeemRecoveryEmailToken(ctx context.Context, c *gin.Context, token string) bool {
+	_, err := h.consumeRecoveryEmailToken(ctx, token)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, redis.Nil) {
+		h.refuseRecoveryEmailToken(ctx, c)
+		return false
+	}
+	h.log.Error("Failed to redeem recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+	c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+	return false
 }
 
 // refuseRecoveryEmailToken answers an unusable recovery key. The client

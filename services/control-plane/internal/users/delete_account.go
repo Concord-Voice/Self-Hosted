@@ -303,9 +303,8 @@ func (s *AccountService) EmailVerified(ctx context.Context, userID string) (bool
 func (s *AccountService) EmailErasureConfirmationBinding(
 	ctx context.Context, request AccountErasureRequest,
 ) (EmailErasureConfirmation, error) {
-	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
-	if !ok || !sameErasureActor(identity, request.Actor) {
-		return EmailErasureConfirmation{}, errors.Join(credepoch.ErrEpochMismatch, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil))
+	if !requestIsErasureActor(ctx, request) {
+		return EmailErasureConfirmation{}, errErasureActorMismatch()
 	}
 	var result EmailErasureConfirmation
 	var verified bool
@@ -329,15 +328,10 @@ func (s *AccountService) EmailErasureConfirmationBinding(
 func (s *AccountService) PrepareEmailErasureConfirmation(
 	ctx context.Context, request AccountErasureRequest,
 ) (prepared EmailErasureConfirmation, returnErr error) {
-	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
-	if !ok || !sameErasureActor(identity, request.Actor) {
-		return EmailErasureConfirmation{}, errors.Join(credepoch.ErrEpochMismatch, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil))
+	if !requestIsErasureActor(ctx, request) {
+		return EmailErasureConfirmation{}, errErasureActorMismatch()
 	}
-	defer func() {
-		if err := request.PasswordAttempt.Settle(context.Background()); err != nil && s.log != nil {
-			s.log.Warn("Could not settle account-erasure email-confirmation password attempt", "error", err)
-		}
-	}()
+	defer s.settleErasurePasswordAttempt(request.PasswordAttempt, "Could not settle account-erasure email-confirmation password attempt")
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return EmailErasureConfirmation{}, fmt.Errorf("prepare erasure email confirmation: begin tx: %w", err)
@@ -451,45 +445,83 @@ func (s *AccountService) AudienceFenceWired() bool {
 // On failure at any stage the deferred rollback restores the pre-call
 // state; callers may retry safely (idempotent).
 func (s *AccountService) DeleteAccount(ctx context.Context, request AccountErasureRequest) error {
-	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
-	if !ok || !sameErasureActor(identity, request.Actor) {
-		return errors.Join(credepoch.ErrEpochMismatch, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil))
+	if !requestIsErasureActor(ctx, request) {
+		return errErasureActorMismatch()
 	}
 	creatorID := request.Actor.UserID
-	userID := creatorID.String()
-	candidates, overflow, err := readErasurePrivateCallCandidates(ctx, s.db, creatorID)
+	candidates, err := s.erasurePrivateCallCandidates(ctx, creatorID)
 	if err != nil {
-		return fmt.Errorf("delete account: read private-call candidates: %w", err)
+		return err
 	}
-	if overflow {
-		return fmt.Errorf("private-call candidate fan-out exceeds %d subjects", maxErasurePrivateCallSubjects)
-	}
-	if len(candidates) > 0 && (s.activityCleanup == nil || s.activePlans == nil) {
-		return errors.New("delete account: private-call erasure wiring unavailable")
-	}
-	defer func() {
-		if err := request.PasswordAttempt.Settle(context.Background()); err != nil && s.log != nil {
-			s.log.Warn("Could not settle account-erasure password attempt", "error", err)
-		}
-	}()
+	defer s.settleErasurePasswordAttempt(request.PasswordAttempt, "Could not settle account-erasure password attempt")
 	survivorSubjects := append([]uuid.UUID(nil), candidates...)
 	committed, operationErr := s.deleteAccountWithActivityCleanup(
 		ctx, request, creatorID, candidates, &survivorSubjects,
 	)
-	if committed != nil {
-		s.closeErasedFamilies(ctx, committed.familyOwners)
-		s.runPostCommitObligations(ctx, userID, committed.channelIDs,
-			committed.serverIDs, committed.drained, committed.stranded, committed.commitUnresolved)
-		if s.seatsErased != nil && len(committed.seats) > 0 && !committed.commitUnresolved {
-			s.seatsErased(ctx, committed.seats)
-		}
-		if !committed.commitUnresolved && request.MFACode != "" {
-			if err := stepup.DangerousActionBudget(s.redis).Clear(context.Background(), userID); err != nil && s.log != nil {
-				s.log.Warn("Could not clear account-erasure MFA attempt budget", "error", err)
-			}
-		}
-	}
+	s.finishCommittedErasure(ctx, creatorID.String(), request.MFACode, committed)
 	return operationErr
+}
+
+// requestIsErasureActor reports whether the request's actor is the verified
+// identity this request authenticated as.
+func requestIsErasureActor(ctx context.Context, request AccountErasureRequest) bool {
+	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
+	return ok && sameErasureActor(identity, request.Actor)
+}
+
+func errErasureActorMismatch() error {
+	return errors.Join(credepoch.ErrEpochMismatch, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil))
+}
+
+// erasurePrivateCallCandidates reads the private-call subjects erasure must
+// reconcile, refusing a fan-out over the bound or a set the service is not
+// wired to clean up.
+func (s *AccountService) erasurePrivateCallCandidates(ctx context.Context, creatorID uuid.UUID) ([]uuid.UUID, error) {
+	candidates, overflow, err := readErasurePrivateCallCandidates(ctx, s.db, creatorID)
+	if err != nil {
+		return nil, fmt.Errorf("delete account: read private-call candidates: %w", err)
+	}
+	if overflow {
+		return nil, fmt.Errorf("private-call candidate fan-out exceeds %d subjects", maxErasurePrivateCallSubjects)
+	}
+	if len(candidates) > 0 && (s.activityCleanup == nil || s.activePlans == nil) {
+		return nil, errors.New("delete account: private-call erasure wiring unavailable")
+	}
+	return candidates, nil
+}
+
+// settleErasurePasswordAttempt settles the reserved password attempt on a
+// context detached from the request, logging a failure instead of returning it.
+func (s *AccountService) settleErasurePasswordAttempt(attempt *stepup.PasswordAttempt, failure string) {
+	if err := attempt.Settle(context.Background()); err != nil && s.log != nil {
+		s.log.Warn(failure, "error", err)
+	}
+}
+
+// finishCommittedErasure runs the obligations a committed (or possibly
+// committed) erasure owes: socket closure, post-commit delivery, seat release
+// and, on a definite commit that verified a code, the shared MFA budget clear.
+func (s *AccountService) finishCommittedErasure(
+	ctx context.Context, userID, mfaCode string, committed *committedAccountDeletion,
+) {
+	if committed == nil {
+		return
+	}
+	s.closeErasedFamilies(ctx, committed.familyOwners)
+	s.runPostCommitObligations(ctx, userID, committed.channelIDs,
+		committed.serverIDs, committed.drained, committed.stranded, committed.commitUnresolved)
+	if committed.commitUnresolved {
+		return
+	}
+	if s.seatsErased != nil && len(committed.seats) > 0 {
+		s.seatsErased(ctx, committed.seats)
+	}
+	if mfaCode == "" {
+		return
+	}
+	if err := stepup.DangerousActionBudget(s.redis).Clear(context.Background(), userID); err != nil && s.log != nil {
+		s.log.Warn("Could not clear account-erasure MFA attempt budget", "error", err)
+	}
 }
 
 func sameErasureActor(a, b loginfamily.AccessIdentity) bool {

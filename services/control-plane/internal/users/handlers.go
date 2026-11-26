@@ -3483,34 +3483,15 @@ func (h *Handler) PatchSecurity(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
 		return
 	}
-	trustMayEnable := req.TrustSSOSecurity != nil && *req.TrustSSOSecurity
-	onlyTrustDisable := req.TrustSSOSecurity != nil && !*req.TrustSSOSecurity && req.PasswordLoginDisabled == nil
-	if !trustMayEnable && !onlyTrustDisable && req.CurrentPassphrase == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "passphrase_required"})
+	proof, ok := h.admitSecurityPatch(c, userID, req)
+	if !ok {
 		return
-	}
-	if !trustMayEnable && !onlyTrustDisable && !h.verifyCurrentPassphrase(c, userID, req.CurrentPassphrase) {
-		return
-	}
-	var proof *ssoStepUp
-	if trustMayEnable {
-		mfaCharged, ok := h.chargeDangerousMFA(c, userID, req.MFACode)
-		if !ok {
-			return
-		}
-		attempt, ok := h.reserveSSOStepUp(c, userID, req.CurrentPassphrase)
-		if !ok {
-			return
-		}
-		proof = &ssoStepUp{attempt: attempt, mfaCharged: mfaCharged}
 	}
 
 	// Refuse self-hosted disablement before any transaction or identity read.
-	if req.PasswordLoginDisabled != nil && *req.PasswordLoginDisabled { // pragma: allowlist secret
-		if config.IsSelfHostedInstance(h.instanceType) {
-			c.JSON(http.StatusForbidden, gin.H{"error_code": "password_login_required_self_hosted"})
-			return
-		}
+	if req.PasswordLoginDisabled != nil && *req.PasswordLoginDisabled && config.IsSelfHostedInstance(h.instanceType) { // pragma: allowlist secret
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "password_login_required_self_hosted"})
+		return
 	}
 
 	query, args := securityPatchUpdate(userID, req)
@@ -3518,23 +3499,54 @@ func (h *Handler) PatchSecurity(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "no_fields"})
 		return
 	}
-	if !h.applySecurityPatch(c, userID, req, query, args, proof) {
-		if proof != nil {
-			if err := proof.attempt.Settle(c.Request.Context()); err != nil {
-				h.log.Warn("Could not settle SSO trust password attempt", "error", err)
-			}
+	applied := h.applySecurityPatch(c, userID, req, query, args, proof)
+	h.settleSecurityPatchProof(c, userID, proof, applied)
+	if applied {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// admitSecurityPatch checks the request's credentials before any transaction.
+// Enabling SSO trust charges the MFA budget and reserves a password attempt for
+// the in-transaction fresh proof it returns. Turning trust off alone is an
+// ungated strengthening. Any other change needs the current passphrase.
+func (h *Handler) admitSecurityPatch(c *gin.Context, userID string, req patchSecurityRequest) (*ssoStepUp, bool) {
+	trustMayEnable := req.TrustSSOSecurity != nil && *req.TrustSSOSecurity
+	onlyTrustDisable := req.TrustSSOSecurity != nil && !*req.TrustSSOSecurity && req.PasswordLoginDisabled == nil
+	if onlyTrustDisable {
+		return nil, true
+	}
+	if !trustMayEnable {
+		if req.CurrentPassphrase == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error_code": "passphrase_required"})
+			return nil, false
 		}
+		return nil, h.verifyCurrentPassphrase(c, userID, req.CurrentPassphrase)
+	}
+	mfaCharged, ok := h.chargeDangerousMFA(c, userID, req.MFACode)
+	if !ok {
+		return nil, false
+	}
+	attempt, ok := h.reserveSSOStepUp(c, userID, req.CurrentPassphrase)
+	if !ok {
+		return nil, false
+	}
+	return &ssoStepUp{attempt: attempt, mfaCharged: mfaCharged}, true
+}
+
+// settleSecurityPatchProof settles a trust-enabling request's reserved
+// password attempt, and clears the shared MFA budget only after an applied
+// change whose code was verified.
+func (h *Handler) settleSecurityPatchProof(c *gin.Context, userID string, proof *ssoStepUp, applied bool) {
+	if proof == nil {
 		return
 	}
-	if proof != nil {
-		if err := proof.attempt.Settle(c.Request.Context()); err != nil {
-			h.log.Warn("Could not settle SSO trust password attempt", "error", err)
-		}
-		if proof.mfaVerified {
-			h.clearDangerousMFA(c, userID)
-		}
+	if err := proof.attempt.Settle(c.Request.Context()); err != nil {
+		h.log.Warn("Could not settle SSO trust password attempt", "error", err)
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	if applied && proof.mfaVerified {
+		h.clearDangerousMFA(c, userID)
+	}
 }
 
 // securityPatchUpdate builds only the supplied security flags; proof is never
