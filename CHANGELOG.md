@@ -60,6 +60,7 @@ The server now returns stored E2EE format metadata for message and attachment re
 ### Fixed
 
 - **Host agent:** The 202 response to an action (`POST /v1/actions/<name>`) now always reports the job it just started as `running`; a job that finished quickly could be reported as `succeeded` in that response.
+- **Admin Console:** An Admin Portal tab opened before an upgrade can sign in again. The security-key sign-in returns the admins-added notice fields only when the portal asks for them with `signin_notice: true`, which the current portal sends; without it the response is `{"status":"authenticated"}`, the shape older portals accept ([#432](https://github.com/Concord-Voice/Self-Hosted/pull/432)).
 
 ## [0.4.0] - 2026-11-23
 
