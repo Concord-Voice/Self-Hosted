@@ -36,6 +36,10 @@ belongs in it, and write it if the section has none. Do not edit the
 - **Recovery:** **BREAKING** A recovery token now names the credential epoch it was issued against and lives 15 minutes instead of 25 hours. A password change or a completed recovery rotates that epoch, so every earlier or sibling token is refused, and a token issued before this release is refused too. The device-recovery routes (create, poll and complete) now refuse a token already spent on a reset. Only a session on a designated trusted device can list or answer a device-recovery request. `GET /api/v1/mfa/trusted-devices` and `GET /api/v1/sessions` no longer return `machine_id`.
 - **Accounts:** Sign-in rate limits, auth bans, the Admin lockout, the nginx limits and voice connection admission now count an IPv6 client by its /64 and an IPv4 client by its address, so rotating addresses inside one /64 no longer resets a budget. When the counter backend is unavailable, these checks refuse the request with a 503 instead of letting it through. Voice admission gives a trusted proxy that sends no client address ten times the per-client limit, so one missing header cannot block voice for every user.
 
+### Fixed
+
+- **Host agent:** The 202 response to an action (`POST /v1/actions/<name>`) now always reports the job it just started as `running`; a job that finished quickly could be reported as `succeeded` in that response.
+
 ## [0.4.0] - 2026-11-23
 
 WebSocket event budgets are ready for self-hosted operators and stay off
