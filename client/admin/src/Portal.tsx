@@ -3,6 +3,7 @@ import {
   ChartLine,
   Gauge,
   HardDrive,
+  KeyRound,
   ListChecks,
   LogOut,
   RefreshCw,
@@ -42,6 +43,7 @@ import {
   type Thresholds,
 } from "./preferences";
 import { LOG_SERVICES } from "./server";
+import { SecurityKeys } from "./SecurityKeys";
 import { ServerWorkspace } from "./ServerWorkspace";
 import { usePolling, type PollingState } from "./usePolling";
 import {
@@ -58,7 +60,14 @@ import {
 import type { TimeMode } from "./time";
 
 export type Workspace =
-  "host" | "services" | "users" | "counters" | "series" | "changes" | "server";
+  | "host"
+  | "services"
+  | "users"
+  | "counters"
+  | "series"
+  | "changes"
+  | "server"
+  | "keys";
 
 interface WorkspaceDefinition {
   count: string;
@@ -109,6 +118,7 @@ const WORKSPACES: readonly WorkspaceDefinition[] = [
     id: "server",
     label: "Server",
   },
+  { count: "You", icon: KeyRound, id: "keys", label: "Security keys" },
 ];
 
 const THRESHOLD_FIELDS: readonly {
@@ -335,6 +345,14 @@ function WorkspaceContent({
         <ServerWorkspace
           onForbidden={onForbidden}
           onUnauthorized={onUnauthorized}
+        />
+      );
+    case "keys":
+      return (
+        <SecurityKeys
+          onForbidden={onForbidden}
+          onUnauthorized={onUnauthorized}
+          timeMode={timeMode}
         />
       );
   }
