@@ -512,6 +512,22 @@ code,
   font-size: 13px;
 }
 
+.admins-added-notice {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  border-color: var(--gold);
+}
+
+.admins-added-notice h2,
+.admins-added-notice p {
+  margin: 0;
+}
+
+.admins-added-notice h2 {
+  font-size: 14px;
+}
+
 .resource-loading {
   min-height: 48px;
   border-color: var(--gold);

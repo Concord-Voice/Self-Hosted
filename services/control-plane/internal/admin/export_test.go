@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 )
 
 // export_test.go exposes a few unexported helpers to the external `admin_test`
@@ -111,4 +112,22 @@ func RunAdminCtlWithStderrForTest(ctx context.Context, db *sql.DB, rdb *redis.Cl
 // that names an admin's action-only credentials.
 func UseActionCredentialLoaderForTest(h *Handler, load func(adminID string) (map[string]struct{}, error)) {
 	h.loadActionCredentialIDs = load
+}
+
+// SignInNoticeLockKeyForTest is the advisory key that orders admin creations
+// against sign-in notice reads.
+var SignInNoticeLockKeyForTest = signInNoticeLockKey
+
+// AdminsAddedQueryMarkerForTest starts the sign-in notice count query, so a
+// fault connector can fail exactly that statement.
+const AdminsAddedQueryMarkerForTest = adminsAddedQueryMarker
+
+// SignInNoticeQueryForTest is the sign-in notice count query, so a test can
+// EXPLAIN exactly what production runs.
+var SignInNoticeQueryForTest = signInNoticeQuery
+
+// RateLimitAdminCreateForTest exposes the admin-create limiter so its
+// missing-admin-id refusal can be exercised without AdminAuthRequired.
+func RateLimitAdminCreateForTest(rdb *redis.Client, requests int, window time.Duration) gin.HandlerFunc {
+	return rateLimitAdminCreate(rdb, requests, window)
 }

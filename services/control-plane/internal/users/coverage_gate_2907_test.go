@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,7 +33,7 @@ func TestCoverageGate2907_DeleteAccountFailsClosedWhenBlockMarkerDrainFails(t *t
 		}
 	})
 
-	err = NewAccountService(db, logger.New("test")).DeleteAccount(testdb.ActorContext(context.Background(), t, db, userID.String()), userID.String())
+	err = NewAccountService(db, logger.New("test")).DeleteAccountForTest(testdb.ActorContext(context.Background(), t, db, userID.String()), userID.String())
 	require.ErrorContains(t, err, "drain DM block reconciliation")
 	var count int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM users WHERE id = $1`, userID).Scan(&count))

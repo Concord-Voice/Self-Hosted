@@ -439,7 +439,7 @@ test("password plus WebAuthn signs in and explicit logout clears the session", a
       authenticated = true;
       await route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ status: "authenticated" }),
+        body: JSON.stringify({ status: "authenticated", admins_added: 0 }),
         status: 200,
       });
       return;
@@ -527,6 +527,7 @@ test("password plus WebAuthn signs in and explicit logout clears the session", a
         type: "public-key",
       },
       handle: "browser-login-handle",
+      signin_notice: true,
     });
     expect(
       await page.evaluate(() => ({

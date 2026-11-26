@@ -33,12 +33,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/servers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/servers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 )
 
 const (
@@ -607,8 +607,11 @@ type lockCounterpart struct {
 }
 
 func lockCounterparts() []lockCounterpart {
-	erase := func(u testhelpers.TestUser, env *mfaEnv) *httptest.ResponseRecorder {
-		return env.ts.DoRequest(http.MethodPost, "/api/v1/privacy/erase-account", nil, testhelpers.AuthHeaders(u.AccessToken))
+	erase := func(u testhelpers.TestUser, env *mfaEnv, mfaCode string, confirmedOwnedServerIDs []string) *httptest.ResponseRecorder {
+		return env.ts.DoRequest(http.MethodPost, "/api/v1/privacy/erase-account", map[string]any{
+			"password": testhelpers.TestAuthPlaintext, "mfa_code": mfaCode,
+			"confirmed_owned_server_ids": confirmedOwnedServerIDs,
+		}, testhelpers.AuthHeaders(u.AccessToken))
 	}
 	return []lockCounterpart{
 		{
@@ -629,8 +632,14 @@ func lockCounterparts() []lockCounterpart {
 		{
 			name:     "erasure of the actor",
 			fragment: `DELETE FROM users WHERE id = $1`,
-			do: func(_ *testing.T, env *mfaEnv, f lockFixture) *httptest.ResponseRecorder {
-				return erase(f.admin, env)
+			do: func(t *testing.T, env *mfaEnv, f lockFixture) *httptest.ResponseRecorder {
+				// An odd run's PUT spends the actor's one backup code, so the
+				// actor's erasure proves with a live TOTP code of its own.
+				code, err := totp.GenerateCode(f.adminTOTPSecret, time.Now())
+				if err != nil {
+					t.Errorf("generate TOTP code: %v", err)
+				}
+				return erase(f.admin, env, code, []string{})
 			},
 			wantCode:        http.StatusNoContent,
 			putOutcomes:     []string{putOK, putActorGone, putNotAMember},
@@ -640,7 +649,7 @@ func lockCounterparts() []lockCounterpart {
 			name:     "erasure of the owner",
 			fragment: `DELETE FROM users WHERE id = $1`,
 			do: func(_ *testing.T, env *mfaEnv, f lockFixture) *httptest.ResponseRecorder {
-				return erase(f.owner, env)
+				return erase(f.owner, env, mfaBackupCode, []string{f.serverID})
 			},
 			wantCode:        http.StatusNoContent,
 			putOutcomes:     []string{putOK, putServerGone, putNotAMember},

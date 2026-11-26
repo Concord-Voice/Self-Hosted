@@ -10,9 +10,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 )
 
 // The dangerous-action gate on the moderation routes (#3454): a ban, and a
@@ -34,6 +34,8 @@ import (
 type moderationConfirm struct {
 	code  string
 	grace stepup.GraceRead
+	// charged is the budget charge, for a busy refund.
+	charged stepup.Charged
 }
 
 // chargeModerationGate is a moderation gate's pre-transaction half: it charges
@@ -45,11 +47,12 @@ func (h *Handler) chargeModerationGate(
 	c *gin.Context, serverID, actorID, code string, bit rbac.Permission,
 ) (moderationConfirm, bool) {
 	ctx := c.Request.Context()
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), actorID, code); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), actorID, code)
+	if e != nil {
 		mfaenforce.WriteError(c, h.log, e, nil)
 		return moderationConfirm{}, false
 	}
-	confirm := moderationConfirm{code: code}
+	confirm := moderationConfirm{code: code, charged: charged}
 	server, serverErr := uuid.Parse(serverID)
 	actor, actorErr := uuid.Parse(actorID)
 	if serverErr == nil && actorErr == nil {
@@ -109,6 +112,18 @@ func (h *Handler) requireModerationGate(
 func (h *Handler) settleModerationGate(ctx context.Context, outcome mfaenforce.Outcome, in moderationConfirm, actorID string) {
 	mfaenforce.Settle(ctx, h.log, outcome, stepup.DangerousActionBudget(h.redis), stepup.NewGraceStore(h.redis),
 		in.grace, actorID)
+}
+
+// refundModerationGateIfBusy returns chargeModerationGate's attempt when err is
+// a busy backup-code check (stepup.IsBusy): the code was never judged, so it
+// must not cost an attempt. Any other error keeps its charge. The ban and
+// removal routes call it on their transaction's error, after that transaction
+// has ended: it is a Redis call, and none may run while the transaction is
+// open (A-2, A-9).
+func (h *Handler) refundModerationGateIfBusy(ctx context.Context, err error, confirm moderationConfirm) {
+	if rErr := stepup.RefundIfBusy(ctx, err, confirm.charged); rErr != nil {
+		h.log.Warn("Could not refund a busy moderation-gate attempt", "error", rErr)
+	}
 }
 
 // writeModerationDenial writes a moderation preflight's permission refusal.

@@ -11,12 +11,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // DB/Redis-backed proof for the renewal authority (token_renewal.go and
@@ -88,7 +88,7 @@ func TestValidateAccessToken(t *testing.T) {
 
 	t.Run("recovery token is rejected", func(t *testing.T) {
 		h, userID := renewalValidatorHandler(t)
-		token, _, err := mfa.GenerateRecoveryToken(userID, mfa.JWTSecret(testJWTSecret))
+		token, _, err := mfa.GenerateRecoveryToken(userID, "email", mfa.JWTSecret(testJWTSecret), mfa.CredEpoch(""))
 		require.NoError(t, err)
 		_, err = h.validateAccessToken(ctx, token)
 		require.ErrorContains(t, err, "invalid authentication")

@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -389,7 +389,7 @@ func TestLogoutEmitsOnlyAfterCommittedRevoke(t *testing.T) {
 
 type recoveryTokenFailureChecker struct{ ambiguousRecoveryMFAChecker }
 
-func (recoveryTokenFailureChecker) GenerateRecoveryToken(string, string) (string, string, error) {
+func (recoveryTokenFailureChecker) IssueRecoveryTokenTx(context.Context, *sql.Tx, string, string) (string, string, error) {
 	return "", "", errors.New("recovery token issuer failed")
 }
 
@@ -537,8 +537,8 @@ type recoveryIssuancePolicyChecker struct {
 	err error
 }
 
-func (s *recoveryIssuancePolicyChecker) ValidateRecoveryClaimsTx(context.Context, *sql.Tx, *RecoveryClaims) error {
-	return s.err
+func (s *recoveryIssuancePolicyChecker) IssueRecoveryTokenTx(context.Context, *sql.Tx, string, string) (string, string, error) {
+	return "", "", s.err
 }
 
 func TestRecoveryIssuanceRejectsChangedOrUnavailablePolicy(t *testing.T) {

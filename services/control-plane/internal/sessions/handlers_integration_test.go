@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/sessions"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/sessions"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -362,10 +362,37 @@ func TestListSessions_ReturnsExpectedFields(t *testing.T) {
 	require.NotEmpty(t, sessions)
 	sess := testhelpers.JSONElem[map[string]interface{}](t, sessions, 0)
 
-	expectedKeys := []string{"id", "device_name", "ip_address", "user_agent", "machine_id",
-		"expires_at", "created_at", "last_used", "remember_me", "is_current"}
-	for _, key := range expectedKeys {
+	for _, key := range sessionListKeys {
 		assert.Contains(t, sess, key, "session should contain key: %s", key)
+	}
+}
+
+var sessionListKeys = []string{"id", "device_name", "ip_address", "user_agent",
+	"expires_at", "created_at", "last_used", "remember_me", "is_current"}
+
+// TestSessionListOmitsMachineID proves the session list never returns the
+// machine identifier a trusted-device responder check is keyed on.
+func TestSessionListOmitsMachineID(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "sessnomachine")
+	sid := createSession(t, ts, user.ID, "TestBrowser", "192.168.1.1")
+	const machineID = "5f0c6a52-9d3e-4b1a-8c77-2e4f6a8b9c01"
+	_, err := ts.DB.Exec(`UPDATE refresh_tokens SET machine_id = $1 WHERE id = $2`, machineID, sid)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("GET", sessionsPath, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotContains(t, w.Body.String(), "machine_id")
+	require.NotContains(t, w.Body.String(), machineID)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	sessions := testhelpers.JSONField[[]interface{}](t, body, "sessions")
+	require.NotEmpty(t, sessions)
+	for i := range sessions {
+		sess := testhelpers.JSONElem[map[string]interface{}](t, sessions, i)
+		for _, key := range sessionListKeys {
+			assert.Contains(t, sess, key, "session should contain key: %s", key)
+		}
 	}
 }
 
@@ -722,7 +749,7 @@ func TestSimpleMode_AuthWindowAllowsSubsequentRevokes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	assertSessionFamilyRevoked(t, ts, user.ID, sessionID)
-	window, err := ts.Redis.Get(context.Background(), "session_revoke_auth:"+user.ID).Result()
+	window, err := ts.Redis.Get(context.Background(), simpleWindowKey(t, ts, user.ID, user.AccessToken)).Result()
 	require.NoError(t, err)
 	require.Equal(t, "v2:1", window)
 	// Second revoke within window should NOT require password
@@ -731,6 +758,17 @@ func TestSimpleMode_AuthWindowAllowsSubsequentRevokes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assertSessionFamilyRevoked(t, ts, user.ID, sessionID2)
 	assertSessionState(t, ts, user.ID, 0, true)
+}
+
+// simpleWindowKey names the Simple-mode window of the login family behind
+// accessToken; the window is scoped to the family that proved its password.
+func simpleWindowKey(t *testing.T, ts *testhelpers.TestServer, userID, accessToken string) string {
+	t.Helper()
+	claims, err := auth.ValidateAccessToken(accessToken, testhelpers.TestJWTSecret)
+	require.NoError(t, err)
+	var family string
+	require.NoError(t, ts.DB.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid = $1`, claims.SessionID).Scan(&family))
+	return "session_revoke_auth:" + userID + ":" + family
 }
 
 // ── RevokeAll resets tracking ────────────────────────────────────────────────
@@ -751,7 +789,8 @@ func TestRevokeAll_ResetsTracking(t *testing.T) {
 
 	assertSessionFamilyRevoked(t, ts, user.ID, s3)
 	assertSessionState(t, ts, user.ID, 3, true)
-	require.NoError(t, ts.Redis.Set(context.Background(), "session_revoke_auth:"+user.ID, "1", time.Minute).Err())
+	windowKey := simpleWindowKey(t, ts, user.ID, user.AccessToken)
+	require.NoError(t, ts.Redis.Set(context.Background(), windowKey, "1", time.Minute).Err())
 	// Revoke all (resets tracking)
 	payload := map[string]interface{}{
 		"password":        sessTestPassword,
@@ -761,7 +800,7 @@ func TestRevokeAll_ResetsTracking(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 
 	assertSessionState(t, ts, user.ID, 0, false)
-	exists, err := ts.Redis.Exists(context.Background(), "session_revoke_auth:"+user.ID).Result()
+	exists, err := ts.Redis.Exists(context.Background(), windowKey).Result()
 	require.NoError(t, err)
 	assert.Zero(t, exists)
 	claims, err := auth.ValidateAccessToken(user.AccessToken, testhelpers.TestJWTSecret)

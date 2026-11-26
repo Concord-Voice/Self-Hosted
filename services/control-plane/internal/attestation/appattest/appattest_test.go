@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/attestation/appattest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/appattesttest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/attestation/appattest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/appattesttest"
 	"github.com/fxamacker/cbor/v2"
 )
 

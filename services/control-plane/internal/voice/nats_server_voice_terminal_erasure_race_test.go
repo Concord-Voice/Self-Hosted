@@ -10,12 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	concordws "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/erasuretest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	concordws "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -451,7 +452,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 
 		svc := users.NewAccountService(ts.DB, logger.New("test"))
 		svc.SetAudienceFence(hub)
-		require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, erasedUser.ID), erasedUser.ID))
+		erasuretest.New(t, ts.DB).MustErase(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, erasedUser.ID), t, svc, erasedUser.ID)
 		close(release)
 
 		require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
@@ -567,7 +568,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 
 		svc := users.NewAccountService(ts.DB, logger.New("test"))
 		svc.SetAudienceFence(hub)
-		require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, erasedUser.ID), erasedUser.ID))
+		erasuretest.New(t, ts.DB).MustErase(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, erasedUser.ID), t, svc, erasedUser.ID)
 		_, accepted := hub.BroadcastToServerVoiceParticipantReliableContext(
 			context.Background(), uuid.MustParse(serverID), uuid.MustParse(channelID), uuid.MustParse(erasedUser.ID),
 			concordws.OutgoingMessage{Type: "voice_state_update", Data: map[string]interface{}{

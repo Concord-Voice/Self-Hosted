@@ -13,6 +13,7 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 | `docs.counts_script` | string | unset → count-drift probe skipped | dev-lifecycle Phase 4, enhanced-pr-review §2.5.0: repo-relative script that dry-runs (no args) or applies (`--apply`) a metric-count refresh. Read from the default-branch tip (`refs/remotes/origin/HEAD`), never the checkout; it runs only if it is a regular tracked file there (not a symlink) and the branch matches the tip at it and its directory. |
 | `docs.counts_script_deps[]` | string[] | `[]` → the script must call no other repo file | dev-lifecycle Phase 4, enhanced-pr-review §2.5.0: repo-relative files or directories the counts script sources or calls. Read from the default-branch tip. Entries must be plain relative paths (one bad entry skips the probe). The probe is skipped with a WARN when the branch differs from the tip under any of them or the directory of a file dep, when one is a symlink, or when untracked files (ignored ones included) sit there. |
 | `docs.count_globs[]` | string[] | `[]` → run the probe on every PR when `counts_script` is set | dev-lifecycle Phase 4: paths whose change can make a count stale, as git `:(glob)` pathspecs from the repo root (`*` stays within a directory, `**` crosses them) |
+| `issue_creation.sub_issue_linkage` | `tasklist` or `native_rest` | `tasklist` | fleet issue creation: feature-epic attachments and parent index; release-specific tracking rules govern version epics |
 | `project` | object\|null | null → all project-board ops skipped | issue-creation, pr-creation, dev-lifecycle |
 | `project.id` | string | — | board mutations (`PVT_…` node id) |
 | `project.number` / `project.owner` | int / string | `gh` user when absent | `gh project item-add` |
@@ -56,6 +57,8 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 | `agents.escalation_surfaces` | string[] | `[]` | reproduce-then-fix E2 only: extra surfaces (for example a concurrency fence) that count as escalation-worthy in its debugging loop; dev-lifecycle's E2 list is fixed in `_shared/lifecycle-agent-dispatch.md` |
 | `visual.launch[]` | array of `{match: [globs], dir, cmd, note?}` | `[]` → `/run` or the repo's documented path | dev-lifecycle Phase 4 visual verification: the launcher for each UI surface, picked by the changed files. |
 | `feedback_triage.public` / `.tracker` | string (`owner/repo`) | unset → Phase 0 stops | feedback-triage: public intake repo and private tracker |
+| `feedback_triage.routing` | object (`surface -> owner/repo`) | unset → all items route to `.tracker` | feedback-triage: optional surface-to-owning-repo map; multi-repo work puts parent epic in primary owner with sub-issues in sibling owners |
+| `feedback_triage.disclosure` | `repo` \| `internal` | `internal` | feedback-triage: how the public marker names the tracker issue: `repo#N` (names shown) or opaque `internal#N` (private names withheld) |
 | `feedback_triage.sentinel_prefix` | string | `feedback-triage` | feedback-triage: HTML-comment marker prefix (`<!-- {prefix}:status v1 -->`) |
 | `release.frontend_dir` / `.backend_dir` | string | `frontend` / `backend` | release-checklist |
 | `release.tag_prefix` | string | `v` | release-checklist, release-notes |

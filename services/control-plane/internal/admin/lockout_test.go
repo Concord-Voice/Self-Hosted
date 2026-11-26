@@ -2,8 +2,10 @@ package admin_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path"
 	"regexp"
@@ -15,15 +17,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
 // uniqueLockoutIP returns a per-run-unique synthetic IP so concurrent runs and
 // re-runs against the shared test Redis do not collide (the lockout keys are
 // hashed, but the inputs must still be unique to self-isolate).
 func uniqueLockoutIP(prefix string) string {
-	return prefix + "-" + uniqueAdminUsername("ip")
+	seed := uniqueAdminUsername("ip")
+	sum := sha256.Sum256([]byte(prefix + "-" + seed))
+	return fmt.Sprintf("2001:db8:%02x%02x:%02x%02x::1", sum[0], sum[1], sum[2], sum[3])
 }
 
 func acctLockKey(username string) string  { return "admin_lockout:acct_lock:" + username }
@@ -93,6 +97,26 @@ func TestLockout_Reserve_AllowsFiveThenLocks(t *testing.T) {
 	assertWindow(t, rdb, acctLockKey(user), time.Minute, "the first lock is the base window")
 	assertWindow(t, rdb, acctLevelKey(user), time.Minute+time.Hour, "the level outlives its lock by an hour")
 	assertWindow(t, rdb, ipLevelKey(ip), time.Minute+time.Hour, "the IP level outlives its lock by an hour")
+}
+
+func TestLockout_ReserveAggregatesNativeIPv6ByPrefix(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	lk := admin.NewLockout(rdb, nil)
+	username := uniqueAdminUsername("ipv6")
+
+	for suffix := 1; suffix <= 5; suffix++ {
+		allowed, err := lk.Reserve(context.Background(), username, fmt.Sprintf("2001:db8:1:2::%x", suffix))
+		require.NoError(t, err)
+		require.True(t, allowed)
+	}
+	allowed, err := lk.Reserve(context.Background(), username, "2001:db8:1:2::ff")
+	require.NoError(t, err)
+	require.False(t, allowed)
+
+	locked, err := lk.IsLocked(context.Background(), username, "2001:db8:1:2::100")
+	require.NoError(t, err)
+	require.True(t, locked)
 }
 
 // A counted guess stays counted for an hour, so a patient attacker cannot stay
@@ -216,12 +240,14 @@ func TestLockout_EscalatesAcrossExpiry(t *testing.T) {
 	rdb, cleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
-	user, ip := uniqueAdminUsername("acct"), uniqueLockoutIP("1.2.4")
+	user := uniqueAdminUsername("acct")
 	lk := admin.NewLockout(rdb, nil)
 
 	want := []int{1, 2, 4, 8, 16, 32, 60, 60, 60}
 	for i, minutes := range want {
-		lockOut(t, lk, user, ip+string(rune('a'+i)))
+		// A fresh /64 each round: addresses inside one /64 share the per-IP
+		// lock, and this test isolates the account axis.
+		lockOut(t, lk, user, uniqueLockoutIP(fmt.Sprintf("1.2.4-%d", i)))
 		assertWindow(t, rdb, acctLockKey(user), time.Duration(minutes)*time.Minute, "lock window")
 		// Expiry: the lock key goes, the level key stays.
 		require.NoError(t, rdb.Del(ctx, acctLockKey(user)).Err())

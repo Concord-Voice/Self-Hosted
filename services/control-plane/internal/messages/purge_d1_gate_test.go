@@ -26,11 +26,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/messages"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/messages"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/stmthook"
 )
 
 const (
@@ -571,4 +571,40 @@ func TestPurgeProvenance_BanKickPin(t *testing.T) {
 			assert.Zero(t, s.countBy(t, w.author.ID))
 		})
 	}
+}
+
+// TestPurgeD1Gate_BusyVerificationNeverCharges: a D1 purge whose backup-code
+// check was busy answers 503 with Retry-After: 1, purges nothing, and returns
+// the attempt it charged — whether D1 charged it (D1 only) or the soft-lock
+// did (a mixed plan, charged once).
+//
+// Mutant killed: dropping the refund in refuseSelfPurge (the budget climbs on
+// each busy answer and the fourth one is a 429).
+func TestPurgeD1Gate_BusyVerificationNeverCharges(t *testing.T) {
+	t.Run("D1 only", func(t *testing.T) {
+		s := newSoftLockHarness(t)
+		w := s.world(t, true)
+		s.enroll(t, w.moderator.ID)
+		s.seed(t, w.channelID, w.author, 3)
+		path := "/channels/" + w.channelID + "/messages"
+
+		s.requireBusyNeverCharges(t, w.moderator.ID, func(code string) *httptest.ResponseRecorder {
+			return s.d1Purge(t, w.moderator.ID, path,
+				map[string]any{"range": "all", "target_user_id": w.author.ID, "mfa_code": code})
+		})
+		assert.Zero(t, s.countBy(t, w.author.ID))
+	})
+	t.Run("D1 and the soft-lock", func(t *testing.T) {
+		s := newSoftLockHarness(t)
+		w := s.world(t, true)
+		s.enroll(t, w.moderator.ID)
+		s.mixedWorld(t, w, 16)
+
+		s.requireBusyNeverCharges(t, w.moderator.ID, func(code string) *httptest.ResponseRecorder {
+			return s.d1Purge(t, w.moderator.ID, "/servers/"+w.serverID+"/messages",
+				map[string]any{"range": "all", "mfa_code": code})
+		})
+		assert.Zero(t, s.countBy(t, w.author.ID))
+		assert.Zero(t, s.countBy(t, w.moderator.ID))
+	})
 }

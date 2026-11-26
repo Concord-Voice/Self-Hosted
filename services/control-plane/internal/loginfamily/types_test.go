@@ -2,7 +2,7 @@ package loginfamily_test
 
 import (
 	"errors"
-	lf "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
+	lf "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
 	"github.com/stretchr/testify/require"
 	"testing"
 )

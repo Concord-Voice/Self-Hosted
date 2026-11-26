@@ -64,6 +64,7 @@ make migrate-version
 6. **Never modify committed migrations** - Create new migrations to fix issues
 7. **Pass squawk** - The `squawk` pre-commit hook and the `migration-lint` PR CI job lint new and changed `*.up.sql` files against `.squawk.toml` (PostgreSQL 16). Run it by hand with `pre-commit run squawk --files <file>`. Suppress a false positive on one statement with `-- squawk-ignore <rule>` and a reason; see `[internal]rules/migrations.md` § Migration linting (squawk)
    - The ignore line must be exactly `-- squawk-ignore <rule>[, <rule>]`, directly above the statement, with the reason on its own comment line above it. CI refuses any other line that mentions `squawk-ignore`: `squawk-ignore-file`, a bare ignore with no rule, text after the rules, or an ignore in a trailing or block comment.
+8. **Merge in version order** - golang-migrate never applies a version below the one already recorded, so a migration must merge after every migration with a lower number.
 
 ## Migration Structure
 
@@ -83,7 +84,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000200)
+## Existing Migrations (000001–000207)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -309,6 +310,11 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000198 | add_session_revoke_allowance | Moves the rolling session-revocation allowance to a nullable users timestamp and binds simple-mode auth windows to a reset generation. Existing users start a conservative 24-hour window; new users start with no timestamp. Down refuses while any recorded window is active. |
 | 000199 | add_positive_admin_session_generation_check | Aborts under a bounded write-blocking lock if any existing admin generation is nonpositive, then adds a positive check for future writes. The original nonnegative check remains. |
 | 000200 | validate_positive_admin_session_generation | Validates the positive check against existing administrator rows without holding an exclusive lock across the scan. Existing nonpositive rows are already rejected by 000199. |
+| 000201 | e2ee_format_metadata | Adds nullable dormant stored-format and request-fingerprint metadata to channel/DM messages and encrypted media, with user/message-v1/attachment-v4 shape constraints; no writer or fallback behavior is enabled. |
+| 000203 | admin_audit_login_success_index | One-statement `CREATE INDEX CONCURRENTLY` of a partial index on `admin_audit_log (admin_id, ts DESC)` for successful sign-ins, the inner lookup of the admin sign-in notice; a first sign-in no longer scans the whole log. Merge after the change that holds 000202: golang-migrate never applies a version below the one recorded. Down drops the index concurrently. |
+| 000204 | admin_audit_event_result_ts_index | One-statement `CREATE INDEX CONCURRENTLY` on `admin_audit_log (event_type, result, ts)` for the notice's count of `admin_created` successes since the previous sign-in. Same merge order as 000203. Down drops the index concurrently. |
+| 000206 | message_id_reservations | Adds a dormant global ID-only reservation namespace for channel and DM message UUIDs, plus the online baseline gate; no message-v1 writer is enabled. |
+| 000207 | prefix_legacy_backup_code_hashes | Rewrites each bare lowercase 64-hex SHA-256 element of `user_mfa_totp.backup_codes_hash` to `v1$` plus the same digest, keeping array order and `backup_codes_used`; other elements are untouched. Run only after every serving replica reads bare, v1 and v2 hashes. The down strips `v1$` under a `SHARE ROW EXCLUSIVE` lock and refuses while any element is neither bare nor v1, such as a generated v2 code. |
 
 If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
 

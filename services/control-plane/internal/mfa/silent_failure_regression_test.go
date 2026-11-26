@@ -42,8 +42,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // sfFaultHook fails one Redis command (or any of a "|"-separated set, so an
@@ -71,8 +71,13 @@ func (sfFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 func (h sfFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		if slices.Contains(strings.Split(h.cmd, "|"), cmd.Name()) {
-			if args := cmd.Args(); len(args) >= 2 {
-				if k, ok := args[1].(string); ok && strings.HasPrefix(k, h.prefix) {
+			// A script call's first key follows the script and the key count.
+			keyAt := 1
+			if cmd.Name() == "evalsha" || cmd.Name() == "eval" {
+				keyAt = 3
+			}
+			if args := cmd.Args(); len(args) > keyAt {
+				if k, ok := args[keyAt].(string); ok && strings.HasPrefix(k, h.prefix) {
 					h.hits.Add(1)
 					err := fmt.Errorf("sf: forced %s failure on %s", h.cmd, k)
 					cmd.SetErr(err)
@@ -179,20 +184,14 @@ func TestSilentFailureVerify_UsedPrecheckFault_DoesNotEvaluateCode(t *testing.T)
 	assert.Equal(t, 0, sfAttempts(t, f), "a Redis fault on the single-use pre-check must not let a code be evaluated")
 }
 
-func TestSilentFailureVerify_AttemptIncrFault_FailsClosed(t *testing.T) {
-	hook, hits := sfFault("incr", "mfa_verify_attempts:")
+// The count, its window and its window ID are one script (stepup.ChargeKey),
+// so one fault on that script covers a lost count and a lost window alike.
+func TestSilentFailureVerify_AttemptChargeFault_FailsClosed(t *testing.T) {
+	hook, hits := sfFault("evalsha|eval", "mfa_verify_attempts:")
 	f := sfNewVerifyFixture(t, hook)
 	status, body := sfVerify(t, f, sfWrongCode(t, f.secret))
 	sfRequireFired(t, hits)
 	sfRequireUnavailable(t, status, body, "a wrong code whose attempt could not be counted must fail closed, not answer 'invalid code'")
-}
-
-func TestSilentFailureVerify_AttemptExpireFault_FailsClosed(t *testing.T) {
-	hook, hits := sfFault("expire", "mfa_verify_attempts:")
-	f := sfNewVerifyFixture(t, hook)
-	status, body := sfVerify(t, f, sfWrongCode(t, f.secret))
-	sfRequireFired(t, hits)
-	sfRequireUnavailable(t, status, body, "an attempt counter whose window could not be set must fail closed")
 }
 
 // ── Class B — TOTPVerifySetup ──────────────────────────────────────────────
@@ -736,6 +735,75 @@ func TestSilentFailureVerify_LockoutSetFault_FailsClosedAtThreshold(t *testing.T
 	status, body := sfVerify(t, f, sfWrongCode(t, f.secret))
 	sfRequireFired(t, hits)
 	sfRequireUnavailable(t, status, body, "the attempt that reaches the threshold must fail closed when the lockout cannot be written")
+}
+
+// sfRefundFaultHook fails only the budget refund script on keys starting with
+// prefix. The charge and the refund both run as scripts on the attempts key;
+// the refund is the one with a single ARGV (the window ID), so its command is
+// [evalsha|eval, script, numkeys, key, windowKey, windowID].
+type sfRefundFaultHook struct {
+	prefix string
+	hits   *atomic.Int32
+}
+
+func (sfRefundFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (sfRefundFaultHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (h sfRefundFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		args := cmd.Args()
+		if (cmd.Name() == "evalsha" || cmd.Name() == "eval") && len(args) == 6 {
+			if k, ok := args[3].(string); ok && strings.HasPrefix(k, h.prefix) {
+				h.hits.Add(1)
+				err := fmt.Errorf("sf: forced refund failure on %s", k)
+				cmd.SetErr(err)
+				return err
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+// An attempt refused past the limit gives its charge back. When that refund
+// cannot be made the count stays past the limit, so the refusal arms the
+// lockout instead, and still judges nothing.
+func TestSilentFailureVerify_RefusalRefundFault_ArmsTheLockout(t *testing.T) {
+	refundHits := new(atomic.Int32)
+	f := sfNewVerifyFixture(t, sfRefundFaultHook{prefix: "mfa_verify_attempts:", hits: refundHits})
+	require.NoError(t, f.clean.Set(context.Background(), "mfa_verify_attempts:"+f.userID, 5, 0).Err())
+	status, body := sfVerify(t, f, iuTOTPCode(t, f.secret))
+	sfRequireFired(t, refundHits)
+	assert.Equal(t, http.StatusTooManyRequests, status, "%v", body)
+	assert.Equal(t, int64(1), f.clean.Exists(context.Background(), "mfa_verify_lockout:"+f.userID).Val(),
+		"a refusal whose refund failed must arm the lockout")
+}
+
+// When neither the refund nor the lockout can be written, the refusal fails
+// closed.
+func TestSilentFailureVerify_LockoutSetFault_FailsClosedPastThreshold(t *testing.T) {
+	hook, hits := sfFault("set|setnx", "mfa_verify_lockout:")
+	refundHits := new(atomic.Int32)
+	f := sfNewVerifyFixture(t, hook, sfRefundFaultHook{prefix: "mfa_verify_attempts:", hits: refundHits})
+	require.NoError(t, f.clean.Set(context.Background(), "mfa_verify_attempts:"+f.userID, 5, 0).Err())
+	status, body := sfVerify(t, f, sfWrongCode(t, f.secret))
+	sfRequireFired(t, refundHits)
+	sfRequireFired(t, hits)
+	sfRequireUnavailable(t, status, body, "an attempt refused past the limit must fail closed when neither its refund nor the lockout can be written")
+}
+
+// With the refund working, a lockout fault past the limit is never reached:
+// the refusal gives its charge back and answers 429 without judging.
+func TestSilentFailureVerify_LockoutSetFault_PastThresholdRefundsInstead(t *testing.T) {
+	hook, hits := sfFault("set|setnx", "mfa_verify_lockout:")
+	f := sfNewVerifyFixture(t, hook)
+	require.NoError(t, f.clean.Set(context.Background(), "mfa_verify_attempts:"+f.userID, 5, 0).Err())
+	status, body := sfVerify(t, f, iuTOTPCode(t, f.secret))
+	assert.Equal(t, http.StatusTooManyRequests, status, "%v", body)
+	assert.Zero(t, hits.Load(), "a refunded refusal does not write the lockout")
+	got, err := f.clean.Get(context.Background(), "mfa_verify_attempts:"+f.userID).Int()
+	require.NoError(t, err)
+	assert.Equal(t, 5, got, "the refusal's own charge came back")
 }
 
 // ── Round 2 — found by the class A–H fix, outside its brief ─────────────────

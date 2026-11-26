@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"time"
 
-	ac "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authoritycontract"
+	ac "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authoritycontract"
 )
 
 // ReplicationProbe answers step 12's question on the request's own session.

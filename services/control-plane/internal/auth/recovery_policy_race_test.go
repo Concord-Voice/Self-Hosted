@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/devicerecovery"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/devicerecovery"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/pquerna/otp/totp"
@@ -335,6 +335,7 @@ func approvedDeviceRecoveryRequest(t *testing.T, ts *testhelpers.TestServer, use
 	}
 	testhelpers.ParseJSON(t, create, &pending)
 	digest, payload := deviceOfferV2(t, ts, user.ID, pending.RequestID)
+	testhelpers.TrustSession(t, ts.DB, user.ID, user.AccessToken)
 	approved := ts.DoRequest(http.MethodPost, "/api/v1/mfa/recovery-requests/"+pending.RequestID+"/respond", map[string]any{"action": "approve", "protocol_version": 2, "transcript_hash": digest, "encrypted_payload": payload}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusOK, approved.Code, approved.Body.String())
 	return pending.RequestID, digest

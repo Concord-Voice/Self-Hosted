@@ -12,6 +12,8 @@ Concord treats every credential as interchangeable, and the weakest can rebuild 
 
 **Current implementation note (2026-10-15):** the ad-hoc `recovery-only-challenge` patch closes this immediate recovery-policy bypass (Codex Security finding `csf_13551019f403b6ab218b09ef`) on this branch, pending deployment. A recovery email is atomically consumed and, where current raw policy reserves an actually enrolled TOTP or WebAuthn factor, a distinct five-minute recovery challenge must prove one before final recovery authority is issued. The final `recovery_v2` token carries signed server-verified factor provenance and every reset, device, and social-recovery consumer rechecks current policy. The patch does not implement this ADR's broader proposed hardening: universal MFA accounts, the 15-minute recovery-token TTL, credential-epoch recovery binding, recovery-key authority, or the seniority/hold model remain proposed work.
 
+**Implementation note (2026-11-25):** decision 7's recovery token is now implemented, superseding the 2026-10-15 note for those two items. Final recovery authority is a `recovery_v3` token that names the credential epoch it was issued against and lives 15 minutes. Reset-password, reset-account and the trusted-device requester routes compare that epoch with `users.credential_epoch` under the users lock, so a password change, completed recovery or account-key replacement revokes every earlier and sibling token, and a `recovery_v2` token is refused everywhere. The requester device routes also refuse a token a reset already spent. Only a session on a designated trusted device can list or answer a device-recovery request. That check is interim hardening ahead of the device-held recovery key, not device authentication: `machine_id` is client-asserted. Any future primary-email change path must rotate the credential epoch in its own transaction. Universal MFA accounts, recovery-key authority and the seniority/hold model remain proposed.
+
 **Recovery attempt policy (revised 2026-11-18, #344):** email recovery now
 sends a single-use recovery key with 256 random bits. Guessing one is
 infeasible, so the key path has no attempt limit and wrong keys never count
@@ -44,6 +46,14 @@ to be sent to it, and delay that address's registration for up to the pending
 TTL. The account-wide bound stays
 for the same reason as recovery's: a limit tied to a pending row would let a
 caller cancel, re-register and restart guessing.
+
+**Registration code binding:** a registration verification code is
+evidence for its canonical pending UUID and normalized recipient email. The
+control plane carries that recipient through verification and compares it with
+the pending row while locked before promotion. Email rotation invalidates current
+code material before the row changes, preserves the pending registration's attempt
+budget, and leaves a newer racing code intact. A code record with no bound
+recipient is refused, so a code issued before this binding must be resent.
 
 #2553 assumes CP user authentication is sound (ADR-0045 decision-table row D21, `0045:672`) and freezes its protocol-v1 contract at #3587 PR-A, so any factor this design needs must be named first.
 

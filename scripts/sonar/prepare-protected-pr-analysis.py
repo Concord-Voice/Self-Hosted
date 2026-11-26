@@ -23,10 +23,8 @@ REPO = "Concord-Voice/Self-Hosted"
 API = f"https://api.github.com/repos/{REPO}"
 ROOT = Path(__file__).resolve().parents[2]
 GIT_REMOTE = f"https://github.com/{REPO}.git"
-# Accepted control-plane module path prefixes. The second is the pre-rename
-# module path; drop it once services/control-plane/go.mod on main no longer
-# declares it (the module rename PR, #340, does that).
-GO_MODULE_PREFIXES = (f"github.com/{REPO}/", "github.com/Concord-Voice/Concord-Voice-Alpha/")
+# Accepted control-plane module path prefix (services/control-plane/go.mod).
+GO_MODULE_PREFIXES = (f"github.com/{REPO}/",)
 GO_COVERAGE_HEADER = re.compile(r"mode: (set|count|atomic)")
 GO_COVERAGE_RECORD = re.compile(r"([^:\s]+)(:\d+\.\d+,\d+\.\d+ \d+ \d+)")
 GIT_ENV = {k: v for k, v in os.environ.items()
@@ -71,6 +69,8 @@ MAX_COVERAGE = 128 * 1024 * 1024
 MAX_SOURCE_FILES = 30000
 MAX_SOURCE_FILE = 16 * 1024 * 1024
 MAX_SOURCE_TOTAL = 512 * 1024 * 1024
+ARTIFACT_SETTLE_ATTEMPTS = 13
+ARTIFACT_SETTLE_DELAY = 10
 
 
 class Reject(Exception):
@@ -604,6 +604,19 @@ def settled_jobs(api, path):
     return jobs
 
 
+def settled_proof_inventory(api, run_id, name):
+    # The upload can succeed before the separately dispatched workflow sees
+    # the artifact in GitHub's inventory. Retry only an absent exact name; a
+    # present one, stale or not, is judged by api.artifact, which rejects it.
+    inventory = api.artifacts(run_id)
+    for _ in range(ARTIFACT_SETTLE_ATTEMPTS - 1):
+        if any(isinstance(a, dict) and a.get("name") == name for a in inventory):
+            return inventory
+        time.sleep(ARTIFACT_SETTLE_DELAY)
+        inventory = api.artifacts(run_id)
+    return inventory
+
+
 def prepare(candidate, directory, api):
     if directory.exists() or not directory.parent.is_dir():
         raise Reject("analysis directory must be absent with an existing parent")
@@ -612,8 +625,8 @@ def prepare(candidate, directory, api):
     if not isinstance(run, dict) or not isinstance(run.get("run_started_at"), str):
         raise Reject("caller attempt unavailable")
     started = timestamp(run["run_started_at"])
-    inventory = api.artifacts(run_id)
     name = f"protected-sonar-caller-proof-{run_id}-{attempt}"
+    inventory = settled_proof_inventory(api, run_id, name)
     proof_zip = api.artifact(inventory, name, run_id, started, MAX_PROOF_ZIP)
     proof_bytes = one_zip(proof_zip, "proof.json", MAX_PROOF)
     with tempfile.TemporaryDirectory(prefix="sonar-proof-", dir=directory.parent) as temporary:

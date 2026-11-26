@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 )
 
 // Erasure cascades the user's Wing seats (#2033 PR-5) and tells each survivor
@@ -27,7 +27,7 @@ func TestDeleteAccountReportsErasedWingSeats(t *testing.T) {
 	var got []ErasedSeat
 	service.SetErasedSeatNotifier(func(_ context.Context, seats []ErasedSeat) { got = seats })
 
-	require.NoError(t, service.DeleteAccount(testdb.ActorContext(context.Background(), t, db, payer.String()), payer.String()))
+	require.NoError(t, service.DeleteAccountForTest(testdb.ActorContext(context.Background(), t, db, payer.String()), payer.String()))
 
 	assert.ElementsMatch(t, []ErasedSeat{
 		{SeatID: activeSeat, Survivor: holder, Holder: true},

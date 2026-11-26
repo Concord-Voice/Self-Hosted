@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/hostagent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/hostagent"
 )
 
 type fakeAuthorizerStore struct {

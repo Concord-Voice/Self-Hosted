@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -247,6 +247,17 @@ func TestSendOwnershipTransferNotificationDevMode(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestSendAccountErasureConfirmationDevModeFailsClosed(t *testing.T) {
+	svc := newDevService()
+
+	err := svc.SendAccountErasureConfirmation(
+		testUserEmail,
+		"concord://account-erasure/confirm/00000000-0000-4000-8000-000000000001/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	)
+
+	require.ErrorIs(t, err, ErrDeliveryNotConfigured)
+}
+
 // Without SMTP, only development and test may log what they would have sent.
 // Anywhere else every send fails and the secret never reaches the log: a
 // recovery code resets the account, and staging runs without SMTP (security
@@ -306,6 +317,7 @@ func TestTemplatesLoad(t *testing.T) {
 	assert.NotNil(t, verificationTmpl)
 	assert.NotNil(t, recoveryTmpl)
 	assert.NotNil(t, ownershipTransferTmpl)
+	assert.NotNil(t, accountErasureConfirmationTmpl)
 }
 
 // ── Production Path Tests (mock SMTP) ───────────────────────────────────────
@@ -357,6 +369,53 @@ func TestSendOwnershipTransferProd(t *testing.T) {
 	assert.Contains(t, msg, "newowner42")
 	assert.Contains(t, msg, "reversal-token-xyz")
 	assert.Contains(t, msg, "Subject: Ownership transfer initiated for Test Server")
+}
+
+func TestSendAccountErasureConfirmationProd(t *testing.T) {
+	addr, capture := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
+	svc := newProdService(addr)
+	confirmationURL := "concord://account-erasure/confirm/00000000-0000-4000-8000-000000000001/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	err := svc.SendAccountErasureConfirmation(testUserEmail, confirmationURL)
+	require.NoError(t, err)
+
+	msg := capture.last()
+	assert.Contains(t, msg, confirmationURL)
+	assert.Contains(t, msg, "Confirm account erasure")
+	assert.Contains(t, msg, "Subject: Confirm your Concord account erasure")
+}
+
+func TestSendAccountErasureConfirmationRejectsUnexpectedLink(t *testing.T) {
+	addr, capture := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
+	svc := newProdService(addr)
+	const (
+		prefix = "concord://account-erasure/confirm/"
+		id     = "00000000-0000-4000-8000-000000000001"
+		token  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	)
+
+	for name, link := range map[string]string{
+		"other scheme":          "https://example.test/not-an-erasure-link",
+		"javascript":            "javascript:alert(1)",
+		"attribute break-out":   prefix + id + "/x\"onmouseover=\"alert(1)",
+		"too long":              prefix + id + "/" + token + strings.Repeat("A", 200),
+		"line break":            prefix + id + "/" + token + "\r\n",
+		"other host":            "concord://other/confirm/" + id + "/" + token,
+		"user info":             "concord://user@account-erasure/confirm/" + id + "/" + token,
+		"query":                 prefix + id + "/" + token + "?x=1",
+		"fragment":              prefix + id + "/" + token + "#x",
+		"escaped path":          prefix + id + "/" + token[:40] + "%41AA",
+		"other action":          "concord://account-erasure/verify/" + id + "/" + token,
+		"missing token":         prefix + id,
+		"short request id":      prefix + id[:35] + "/" + token,
+		"request id dash moved": prefix + "00000000a0000-4000-8000-000000000001/" + token,
+		"uppercase request id":  prefix + strings.ToUpper("0000000a-0000-4000-8000-000000000001") + "/" + token,
+		"short token":           prefix + id + "/" + token[:42],
+		"token bad character":   prefix + id + "/" + token[:42] + "+",
+	} {
+		require.Error(t, svc.SendAccountErasureConfirmation(testUserEmail, link), name)
+	}
+	assert.Empty(t, capture.last(), "a refused link sends no email")
 }
 
 // ── Sanitization Tests ──────────────────────────────────────────────────────

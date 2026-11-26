@@ -12,18 +12,18 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/klipy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/klipy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/requestid"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -415,7 +415,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 // by hand.
 func (h *Handler) queryMessages(channelID, before string, since time.Time, limit int) ([]models.MessageWithUser, error) {
 	query := `
-		SELECT m.id, m.channel_id, m.user_id, m.content, m.key_version,
+		SELECT m.id, m.channel_id, m.user_id, m.content, m.key_version, m.e2ee_format,
 		       m.embeds_suppressed, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_at, m.expires_at, m.created_at, m.updated_at,
 		       m.type, m.expiration_event_payload,
 		       u.username, u.display_name, u.avatar_url
@@ -466,6 +466,7 @@ func (h *Handler) queryMessages(channelID, before string, since time.Time, limit
 			&msg.UserID,
 			&msg.Content,
 			&msg.KeyVersion,
+			&msg.E2EEFormat,
 			&msg.EmbedsSuppressed,
 			&msg.ReplyToID,
 			&msg.PinnedAt,
@@ -1227,6 +1228,11 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 		return
 	}
 	if err != nil {
+		// DeleteOne has ended the delete transaction, so the refund's Redis
+		// call holds no connection. Only an over-threshold delete charged.
+		if verdict.Over {
+			h.refundBusyStepUp(ctx, err, &deleteAdmission{gate: gate, mode: confirmOverThreshold})
+		}
 		h.respondSoftLockError(c, err, verdict.RetryAfter, errMsgMessageNotFound, errMsgFailedDeleteMessage)
 		return
 	}

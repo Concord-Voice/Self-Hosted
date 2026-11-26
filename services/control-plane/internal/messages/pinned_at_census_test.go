@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/expiration"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/expiration"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,7 +61,7 @@ import (
 
 const (
 	censusOpaque           = "?"
-	censusExpirationImport = "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/expiration"
+	censusExpirationImport = "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/expiration"
 )
 
 // censusFragments is what expiration.<Name> evaluates to inside a statement.

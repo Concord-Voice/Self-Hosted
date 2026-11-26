@@ -9,10 +9,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // The mint endpoint's refusal copy. ErrMsgInvalidPassword (stepup.go) is the
@@ -223,9 +223,10 @@ func (h *PasswordTokenHandler) verifyPassword(c *gin.Context, userID, password s
 		h.emit(c, mintAccountLockedEvent)
 		c.JSON(http.StatusLocked, gin.H{"error": ErrMsgStepUpLocked, "error_code": errCodeAccountLocked})
 	case errors.Is(err, auth.ErrInvalidCredentials):
-		outcome := middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return false
+		}
 		h.emit(c, mintRefusedEvent)
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusForbidden, gin.H{"error": ErrMsgInvalidPassword})
 	default:
 		// err is deliberately not logged: a hash decode failure can embed the

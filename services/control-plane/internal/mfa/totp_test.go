@@ -1,15 +1,22 @@
 package mfa
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
+	"github.com/gin-gonic/gin"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -261,7 +268,7 @@ func TestParseEncryptionKey(t *testing.T) {
 }
 
 func TestGenerateBackupCodes(t *testing.T) {
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	if err != nil {
 		t.Fatalf("GenerateBackupCodes failed: %v", err)
 	}
@@ -278,10 +285,27 @@ func TestGenerateBackupCodes(t *testing.T) {
 			t.Errorf("code[%d] length = %d, want %d", i, len(code), backupLen)
 		}
 
-		h := sha256.Sum256([]byte(code))
-		if hashes[i] != hex.EncodeToString(h[:]) {
-			t.Errorf("hash[%d] changed before the reader rollout", i)
+		// B2 writes only v2: a fresh salt per code, in the exact tuple the B1
+		// reader accepts.
+		salt, _, parseErr := backuphash.Parse(hashes[i])
+		if parseErr != nil || salt == nil {
+			t.Errorf("hash[%d] is not a v2 hash the reader accepts: %v", i, parseErr)
 		}
+		if !strings.HasPrefix(hashes[i], "v2$argon2id$v=19$m=19456,t=2,p=1$") {
+			t.Errorf("hash[%d] is not in the B1 reader's v2 tuple", i)
+		}
+		h := sha256.Sum256([]byte(code))
+		if strings.Contains(hashes[i], hex.EncodeToString(h[:])) {
+			t.Errorf("hash[%d] still carries the unsalted SHA-256 digest", i)
+		}
+	}
+	salts := make(map[string]bool, len(hashes))
+	for i, stored := range hashes {
+		salt, _, _ := backuphash.Parse(stored)
+		if salts[string(salt)] {
+			t.Errorf("hash[%d] reuses another code's salt", i)
+		}
+		salts[string(salt)] = true
 	}
 
 	// Codes should be unique
@@ -295,7 +319,7 @@ func TestGenerateBackupCodes(t *testing.T) {
 }
 
 func TestVerifyBackupCode(t *testing.T) {
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	if err != nil {
 		t.Fatalf("GenerateBackupCodes failed: %v", err)
 	}
@@ -303,7 +327,7 @@ func TestVerifyBackupCode(t *testing.T) {
 	used := make([]bool, len(codes))
 
 	// Valid code matches
-	idx, ok, err := VerifyBackupCode(codes[0], hashes, used)
+	idx, ok, err := VerifyBackupCode(context.Background(), codes[0], hashes, used)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +336,7 @@ func TestVerifyBackupCode(t *testing.T) {
 	}
 
 	// Case insensitive
-	idx, ok, err = VerifyBackupCode("  "+codes[1]+"  ", hashes, used)
+	idx, ok, err = VerifyBackupCode(context.Background(), "  "+codes[1]+"  ", hashes, used)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +346,7 @@ func TestVerifyBackupCode(t *testing.T) {
 
 	// Used code is skipped
 	used[2] = true
-	_, ok, err = VerifyBackupCode(codes[2], hashes, used)
+	_, ok, err = VerifyBackupCode(context.Background(), codes[2], hashes, used)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +355,7 @@ func TestVerifyBackupCode(t *testing.T) {
 	}
 
 	// Invalid code
-	idx, ok, err = VerifyBackupCode("XXXXXXXX", hashes, used)
+	idx, ok, err = VerifyBackupCode(context.Background(), "XXXXXXXX", hashes, used)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,19 +368,56 @@ func TestVerifyBackupCode(t *testing.T) {
 // than the hashes is a damaged row. A code with no used flag must not match:
 // the caller indexes used[i] to spend it.
 func TestVerifyBackupCodeShortUsedArrayFailsClosed(t *testing.T) {
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	if err != nil {
 		t.Fatalf("GenerateBackupCodes failed: %v", err)
 	}
 	used := make([]bool, 2)
 
-	if idx, ok, err := VerifyBackupCode(codes[0], hashes, used); err != nil || !ok || idx != 0 {
+	if idx, ok, err := VerifyBackupCode(context.Background(), codes[0], hashes, used); err != nil || !ok || idx != 0 {
 		t.Fatalf("code with a used flag: idx=%d, ok=%v, want idx=0, ok=true", idx, ok)
 	}
-	if idx, ok, err := VerifyBackupCode(codes[5], hashes, used); err != nil || ok {
+	if idx, ok, err := VerifyBackupCode(context.Background(), codes[5], hashes, used); err != nil || ok {
 		t.Errorf("code %d has no used flag but matched", idx)
 	}
-	if idx, ok, err := VerifyBackupCode(codes[0], hashes, nil); err != nil || ok {
+	if idx, ok, err := VerifyBackupCode(context.Background(), codes[0], hashes, nil); err != nil || ok {
 		t.Errorf("nil used array: code %d matched", idx)
+	}
+}
+
+// An ended request context refuses backup-code hashing on both the writer and
+// the verifier with backuphash.ErrBusy, and the handlers answer it with 503.
+func TestBackupCodeHashingHonoursTheRequestContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, _, err := GenerateBackupCodes(ctx); !errors.Is(err, backuphash.ErrBusy) {
+		t.Fatalf("GenerateBackupCodes with a cancelled context = %v, want ErrBusy", err)
+	}
+	stored, err := backuphash.NewV2(context.Background(), "ABCD1234")
+	if err != nil {
+		t.Fatalf("NewV2: %v", err)
+	}
+	if _, matched, err := VerifyBackupCode(ctx, "ABCD1234", []string{stored}, []bool{false}); matched || !errors.Is(err, backuphash.ErrBusy) {
+		t.Fatalf("VerifyBackupCode with a cancelled context = %v, %v; want no match and ErrBusy", matched, err)
+	}
+}
+
+func TestBackupHashFailureStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		err        error
+		status     int
+		retryAfter string
+	}{
+		{fmt.Errorf("hash backup code: %w", backuphash.ErrBusy), http.StatusServiceUnavailable, "1"},
+		{errors.New("read backup codes: boom"), http.StatusInternalServerError, ""},
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		writeBackupHashFailure(c, tc.err, errMsgFailedBackupCodes)
+		if w.Code != tc.status || w.Header().Get("Retry-After") != tc.retryAfter {
+			t.Fatalf("%v: status %d Retry-After %q, want %d %q", tc.err, w.Code, w.Header().Get("Retry-After"), tc.status, tc.retryAfter)
+		}
 	}
 }

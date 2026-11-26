@@ -7,13 +7,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/privacy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/email"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/erasureclear"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/privacy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 )
 
 // erasureClearWiring is the #2447 erasure capture and cross-replica clear
@@ -25,9 +27,16 @@ type erasureClearWiring struct {
 	secret  string
 }
 
+// erasureStepUpWiring is what account erasure needs to judge a fresh proof:
+// the MFA code verifier, and the sender of the email confirmation link.
+type erasureStepUpWiring struct {
+	mfaVerifier stepup.MFATxCodeVerifier
+	emailSender *email.Service
+}
+
 // buildPrivacyHandler constructs the privacy handler wired to the
 // account-deletion service. Telemetry-related wiring was removed in #758 (sub-epic G);
-// the handler now exposes only POST /api/v1/privacy/erase-account.
+// the handler now exposes only the account-erasure POST and its owned-server preview.
 //
 // It also returns the AccountService itself (#2447). The service is constructed
 // here rather than in NewRouter, so returning it is what lets the boot guard
@@ -39,9 +48,12 @@ func buildPrivacyHandler(
 	log *logger.Logger,
 	activityCleanup *users.Handler,
 	hub *websocket.Hub,
+	stepUp erasureStepUpWiring,
 	erasure erasureClearWiring,
 ) (*privacy.Handler, *users.AccountService) {
 	account := users.NewAccountService(db, log)
+	account.SetRedis(redisClient)
+	account.SetMFAVerifier(stepUp.mfaVerifier)
 	account.SetActivitySettingsCleanupHandler(activityCleanup)
 	// #2447: the erasure capture and the cross-replica clear publisher. Returned
 	// alongside the handler so the router's boot guard can interrogate the
@@ -69,5 +81,8 @@ func buildPrivacyHandler(
 			})
 		})
 	}
-	return privacy.NewHandler(account, redisClient, log), account
+	handler := privacy.NewHandler(account, redisClient, log)
+	handler.SetErasureEmailSender(stepUp.emailSender)
+	handler.SetOwnedServersDB(db)
+	return handler, account
 }

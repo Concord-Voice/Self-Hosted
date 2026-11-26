@@ -18,7 +18,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
 )
 
 func loginAssertionFixture(t *testing.T) (*Server, *AuthorizerStore, string, webauthn.SessionData, []byte, *ecdsa.PrivateKey) {

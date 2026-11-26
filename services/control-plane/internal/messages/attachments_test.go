@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/messages"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/messages"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -65,6 +65,8 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 	// Create message and attach a file
 	msgID := insertChannelMessage(t, ts, channelID, user.ID, "check this out")
 	fileID := insertMediaFile(t, ts, user.ID, channelID, "photo", mimeImagePNG, 12345)
+	_, err := ts.DB.Exec(`UPDATE media_files SET e2ee_format = 'attachment-v4' WHERE id = $1`, fileID)
+	require.NoError(t, err)
 	insertMessageAttachment(t, ts, msgID, fileID, 0)
 
 	// GET messages
@@ -78,7 +80,7 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 			Attachments []models.AttachmentSummary `json:"attachments"`
 		} `json:"messages"`
 	}
-	err := json.Unmarshal(w.Body.Bytes(), &body)
+	err = json.Unmarshal(w.Body.Bytes(), &body)
 	require.NoError(t, err)
 
 	// Find our message
@@ -91,10 +93,60 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 			assert.Equal(t, "photo", msg.Attachments[0].FileType)
 			assert.Equal(t, mimeImagePNG, msg.Attachments[0].MimeType)
 			assert.Equal(t, int64(12345), msg.Attachments[0].FileSize)
+			assert.Equal(t, user.ID, msg.Attachments[0].UploaderID)
+			require.NotNil(t, msg.Attachments[0].KeyVersion)
+			assert.Equal(t, 1, *msg.Attachments[0].KeyVersion)
+			require.NotNil(t, msg.Attachments[0].ChannelID)
+			assert.Equal(t, channelID, *msg.Attachments[0].ChannelID)
+			assert.Nil(t, msg.Attachments[0].ConversationID)
+			require.NotNil(t, msg.Attachments[0].E2EEFormat)
+			assert.Equal(t, "attachment-v4", *msg.Attachments[0].E2EEFormat)
 			break
 		}
 	}
 	assert.True(t, found, "Message with attachment not found")
+}
+
+func TestGetMessagesReturnsLegacyAttachmentWithoutKeyVersion(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "legacyattachuser")
+	serverID := ts.CreateTestServer(t, user.ID, "LegacyAttachServer")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+	messageID := insertChannelMessage(t, ts, channelID, user.ID, "legacy attachment")
+
+	var fileID string
+	err := ts.DB.QueryRow(
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, created_at)
+		 VALUES (gen_random_uuid(), $1, 'photo', 1, $2, 99, 'legacy/' || gen_random_uuid(), NOW())
+		 RETURNING id`,
+		user.ID, mimeImagePNG,
+	).Scan(&fileID)
+	require.NoError(t, err)
+	insertMessageAttachment(t, ts, messageID, fileID, 0)
+
+	w := ts.DoRequest("GET", channelMessagesURL(channelID), nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Messages []struct {
+			ID          string                     `json:"id"`
+			Attachments []models.AttachmentSummary `json:"attachments"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	for _, message := range body.Messages {
+		if message.ID != messageID {
+			continue
+		}
+		require.Len(t, message.Attachments, 1)
+		assert.Equal(t, fileID, message.Attachments[0].ID)
+		assert.Nil(t, message.Attachments[0].KeyVersion)
+		assert.Nil(t, message.Attachments[0].ChannelID)
+		assert.Nil(t, message.Attachments[0].ConversationID)
+		assert.Nil(t, message.Attachments[0].E2EEFormat)
+		return
+	}
+	t.Fatal("Message not found")
 }
 
 func TestGetMessagesNoAttachments(t *testing.T) {

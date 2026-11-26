@@ -3,7 +3,7 @@ package store
 import (
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/policy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/authority/policy"
 )
 
 // Authority-only constants (DoR §2.3; not Class F: changing one is a release).

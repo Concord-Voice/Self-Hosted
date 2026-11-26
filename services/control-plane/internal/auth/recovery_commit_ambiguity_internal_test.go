@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -94,7 +94,7 @@ func (*ambiguousRecoveryMFAChecker) BeginWebAuthnLogin(context.Context, string, 
 	return nil, nil
 }
 
-func (*ambiguousRecoveryMFAChecker) GenerateRecoveryToken(string, string) (string, string, error) {
+func (*ambiguousRecoveryMFAChecker) IssueRecoveryTokenTx(context.Context, *sql.Tx, string, string) (string, string, error) {
 	return "", "", nil
 }
 func (*ambiguousRecoveryMFAChecker) GetRecoveryMethods(context.Context, string) ([]string, error) {

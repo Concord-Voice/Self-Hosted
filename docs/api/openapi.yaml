@@ -43,7 +43,10 @@ info:
       `error` envelope; global header validation, account state, email verification,
       and client-attestation gates keep the distinct shapes documented per operation.
 
-    - Rate limits are documented per-endpoint; exceeded limits return 429
+    - Rate limits are documented per-endpoint; exceeded limits return 429.
+      Public `/auth` source-budget checks return the fixed 503 response with
+      a jittered `Retry-After` of 2 to 4 seconds when Redis is unavailable, rather than admitting an
+      uncounted authentication attempt.
 
 
     ## End-to-End Encryption (E2EE)
@@ -922,7 +925,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Invalid or expired role authentication
+          description: Invalid, expired, stale-epoch or spent recovery token (a reset already used its JTI, or the credential epoch changed since issuance)
           content:
             application/json:
               schema:
@@ -954,7 +957,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Recovery policy unavailable; token remains unconsumed and no authentication failure is recorded
+          description: Recovery policy or spent-token state unavailable; nothing is read or written, the token remains unconsumed and no authentication failure is recorded
           content:
             application/json:
               schema:
@@ -992,7 +995,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Invalid or expired role authentication
+          description: Invalid, expired, stale-epoch or spent recovery token (a reset already used its JTI, or the credential epoch changed since issuance)
           content:
             application/json:
               schema:
@@ -1024,7 +1027,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Recovery policy unavailable; token remains unconsumed and no authentication failure is recorded
+          description: Recovery policy or spent-token state unavailable; nothing is read or written, the token remains unconsumed and no authentication failure is recorded
           content:
             application/json:
               schema:
@@ -1182,7 +1185,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Invalid or expired role authentication
+          description: Invalid, expired, stale-epoch or spent recovery token (a reset already used its JTI, or the credential epoch changed since issuance)
           content:
             application/json:
               schema:
@@ -1214,7 +1217,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Recovery policy unavailable; token remains unconsumed and no authentication failure is recorded
+          description: Recovery policy or spent-token state unavailable; nothing is read or written, the token remains unconsumed and no authentication failure is recorded
           content:
             application/json:
               schema:
@@ -1225,10 +1228,10 @@ paths:
       - Auth
       summary: Social recovery request creation is temporarily paused
       description: >-
-        After the unchanged AuthBanCheck parent gate, always returns the exact Recovery Circle pause
+        After the AuthBanCheck parent gate, always returns the exact Recovery Circle pause
         response without reading the body or recovery token. Does not create a request or access
         recovery data. Runs before the route-specific limiter, whose counter is not advanced.
-        AuthBanCheck can still access Redis and return 429 with Retry-After. The pause itself sets no
+        AuthBanCheck can still access Redis and return 429 with Retry-After, or 503 with a Retry-After of 2 to 4 seconds when Redis is unavailable. The pause itself sets no
         Retry-After. Request definitions remain for dormant compatibility; no success response is reachable.
       operationId: createSocialRecoveryRequest
       security: []
@@ -1249,10 +1252,10 @@ paths:
       - Auth
       summary: Social recovery polling is temporarily paused
       description: >-
-        After the unchanged AuthBanCheck parent gate, always returns the exact Recovery Circle pause
+        After the AuthBanCheck parent gate, always returns the exact Recovery Circle pause
         response, regardless of request existence, status or recovery token. No shares are returned,
         including for complete requests. Runs before the route-specific limiter, whose counter is not
-        advanced. AuthBanCheck can still access Redis and return 429 with Retry-After. The pause itself
+        advanced. AuthBanCheck can still access Redis and return 429 with Retry-After, or 503 with a Retry-After of 2 to 4 seconds when Redis is unavailable. The pause itself
         sets no Retry-After. Stored requests remain unchanged; no success response is reachable.
       operationId: pollSocialRecoveryRequest
       security: []
@@ -1295,8 +1298,10 @@ paths:
         rechecked at MFA verification. Unknown policy or an enrolled SMS requirement fails closed;
         hardened mode remains dormant without enrolled SMS, which has no recovery verifier yet.
         Accounts needing no additional factor receive the existing recovery token and wrapped key data.
-        Final tokens use purpose recovery_v2 and carry signed recovery_factor provenance; legacy
-        recovery tokens must restart email verification. Final issuance rechecks current policy
+        Final tokens use purpose recovery_v3, live 15 minutes, carry signed recovery_factor provenance
+        and name the credential epoch they were issued against; a password change, completed recovery
+        or account-key replacement revokes them. recovery_v2 and other legacy recovery tokens must
+        restart email verification. Final issuance rechecks current policy
         under the user lock before returning a token or wrapped keys; every recovery-token consumer
         rechecks it again, so email-only authority cannot bypass a subsequently reserved inline factor.
 
@@ -1643,7 +1648,9 @@ paths:
       - Auth
       summary: Confirm a pending registration
       description: 'Validate the emailed verification code and promote the pending registration to a full
-        user account.
+        user account. Confirmation binds the code to the current normalized pending-registration email;
+        UUID case variants identify the same pending registration. A code for an earlier email returns
+        the existing 401 `invalid_code` response.
 
         Rate limit: 10 requests per 15 minutes (IP-based).
 
@@ -9111,7 +9118,11 @@ paths:
 
         the original MIME type hint is returned in the X-File-Mime-Type header, and the CSK epoch
 
-        the file was sealed under in X-File-Key-Version.
+        the file was sealed under in X-File-Key-Version. If present,
+        X-File-E2EE-Format is descriptive stored-format metadata only; it does
+        not supply authenticated attachment context. X-File-Uploader-ID,
+        X-File-Scope, and X-File-Scope-ID are candidate values from the stored
+        attachment row, not authenticated attachment provenance.
 
         Rate limit: 60 requests per minute.
 
@@ -9149,6 +9160,28 @@ paths:
               schema:
                 type: integer
                 minimum: 1
+            X-File-E2EE-Format:
+              description: >-
+                Stored attachment envelope format. It is not a substitute for
+                verified enclosing-message provenance or authenticated AAD.
+              schema:
+                type: string
+                enum: [attachment-v4]
+            X-File-Uploader-ID:
+              description: Candidate uploader UUID from media metadata; never authenticated AAD by itself.
+              schema:
+                type: string
+                format: uuid
+            X-File-Scope:
+              description: Candidate scope kind from the tier-2 media row.
+              schema:
+                type: string
+                enum: [channel, dm]
+            X-File-Scope-ID:
+              description: Candidate channel or DM UUID from the tier-2 media row.
+              schema:
+                type: string
+                format: uuid
             Cache-Control:
               description: private, no-store
               schema:
@@ -11501,11 +11534,16 @@ paths:
                   description: Required when MFA is already active
                 methods:
                   type: array
+                  minItems: 1
+                  maxItems: 2
                   items:
                     type: string
                     enum:
                     - email
                     - sms
+                  description: A repeated method is sent and stored once, and the response
+                    lists each method once. An empty list, more than two entries or another
+                    method is refused with 400 before the step-up is checked or any code is made.
       responses:
         '200':
           description: Verification codes sent
@@ -11532,7 +11570,8 @@ paths:
                     type: boolean
                     description: Non-production only
         '400':
-          description: Invalid methods, or no standard MFA method is active yet
+          description: '`methods` is empty, has more than two entries or names another method,
+            or no standard MFA method is active yet'
           content:
             application/json:
               schema:
@@ -12223,9 +12262,17 @@ paths:
               properties:
                 methods:
                   type: array
+                  maxItems: 4
                   items:
                     type: string
-                  description: Methods to mark recovery-only (e.g. ["email", "sms"]); empty array clears
+                    enum:
+                    - totp
+                    - webauthn
+                    - email
+                    - sms
+                  description: Methods to mark recovery-only (e.g. ["email", "sms"]); empty array clears.
+                    A repeated method is stored once. More than four entries or an unknown method
+                    is refused with 400 before the step-up is checked.
                 password:
                   type: string
                 mfa_code:
@@ -12246,7 +12293,8 @@ paths:
                   recovery_hardened:
                     type: boolean
         '400':
-          description: Password missing, or no MFA method would remain login-eligible
+          description: '`methods` has more than four entries or an unknown method, or no MFA
+            method would remain login-eligible'
           content:
             application/json:
               schema:
@@ -12280,7 +12328,7 @@ paths:
       operationId: mfaListRecoveryRequests
       security:
       - BearerAuth: []
-      description: Owned, unexpired pending/offered rows only; never ciphertext. 10 per minute per user.
+      description: Owned, unexpired pending/offered rows only; never ciphertext. 10 per minute per user. Only a session on a designated trusted device sees requests; any other session gets 200 with an empty list.
       responses:
         '200':
           description: Owned v2 recovery state
@@ -12440,6 +12488,12 @@ paths:
                 $ref: '#/components/schemas/Error'
         '401':
           description: Invalid or expired role authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Session is not on a designated trusted device; refused before the request is looked up
           content:
             application/json:
               schema:
@@ -13300,6 +13354,7 @@ paths:
                   - mfa_settings.totp_setup
                   - mfa_settings.totp_disable
                   - mfa_settings.webauthn_register
+                  - mfa_settings.webauthn_delete
                   - mfa_settings.recovery_only_set
                   - mfa_settings.recovery_hardened_set
                   - mfa_settings.email_sms_setup
@@ -13314,11 +13369,15 @@ paths:
                   - account.password_change
                   - account.e2ee_key_reset
                   - privacy.purge_fence_disable
+                  - privacy.account_erase
+                  - account.sso_unlink
+                  - account.sso_trust_enable
                   - sessions.revoke
                   - sessions.revoke_all
                   - sessions.revocation_mode_set
                   - ownership.transfer_initiate
                   - ownership.transfer_reverse
+                  - ownership.transfer_confirm
                   - dm.purge
                   - dm.clear
                   - dm.message_delete
@@ -13604,6 +13663,55 @@ paths:
           $ref: '#/components/responses/RateOrStepUpBudgetLimited'
         '503':
           $ref: '#/components/responses/StepUpBudgetUnavailable'
+  /privacy/erase-account/owned-servers:
+    get:
+      tags:
+      - Privacy
+      summary: Preview owned servers requiring erasure acknowledgement
+      operationId: listErasureOwnedServers
+      description: >-
+        Available to authenticated users before email verification. Returns only
+        servers owned by the caller that have another member, sorted by ID.
+        This is an advisory preview; erasure locks and rechecks the exact set.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+      - BearerAuth: []
+      responses:
+        '200':
+          description: Protected owned servers (empty array when none)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [servers]
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, member_count]
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        name:
+                          type: string
+                        member_count:
+                          type: integer
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Owned-server preview temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /privacy/erase-account:
     post:
       tags:
@@ -13615,22 +13723,81 @@ paths:
         Any pending Rich Presence cleanup is resumed and active activity is
         suppressed under the sender gate first. The subsequent user cascade and
         privacy-safe audit insertion execute atomically in one database transaction.
-        Available before email verification. Rate limit: 3 requests per 24 hours
-        (user-based).
+        Requires fresh password proof, the current MFA factor when enrolled, and
+        acknowledgement of the exact protected owned-server IDs. Before email
+        verification, a successful first request emails a one-use confirmation
+        link valid for 15 minutes and returns 202; retry with its request ID
+        and token to erase.
+        The confirmation is bound to the login family, credential epoch, and
+        owned-server set. Rate limit: 3 requests per 24 hours (user-based).
       security:
       - BearerAuth: []
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
               type: object
-              description: Optional empty object; unknown fields are ignored
+              additionalProperties: false
+              description: >-
+                Proof-bearing requests must include confirmed_owned_server_ids,
+                even when empty. IDs must be canonical lowercase UUIDs in
+                strictly increasing order. An empty object receives a
+                step_up_required refusal without deleting the account.
+              properties:
+                password:
+                  type: string
+                  format: password
+                mfa_code:
+                  type: string
+                  description: Current enrolled MFA factor proof, when required.
+                confirmed_owned_server_ids:
+                  type: array
+                  uniqueItems: true
+                  items:
+                    type: string
+                    format: uuid
+                email_confirmation:
+                  type: object
+                  additionalProperties: false
+                  required: [request_id, token]
+                  description: >-
+                    Only for unverified-email accounts after the first 202.
+                    The token arrives in the emailed deep link, never in the
+                    first API response.
+                  properties:
+                    request_id:
+                      type: string
+                      format: uuid
+                    token:
+                      type: string
+                clientId:
+                  type: string
+                  deprecated: true
+                  description: Accepted temporarily for compatibility; grants no authority.
       responses:
         '204':
           description: Account erased
+        '202':
+          description: Email confirmation sent; account remains present
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status, request_id, expires_in]
+                properties:
+                  status:
+                    type: string
+                    enum: [email_confirmation_required]
+                  request_id:
+                    type: string
+                    format: uuid
+                  expires_in:
+                    type: integer
+                    description: Confirmation lifetime in seconds.
         '400':
-          description: Malformed JSON body
+          description: Malformed body, unsupported field, or invalid owned-server acknowledgement
           content:
             application/json:
               schema:
@@ -13647,14 +13814,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Fresh password or enrolled MFA proof required or refused
+          content:
+            application/json:
+              schema:
+                type: object
+                description: A step-up refusal with error_code and applicable proof hints.
         '409':
-          description: Account state changed while the erasure was prepared; retry the deletion
+          description: Account state, protected owned-server set, or email confirmation changed or expired; refresh and retry
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Authentication temporarily unavailable
+          description: Authentication or email confirmation unavailable, or erasure committed but presence delivery remains unsettled
           content:
             application/json:
               schema:
@@ -13666,7 +13840,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          description: Erasure request or fresh-proof attempt budget exhausted
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Rate-limit or step-up budget refusal; Retry-After may be set.
   /servers:
     get:
       tags:
@@ -20732,13 +20911,35 @@ components:
         a window that never started. Retry shortly. The body carries
         `step_up_budget_unavailable: true`, which tells it apart from a
         row-lock conflict's 503 (`lock_conflict: true`).
+
+
+        A backup code that could not be checked because backup-code hashing had
+        no free slot answers the same status with `verification_busy: true` and
+        `Retry-After: 1`. No code was judged and the attempt it was charged is
+        returned, so it never counts toward the step-up budget. Retry after
+        `Retry-After`.
+      headers:
+        Retry-After:
+          description: 1 on the verification-busy body. Absent on the budget-unavailable body.
+          schema:
+            type: integer
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/StepUpBudgetUnavailableError'
-          example:
-            error: Verification is temporarily unavailable. Try again in a few minutes.
-            step_up_budget_unavailable: true
+            anyOf:
+            - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
+            - $ref: '#/components/schemas/VerificationBusyError'
+          examples:
+            budgetUnavailable:
+              summary: Step-up attempt budget unavailable
+              value:
+                error: Verification is temporarily unavailable. Try again in a few minutes.
+                step_up_budget_unavailable: true
+            verificationBusy:
+              summary: Backup-code hashing busy (Retry-After 1)
+              value:
+                error: Verification is busy. Try again.
+                verification_busy: true
     DeleteSessionRejected:
       description: >-
         A missing, invalid or stale bearer token, or a session whose
@@ -20903,6 +21104,7 @@ components:
             anyOf:
             - $ref: '#/components/schemas/StepUpBudgetUnavailableError'
             - $ref: '#/components/schemas/LockConflictError'
+            - $ref: '#/components/schemas/VerificationBusyError'
             - $ref: '#/components/schemas/Error'
           examples:
             softLockUnavailable:
@@ -23716,6 +23918,12 @@ components:
           format: uuid
         content:
           type: string
+        e2ee_format:
+          type: string
+          nullable: true
+          description: >-
+            Stored E2EE envelope format. Null selects the legacy reader family.
+            This passive metadata does not enable a writer.
         edited_at:
           type: string
           format: date-time
@@ -23744,6 +23952,43 @@ components:
           avatar_url:
             type: string
             nullable: true
+          attachments:
+            type: array
+            description: Present only when the message has file attachments.
+            items:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                file_type:
+                  type: string
+                mime_type:
+                  type: string
+                file_size:
+                  type: integer
+                uploader_id:
+                  type: string
+                  format: uuid
+                key_version:
+                  type: integer
+                  minimum: 1
+                  nullable: true
+                  description: Stored key epoch when the attachment row carries one; omitted for legacy rows.
+                channel_id:
+                  type: string
+                  format: uuid
+                  nullable: true
+                conversation_id:
+                  type: string
+                  format: uuid
+                  nullable: true
+                e2ee_format:
+                  type: string
+                  nullable: true
+                  description: >-
+                    Stored attachment envelope format. Descriptive only: attachment
+                    decryption still requires verified enclosing-message context.
     ServerMember:
       type: object
       properties:
@@ -23917,9 +24162,6 @@ components:
           format: date-time
         remember_me:
           type: boolean
-        machine_id:
-          type: string
-          description: Machine identifier recorded on this refresh row, or empty when absent.
         is_current:
           type: boolean
     PastSession:
@@ -24273,6 +24515,12 @@ components:
           format: uuid
         content:
           type: string
+        e2ee_format:
+          type: string
+          nullable: true
+          description: >-
+            Stored E2EE envelope format. Null selects the legacy reader family.
+            This passive metadata does not enable a writer.
         type:
           type: string
           description: >-
@@ -24317,6 +24565,28 @@ components:
                 type: string
               file_size:
                 type: integer
+              uploader_id:
+                type: string
+                format: uuid
+              key_version:
+                type: integer
+                minimum: 1
+                nullable: true
+                description: Stored key epoch when the attachment row carries one; omitted for legacy rows.
+              channel_id:
+                type: string
+                format: uuid
+                nullable: true
+              conversation_id:
+                type: string
+                format: uuid
+                nullable: true
+              e2ee_format:
+                type: string
+                nullable: true
+                description: >-
+                  Stored attachment envelope format. Descriptive only: attachment
+                  decryption still requires verified enclosing-message context.
         reactions:
           type: array
           description: Present only when the message has reactions
@@ -24725,6 +24995,22 @@ components:
         - step_up_budget_unavailable
         properties:
           step_up_budget_unavailable:
+            type: boolean
+            enum:
+            - true
+    VerificationBusyError:
+      description: >-
+        A backup code that was never checked because backup-code hashing had
+        no free slot (`stepup.BusyError`). Nothing was judged or written, and
+        the attempt it was charged is returned. Retry after `Retry-After`,
+        which is 1.
+      allOf:
+      - $ref: '#/components/schemas/Error'
+      - type: object
+        required:
+        - verification_busy
+        properties:
+          verification_busy:
             type: boolean
             enum:
             - true
@@ -25513,8 +25799,6 @@ components:
           type: string
           format: uuid
         device_name:
-          type: string
-        machine_id:
           type: string
         designated_at:
           type: string

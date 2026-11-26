@@ -9,8 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -177,7 +178,7 @@ func TestSSOLinkDispatchCarriesVerifiedEmailMethod(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/mfa/verify", nil)
 	claims := &ChallengeClaims{UserID: "user-1", Purpose: PurposeLogin, CompletionKind: CompletionKindSSOLink, RegisteredClaims: jwt.RegisteredClaims{ID: "jti-email"}}
 
-	verified, method, responded := h.verifyByMethod(c.Request.Context(), c, verifyRequest{Method: "email", Code: "123456"}, claims, false)
+	verified, method, responded := h.verifyByMethod(c.Request.Context(), c, verifyRequest{Method: "email", Code: "123456"}, claims, false, stepup.Charged{})
 	require.True(t, verified)
 	require.False(t, responded)
 	require.Equal(t, "email", method)

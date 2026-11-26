@@ -17,8 +17,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/erasuretest"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
 )
 
 // Task 8 (spec section 10, refinements R-b, R-c, R-d): the erasure outbox
@@ -577,7 +578,7 @@ func TestOutbox_ErasureEndToEnd(t *testing.T) {
 	fake.seedCustomer("cus_e2e")
 	fake.seedSession("cs_e2e", "cus_e2e", "open")
 
-	require.NoError(t, users.NewAccountService(env.DB, env.Svc.Log).DeleteAccount(dbtest.ActorContext(ctx, t, env.DB, userID.String()), userID.String()))
+	erasuretest.New(t, env.DB).MustErase(dbtest.ActorContext(ctx, t, env.DB, userID.String()), t, users.NewAccountService(env.DB, env.Svc.Log), userID.String())
 
 	assert.Zero(t, scalarInt(t, env.DB, `SELECT COUNT(*) FROM users WHERE id = $1`, userID), "the account is gone")
 	assert.Empty(t, mappedCustomer(t, env.DB, userID), "the mapping cascaded away with the user")

@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/voice"
-	concordws "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
+	concordws "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
@@ -555,7 +555,7 @@ func TestOwnershipTransfer_ReconcilesServerVoiceRecipients(t *testing.T) {
 		testhelpers.AuthHeaders(oldOwner.AccessToken))
 	require.Equal(t, http.StatusCreated, initiate.Code)
 	confirm := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/transfer-ownership/confirm",
-		nil, testhelpers.AuthHeaders(oldOwner.AccessToken))
+		map[string]interface{}{"password": testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(oldOwner.AccessToken))
 	require.Equal(t, http.StatusOK, confirm.Code)
 	resolver := rbac.NewResolver(ts.DB, rbac.NewPermissionCache(ts.Redis), logger.New("test-ownership-repro"))
 	oldVisible, visibilityErr := resolver.HasPermission(context.Background(), serverID, oldOwner.ID, channelID, rbac.PermViewVoiceChannels)
@@ -619,8 +619,8 @@ func TestOwnershipReversal_ReconcilesInverseRecipients(t *testing.T) {
 		map[string]interface{}{"target_user_id": newOwner.ID, "password": testhelpers.TestAuthPlaintext},
 		testhelpers.AuthHeaders(oldOwner.AccessToken))
 	require.Equal(t, http.StatusCreated, initiate.Code)
-	confirm := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/transfer-ownership/confirm", nil,
-		testhelpers.AuthHeaders(oldOwner.AccessToken))
+	confirm := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/transfer-ownership/confirm",
+		map[string]interface{}{"password": testhelpers.TestAuthPlaintext}, testhelpers.AuthHeaders(oldOwner.AccessToken))
 	require.Equal(t, http.StatusOK, confirm.Code)
 	_, err = receiveVoiceWireType(oldConn, sender.ID, "rich_presence_clear")
 	require.NoError(t, err)

@@ -27,18 +27,18 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/feedbackscreenshots"
-	invitecodes "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/invites"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/storage"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/feedbackscreenshots"
+	invitecodes "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/invites"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/storage"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 const (
@@ -517,13 +517,13 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	userID := c.GetString("user_id")
 	fileID := c.Param("file_id")
 
-	if _, err := uuid.Parse(fileID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+	if !validateMediaFileID(c, fileID) {
 		return
 	}
 
 	// Fetch file metadata and verify access
 	var storageKey, mimeType, uploaderID string
+	var e2eeFormat *string
 	var fileSize int64
 	var channelID, conversationID *string
 	// NULLable: rows predating the client-attested epoch (#2832) carry none, and
@@ -534,11 +534,11 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	// closed — it is the value every pre-cutover object carries forever.
 	var storageBackend *string
 
-	query := `SELECT storage_key, mime_type, file_size, channel_id, conversation_id, key_version, storage_backend, uploader_id
+	query := `SELECT storage_key, mime_type, file_size, channel_id, conversation_id, key_version, storage_backend, uploader_id, e2ee_format
 	          FROM media_files
 	          WHERE id = $1 AND deleted_at IS NULL AND media_tier = 2`
 	err := h.db.QueryRow(query, fileID).
-		Scan(&storageKey, &mimeType, &fileSize, &channelID, &conversationID, &keyVersion, &storageBackend, &uploaderID)
+		Scan(&storageKey, &mimeType, &fileSize, &channelID, &conversationID, &keyVersion, &storageBackend, &uploaderID, &e2eeFormat)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
 		return
@@ -590,6 +590,21 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	// backfill and no change to AttachmentSummary.
 	if keyVersion != nil {
 		c.Header(middleware.FileKeyVersionHeader, strconv.Itoa(*keyVersion))
+	}
+	if e2eeFormat != nil {
+		c.Header(middleware.FileE2EEFormatHeader, *e2eeFormat)
+	}
+	// These are candidate fields for a later authenticated attachment-reference
+	// check. The DB's tier-2 XOR constraint supplies exactly one scope, but the
+	// reader must authenticate agreement with its enclosing message before using
+	// any of these values as AAD.
+	c.Header(middleware.FileUploaderIDHeader, uploaderID)
+	if channelID != nil {
+		c.Header(middleware.FileScopeHeader, "channel")
+		c.Header(middleware.FileScopeIDHeader, *channelID)
+	} else {
+		c.Header(middleware.FileScopeHeader, "dm")
+		c.Header(middleware.FileScopeIDHeader, *conversationID)
 	}
 	c.Header(headerCacheControl, "private, no-store")
 	c.Status(http.StatusOK)
@@ -1046,6 +1061,84 @@ func lockMediaMembership(ctx context.Context, tx *sql.Tx, channelID, conversatio
 	return tx.QueryRowContext(ctx, `SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2 FOR KEY SHARE`, conversationID.String, userID).Scan(&member)
 }
 
+func validateMediaFileID(c *gin.Context, fileID string) bool {
+	if _, err := uuid.Parse(fileID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+		return false
+	}
+	return true
+}
+
+func (h *Handler) lockMediaDeletionUploader(c *gin.Context, tx *sql.Tx, userID string) bool {
+	var uploader int
+	err := tx.QueryRowContext(c.Request.Context(), `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID).Scan(&uploader)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		return false
+	}
+	if err != nil {
+		h.log.Error("Failed to lock media uploader", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+		return false
+	}
+	return true
+}
+
+func (h *Handler) locateMediaForDeletion(c *gin.Context, tx *sql.Tx, fileID, userID string) (sql.NullString, bool) {
+	var conversationID sql.NullString
+	err := tx.QueryRowContext(c.Request.Context(), `SELECT conversation_id FROM media_files
+		WHERE id = $1 AND uploader_id = $2 AND media_tier = 2 AND deleted_at IS NULL`, fileID, userID).Scan(&conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		return sql.NullString{}, false
+	}
+	if err != nil {
+		h.log.Error("Failed to locate file for deletion", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+		return sql.NullString{}, false
+	}
+	return conversationID, true
+}
+
+type mediaDeletionTarget struct {
+	storageKey     string
+	storageBackend *string
+}
+
+func (h *Handler) loadAuthorizedMediaDeletion(c *gin.Context, tx *sql.Tx, fileID, userID string, expectedConversationID sql.NullString) (mediaDeletionTarget, bool) {
+	var target mediaDeletionTarget
+	var channelID, conversationID sql.NullString
+	err := tx.QueryRowContext(c.Request.Context(), `SELECT storage_key, storage_backend, channel_id, conversation_id FROM media_files WHERE id = $1 AND uploader_id = $2 AND media_tier = 2 AND deleted_at IS NULL FOR UPDATE`, fileID, userID).Scan(&target.storageKey, &target.storageBackend, &channelID, &conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		return mediaDeletionTarget{}, false
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch file for deletion", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+		return mediaDeletionTarget{}, false
+	}
+	if conversationID != expectedConversationID {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		return mediaDeletionTarget{}, false
+	}
+	if channelID.Valid == conversationID.Valid {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
+		return mediaDeletionTarget{}, false
+	}
+	err = lockMediaMembership(c.Request.Context(), tx, channelID, conversationID, userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
+		return mediaDeletionTarget{}, false
+	}
+	if err != nil {
+		h.log.Error("Failed to lock media membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
+		return mediaDeletionTarget{}, false
+	}
+	return target, true
+}
+
 // DeleteMedia soft-deletes a media file and removes it from object storage.
 // DELETE /api/v1/media/:file_id
 // Only the uploader can delete their own Tier 2 (attachment) files while they
@@ -1056,8 +1149,7 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	userID := c.GetString("user_id")
 	fileID := c.Param("file_id")
 
-	if _, err := uuid.Parse(fileID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid file ID"})
+	if !validateMediaFileID(c, fileID) {
 		return
 	}
 
@@ -1074,29 +1166,13 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 		}
 	}()
 
-	var uploader int
-	err = tx.QueryRowContext(c.Request.Context(), `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID).Scan(&uploader)
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to lock media uploader", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+	if !h.lockMediaDeletionUploader(c, tx, userID) {
 		return
 	}
 	// DM retirement locks the conversation before cascading to participants and
 	// media. Read its ID without taking the media row lock, then share that order.
-	var expectedConversationID sql.NullString
-	err = tx.QueryRowContext(c.Request.Context(), `SELECT conversation_id FROM media_files
-		WHERE id = $1 AND uploader_id = $2 AND media_tier = 2 AND deleted_at IS NULL`, fileID, userID).Scan(&expectedConversationID)
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to locate file for deletion", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
+	expectedConversationID, ok := h.locateMediaForDeletion(c, tx, fileID, userID)
+	if !ok {
 		return
 	}
 	err = lockMediaConversation(c.Request.Context(), tx, expectedConversationID)
@@ -1114,43 +1190,15 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	// The backend rides along on the row we are already reading (ADR-0038 /
 	// #2759 unit B2) — deleting from the wrong bucket would SUCCEED and erase
 	// nothing. NULLable permanently: NULL is the legacy backend.
-	var storageKey string
-	var storageBackend *string
-	var channelID, conversationID sql.NullString
-	query := `SELECT storage_key, storage_backend, channel_id, conversation_id FROM media_files WHERE id = $1 AND uploader_id = $2 AND media_tier = 2 AND deleted_at IS NULL FOR UPDATE`
-	err = tx.QueryRowContext(c.Request.Context(), query, fileID, userID).Scan(&storageKey, &storageBackend, &channelID, &conversationID)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
-		return
-	} else if err != nil {
-		h.log.Error("Failed to fetch file for deletion", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteFile})
-		return
-	}
-	if conversationID != expectedConversationID {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
-		return
-	}
-	if channelID.Valid == conversationID.Valid {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
-		return
-	}
-
-	err = lockMediaMembership(c.Request.Context(), tx, channelID, conversationID, userID)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to lock media membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
+	target, ok := h.loadAuthorizedMediaDeletion(c, tx, fileID, userID, expectedConversationID)
+	if !ok {
 		return
 	}
 
 	// Resolve BEFORE the soft-delete and 503 if the row's backend is unknown:
 	// nothing is recorded, so the client retries against a state that never
 	// claimed the file was gone. Identical body to the unconfigured-store 503.
-	store, ok := h.requireObjectStoreForRow(c, storageBackend)
+	store, ok := h.requireObjectStoreForRow(c, target.storageBackend)
 	if !ok {
 		return
 	}
@@ -1181,9 +1229,9 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	// argument holds ONLY for tier 2: the sweep is bounded to media_tier = 2,
 	// which is why media.CleanupObject (tier 1, no retry behind it) refuses
 	// instead of warning.
-	if err := store.DeleteObject(c.Request.Context(), storageKey); err != nil {
+	if err := store.DeleteObject(c.Request.Context(), target.storageKey); err != nil {
 		h.log.Warn("Failed to delete object from storage (orphaned, left for the straggler sweep)",
-			"error", err, "key", storageKey, "storage_backend", describeBackend(storageBackend))
+			"error", err, "key", target.storageKey, "storage_backend", describeBackend(target.storageBackend))
 	}
 
 	h.log.Info("Media file deleted", "file_id", fileID, "user_id", userID)

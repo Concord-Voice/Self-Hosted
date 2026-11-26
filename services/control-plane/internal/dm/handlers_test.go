@@ -1,6 +1,7 @@
 package dm_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -20,16 +21,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dm"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	gorillaWS "github.com/gorilla/websocket"
@@ -1489,10 +1490,11 @@ func TestGetMessages_MessageFields(t *testing.T) {
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	msgID := uuid.New().String()
+	fingerprint := bytes.Repeat([]byte{0x5a}, 32)
 	_, err := ts.DB.Exec(`
-		INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version)
-		VALUES ($1, $2, $3, 'test content', 'text', 2)
-	`, msgID, convID, user1.ID)
+		INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version, e2ee_format, request_fingerprint)
+		VALUES ($1, $2, $3, 'test content', 'user', 2, 'message-v1', $4)
+	`, msgID, convID, user1.ID, fingerprint)
 	require.NoError(t, err)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1509,7 +1511,9 @@ func TestGetMessages_MessageFields(t *testing.T) {
 	assert.Equal(t, user1.ID, msg["user_id"])
 	assert.Equal(t, "test content", msg["content"])
 	assert.Equal(t, float64(2), msg["key_version"])
-	assert.Equal(t, "text", msg["type"])
+	assert.Equal(t, "user", msg["type"])
+	assert.Equal(t, "message-v1", msg["e2ee_format"])
+	assert.NotContains(t, msg, "request_fingerprint")
 	assert.NotEmpty(t, msg["created_at"])
 	assert.NotEmpty(t, msg["username"])
 }
@@ -2657,6 +2661,8 @@ func TestGetMessagesWithAttachments(t *testing.T) {
 
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "see attached")
 	fileID := insertDMMediaFile(t, ts, user1.ID, convID, "photo", mimeImagePNG, 12345)
+	_, err := ts.DB.Exec(`UPDATE media_files SET e2ee_format = 'attachment-v4' WHERE id = $1`, fileID)
+	require.NoError(t, err)
 	insertDMMessageAttachment(t, ts, msgID, fileID, 0)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -2666,10 +2672,15 @@ func TestGetMessagesWithAttachments(t *testing.T) {
 		Messages []struct {
 			ID          string `json:"id"`
 			Attachments []struct {
-				ID       string `json:"id"`
-				FileType string `json:"file_type"`
-				MimeType string `json:"mime_type"`
-				FileSize int64  `json:"file_size"`
+				ID             string  `json:"id"`
+				FileType       string  `json:"file_type"`
+				MimeType       string  `json:"mime_type"`
+				FileSize       int64   `json:"file_size"`
+				UploaderID     string  `json:"uploader_id"`
+				KeyVersion     int     `json:"key_version"`
+				ChannelID      *string `json:"channel_id"`
+				ConversationID *string `json:"conversation_id"`
+				E2EEFormat     *string `json:"e2ee_format"`
 			} `json:"attachments"`
 		} `json:"messages"`
 	}
@@ -2684,6 +2695,13 @@ func TestGetMessagesWithAttachments(t *testing.T) {
 			assert.Equal(t, "photo", msg.Attachments[0].FileType)
 			assert.Equal(t, mimeImagePNG, msg.Attachments[0].MimeType)
 			assert.Equal(t, int64(12345), msg.Attachments[0].FileSize)
+			assert.Equal(t, user1.ID, msg.Attachments[0].UploaderID)
+			assert.Equal(t, 1, msg.Attachments[0].KeyVersion)
+			assert.Nil(t, msg.Attachments[0].ChannelID)
+			require.NotNil(t, msg.Attachments[0].ConversationID)
+			assert.Equal(t, convID, *msg.Attachments[0].ConversationID)
+			require.NotNil(t, msg.Attachments[0].E2EEFormat)
+			assert.Equal(t, "attachment-v4", *msg.Attachments[0].E2EEFormat)
 			break
 		}
 	}

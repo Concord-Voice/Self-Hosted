@@ -6,18 +6,18 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"io"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
@@ -291,9 +291,13 @@ func (c ambiguousConn) QueryContext(_ context.Context, query string, args []driv
 			return rows, nil
 		}
 	}
-	*c.trace = append(*c.trace, "server-row")
-	value := uuid.NewString()
 	lowerQuery := strings.ToLower(query)
+	step := "server-row"
+	if strings.Contains(lowerQuery, "current_setting") {
+		step = "writer-barrier-check"
+	}
+	*c.trace = append(*c.trace, step)
+	value := uuid.NewString()
 	if strings.Contains(lowerQuery, "credential_epoch") {
 		value = c.credentialEpoch
 	}
@@ -496,7 +500,7 @@ func TestWithOwnershipCapture_AmbiguousCommitAbandonsInOrder(t *testing.T) {
 	})
 	require.ErrorIs(t, err, errAmbiguousCommit)
 	require.False(t, changed)
-	require.Equal(t, []string{"lock", "server-row", "capture", "write", "commit"}, trace)
+	require.Equal(t, []string{"lock", "writer-barrier-check", "server-row", "capture", "write", "commit"}, trace)
 	require.Equal(t, []string{"ambiguous_commit"}, presence.abandons)
 	require.Zero(t, presence.commits)
 }
@@ -539,7 +543,7 @@ func TestWithOwnershipCapture_RollbackFailureIsReturned(t *testing.T) {
 
 		require.ErrorIs(t, err, errRollbackFailure)
 		require.False(t, changed)
-		require.Equal(t, []string{"lock", "server-row"}, trace)
+		require.Equal(t, []string{"lock", "writer-barrier-check", "server-row"}, trace)
 	})
 
 	t.Run("joined with write failure", func(t *testing.T) {
@@ -558,7 +562,7 @@ func TestWithOwnershipCapture_RollbackFailureIsReturned(t *testing.T) {
 		require.ErrorIs(t, err, writeErr)
 		require.ErrorIs(t, err, errRollbackFailure)
 		require.False(t, changed)
-		require.Equal(t, []string{"lock", "server-row"}, trace)
+		require.Equal(t, []string{"lock", "writer-barrier-check", "server-row"}, trace)
 	})
 }
 

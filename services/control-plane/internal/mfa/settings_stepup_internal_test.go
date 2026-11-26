@@ -45,12 +45,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -254,7 +254,7 @@ func TestRegenerateBackupCodesRejectsBackupCode(t *testing.T) {
 	h := iuHandler(db, rdb, kr)
 	userID := iuCreateUser(t, db, iuPassword)
 	iuEnrollTOTP(t, db, kr, userID)
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	require.NoError(t, db.QueryRow(`UPDATE user_mfa_totp
 		SET backup_codes_hash = $1, backup_codes_used = $2 WHERE user_id = $3
@@ -571,12 +571,8 @@ func (iuBudgetIncrFaultHook) DialHook(next redis.DialHook) redis.DialHook { retu
 
 func (h iuBudgetIncrFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == "incr" {
-			if args := cmd.Args(); len(args) >= 2 {
-				if k, ok := args[1].(string); ok && k == h.key {
-					return errors.New("iu: forced step-up budget incr failure")
-				}
-			}
+		if stepup.ChargeCommandKey(cmd) == h.key {
+			return errors.New("iu: forced step-up budget charge failure")
 		}
 		return next(ctx, cmd)
 	}
@@ -618,7 +614,7 @@ func TestOpenMFASettingsTx_EpochFence(t *testing.T) {
 	h := iuHandler(db, rdb, kr)
 	c, w := iuGinContext(http.MethodPost, "/api/v1/mfa/email-sms/disable", "", userID, "stale-client-epoch")
 
-	tx, _, _, ok := h.openMFASettingsTx(c, userID, mfaStepUpCredentials{Password: iuPassword}, lockForNoKeyUpdate)
+	tx, _, _, _, ok := h.openMFASettingsTx(c, userID, mfaStepUpCredentials{Password: iuPassword}, lockForNoKeyUpdate)
 
 	assert.False(t, ok, "a mismatched credential epoch must refuse")
 	assert.Nil(t, tx)
@@ -700,7 +696,8 @@ func TestOpenAndVerifyMFASettingsStepUpTx_PoolSafety(t *testing.T) {
 				var tx *sql.Tx
 				var subj stepup.Subject
 				var attempt *stepup.PasswordAttempt
-				tx, subj, attempt, ok = h.openMFASettingsTx(c, s.userID, s.creds(), s.lock)
+				var charged stepup.Charged
+				tx, subj, attempt, charged, ok = h.openMFASettingsTx(c, s.userID, s.creds(), s.lock)
 				if !ok {
 					return
 				}
@@ -711,7 +708,7 @@ func TestOpenAndVerifyMFASettingsStepUpTx_PoolSafety(t *testing.T) {
 						NoFactors:          "no factors",
 						CredentialRequired: "credential required",
 					},
-				}, attempt)
+				}, stepUpCharge{attempt, charged})
 				if stepErr == nil {
 					_ = tx.Commit()
 				}
@@ -788,6 +785,7 @@ func TestHandlers_PoolSafety_GreenButProspective(t *testing.T) {
 	factorSecret := iuEnrollTOTP(t, db, kr, factorUser)
 	iuAddWebAuthnCredential(t, db, factorUser)
 	factorCredentialID := iuWebAuthnCredentialID(t, db, factorUser)
+	webAuthnProof := mintWebAuthnDeleteProof(t, h, factorUser)
 
 	// iuMountHandler bypasses AuthRequired exactly like case 3's
 	// iuGinContext (same "user_id" + middleware.JWTClaimsContextKey shape),
@@ -850,9 +848,9 @@ func TestHandlers_PoolSafety_GreenButProspective(t *testing.T) {
 			handler: h.TOTPDisable,
 		},
 		{
-			name: "WebAuthnDeleteCredential, password", userID: factorUser,
+			name: "WebAuthnDeleteCredential, fresh WebAuthn proof", userID: factorUser,
 			method: http.MethodDelete, path: "/webauthn/credentials/" + factorCredentialID, route: "/webauthn/credentials/:id",
-			body:    fmt.Sprintf(`{"password":%q}`, iuPassword),
+			body:    fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, webAuthnProof),
 			handler: h.WebAuthnDeleteCredential,
 		},
 	}
@@ -1153,7 +1151,7 @@ func TestFlagSync_RedisExistsFault_WebAuthnDeleteLeavesNoStaleFactor(t *testing.
 
 	h := iuHandler(db, iuExistsFaultRedis(t), kr)
 	c, w := iuGinContext(http.MethodDelete, "/api/v1/mfa/webauthn/credentials/"+credentialID,
-		fmt.Sprintf(`{"password":%q}`, iuPassword), userID, "")
+		fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, iuTOTPCode(t, iuTOTPSecret)), userID, "")
 	c.Params = gin.Params{{Key: "id", Value: credentialID}}
 	h.WebAuthnDeleteCredential(c)
 
@@ -1243,8 +1241,9 @@ func TestD1_LastInlineFactorWhileEmailOrSmsIsOn(t *testing.T) {
 	deleteKey := func(t *testing.T, h *Handler, userID string) *httptest.ResponseRecorder {
 		t.Helper()
 		credentialID := iuWebAuthnCredentialID(t, db, userID)
+		proof := mintWebAuthnDeleteProof(t, h, userID)
 		c, w := iuGinContext(http.MethodDelete, "/api/v1/mfa/webauthn/credentials/"+credentialID,
-			fmt.Sprintf(`{"password":%q}`, iuPassword), userID, "")
+			fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, proof), userID, "")
 		c.Params = gin.Params{{Key: "id", Value: credentialID}}
 		h.WebAuthnDeleteCredential(c)
 		return w

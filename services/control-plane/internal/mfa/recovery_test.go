@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/stretchr/testify/require"
@@ -37,7 +38,7 @@ func TestRecoveryMethodsUseActualReservedFactors(t *testing.T) {
 			if tc.flags == "" {
 				tc.flags = "{}"
 			}
-			h, _ := scriptedHandler(t, &mfaEventDB{}, "test", scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte(tc.reserved), tc.hardened, []byte(tc.flags), tc.totp, tc.webauthn}})
+			h, _ := scriptedHandler(t, &mfaEventDB{}, "test", scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte(tc.reserved), tc.hardened, []byte(tc.flags), tc.totp, tc.webauthn, ""}})
 			methods, err := h.GetRecoveryMethods(context.Background(), enrollUser)
 			if tc.refused {
 				require.Error(t, err)
@@ -58,7 +59,7 @@ func TestRecoveryMethodsFailClosedOnDependencyErrors(t *testing.T) {
 	}{
 		{name: "database failure", answer: scriptedAnswer{match: recoveryPolicyQuery, err: errReadFailed}},
 		{name: "missing user", answer: scriptedAnswer{match: recoveryPolicyQuery, noRows: true}},
-		{name: "SMS policy store failure", answer: scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte("{}"), true, []byte("{}"), false, false}}, redisFault: true},
+		{name: "SMS policy store failure", answer: scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte("{}"), true, []byte("{}"), false, false, ""}}, redisFault: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, rdb := scriptedHandler(t, &mfaEventDB{}, "test", tc.answer)
@@ -82,7 +83,7 @@ func (r *recoveryCompletionRecorder) CompleteRecovery(c *gin.Context, _, _ strin
 
 func TestRecoveryChallengeRefusesUnreservedFactorBeforeSpendingIt(t *testing.T) {
 	f := newVerifyFixture(t)
-	h, _ := scriptedHandlerFull(t, f.state, "test", f.h.keyring, []scriptedAnswer{{match: recoveryPolicyQuery, values: []driver.Value{[]byte("{webauthn}"), false, []byte("{totp,webauthn}"), true, true}}}, nil)
+	h, _ := scriptedHandlerFull(t, f.state, "test", f.h.keyring, []scriptedAnswer{{match: recoveryPolicyQuery, values: []driver.Value{[]byte("{webauthn}"), false, []byte("{totp,webauthn}"), true, true, ""}}}, nil)
 	token, _, err := h.GenerateRecoveryChallenge(context.Background(), enrollUser)
 	require.NoError(t, err)
 	r := &recoveryCompletionRecorder{}
@@ -101,7 +102,7 @@ func TestRecoveryChallengeRechecksPolicyBeforeSpendingIt(t *testing.T) {
 	token, _, err := f.h.GenerateRecoveryChallenge(context.Background(), enrollUser)
 	require.NoError(t, err)
 	// The current policy no longer offers the authenticator this challenge began with.
-	h, _ := scriptedHandlerFull(t, f.state, "test", f.h.keyring, []scriptedAnswer{{match: recoveryPolicyQuery, values: []driver.Value{[]byte("{}"), false, []byte("{totp}"), true, false}}}, nil)
+	h, _ := scriptedHandlerFull(t, f.state, "test", f.h.keyring, []scriptedAnswer{{match: recoveryPolicyQuery, values: []driver.Value{[]byte("{}"), false, []byte("{totp}"), true, false, ""}}}, nil)
 	w := verifyWith(h, fmt.Sprintf(`{"mfa_challenge_token":%q,"method":"totp","code":%q}`, token, f.right))
 	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 	require.Zero(t, f.judged())
@@ -139,9 +140,9 @@ func TestRecoveryWebAuthnProofIsBoundToItsChallenge(t *testing.T) {
 func TestRecoveryPolicyRejectsPriorEmailAuthorityAfterTightening(t *testing.T) {
 	h, _ := scriptedHandler(t, &mfaEventDB{}, "test", scriptedAnswer{
 		match:  recoveryPolicyQuery,
-		values: []driver.Value{[]byte("{totp}"), true, []byte("{totp}"), true, false},
+		values: []driver.Value{[]byte("{totp}"), true, []byte("{totp}"), true, false, ""},
 	})
-	token, _, err := GenerateRecoveryToken(enrollUser, JWTSecret("test"))
+	token, _, err := GenerateRecoveryToken(enrollUser, "email", JWTSecret("test"), "")
 	require.NoError(t, err)
 	_, err = h.ValidateRecoveryToken(context.Background(), token)
 	require.Error(t, err, "email-only authority must not bypass the current reserved authenticator")
@@ -161,8 +162,8 @@ func TestFinalRecoveryAuthoritySatisfiesCurrentPolicy(t *testing.T) {
 		{name: "removed reservation needs no extra proof", factor: "webauthn", reserved: "{}", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, _ := scriptedHandler(t, &mfaEventDB{}, "test", scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte(tc.reserved), true, []byte("{}"), true, true}})
-			token, _, err := h.GenerateRecoveryToken(enrollUser, tc.factor)
+			h, _ := scriptedHandler(t, &mfaEventDB{}, "test", scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte(tc.reserved), true, []byte("{}"), true, true, ""}})
+			token, _, err := GenerateRecoveryToken(enrollUser, tc.factor, JWTSecret("test"), "")
 			require.NoError(t, err)
 			claims, err := h.ValidateRecoveryToken(context.Background(), token)
 			if tc.want {
@@ -179,27 +180,27 @@ func TestFinalRecoveryAuthoritySatisfiesCurrentPolicy(t *testing.T) {
 
 func TestFinalRecoveryAuthorityFailsClosedWithoutProofOrPolicy(t *testing.T) {
 	h, _ := scriptedHandler(t, &mfaEventDB{}, "test", scriptedAnswer{match: recoveryPolicyQuery, err: errReadFailed})
-	token, _, err := h.GenerateRecoveryToken(enrollUser, "email")
+	token, _, err := GenerateRecoveryToken(enrollUser, "email", JWTSecret("test"), "")
 	require.NoError(t, err)
 	_, err = h.ValidateRecoveryToken(context.Background(), token)
 	require.ErrorIs(t, err, errReadFailed)
 	require.ErrorIs(t, err, auth.ErrRecoveryPolicyUnavailable)
-	token, _, err = GenerateChallengeToken(enrollUser, PurposeRecovery, JWTSecret("test"), "")
+	token, _, err = generateChallengeTokenWithTTL(ChallengeClaims{UserID: enrollUser, Purpose: PurposeRecovery}, JWTSecret("test"), time.Minute)
 	require.NoError(t, err)
 	_, err = h.ValidateRecoveryToken(context.Background(), token)
 	require.ErrorContains(t, err, "recovery proof missing")
 	require.NotErrorIs(t, err, auth.ErrRecoveryPolicyUnavailable)
-	_, _, err = h.GenerateRecoveryToken(enrollUser, "unverified")
+	_, _, err = GenerateRecoveryToken(enrollUser, "unverified", JWTSecret("test"), "")
 	require.ErrorContains(t, err, "invalid recovery proof")
 }
 
 func TestFinalRecoveryAuthorityClassifiesRedisPolicyFailure(t *testing.T) {
 	h, rdb := scriptedHandler(t, &mfaEventDB{}, "test", scriptedAnswer{
 		match:  recoveryPolicyQuery,
-		values: []driver.Value{[]byte("{}"), true, []byte("{}"), false, false},
+		values: []driver.Value{[]byte("{}"), true, []byte("{}"), false, false, ""},
 	})
 	rdb.AddHook(failKeyHook{name: "exists", prefix: "mfa_emailsms_enabled:"})
-	token, _, err := h.GenerateRecoveryToken(enrollUser, "email")
+	token, _, err := GenerateRecoveryToken(enrollUser, "email", JWTSecret("test"), "")
 	require.NoError(t, err)
 	claims, err := h.ValidateRecoveryToken(context.Background(), token)
 	require.Nil(t, claims)
@@ -224,13 +225,13 @@ func TestRecoveryClaimsTransactionUsesLockedPolicyWithoutRedis(t *testing.T) {
 			state := &mfaEventDB{}
 			h, rdb := scriptedHandler(t, state, "test",
 				scriptedAnswer{match: "FOR NO KEY UPDATE", values: []driver.Value{enrollUser}, err: tc.lockErr},
-				scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte(tc.reserved), tc.hardened, []byte(tc.flags), tc.totp, false}, err: tc.policyErr},
+				scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte(tc.reserved), tc.hardened, []byte(tc.flags), tc.totp, false, "e1"}, err: tc.policyErr},
 			)
 			rdb.AddHook(failKeyHook{name: "exists", prefix: ""})
 			tx, err := h.db.BeginTx(context.Background(), nil)
 			require.NoError(t, err)
 			defer func() { require.NoError(t, tx.Rollback()) }()
-			err = h.ValidateRecoveryClaimsTx(context.Background(), tx, &auth.RecoveryClaims{UserID: enrollUser, RecoveryFactor: tc.factor})
+			err = h.ValidateRecoveryClaimsTx(context.Background(), tx, &auth.RecoveryClaims{UserID: enrollUser, RecoveryFactor: tc.factor, CredentialEpoch: "e1", EpochBound: true})
 			if tc.want == nil {
 				require.NoError(t, err)
 			} else {
@@ -245,4 +246,145 @@ func TestRecoveryClaimsTransactionRejectsMissingProof(t *testing.T) {
 	h := &Handler{}
 	require.ErrorIs(t, h.ValidateRecoveryClaimsTx(context.Background(), nil, nil), auth.ErrRecoveryProofInvalid)
 	require.ErrorIs(t, h.ValidateRecoveryClaimsTx(context.Background(), nil, &auth.RecoveryClaims{RecoveryFactor: "email"}), auth.ErrRecoveryProofInvalid)
+}
+
+// lockedPolicyHandler scripts the users lock and the locked policy row, whose
+// sixth column is the coalesced credential epoch.
+func lockedPolicyHandler(t *testing.T, reserved string, totp bool, storedEpoch string, policyErr error) (*Handler, *mfaEventDB) {
+	t.Helper()
+	state := &mfaEventDB{}
+	h, rdb := scriptedHandler(t, state, "test",
+		scriptedAnswer{match: "FOR NO KEY UPDATE", values: []driver.Value{enrollUser}},
+		scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte(reserved), false, []byte("{}"), totp, false, storedEpoch}, err: policyErr},
+	)
+	rdb.AddHook(failKeyHook{name: "exists", prefix: ""})
+	return h, state
+}
+
+func TestIssueRecoveryTokenTxStampsLockedEpoch(t *testing.T) {
+	for _, stored := range []string{"e1", ""} {
+		h, state := lockedPolicyHandler(t, "{}", false, stored, nil)
+		tx, err := h.db.BeginTx(context.Background(), nil)
+		require.NoError(t, err)
+		token, jti, err := h.IssueRecoveryTokenTx(context.Background(), tx, enrollUser, "email")
+		require.NoError(t, err)
+		require.NoError(t, tx.Rollback())
+		claims, err := ValidateChallengeToken(token, "test", PurposeRecovery)
+		require.NoError(t, err)
+		require.Equal(t, stored, claims.CredentialEpoch)
+		require.Equal(t, jti, claims.ID)
+		require.Equal(t, "email", claims.RecoveryFactor)
+		require.Contains(t, state.statements[0], "FOR NO KEY UPDATE", "the epoch must be read under the users lock")
+		require.Contains(t, state.statements[1], "COALESCE(credential_epoch, '')")
+	}
+}
+
+func TestIssueRecoveryTokenTxRefusesUnsatisfiedPolicy(t *testing.T) {
+	h, _ := lockedPolicyHandler(t, "{totp}", true, "e1", nil)
+	tx, err := h.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, tx.Rollback()) }()
+	token, _, err := h.IssueRecoveryTokenTx(context.Background(), tx, enrollUser, "email")
+	require.ErrorIs(t, err, auth.ErrRecoveryProofInvalid)
+	require.Empty(t, token)
+	token, _, err = h.IssueRecoveryTokenTx(context.Background(), tx, enrollUser, "unverified")
+	require.ErrorIs(t, err, auth.ErrRecoveryProofInvalid)
+	require.Empty(t, token)
+	token, _, err = h.IssueRecoveryTokenTx(context.Background(), nil, enrollUser, "email")
+	require.ErrorIs(t, err, auth.ErrRecoveryProofInvalid)
+	require.Empty(t, token)
+
+	h, _ = lockedPolicyHandler(t, "{}", false, "", errReadFailed)
+	tx2, err := h.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, tx2.Rollback()) }()
+	token, _, err = h.IssueRecoveryTokenTx(context.Background(), tx2, enrollUser, "email")
+	require.ErrorIs(t, err, auth.ErrRecoveryPolicyUnavailable)
+	require.Empty(t, token)
+}
+
+func TestRecoveryClaimsTxRejectsRotatedEpoch(t *testing.T) {
+	for _, tc := range []struct {
+		claim, stored string
+		bound         bool
+		want          error
+	}{
+		{claim: "", stored: "", bound: true},
+		{claim: "e1", stored: "e1", bound: true},
+		{claim: "", stored: "e1", bound: true, want: auth.ErrRecoveryProofInvalid},
+		{claim: "e1", stored: "e2", bound: true, want: auth.ErrRecoveryProofInvalid},
+		{claim: "e1", stored: "", bound: true, want: auth.ErrRecoveryProofInvalid},
+		{claim: "e1", stored: "e1", bound: false, want: auth.ErrRecoveryProofInvalid},
+	} {
+		t.Run(fmt.Sprintf("claim=%q/stored=%q/bound=%t", tc.claim, tc.stored, tc.bound), func(t *testing.T) {
+			h, _ := lockedPolicyHandler(t, "{}", false, tc.stored, nil)
+			tx, err := h.db.BeginTx(context.Background(), nil)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, tx.Rollback()) }()
+			err = h.ValidateRecoveryClaimsTx(context.Background(), tx, &auth.RecoveryClaims{
+				UserID: enrollUser, RecoveryFactor: "email", CredentialEpoch: tc.claim, EpochBound: tc.bound,
+			})
+			if tc.want == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tc.want)
+			}
+		})
+	}
+}
+
+// policyHandlerAt scripts both the unlocked and the locked policy reads with
+// storedEpoch as the account's current credential epoch.
+func policyHandlerAt(t *testing.T, storedEpoch string, policyErr error) *Handler {
+	t.Helper()
+	h, _ := scriptedHandler(t, &mfaEventDB{}, "test",
+		scriptedAnswer{match: "FOR NO KEY UPDATE", values: []driver.Value{enrollUser}},
+		scriptedAnswer{match: recoveryPolicyQuery, values: []driver.Value{[]byte("{}"), false, []byte("{}"), false, false, storedEpoch}, err: policyErr},
+	)
+	return h
+}
+
+func TestValidateRecoveryTokenPrechecksEpoch(t *testing.T) {
+	token, jti, err := GenerateRecoveryToken(enrollUser, "email", JWTSecret("test"), "e1")
+	require.NoError(t, err)
+
+	claims, err := policyHandlerAt(t, "e2", nil).ValidateRecoveryToken(context.Background(), token)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, auth.ErrRecoveryPolicyUnavailable, "a stale token is a 401, not a 503")
+	require.Nil(t, claims)
+
+	claims, err = policyHandlerAt(t, "e1", nil).ValidateRecoveryToken(context.Background(), token)
+	require.NoError(t, err)
+	require.True(t, claims.EpochBound)
+	require.Equal(t, "e1", claims.CredentialEpoch)
+	require.Equal(t, jti, claims.JTI)
+
+	claims, err = policyHandlerAt(t, "e1", errReadFailed).ValidateRecoveryToken(context.Background(), token)
+	require.ErrorIs(t, err, auth.ErrRecoveryPolicyUnavailable)
+	require.Nil(t, claims)
+}
+
+// TestVuln018RecoveryTokenDoesNotSurviveCredentialRotation is the in-repo
+// regression for VULN-018: a token issued before a credential rotation is
+// refused by both the unlocked pre-check and the locked authority.
+func TestVuln018RecoveryTokenDoesNotSurviveCredentialRotation(t *testing.T) {
+	issuer := policyHandlerAt(t, "e1", nil)
+	tx, err := issuer.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	token, _, err := issuer.IssueRecoveryTokenTx(context.Background(), tx, enrollUser, "email")
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback())
+
+	before, err := issuer.ValidateRecoveryToken(context.Background(), token)
+	require.NoError(t, err, "control: the token is valid while the epoch is unchanged")
+
+	rotated := policyHandlerAt(t, "e2", nil)
+	claims, err := rotated.ValidateRecoveryToken(context.Background(), token)
+	require.Error(t, err)
+	require.Nil(t, claims)
+
+	tx, err = rotated.db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, tx.Rollback()) }()
+	require.ErrorIs(t, rotated.ValidateRecoveryClaimsTx(context.Background(), tx, before), auth.ErrRecoveryProofInvalid)
 }

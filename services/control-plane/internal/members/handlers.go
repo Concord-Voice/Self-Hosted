@@ -12,19 +12,19 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehook"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehook"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -1720,6 +1720,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	var deliveryFailure *presencehook.Failure
 	fence, removalErr := h.execRemovalFenceTx(c.Request.Context(), fenceReq)
 	if removalErr != nil {
+		h.refundModerationGateIfBusy(c.Request.Context(), removalErr, fenceReq.confirm) // the transaction has ended
 		// presencehook wraps commit acknowledgement failures, so they do not
 		// retain rbac's ambiguity sentinel. Any non-delivery error after this
 		// exact set was locked receives idempotent fail-closed recovery; only a
@@ -2229,6 +2230,7 @@ func (h *Handler) BanMember(c *gin.Context) {
 	var banDeliveryFailure *presencehook.Failure
 	fence, banErr := h.execBanFenceTx(c.Request.Context(), fenceReq)
 	if banErr != nil {
+		h.refundModerationGateIfBusy(c.Request.Context(), banErr, fenceReq.confirm) // the transaction has ended
 		// Same split as RemoveMember: a post-commit delivery failure means the
 		// member IS banned, so it must not be reported as a 500 that implies
 		// nothing happened — and must not skip the de-authorization below. A

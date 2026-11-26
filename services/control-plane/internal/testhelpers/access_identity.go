@@ -6,13 +6,14 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 )
 
 // AccessIdentityForToken returns the signed access identity of a fixture
@@ -32,6 +33,30 @@ func AccessIdentityForToken(t testing.TB, token string) loginfamily.AccessIdenti
 		t.Fatalf("testhelpers: fixture token sid: %v", err)
 	}
 	return loginfamily.AccessIdentity{UserID: user, SID: sid, CredentialEpoch: claims.CredentialEpoch, AccessExpiresAt: claims.ExpiresAt.Time}
+}
+
+// TrustSession records accessToken's session on a fresh machine and designates
+// that machine as userID's trusted recovery device, so the session may list
+// and answer device-recovery requests. Fixture access tokens normally have no
+// refresh_tokens row, so this upserts one keyed by the token's sid. It returns
+// the machine id.
+func TrustSession(t testing.TB, db *sql.DB, userID, accessToken string) string {
+	t.Helper()
+	return TrustSID(t, db, userID, AccessIdentityForToken(t, accessToken).SID)
+}
+
+// TrustSID is TrustSession for a session id a context-built identity carries.
+func TrustSID(t testing.TB, db *sql.DB, userID string, sid uuid.UUID) string {
+	t.Helper()
+	machineID := uuid.NewString()
+	if _, err := db.Exec(`INSERT INTO refresh_tokens(id,user_id,token_hash,expires_at,machine_id) VALUES($1,$2,$3,$4,$5)
+ ON CONFLICT (id) DO UPDATE SET machine_id = EXCLUDED.machine_id`, sid, userID, uuid.NewString(), time.Now().Add(time.Hour), machineID); err != nil {
+		t.Fatalf("testhelpers: trusted session row: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO trusted_recovery_devices(user_id,device_name,machine_id) VALUES($1,'trusted fixture',$2)`, userID, machineID); err != nil {
+		t.Fatalf("testhelpers: trusted device designation: %v", err)
+	}
+	return machineID
 }
 
 // WithAccessIdentity attaches user's signed identity to ctx, as AuthRequired

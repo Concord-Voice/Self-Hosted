@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -148,6 +148,8 @@ func TestValidateAndLinkAttachmentTier2Succeeds(t *testing.T) {
 	setup := setupEpochTest(t, false, false)
 	msgID := seedDMMessage(t, setup)
 	fileID := seedMediaFile(t, setup, 2)
+	_, err := setup.db.Exec(`UPDATE media_files SET e2ee_format = 'attachment-v4' WHERE id = $1`, fileID)
+	require.NoError(t, err)
 
 	tx := beginAttachmentTx(t, setup)
 	summary, ok, err := setup.hub.validateAndLinkAttachment(context.Background(), tx, dmLinkCtx(setup, msgID), fileID, 0)
@@ -156,6 +158,14 @@ func TestValidateAndLinkAttachmentTier2Succeeds(t *testing.T) {
 	require.NoError(t, tx.Commit())
 	require.True(t, ok, "a tier-2 attachment owned by the sender must link")
 	assert.Equal(t, fileID, summary.ID)
+	assert.Equal(t, setup.user1.String(), summary.UploaderID)
+	require.NotNil(t, summary.KeyVersion)
+	assert.Equal(t, 1, *summary.KeyVersion)
+	require.NotNil(t, summary.ConversationID)
+	assert.Equal(t, setup.convID, *summary.ConversationID)
+	assert.Nil(t, summary.ChannelID)
+	require.NotNil(t, summary.E2EEFormat)
+	assert.Equal(t, "attachment-v4", *summary.E2EEFormat)
 
 	var linked int
 	require.NoError(t, setup.db.QueryRow(

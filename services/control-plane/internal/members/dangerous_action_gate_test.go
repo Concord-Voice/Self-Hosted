@@ -10,6 +10,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -18,16 +21,18 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/members"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/messages"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/members"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/messages"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 const (
@@ -416,4 +421,85 @@ func TestModerationGate_PurgeProvenance(t *testing.T) {
 	assert.Equal(t, messages.PurgeConfirmed, recorder.last(), "a verified purging kick")
 	assert.Equal(t, []stepup.Purpose{stepup.PurposeMemberBan, stepup.PurposeMemberKickPurge}, verifier.Purposes())
 	assert.Len(t, recorder.seen, 4, "the refused kick never reached the purge")
+}
+
+// gateBudgetCount reads the actor's dangerous-action budget as a count, 0
+// when the key is absent.
+func gateBudgetCount(t *testing.T, ts *testhelpers.TestServer, userID string) int {
+	t.Helper()
+	n, err := ts.Redis.Get(context.Background(), stepup.DangerousActionBudget(nil).Key(userID)).Int()
+	if errors.Is(err, redis.Nil) {
+		return 0
+	}
+	require.NoError(t, err)
+	return n
+}
+
+// A busy backup-code check judged nothing, so on a ban and on a purging kick
+// it is a 503 with Retry-After: 1 that writes nothing and leaves the shared
+// budget where it was. Busy answers past the budget's limit never become 429;
+// a wrong code afterwards costs exactly one attempt, and the right code still
+// lands.
+// Kills: the busy refund dropped from RemoveMember or BanMember (the budget
+// climbs and the sixth busy request answers 429).
+func TestModerationGate_BusyVerificationRefundsTheAttempt(t *testing.T) {
+	ts := setupTS(t)
+	const accept = "246810"
+	for _, route := range gateRoutes() {
+		t.Run(route.name, func(t *testing.T) {
+			f := newGateFixture(t, ts)
+			testhelpers.SetServerMFAEnforcement(t, ts.DB, f.serverID, true)
+			testhelpers.EnrollInlineTOTP(t, ts.DB, f.mod.ID)
+			verifier := &testhelpers.FakeMFAVerifier{Err: fmt.Errorf("verify: %w", backuphash.ErrBusy)}
+			log := logger.NewWithWriter(&bytes.Buffer{})
+			resolver := rbac.NewResolver(ts.DB, rbac.NewPermissionCache(ts.Redis), log)
+			handler := members.NewHandler(ts.DB, log, ts.Redis, ts.Hub, resolver, nil)
+			handler.SetAuthorityHandler(rbac.NewHandler(ts.DB, log, nil, nil, resolver, nil, nil))
+			handler.SetMFAVerifier(verifier)
+			handler.SetServerMessagePurger(&provenanceRecorder{}, 0, 0)
+			sid := uuid.NewString()
+			router := gin.New()
+			router.Use(func(c *gin.Context) {
+				c.Set("user_id", f.mod.ID)
+				c.Set(middleware.JWTClaimsContextKey, jwt.MapClaims{"sid": sid})
+				ts.AttachActorIdentity(t, c, f.mod.ID)
+				c.Next()
+			})
+			router.POST("/api/v1/servers/:id/bans/:user_id", handler.BanMember)
+			router.DELETE("/api/v1/servers/:id/members/:user_id", handler.RemoveMember)
+			do := func(code string) *httptest.ResponseRecorder {
+				body, err := json.Marshal(route.body(code))
+				require.NoError(t, err)
+				req := httptest.NewRequest(route.method, route.path(f), bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				return w
+			}
+
+			for i := 0; i <= stepup.BudgetLimit; i++ {
+				before := gateBudgetCount(t, ts, f.mod.ID)
+				w := do(accept)
+				require.Equal(t, http.StatusServiceUnavailable, w.Code, "busy attempt %d: %s", i+1, w.Body.String())
+				assert.JSONEq(t, fmt.Sprintf(`{"error":%q,"verification_busy":true}`, stepup.ErrMsgVerificationBusy), w.Body.String())
+				assert.Equal(t, "1", w.Header().Get("Retry-After"))
+				assert.Equal(t, before, gateBudgetCount(t, ts, f.mod.ID), "a busy check costs no attempt")
+				assertNothingWritten(t, ts.DB, f)
+			}
+			require.Equal(t, stepup.BudgetLimit+1, verifier.Calls(), "every busy request reached the verifier")
+
+			verifier.Err = nil
+			verifier.AcceptCode = accept
+			w := do(gateWrongCode)
+			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			assert.JSONEq(t, gateBodyInvalidCode, w.Body.String())
+			assert.Equal(t, 1, gateBudgetCount(t, ts, f.mod.ID), "a wrong code burns exactly one attempt")
+			assertNothingWritten(t, ts.DB, f)
+
+			w = do(accept)
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.True(t, route.done(t, ts.DB, f), "the right code lands")
+			assert.Equal(t, 0, gateBudgetCount(t, ts, f.mod.ID), "a verified commit clears the budget")
+		})
+	}
 }

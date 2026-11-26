@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
@@ -183,7 +183,7 @@ func TestLoginFamilySecurityErasureEvidenceSurvivesUser(t *testing.T) {
 			service.SetGraphPresenceCapture(capture)
 			fence := &erasureFamilyFence{}
 			users.SetErasureFamilyCloserForTest(service, fence)
-			err := service.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
+			err := service.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
 			switch outcome {
 			case "commit":
 				require.NoError(t, err)
@@ -342,7 +342,7 @@ func TestLoginFamilySecurityErasureSortedUsersBeforeFamiliesAndConversations(t *
 	defer cancel()
 	done := make(chan error, 1)
 	actor := testhelpers.WithAccessIdentity(ctx, t, erased)
-	go func() { done <- service.DeleteAccount(actor, erased.ID) }()
+	go func() { done <- service.DeleteAccountForTest(actor, erased.ID) }()
 	securityWaitBlocker(t, ts.DB, userPID)
 	// KEY SHARE conflicts with UPDATE, while it permits NO KEY UPDATE.
 	for _, subject := range subjects[:2] {
@@ -400,7 +400,7 @@ func TestLoginFamilySecurityRevokedRequesterCannotErase(t *testing.T) {
 	require.NoError(t, revoke.Commit())
 
 	service := users.NewAccountService(ts.DB, logger.New("test"))
-	err = service.DeleteAccount(testhelpers.WithAccessIdentity(ctx, t, stale), stale.ID)
+	err = service.DeleteAccountForTest(testhelpers.WithAccessIdentity(ctx, t, stale), stale.ID)
 
 	require.ErrorIs(t, err, credepoch.ErrEpochMismatch, "the handler maps this to 401")
 	require.ErrorIs(t, err, loginfamily.ErrDenied)
@@ -421,7 +421,7 @@ func TestLoginFamilySecurityEraseRequiresRequesterIdentity(t *testing.T) {
 		"no identity":    context.Background(),
 		"other identity": testhelpers.WithAccessIdentity(context.Background(), t, other),
 	} {
-		err := service.DeleteAccount(ctx, target.ID)
+		err := service.DeleteAccountForTest(ctx, target.ID)
 		require.ErrorIs(t, err, credepoch.ErrEpochMismatch, name)
 		require.ErrorIs(t, err, loginfamily.ErrDenied, name)
 	}

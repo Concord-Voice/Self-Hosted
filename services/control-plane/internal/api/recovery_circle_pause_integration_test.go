@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -138,6 +139,21 @@ func TestRecoveryCirclePauseRoutes(t *testing.T) {
 		})
 	}
 	assert.Equal(t, before, snapshotPauseRows(t, f.ts.DB), "paused recovery must preserve every column of all recovery tables")
+}
+
+// TestRecoveryTokenTTLRequiresSocialPause pins the pause while recovery tokens
+// are shorter than a social request. A 24-hour social request cannot run on a
+// 15-minute token: un-pausing social recovery needs a request-scoped credential
+// designed first, not a longer recovery token.
+func TestRecoveryTokenTTLRequiresSocialPause(t *testing.T) {
+	require.Less(t, auth.RecoveryTokenTTL, 24*time.Hour)
+	f := setupPauseFixture(t)
+	for _, c := range pauseCalls(f) {
+		if c.name != "create" && c.name != "poll pending" {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) { assertPaused(t, servePauseCall(f, c)) })
+	}
 }
 
 func TestRecoveryCirclePauseRoutesExhaustedLimiters(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,27 +18,31 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/database"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/hostagent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedredis"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/hostagent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedredis"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
-// verbResetEnrollment is the break-glass recovery subcommand name (extracted to
-// satisfy go:S1192 — it recurs as the dispatch case, the flag-set name, and the
-// audit detail).
-const verbResetEnrollment = "reset-enrollment"
+// verbBootstrap and verbResetEnrollment name the first-admin and break-glass
+// recovery subcommands (extracted to satisfy go:S1192: each recurs as the
+// dispatch case, the flag-set name and the audit detail).
+const (
+	verbBootstrap       = "bootstrap"
+	verbResetEnrollment = "reset-enrollment"
+)
 
 // verbUnlock is the lockout recovery subcommand name.
 const verbUnlock = "unlock"
@@ -89,7 +94,7 @@ type securityEventsOpener func() (securityevent.Emitter, io.Closer, error)
 func RunAdminCtl(args []string) int {
 	if len(args) == 0 {
 		outf(os.Stderr, "usage: control-plane admin <%s> [flags]\n"+
-			"       control-plane admin unlock <username>\n", adminCtlUsage)
+			"       control-plane admin unlock [--] <username>\n", adminCtlUsage)
 		return 2
 	}
 
@@ -204,7 +209,7 @@ func runAdminCtl(ctx context.Context, deps adminCtlDeps, args []string) int {
 	verb := args[0]
 	rest := args[1:]
 	switch verb {
-	case "bootstrap":
+	case verbBootstrap:
 		if err := runBootstrap(ctx, deps, rest); err != nil {
 			outf(deps.stdout, "admin bootstrap failed: %v\n", err)
 			return 1
@@ -380,7 +385,7 @@ func outf(w io.Writer, format string, args ...any) {
 // to STDOUT (never the logger — secrets must not reach any log sink), and audits
 // EventBootstrap.
 func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
-	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	fs := flag.NewFlagSet(verbBootstrap, flag.ContinueOnError)
 	fs.SetOutput(deps.stdout)
 	username := fs.String("username", "", "operator handle for the new admin (required)")
 	passwordStdin := fs.Bool("password-stdin", false, "read the password from stdin without an interactive prompt")
@@ -389,6 +394,9 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 	}
 	if *username == "" {
 		return errors.New("--username is required")
+	}
+	if err := ValidateAdminUsername(*username); err != nil {
+		return fmt.Errorf("%w: it must be 1 to %d lowercase ASCII letters (a-z), digits, '.', '_' or '-', beginning and ending with a letter or a digit", err, MaxAdminUsernameLength)
 	}
 
 	password, err := readPassword(deps.stdin, deps.stdout, *passwordStdin)
@@ -404,26 +412,38 @@ func runBootstrap(ctx context.Context, deps adminCtlDeps, args []string) error {
 		return fmt.Errorf("hash password: %w", err)
 	}
 
-	adminUser, err := deps.repo.CreatePending(ctx, *username, hash)
-	if err != nil {
+	// The pending row and its bootstrap audit row commit in one transaction,
+	// under the sign-in notice lock held shared (WriteWith), so the admin is
+	// counted in every other admin's sign-in notice and no admin exists
+	// without its row. The audit row carries the outcome and the new admin's
+	// id, NEVER the password or token.
+	var adminUser AdminUser
+	err = deps.audit.WriteWith(ctx, AuditEvent{
+		Actor:     *username,
+		EventType: EventBootstrap,
+		Result:    AuditSuccess,
+		Detail:    map[string]any{"verb": verbBootstrap},
+	}, func(tx *sql.Tx, ev *AuditEvent) error {
+		created, cerr := deps.repo.CreatePendingTx(ctx, tx, *username, hash)
+		if cerr != nil {
+			return cerr
+		}
+		adminUser = created
+		ev.AdminID = &adminUser.ID
+		ev.Detail = map[string]any{"verb": verbBootstrap, detailCreatedAdminID: adminUser.ID}
+		return nil
+	})
+	switch {
+	case err == nil:
+	case isAuditStoreError(err):
+		return fmt.Errorf("audit bootstrap: %w", err)
+	default:
 		return fmt.Errorf("create pending admin: %w", err)
 	}
 
 	token, err := deps.enroll.MintEnrollmentToken(ctx, adminUser.ID, adminUser.CredentialGeneration)
 	if err != nil {
 		return fmt.Errorf("mint enrollment token: %w", err)
-	}
-
-	// Audit BEFORE printing so the row exists even if stdout is redirected away.
-	// The audit row carries the outcome + handle, NEVER the password or token.
-	if auditErr := deps.audit.Write(ctx, AuditEvent{
-		AdminID:   &adminUser.ID,
-		Actor:     *username,
-		EventType: EventBootstrap,
-		Result:    AuditSuccess,
-		Detail:    map[string]any{"verb": "bootstrap"},
-	}); auditErr != nil {
-		return fmt.Errorf("audit bootstrap: %w", auditErr)
 	}
 
 	printEnrollment(deps.stdout, *username, deps.enrollBaseURL, token)
@@ -499,12 +519,19 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 
 // runUnlock is the operator's way out of a sign-in lockout: it clears the named
 // admin's lock, attempts and escalation level, so the next correct sign-in
-// succeeds. Usage: unlock <username>. It does not touch the IP axis (an IP lock
-// expires within an hour) and it audits EventBootstrap with verb "unlock", as the
-// other break-glass verbs do (EventLockout would emit an account-locked event).
+// succeeds. Usage: unlock [--] <username>. A "--" ends the options, so a legacy
+// username that begins with '-' is unlocked with unlock -- <username>; without
+// it, such an argument is refused as a misplaced flag. It does not touch the IP
+// axis (an IP lock expires within an hour) and it audits EventBootstrap with
+// verb "unlock", as the other break-glass verbs do (EventLockout would emit an
+// account-locked event).
 func runUnlock(ctx context.Context, deps adminCtlDeps, args []string) error {
-	if len(args) != 1 || args[0] == "" || strings.HasPrefix(args[0], "-") {
-		return errors.New("usage: unlock <username>")
+	endOfOptions := len(args) > 0 && args[0] == "--"
+	if endOfOptions {
+		args = args[1:]
+	}
+	if len(args) != 1 || args[0] == "" || (!endOfOptions && strings.HasPrefix(args[0], "-")) {
+		return errors.New("usage: unlock [--] <username>")
 	}
 	username := args[0]
 
@@ -550,11 +577,13 @@ func readPassword(stdin io.Reader, stdout io.Writer, promptSuppressed bool) (str
 // operator's terminal). This is the ONLY place the token surfaces; it is never
 // logged. The token is carried as a query parameter the enrollment page reads.
 func printEnrollment(stdout io.Writer, username, baseURL, token string) {
-	url := fmt.Sprintf("%s/admin/enroll?username=%s&token=%s", baseURL, username, token)
+	// Both values are query-escaped: a legacy username can hold a space, & or
+	// non-ASCII text, which would otherwise break or rewrite the query.
+	enrollURL := fmt.Sprintf("%s/admin/enroll?username=%s&token=%s", baseURL, url.QueryEscape(username), url.QueryEscape(token))
 	outf(stdout, "Admin created. Complete enrollment within 1 hour at the URL below.\n")
 	outf(stdout, "Copy this from your terminal — it is NOT written to any log:\n")
 	outf(stdout, "  Username:   %s\n", username)
-	outf(stdout, "  Enroll URL: %s\n", url)
+	outf(stdout, "  Enroll URL: %s\n", enrollURL)
 	outf(stdout, "  Token:      %s\n", token)
 	outf(stdout, "Register a BACKUP hardware key immediately to avoid lockout.\n")
 }

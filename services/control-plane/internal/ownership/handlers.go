@@ -16,16 +16,17 @@ import (
 	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/email"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/email"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/keyrotation"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 const (
@@ -166,6 +167,18 @@ type initiateTransferRequest struct {
 	TargetUserID string `json:"target_user_id" binding:"required,uuid"`
 	Password     string `json:"password" binding:"required"` //nolint:gosec // G117: request binding field, not a credential
 	MFACode      string `json:"mfa_code"`
+}
+
+// confirmTransferRequest is a new proof for completing a pending ownership
+// transfer. The initiation proof never grants confirmation authority.
+type confirmTransferRequest struct {
+	Password string `json:"password" binding:"required"` //nolint:gosec // G117: request binding field, not a credential
+	MFACode  string `json:"mfa_code"`
+}
+
+var ownershipConfirmStepUpCopy = stepup.Copy{
+	NoFactors:          "Confirming ownership transfer requires proving your identity, but this account has no password and no MFA method.",
+	CredentialRequired: "Current password required to confirm ownership transfer",
 }
 
 // InitiateTransfer starts an ownership transfer to a target user.
@@ -444,6 +457,12 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 		return
 	}
 
+	var req confirmTransferRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
+		return
+	}
+
 	if err := h.requireServerOwner(ctx, c, serverID, userID, "confirm the transfer"); err != nil {
 		return
 	}
@@ -465,8 +484,38 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 		return
 	}
 
-	// Execute the transfer
-	if err := h.executeTransfer(ctx, serverID, transferID, fromUserID, toUserID, middleware.TokenCredentialEpoch(c)); err != nil {
+	// The password lockout and MFA guess budget both make Redis calls, before
+	// the coordinator transaction takes its user/server locks. Charge MFA first:
+	// an exhausted budget must not leave an unchecked password guess reserved.
+	charged, stepErr := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, req.MFACode)
+	if stepErr != nil {
+		h.writeOwnershipConfirmStepUpError(c, stepErr)
+		return
+	}
+	attempt, stepErr := stepup.ReserveUserPasswordAttempt(ctx, h.db, h.redis, userID, req.Password)
+	if stepErr != nil {
+		h.writeOwnershipConfirmStepUpError(c, stepErr)
+		return
+	}
+	defer h.settleOwnershipConfirmPassword(attempt)
+
+	// Execute the proof and transfer under the same coordinator transaction.
+	// In particular, backup-code redemption must roll back with any rejected
+	// ownership write.
+	mfaVerified, err := h.executeConfirmedTransfer(ctx,
+		expiredTransfer{id: transferID, serverID: serverID, fromUserID: fromUserID, toUserID: toUserID}, userID,
+		middleware.TokenCredentialEpoch(c), req, attempt)
+	if err != nil {
+		var proofErr *stepup.Error
+		if errors.As(err, &proofErr) {
+			// The coordinator transaction has ended, so a busy check's refund
+			// runs under no lock.
+			if rErr := stepup.RefundIfBusy(ctx, proofErr, charged); rErr != nil {
+				h.log.Warn("Could not refund a busy ownership confirmation attempt", "error", rErr)
+			}
+			h.writeOwnershipConfirmStepUpError(c, proofErr)
+			return
+		}
 		switch {
 		case errors.Is(err, credepoch.ErrEpochMismatch), errors.Is(err, credepoch.ErrBlocked):
 			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgAuthenticationRequired})
@@ -485,6 +534,9 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete transfer"})
 		}
 		return
+	}
+	if mfaVerified {
+		h.clearOwnershipMFABudget(c, userID)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1109,6 +1161,12 @@ func (h *Handler) withOwnershipCaptureGuardedOutcome(
 	if err := rbac.LockServerVisibilityCapture(ctx, tx, serverID); err != nil {
 		return nil, ownershipWriteUnchanged, fmt.Errorf("lock ownership visibility capture: %w", err)
 	}
+	// The visibility advisory lock must be the transaction's first statement.
+	// The family writer barrier follows it but still precedes every users-row
+	// lock. A fresh confirmation proof then observes the already-locked actor.
+	if err := loginfamily.EnsureWriterBarrierTx(ctx, tx); err != nil {
+		return nil, ownershipWriteUnchanged, fmt.Errorf("acquire ownership family writer barrier: %w", err)
+	}
 	if err := lockOwnershipUsersTx(ctx, tx, userIDs...); err != nil {
 		return nil, ownershipWriteUnchanged, fmt.Errorf("lock ownership users: %w", err)
 	}
@@ -1350,6 +1408,12 @@ func (h *Handler) executePendingOwnershipTransferTx(
 	if err != nil || outcome != ownershipWriteChanged {
 		return ownershipAuthorityMutation{}, outcome, err
 	}
+	return h.completePreparedOwnershipTransferTx(ctx, tx, transfer, pendingTransferID)
+}
+
+func (h *Handler) completePreparedOwnershipTransferTx(
+	ctx context.Context, tx *sql.Tx, transfer expiredTransfer, pendingTransferID string,
+) (ownershipAuthorityMutation, ownershipWriteOutcome, error) {
 	if h.authority == nil {
 		return ownershipAuthorityMutation{}, ownershipWriteUnchanged, errors.New("ownership authority coordinator unavailable")
 	}
@@ -1526,8 +1590,19 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 		mutation, outcome, writeErr = h.executePendingOwnershipTransferTx(ctx, tx, transfer)
 		return outcome, writeErr
 	})
+	return h.finishOwnershipTransfer(ctx, transfer, plan, outcome, mutation, err)
+}
+
+// finishOwnershipTransfer maps a transfer transaction's result to its error
+// and, after a confirmed change, runs the post-commit reconciliation,
+// broadcast and audit record.
+func (h *Handler) finishOwnershipTransfer(
+	ctx context.Context, transfer expiredTransfer, plan rbac.PresenceRecheckPlan,
+	outcome ownershipWriteOutcome, mutation ownershipAuthorityMutation, err error,
+) error {
+	serverID, fromUserID, toUserID := transfer.serverID, transfer.fromUserID, transfer.toUserID
 	if err != nil {
-		return h.resolveTransferExecutionError(ctx, serverID, transferID, fromUserID, toUserID, mutation.channelIDs, err)
+		return h.resolveTransferExecutionError(ctx, serverID, transfer.id, fromUserID, toUserID, mutation.channelIDs, err)
 	}
 	if outcome == ownershipWriteStaleCancelled {
 		return errTransferOwnershipChanged
@@ -1563,6 +1638,86 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 	}
 
 	return nil
+}
+
+// executeConfirmedTransfer binds confirmation proof and the ownership mutation
+// to one coordinator transaction. The pending row is locked and revalidated
+// before credentials are checked, and a backup-code redemption is therefore
+// rolled back if any subsequent transfer check or write cannot commit.
+func (h *Handler) executeConfirmedTransfer(
+	ctx context.Context, transfer expiredTransfer, actorUserID, tokenEpoch string,
+	req confirmTransferRequest, attempt *stepup.PasswordAttempt,
+) (mfaVerified bool, retErr error) {
+	serverID, fromUserID, toUserID := transfer.serverID, transfer.fromUserID, transfer.toUserID
+	var mutation ownershipAuthorityMutation
+	var outcome ownershipWriteOutcome
+	plan, outcome, err := h.withOwnershipCaptureGuardedOutcome(ctx, serverID, []string{fromUserID, toUserID}, actorUserID, tokenEpoch,
+		func(ctx context.Context, tx *sql.Tx) (ownershipWriteOutcome, error) {
+			pendingTransferID, pendingOutcome, err := h.preparePendingOwnershipTransferTx(ctx, tx, transfer)
+			if err != nil || pendingOutcome != ownershipWriteChanged {
+				return pendingOutcome, err
+			}
+			if actorUserID != fromUserID {
+				return ownershipWriteUnchanged, errTransferOwnershipChanged
+			}
+			verified, proofErr := h.verifyOwnershipConfirmProofTx(ctx, tx, actorUserID, tokenEpoch, req, attempt)
+			if proofErr != nil {
+				return ownershipWriteUnchanged, proofErr
+			}
+			mfaVerified = verified
+
+			var writeErr error
+			mutation, outcome, writeErr = h.completePreparedOwnershipTransferTx(ctx, tx, transfer, pendingTransferID)
+			return outcome, writeErr
+		})
+	if err := h.finishOwnershipTransfer(ctx, transfer, plan, outcome, mutation, err); err != nil {
+		return false, err
+	}
+	return mfaVerified, nil
+}
+
+// verifyOwnershipConfirmProofTx verifies the confirming owner's fresh proof
+// under the locked users row: the password always, and an MFA code when the
+// account has an inline factor. mfaVerified reports that a code was verified.
+func (h *Handler) verifyOwnershipConfirmProofTx(
+	ctx context.Context, tx *sql.Tx, actorUserID, tokenEpoch string,
+	req confirmTransferRequest, attempt *stepup.PasswordAttempt,
+) (mfaVerified bool, err error) {
+	subj, proofErr := stepup.LockSubjectTx(ctx, tx, actorUserID, stepup.LockForShare, tokenEpoch)
+	if proofErr != nil {
+		return false, proofErr
+	}
+	if proofErr = stepup.VerifyPasswordFactor(attempt, subj, req.Password, ownershipConfirmStepUpCopy); proofErr != nil {
+		return false, proofErr
+	}
+	if !subj.MFAEnabled {
+		return false, nil
+	}
+	if h.mfaVerifier == nil {
+		return false, &stepup.Error{
+			Status: http.StatusInternalServerError,
+			Body:   gin.H{"error": stepup.ErrMsgVerificationFailed},
+			Cause:  errors.New("MFA verifier is not configured for ownership confirmation"),
+		}
+	}
+	if proofErr = stepup.VerifyMFAFactorTx(ctx, tx, h.mfaVerifier, actorUserID,
+		stepup.PurposeOwnershipTransferConfirm, req.MFACode, subj.MFAMethods); proofErr != nil {
+		return false, proofErr
+	}
+	return true, nil
+}
+
+func (h *Handler) writeOwnershipConfirmStepUpError(c *gin.Context, e *stepup.Error) {
+	if e.Cause != nil {
+		h.log.Error("Ownership confirmation step-up failed", "status", e.Status, "error", e.Cause)
+	}
+	e.Write(c)
+}
+
+func (h *Handler) settleOwnershipConfirmPassword(attempt *stepup.PasswordAttempt) {
+	if err := attempt.Settle(context.Background()); err != nil {
+		h.log.Warn("Could not settle ownership confirmation password attempt", "error", err)
+	}
 }
 
 func (h *Handler) resolveTransferExecutionError(
@@ -1651,7 +1806,8 @@ func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpos
 		return false, fmt.Errorf("MFA required")
 	}
 
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode)
+	if e != nil {
 		if e.Cause != nil {
 			h.log.Error("Ownership MFA budget unavailable", "error", e.Cause)
 		}
@@ -1661,6 +1817,16 @@ func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpos
 
 	valid, err := h.mfaVerifier.VerifyCode(ctx, userID, purpose, mfaCode)
 	if err != nil {
+		// A busy backup-code check judged nothing: give the attempt back and
+		// answer a retryable 503. No transaction is open here.
+		if stepup.IsBusy(err) {
+			if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil {
+				h.log.Warn("Could not refund a busy ownership MFA attempt", "error", rErr)
+			}
+			busy := stepup.BusyError(err)
+			busy.Write(c)
+			return false, busy
+		}
 		h.log.Error(errMsgFailedVerifyMFACode, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyMFACode})
 		return false, err

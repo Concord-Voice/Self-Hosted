@@ -11,9 +11,9 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // Spending a backup code writes user_mfa_totp (backup_codes_used and
@@ -31,7 +31,7 @@ func TestInlineMFAFactors_BackupCodeAcceptanceKeepsTheDefault(t *testing.T) {
 	require.NoError(t, err)
 	sealed, nonce, version, err := keyring.Seal([]byte("JBSWY3DPEHPK3PXP"))
 	require.NoError(t, err)
-	codes, hashes, err := mfa.GenerateBackupCodes()
+	codes, hashes, err := mfa.GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 
 	// TOTP last matched, and its row last changed, an hour ago; the key was
@@ -73,7 +73,7 @@ func TestInlineMFAFactors_BackupCodeAcceptanceKeepsTheDefault(t *testing.T) {
 func TestInlineMFAFactors_BackupAvailabilityAgreesWithVerifier(t *testing.T) {
 	db := stepup.SubjectTestDB(t)
 	ctx := context.Background()
-	codes, hashes, err := mfa.GenerateBackupCodes()
+	codes, hashes, err := mfa.GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -94,7 +94,7 @@ func TestInlineMFAFactors_BackupAvailabilityAgreesWithVerifier(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spendable := false
 			for _, code := range codes {
-				if _, ok, err := mfa.VerifyBackupCode(code, tc.hashes, tc.used); err == nil && ok {
+				if _, ok, err := mfa.VerifyBackupCode(context.Background(), code, tc.hashes, tc.used); err == nil && ok {
 					spendable = true
 				}
 			}
@@ -114,7 +114,7 @@ func TestInlineMFAFactors_MalformedBackupHashFailsClosed(t *testing.T) {
 	db := stepup.SubjectTestDB(t)
 	userID := stepup.SubjectTestUser(t, db)
 	stepup.SubjectTestTOTP(t, db, userID, true, true)
-	_, hashes, err := mfa.GenerateBackupCodes()
+	_, hashes, err := mfa.GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	stepup.FactorsSetTOTP(t, db, userID, nil, []string{hashes[0], "v2$argon2id$v=19$m=999999999,t=1,p=1$AA$AA"}, []bool{false, false})
 

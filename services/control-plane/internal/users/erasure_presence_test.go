@@ -9,10 +9,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // erasureCapture records what the erasure path hands the capture, and can be
@@ -67,7 +67,7 @@ func TestErasureCapturesTheErasedPrincipal(t *testing.T) {
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
 	svc.SetGraphPresenceCapture(capture)
 
-	require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID))
+	require.NoError(t, svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID))
 
 	require.Len(t, capture.subjects, 1, "exactly one capture per erasure")
 	require.Equal(t, user.ID, capture.subjects[0].Principal.String(),
@@ -88,7 +88,7 @@ func TestErasureFailsClosedOnCaptureFailure(t *testing.T) {
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
 	svc.SetGraphPresenceCapture(capture)
 
-	err := svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
+	err := svc.DeleteAccountForTest(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
 	require.Error(t, err, "a capture failure must fail the erasure")
 
 	var rows int

@@ -18,10 +18,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // pendingAdminWithToken creates a pending admin and mints a real enrollment token
@@ -210,18 +210,31 @@ func TestEnroll_TokenIsSingleUse(t *testing.T) {
 
 // --- admin-create endpoint (behind AdminAuthRequired) ---
 
-// adminCreateEngine wires CreateAdmin under a synthetic admin_id (simulating
-// AdminAuthRequired having set it).
+// testAdminSessionBinding is the session binding the synthetic engines put in
+// the context, standing in for the digest AdminAuthRequired sets.
+const testAdminSessionBinding = "test-admin-session-binding"
+
+// asAdminSession simulates AdminAuthRequired: it sets the admin id and the
+// session binding.
+func asAdminSession(adminID string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set("admin_id", adminID)
+		c.Set("admin_session_binding", testAdminSessionBinding)
+		c.Next()
+	}
+}
+
+// adminCreateEngine wires CreateAdmin under a synthetic admin_id and session
+// binding (simulating AdminAuthRequired having set them).
 func adminCreateEngine(t *testing.T, db *sql.DB, rdb *redis.Client, actingAdminID string) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	h, err := admin.NewHandler(db, rdb, logger.NewWithWriter(&bytes.Buffer{}), authHandlerCfg())
 	require.NoError(t, err)
 	r := gin.New()
-	r.POST("/admin/api/v1/admins", func(c *gin.Context) {
-		c.Set("admin_id", actingAdminID)
-		h.CreateAdmin(c)
-	})
+	r.Use(asAdminSession(actingAdminID))
+	r.POST("/admin/api/v1/admins", h.CreateAdmin)
+	r.POST("/admin/api/v1/admins/stepup", h.CreateAdminStepUpBegin)
 	return r
 }
 
@@ -232,19 +245,15 @@ func TestCreateAdmin_ProvisionsPendingAndReturnsTokenOnce(t *testing.T) {
 	t.Cleanup(rCleanup)
 	ctx := context.Background()
 
-	// An acting admin must exist (FK target for the audit row).
+	// The acting admin needs an enrolled key for the create_admin step-up.
 	repo := admin.NewAdminRepo(db)
-	acting, err := repo.CreatePending(ctx, uniqueAdminUsername("actor"), "h")
-	require.NoError(t, err)
-	registerAdminCleanup(t, db, acting.ID)
+	actingID, _, va := enrolledAdmin(t, db, rdb)
 
-	engine := adminCreateEngine(t, db, rdb, acting.ID)
+	engine := adminCreateEngine(t, db, rdb, actingID)
 
 	newUsername := uniqueAdminUsername("new")
-	rec := postJSON(engine, "/admin/api/v1/admins", map[string]string{
-		"username": newUsername,
-		"password": adminTestPassword,
-	})
+	handle, challenge := stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
+	rec := postJSON(engine, "/admin/api/v1/admins", createBody(newUsername, handle, signStepUp(t, va, challenge, flagUP|flagUV)))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 	var resp struct {
@@ -293,18 +302,14 @@ func TestCreateAdmin_RejectsDuplicateUsername(t *testing.T) {
 	ctx := context.Background()
 
 	repo := admin.NewAdminRepo(db)
-	acting, err := repo.CreatePending(ctx, uniqueAdminUsername("actor2"), "h")
-	require.NoError(t, err)
-	registerAdminCleanup(t, db, acting.ID)
+	actingID, _, va := enrolledAdmin(t, db, rdb)
 
 	existing, err := repo.CreatePending(ctx, uniqueAdminUsername("taken"), "h")
 	require.NoError(t, err)
 	registerAdminCleanup(t, db, existing.ID)
 
-	engine := adminCreateEngine(t, db, rdb, acting.ID)
-	rec := postJSON(engine, "/admin/api/v1/admins", map[string]string{
-		"username": existing.Username,
-		"password": adminTestPassword,
-	})
+	engine := adminCreateEngine(t, db, rdb, actingID)
+	handle, challenge := stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
+	rec := postJSON(engine, "/admin/api/v1/admins", createBody(existing.Username, handle, signStepUp(t, va, challenge, flagUP|flagUV)))
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }

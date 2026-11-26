@@ -9,14 +9,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/privacy"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/privacy"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/redistest"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 const deliveryFailedBody = `{"error":"Your account was deleted. Updating everyone who could see you is taking longer than usual."}`
@@ -61,7 +61,7 @@ func TestEraseAccount_DeleteErrorMapping(t *testing.T) {
 				h.EraseAccount(c)
 
 				require.True(t, stub.called)
-				assert.Equal(t, "char-user", stub.calledWithUser)
+				assert.Equal(t, c.GetString("user_id"), stub.calledWithUser)
 				assert.Equal(t, tc.wantStatus, c.Writer.Status())
 				assert.JSONEq(t, tc.wantBody, w.Body.String())
 			})
@@ -85,7 +85,7 @@ func TestEraseAccount_PreDeleteRefusalsBodies(t *testing.T) {
 		c, w := newTestContext(t, `{bad`, "char-user")
 		h.EraseAccount(c)
 		assert.Equal(t, http.StatusBadRequest, c.Writer.Status())
-		assert.JSONEq(t, `{"error":"invalid body"}`, w.Body.String())
+		assert.JSONEq(t, `{"error":"invalid_request"}`, w.Body.String())
 		assert.False(t, stub.called)
 	})
 	t.Run("success has empty body", func(t *testing.T) {

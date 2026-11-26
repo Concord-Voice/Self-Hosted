@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/devicerecovery"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/email"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/devicerecovery"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/email"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/pquerna/otp"
@@ -348,26 +348,27 @@ func judgedIn(state *mfaEventDB) int {
 // right code and a wrong one get the same 500, so an outage tells a guesser
 // nothing, and the right factor is not spent.
 func TestVerifyJudgesNoCodeItCannotCount(t *testing.T) {
-	// The count is INCR followed by EXPIRE NX; either failing leaves it unset.
-	for _, command := range []string{"incr", "expire"} {
-		for _, which := range []string{"right", "wrong"} {
-			t.Run(command+"/"+which, func(t *testing.T) {
-				f := newVerifyFixture(t)
-				f.redis.AddHook(failCommandHook{name: command})
-				code := f.right
-				if which == "wrong" {
-					code = f.wrong
-				}
+	// The count, its EXPIRE NX window and its window ID are one script
+	// (stepup.ChargeKey); a fault on it leaves the attempt uncounted.
+	for _, which := range []string{"right", "wrong"} {
+		t.Run("charge/"+which, func(t *testing.T) {
+			f := newVerifyFixture(t)
+			hook, hits := sfFault("evalsha|eval", "mfa_verify_attempts:")
+			f.redis.AddHook(hook)
+			code := f.right
+			if which == "wrong" {
+				code = f.wrong
+			}
 
-				response := f.verify(code)
+			response := f.verify(code)
 
-				require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
-				require.Contains(t, response.Body.String(), errMsgMFAVerificationUnavailable)
-				require.False(t, f.completer.called)
-				require.Zero(t, f.judged(), "an uncounted request must not have its code judged")
-				require.False(t, f.exists(t, "auth_failures:ip:192.0.2.1"), "a code that was never judged is not a failed attempt")
-			})
-		}
+			sfRequireFired(t, hits)
+			require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+			require.Contains(t, response.Body.String(), errMsgMFAVerificationUnavailable)
+			require.False(t, f.completer.called)
+			require.Zero(t, f.judged(), "an uncounted request must not have its code judged")
+			require.False(t, f.exists(t, "auth_failures:ip:192.0.2.1"), "a code that was never judged is not a failed attempt")
+		})
 	}
 }
 
@@ -420,8 +421,9 @@ func TestVerifyCountsAWrongCode(t *testing.T) {
 }
 
 // When the lockout write after the last allowed wrong code fails, that attempt
-// fails closed, and the count still refuses the next attempt, even one with
-// the right code.
+// fails closed. The next attempt, even one with the right code, is past the
+// limit: it gives its charge back and is refused with 429, and its code is
+// never judged.
 func TestVerifyRefusesPastTheLimitWhenTheLockoutWriteFails(t *testing.T) {
 	f := newVerifyFixture(t)
 	require.NoError(t, f.redis.Set(context.Background(), "mfa_verify_attempts:"+enrollUser, failedAttemptLimit-1, time.Minute).Err())
@@ -438,6 +440,9 @@ func TestVerifyRefusesPastTheLimitWhenTheLockoutWriteFails(t *testing.T) {
 
 	require.Equal(t, http.StatusTooManyRequests, next.Code, next.Body.String())
 	require.False(t, f.completer.called, "a right code must not sign in past the limit")
+	attempts, err := f.redis.Get(context.Background(), "mfa_verify_attempts:"+enrollUser).Int()
+	require.NoError(t, err)
+	require.Equal(t, failedAttemptLimit, attempts, "the refused attempt gave its charge back")
 	require.Equal(t, judgedBefore, f.judged(), "a refused attempt must not have its code judged")
 }
 

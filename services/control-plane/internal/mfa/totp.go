@@ -2,6 +2,7 @@
 package mfa
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -14,10 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
-	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -150,9 +150,13 @@ func ParseEncryptionKey(hexKey string) ([]byte, error) {
 }
 
 // GenerateBackupCodes creates 8 random backup codes.
-// Returns the plaintext codes (to show the user once) and legacy SHA-256 hashes.
-// The writer changes only after every serving replica can read both formats.
-func GenerateBackupCodes() (codes []string, hashes []string, err error) {
+// Returns the plaintext codes (to show the user once) and their v2 hashes: each
+// code gets its own random salt and the bounded Argon2id tuple the reader
+// accepts. Only a release whose every serving replica reads v2 may run this
+// writer; see the "Backup-code storage" entry under Security Architecture in
+// docs/architecture.md. Hashing shares backuphash's process-wide slots, so a
+// saturated process returns backuphash.ErrBusy.
+func GenerateBackupCodes(ctx context.Context) (codes []string, hashes []string, err error) {
 	codes = make([]string, backupCount)
 	hashes = make([]string, backupCount)
 	alphabetLen := big.NewInt(int64(len(backupAlphabet)))
@@ -167,8 +171,9 @@ func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 			sb.WriteByte(backupAlphabet[idx.Int64()])
 		}
 		codes[i] = sb.String()
-		hash := sha256.Sum256([]byte(codes[i]))
-		hashes[i] = hex.EncodeToString(hash[:])
+		if hashes[i], err = backuphash.NewV2(ctx, codes[i]); err != nil {
+			return nil, nil, fmt.Errorf("hash backup code: %w", err)
+		}
 	}
 
 	return codes, hashes, nil
@@ -176,15 +181,19 @@ func GenerateBackupCodes() (codes []string, hashes []string, err error) {
 
 // VerifyBackupCode checks a code against stored hashes using timing-safe comparison.
 // Returns the index of the matched code, whether it matched, and a storage error.
-// The caller marks a match used through its conditional database update.
-func VerifyBackupCode(code string, hashes []string, used []bool) (index int, matched bool, err error) {
-	type parsedHash struct{ salt, digest []byte }
-	parsed := make([]parsedHash, len(hashes))
+// The caller marks a match used through its conditional database update. A v2
+// derivation that gets no slot returns backuphash.ErrBusy and spends nothing.
+func VerifyBackupCode(ctx context.Context, code string, hashes []string, used []bool) (index int, matched bool, err error) {
+	parsed := make([]parsedBackupHash, len(hashes))
 	for i, stored := range hashes {
 		parsed[i].salt, parsed[i].digest, err = backuphash.Parse(stored)
 		if err != nil {
 			return -1, false, err
 		}
+		// A code with no used flag is treated as used: the arrays are written
+		// together, so a short one is a damaged row, and the caller indexes
+		// used[i] to mark the match.
+		parsed[i].used = i >= len(used) || used[i]
 	}
 	normalized := strings.TrimSpace(code)
 	if len(normalized) != backupLen {
@@ -193,21 +202,53 @@ func VerifyBackupCode(code string, hashes []string, used []bool) (index int, mat
 	normalized = strings.ToUpper(normalized)
 	codeHash := sha256.Sum256([]byte(normalized))
 
-	for i := 0; i < len(parsed) && i < len(used); i++ {
-		// A code with no used flag is treated as used: the arrays are written
-		// together, so a short one is a damaged row, and the caller indexes
-		// used[i] to mark the match.
-		if used[i] {
+	derived, err := deriveUnusedV2(ctx, normalized, parsed)
+	if err != nil {
+		return -1, false, err
+	}
+
+	for i, stored := range parsed {
+		if stored.used {
 			continue
 		}
-		stored := parsed[i]
 		candidate := codeHash[:]
-		if stored.salt != nil {
-			candidate = argon2.IDKey([]byte(normalized), stored.salt, 2, 19456, 1, 32)
+		if d, ok := derived[i]; ok {
+			candidate = d
 		}
 		if subtle.ConstantTimeCompare(candidate, stored.digest) == 1 {
 			return i, true, nil
 		}
 	}
 	return -1, false, nil
+}
+
+type parsedBackupHash struct {
+	salt, digest []byte
+	used         bool
+}
+
+// deriveUnusedV2 derives the code under every unused v2 salt, by index, under
+// one slot and before any comparison, so a busy hasher (backuphash.ErrBusy)
+// answers before anything is judged and the caller can refund the attempt.
+func deriveUnusedV2(ctx context.Context, normalized string, parsed []parsedBackupHash) (map[int][]byte, error) {
+	var v2At []int
+	var salts [][]byte
+	for i, p := range parsed {
+		if !p.used && p.salt != nil {
+			v2At = append(v2At, i)
+			salts = append(salts, p.salt)
+		}
+	}
+	derived := make(map[int][]byte, len(salts))
+	if len(salts) == 0 {
+		return derived, nil
+	}
+	digests, err := backuphash.DeriveEachV2(ctx, normalized, salts)
+	if err != nil {
+		return nil, err
+	}
+	for j, i := range v2At {
+		derived[i] = digests[j]
+	}
+	return derived, nil
 }

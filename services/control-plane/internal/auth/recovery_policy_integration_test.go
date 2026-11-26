@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/lib/pq"
 	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/require"
@@ -45,7 +45,7 @@ func TestRecoveryPolicyReservedFactorCompletesRecovery(t *testing.T) {
 			secret := key.Secret()
 			sealed, nonce, version, err := keyring.Seal([]byte(secret))
 			require.NoError(t, err)
-			codes, hashes, err := mfa.GenerateBackupCodes()
+			codes, hashes, err := mfa.GenerateBackupCodes(context.Background())
 			require.NoError(t, err)
 			_, err = ts.DB.Exec(`INSERT INTO user_mfa_totp (user_id, totp_secret_enc, totp_secret_nonce, key_version, enabled, confirmed, backup_codes_hash, backup_codes_used)
 			 VALUES ($1, $2, $3, $4, TRUE, TRUE, $5, $6)`, user.ID, sealed, nonce, version, pq.Array(hashes), pq.Array(make([]bool, len(hashes))))
@@ -161,7 +161,7 @@ func TestRecoveryPolicyReservedFactorCompletionClearsEmailBudget(t *testing.T) {
 	require.NoError(t, err)
 	sealed, nonce, version, err := keyring.Seal([]byte(key.Secret()))
 	require.NoError(t, err)
-	_, hashes, err := mfa.GenerateBackupCodes()
+	_, hashes, err := mfa.GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	_, err = ts.DB.Exec(`INSERT INTO user_mfa_totp (user_id, totp_secret_enc, totp_secret_nonce, key_version, enabled, confirmed, backup_codes_hash, backup_codes_used)
 	 VALUES ($1, $2, $3, $4, TRUE, TRUE, $5, $6)`, user.ID, sealed, nonce, version, pq.Array(hashes), pq.Array(make([]bool, len(hashes))))
@@ -189,4 +189,18 @@ func TestRecoveryPolicyReservedFactorCompletionClearsEmailBudget(t *testing.T) {
 	exists, err = ts.Redis.Exists(context.Background(), budgetKey).Result()
 	require.NoError(t, err)
 	require.Zero(t, exists, "a completed MFA-backed recovery clears the email-code budget")
+}
+
+// TestRecoveryIssuanceBindsCurrentEpoch proves the real verify-code route stamps
+// the credential epoch stored at issuance into the recovery token.
+func TestRecoveryIssuanceBindsCurrentEpoch(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recoveryepochbind")
+	const stored = "0123456789abcdef0123456789abcdef"
+	_, err := ts.DB.Exec(`UPDATE users SET credential_epoch = $1 WHERE id = $2`, stored, user.ID)
+	require.NoError(t, err)
+	claims, err := mfa.ValidateChallengeToken(recoveryTokenFor(t, ts, user), testhelpers.TestJWTSecret, mfa.PurposeRecovery)
+	require.NoError(t, err)
+	require.Equal(t, stored, claims.CredentialEpoch)
+	require.Equal(t, "email", claims.RecoveryFactor)
 }

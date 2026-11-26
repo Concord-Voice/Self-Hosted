@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	natsclient "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/erasureclear"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencecapture"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
 )
 
 // commitUnresolvedCapture models a commit whose acknowledgement was lost. The
@@ -180,7 +180,7 @@ func TestDeleteAccountCommitUnresolvedPreservesPrivacyOutputButGatesMedia(t *tes
 				reclaimed = append(reclaimed, tier2...)
 			})
 
-			err = service.DeleteAccount(testdb.ActorContext(context.Background(), t, db, erased.String()), erased.String())
+			err = service.DeleteAccountForTest(testdb.ActorContext(context.Background(), t, db, erased.String()), erased.String())
 			require.ErrorIs(t, err, presencecapture.ErrCommitUnresolved)
 			assert.Equal(t, tc.wantAbsent, countUsers(t, db, erased) == 0)
 			assert.Equal(t, 1, drain.clearCount(),

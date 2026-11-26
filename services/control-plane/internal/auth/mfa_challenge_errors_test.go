@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/models"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -89,7 +89,7 @@ func (s *mfaMethodsStub) GenerateUpgradeChallenge(_ context.Context, _, refreshS
 func (s *mfaMethodsStub) BeginWebAuthnLogin(context.Context, string, string) (interface{}, error) {
 	return nil, nil
 }
-func (s *mfaMethodsStub) GenerateRecoveryToken(string, string) (string, string, error) {
+func (s *mfaMethodsStub) IssueRecoveryTokenTx(context.Context, *sql.Tx, string, string) (string, string, error) {
 	return "", "", nil
 }
 func (*mfaMethodsStub) GetRecoveryMethods(context.Context, string) ([]string, error) {

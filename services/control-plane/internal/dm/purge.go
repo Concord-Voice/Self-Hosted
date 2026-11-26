@@ -11,13 +11,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/purge"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmblock"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/requestid"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
 )
 
 const errMsgPurgeFailed = "Purge failed"
@@ -440,12 +440,18 @@ func (h *Handler) verifyPurgeStepUpWithMFA(ctx context.Context, c *gin.Context, 
 		return false, false
 	}
 	if subj.MFAEnabled {
-		if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+		charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode)
+		if e != nil {
 			h.logPurgeStepUpFailure(e)
 			e.Write(c)
 			return false, false
 		}
 		if mErr := stepup.VerifyMFAFactor(ctx, h.mfaVerifier, userID, stepup.PurposeDMPurge, mfaCode, subj.MFAMethods); mErr != nil {
+			// A busy backup-code check judged nothing: give the attempt back.
+			// No transaction is open here.
+			if rfErr := stepup.RefundIfBusy(ctx, mErr, charged); rfErr != nil {
+				h.log.Warn("Could not refund a busy DM-purge MFA attempt", "user_id", userID, "error", rfErr)
+			}
 			h.logPurgeStepUpFailure(mErr)
 			mErr.Write(c)
 			return false, false

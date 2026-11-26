@@ -13,12 +13,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfaenforce"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
 )
 
 // The "Enforce MFA On Dangerous Actions" setting (#3453):
@@ -266,8 +266,10 @@ func (h *Handler) PutMFAEnforcement(c *gin.Context) {
 	enabled := *req.Enabled
 
 	budget := newMFAEnforcementBudget(h.redis)
+	var charged stepup.Charged
 	if !enabled && req.MFACode != "" {
-		if e := budget.Consume(ctx, userID); e != nil {
+		var e *stepup.Error
+		if charged, e = budget.ConsumeAttempt(ctx, userID); e != nil {
 			if e.Cause != nil {
 				h.log.Error("MFA enforcement step-up budget unavailable", "error", e.Cause)
 			}
@@ -278,6 +280,9 @@ func (h *Handler) PutMFAEnforcement(c *gin.Context) {
 
 	changed, err := h.applyMFAEnforcement(ctx, c, serverID, userID, enabled, req.MFACode)
 	if err != nil {
+		// applyMFAEnforcement has rolled its transaction back by now. Only a
+		// code-bearing OFF was charged, and only it reaches the verifier.
+		h.refundBusyCharge(ctx, err, charged)
 		h.respondMFAEnforcementError(c, err)
 		return
 	}

@@ -16,11 +16,36 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/stmthook"
 )
+
+func TestErasureOwnedServersPreviewAllowsPendingEmailAndLimitsDisclosure(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	owner := ts.CreateTestUserUnverified(t, "erasepreviewowner")
+	other := ts.CreateTestUser(t, "erasepreviewother")
+	protectedID := ts.CreateTestServer(t, owner.ID, "protected")
+	ts.AddMemberToServer(t, protectedID, other.ID, "member")
+	ts.CreateTestServer(t, owner.ID, "solo")
+	foreignID := ts.CreateTestServer(t, other.ID, "foreign")
+	ts.AddMemberToServer(t, foreignID, owner.ID, "member")
+
+	path := "/api/v1/privacy/erase-account/owned-servers"
+	w := ts.DoRequest(http.MethodGet, path, nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.JSONEq(t, `{"servers":[{"id":"`+protectedID+`","name":"protected","member_count":2}]}`, w.Body.String())
+
+	w = ts.DoRequest(http.MethodGet, "/api/v1/servers", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusForbidden, w.Code, "the general server list remains verified-only")
+	w = ts.DoRequest(http.MethodGet, path, nil, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	empty := ts.CreateTestUserUnverified(t, "erasepreviewempty")
+	w = ts.DoRequest(http.MethodGet, path, nil, testhelpers.AuthHeaders(empty.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"servers":[]}`, w.Body.String())
+}
 
 // TestEraseAccount_Integration_HappyPath performs a full end-to-end erasure:
 // creates a test user via the testhelpers, sends POST /api/v1/privacy/erase-account
@@ -33,7 +58,7 @@ func TestEraseAccount_Integration_HappyPath(t *testing.T) {
 	w := ts.DoRequest(
 		http.MethodPost,
 		"/api/v1/privacy/erase-account",
-		map[string]interface{}{},
+		map[string]interface{}{"password": user.Password, "confirmed_owned_server_ids": []string{}},
 		testhelpers.AuthHeaders(user.AccessToken),
 	)
 	assert.Equal(t, http.StatusNoContent, w.Code)
@@ -54,6 +79,40 @@ func TestEraseAccount_Integration_HappyPath(t *testing.T) {
 	assert.GreaterOrEqual(t, auditRows, 1, "audit row must be inserted with NULL user_id")
 }
 
+func TestEraseAccount_Integration_BearerOnlyRequiresFreshProof(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "erasebeareronly")
+
+	w := ts.DoRequest(http.MethodPost, "/api/v1/privacy/erase-account",
+		map[string]interface{}{"confirmed_owned_server_ids": []string{}}, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusForbidden, w.Code)
+	assert.JSONEq(t, `{"error_code":"step_up_required","password_required":true}`, w.Body.String())
+
+	var exists bool
+	require.NoError(t, ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, user.ID).Scan(&exists))
+	assert.True(t, exists, "bearer-only refusal must not erase the user")
+}
+
+func TestEraseAccount_Integration_OwnedServerConfirmationMustMatchLockedSet(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	owner := ts.CreateTestUser(t, "eraseownerconfirm")
+	member := ts.CreateTestUser(t, "erasememberconfirm")
+	serverID := ts.CreateTestServer(t, owner.ID, "erasure confirmation")
+	_, err := ts.DB.Exec(`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'member')`, serverID, member.ID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest(http.MethodPost, "/api/v1/privacy/erase-account", map[string]interface{}{
+		"password": owner.Password, "confirmed_owned_server_ids": []string{},
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.JSONEq(t, `{"error_code":"owned_server_confirmation_stale","required_owned_server_ids":["`+serverID+`"]}`, w.Body.String())
+
+	w = ts.DoRequest(http.MethodPost, "/api/v1/privacy/erase-account", map[string]interface{}{
+		"password": owner.Password, "confirmed_owned_server_ids": []string{serverID},
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusNoContent, w.Code)
+}
+
 func TestEraseAccount_Integration_BlacklistsCurrentAccessToken(t *testing.T) {
 	// Regression for #718: erasure must revoke the caller's still-live access token.
 	ts := testhelpers.SetupTestServer(t)
@@ -63,7 +122,7 @@ func TestEraseAccount_Integration_BlacklistsCurrentAccessToken(t *testing.T) {
 	w := ts.DoRequest(
 		http.MethodPost,
 		"/api/v1/privacy/erase-account",
-		map[string]interface{}{},
+		map[string]interface{}{"password": user.Password, "confirmed_owned_server_ids": []string{}},
 		headers,
 	)
 	require.Equal(t, http.StatusNoContent, w.Code)
@@ -88,7 +147,7 @@ func TestEraseAccount_Integration_DeniesOtherLiveAccessTokens(t *testing.T) {
 	w := ts.DoRequest(
 		http.MethodPost,
 		"/api/v1/privacy/erase-account",
-		map[string]interface{}{},
+		map[string]interface{}{"password": user.Password, "confirmed_owned_server_ids": []string{}},
 		testhelpers.AuthHeaders(user.AccessToken),
 	)
 	require.Equal(t, http.StatusNoContent, w.Code)
@@ -116,7 +175,7 @@ func TestEraseAccount_Integration_IgnoresUnknownClientId(t *testing.T) {
 	w := ts.DoRequest(
 		http.MethodPost,
 		"/api/v1/privacy/erase-account",
-		map[string]interface{}{"clientId": clientID},
+		map[string]interface{}{"clientId": clientID, "password": user.Password, "confirmed_owned_server_ids": []string{}},
 		testhelpers.AuthHeaders(user.AccessToken),
 	)
 	assert.Equal(t, http.StatusNoContent, w.Code,
@@ -194,7 +253,7 @@ func TestEraseAccount_Integration_404OnMissingUserAfterAdmission(t *testing.T) {
 	}, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/privacy/erase-account", strings.NewReader(`{}`)).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/privacy/erase-account", strings.NewReader(`{"password":"`+user.Password+`","confirmed_owned_server_ids":[]}`)).WithContext(ctx)
 	req.Header = testhelpers.AuthHeaders(user.AccessToken)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -241,7 +300,7 @@ func TestEraseAccount_Integration_401OnFamilyRevokedAfterAdmission(t *testing.T)
 	}, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/privacy/erase-account", strings.NewReader(`{}`)).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/privacy/erase-account", strings.NewReader(`{"password":"`+user.Password+`","confirmed_owned_server_ids":[]}`)).WithContext(ctx)
 	req.Header = testhelpers.AuthHeaders(user.AccessToken)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

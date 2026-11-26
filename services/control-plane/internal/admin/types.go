@@ -80,8 +80,17 @@ const (
 	EventEnrollComplete = "enroll_complete"
 	// EventCredentialRevoked marks a hardware key being disabled. Not a credential value.
 	EventCredentialRevoked = "credential_revoked" // #nosec G101 -- event-type label, not a secret
-	// EventBootstrap marks the out-of-band creation of an admin (adminctl / in-console).
+	// EventBootstrap marks a break-glass adminctl verb (bootstrap,
+	// reset-enrollment, unlock) run from the host shell.
 	EventBootstrap = "bootstrap"
+	// EventAdminCreated marks an admin asking the console to create another
+	// admin (VULN-139): a success once the pending admin exists, a denial when
+	// the step-up is missing or fails. Successes are what other admins are told
+	// about at their next sign-in.
+	EventAdminCreated = "admin_created"
+	// EventSignInNoticeAck marks an admin session acknowledging the sign-in
+	// notice it displayed; its detail holds the acknowledged cursor.
+	EventSignInNoticeAck = "signin_notice_ack"
 	// EventServerRead marks an admin reading server status, health or logs
 	// through the host agent (#186).
 	EventServerRead = "server_read"

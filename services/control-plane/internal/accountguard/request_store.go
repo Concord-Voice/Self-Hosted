@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/accountguard/decide"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/accountguard/decide"
 	"github.com/google/uuid"
 )
 

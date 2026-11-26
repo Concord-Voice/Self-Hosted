@@ -6,15 +6,16 @@ import (
 	"database/sql/driver"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 )
 
 // errInjectedFault is the error the fault connector returns at its fault point.
@@ -25,9 +26,22 @@ var errInjectedFault = errors.New("injected database fault")
 // transaction step. Everything else reaches PostgreSQL unchanged.
 type dbFault struct {
 	statement string
-	begin     bool
-	commit    bool
-	rollback  bool
+	// statementTimes, when set, fails only that many matching statements;
+	// later ones pass.
+	statementTimes *atomic.Int32
+	begin          bool
+	commit         bool
+	// commitLost commits the transaction and then reports an error, as when
+	// the server's acknowledgement is lost.
+	commitLost bool
+	// commitTimes, when set, applies commit or commitLost only to that many
+	// commits; later ones succeed.
+	commitTimes *atomic.Int32
+	rollback    bool
+}
+
+func (f dbFault) takeCommit() bool {
+	return f.commitTimes == nil || f.commitTimes.Add(-1) >= 0
 }
 
 type faultConnector struct {
@@ -51,7 +65,10 @@ type faultConn struct {
 }
 
 func (c *faultConn) failsOn(query string) bool {
-	return c.fault.statement != "" && strings.Contains(query, c.fault.statement)
+	if c.fault.statement == "" || !strings.Contains(query, c.fault.statement) {
+		return false
+	}
+	return c.fault.statementTimes == nil || c.fault.statementTimes.Add(-1) >= 0
 }
 
 func (c *faultConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -85,8 +102,17 @@ type faultTx struct {
 }
 
 func (tx *faultTx) Commit() error {
+	if !tx.fault.takeCommit() {
+		return tx.Tx.Commit()
+	}
 	if tx.fault.commit {
 		_ = tx.Tx.Rollback()
+		return errInjectedFault
+	}
+	if tx.fault.commitLost {
+		if err := tx.Tx.Commit(); err != nil {
+			return err
+		}
 		return errInjectedFault
 	}
 	return tx.Tx.Commit()

@@ -37,16 +37,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/api"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/storage"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/config"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/api"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/media"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/storage"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 const (
@@ -962,4 +963,79 @@ func TestServerImageGate_GraceCoversTheNextUploadInTheSameSession(t *testing.T) 
 		env.upload(t, banner, first, f.serverID, ""), "grace-covered banner upload"))
 	assert.Equal(t, imgMFARequired, classifyImgGate(t, banner, f.serverID,
 		env.upload(t, banner, session(), f.serverID, ""), "another session"))
+}
+
+// imgBusyBody is the busy-verification refusal, byte for byte.
+const imgBusyBody = `{"error":"Verification is busy. Try again.","verification_busy":true}`
+
+// A busy backup-code check on the icon and banner uploads (#164): while every
+// derivation slot is held, the valid code is answered 503 with Retry-After: 1,
+// nothing is stored, and the budget is exactly what it was, across more than
+// BudgetLimit attempts (never a 429). Then a wrong code burns exactly one
+// attempt and the valid code, never judged while busy, still succeeds.
+// Kills: the RefundIfBusy call removed from storeServerImageGated.
+func TestServerImageGate_BusyVerificationCostsNoAttempt(t *testing.T) {
+	env := setupImgGateEnv(t)
+	for _, r := range imgRoutes() {
+		t.Run(r.name, func(t *testing.T) {
+			f := newImgGateFixture(t, env, true, true)
+			useArgon2ImgBackupCode(t, env, f.owner.ID)
+			before := imgBudget(t, env, f.owner.ID)
+			release := backuphash.HoldAllSlots(10 * time.Millisecond)
+			released := false
+			t.Cleanup(func() {
+				if !released {
+					release()
+				}
+			})
+			for i := range stepup.BudgetLimit + 1 {
+				msg := fmt.Sprintf("busy attempt %d", i+1)
+				clearRouteRateLimits(t, env.ts.Redis, f.owner.ID)
+				w := env.upload(t, r, f.owner.AccessToken, f.serverID, imgBackupCode)
+				require.Equal(t, http.StatusServiceUnavailable, w.Code, "%s: %s", msg, w.Body.String())
+				require.JSONEq(t, imgBusyBody, w.Body.String(), msg)
+				require.Equal(t, "1", w.Header().Get("Retry-After"), msg)
+				require.Equal(t, before, imgBudget(t, env, f.owner.ID), "%s: a busy check must not cost an attempt", msg)
+				requireNothingStored(t, env, r, f.serverID, msg)
+			}
+			release()
+			released = true
+
+			w := env.upload(t, r, f.owner.AccessToken, f.serverID, imgWrongCode)
+			require.Equal(t, imgInvalid, classifyImgGate(t, r, f.serverID, w, "wrong code after busy"))
+			require.Equal(t, before+1, imgBudget(t, env, f.owner.ID), "a wrong code burns exactly one attempt")
+			requireNothingStored(t, env, r, f.serverID, "wrong code after busy")
+
+			w = env.upload(t, r, f.owner.AccessToken, f.serverID, imgBackupCode)
+			require.Equal(t, imgOK, classifyImgGate(t, r, f.serverID, w, "valid code after busy"))
+		})
+	}
+}
+
+// useArgon2ImgBackupCode replaces userID's single backup code with an Argon2id
+// (v2) hash of imgBackupCode. enrollImgTOTP stores a legacy SHA-256 digest,
+// which never takes a derivation slot and so can never be busy.
+func useArgon2ImgBackupCode(t *testing.T, env *imgGateEnv, userID string) {
+	t.Helper()
+	hash, err := backuphash.NewV2(context.Background(), imgBackupCode)
+	require.NoError(t, err)
+	res, err := env.ts.DB.Exec(`UPDATE user_mfa_totp
+		SET backup_codes_hash = ARRAY[$2]::text[], backup_codes_used = ARRAY[FALSE] WHERE user_id = $1`, userID, hash)
+	require.NoError(t, err)
+	n, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+}
+
+// clearRouteRateLimits deletes userID's per-route request limiter keys
+// (middleware.RateLimitByUser), and nothing else. The step-up budget is a
+// different key and is left alone.
+func clearRouteRateLimits(t *testing.T, rdb *redis.Client, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	keys, err := rdb.Keys(ctx, "ratelimit:user:"+userID+":*").Result()
+	require.NoError(t, err)
+	if len(keys) > 0 {
+		require.NoError(t, rdb.Del(ctx, keys...).Err())
+	}
 }

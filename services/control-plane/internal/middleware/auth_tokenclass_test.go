@@ -14,12 +14,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/mfa"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/securityevent"
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 )
 
 // Bearer authentication must be bound to the ACCESS-token class, not merely to a
@@ -61,14 +61,14 @@ func realChallengeTokens(t *testing.T) map[string]string {
 		classFixtureUserID, mfa.PurposeMFAUpgrade, mfa.JWTSecret(tokenClassSecret), "")
 	require.NoError(t, err)
 
-	recovery, _, err := mfa.GenerateRecoveryToken(classFixtureUserID, mfa.JWTSecret(tokenClassSecret))
+	recovery, _, err := mfa.GenerateRecoveryToken(classFixtureUserID, "email", mfa.JWTSecret(tokenClassSecret), mfa.CredEpoch(""))
 	require.NoError(t, err)
 
 	return map[string]string{
 		"login challenge (POST /auth/login on an MFA account)": login,
 		"suspicious-refresh challenge":                         suspicious,
 		"mfa-upgrade challenge":                                upgrade,
-		"account-recovery token (25h TTL)":                     recovery,
+		"account-recovery token (15m TTL)":                     recovery,
 	}
 }
 

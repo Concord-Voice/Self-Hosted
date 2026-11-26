@@ -2,10 +2,11 @@ package mfa
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"fmt"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
 )
@@ -25,21 +26,35 @@ func (h *Handler) SetRecoveryCompleter(completer RecoveryCompleter) {
 // The caller has already proved email ownership; one reserved inline factor is
 // additionally required when configured. Backup codes belong to TOTP.
 func (h *Handler) GetRecoveryMethods(ctx context.Context, userID string) ([]string, error) {
+	methods, _, err := h.readRecoveryPolicy(ctx, userID)
+	return methods, err
+}
+
+// readRecoveryPolicy is the unlocked policy read. It also returns the
+// credential epoch (empty when never rotated) from the same statement, so the
+// recovery token pre-check costs no extra round trip.
+func (h *Handler) readRecoveryPolicy(ctx context.Context, userID string) ([]string, string, error) {
 	var reserved, flags []string
 	var hardened, totpEnabled, webauthnEnabled bool
+	var credEpoch string
 	if err := h.db.QueryRowContext(ctx, `
 		SELECT recovery_only_methods, recovery_hardened, mfa_methods,
 		 EXISTS (SELECT 1 FROM user_mfa_totp WHERE user_id = users.id AND enabled AND confirmed),
-		 EXISTS (SELECT 1 FROM user_mfa_webauthn WHERE user_id = users.id)
+		 EXISTS (SELECT 1 FROM user_mfa_webauthn WHERE user_id = users.id),
+		 COALESCE(credential_epoch, '')
 		FROM users WHERE id = $1`, userID,
-	).Scan(pq.Array(&reserved), &hardened, pq.Array(&flags), &totpEnabled, &webauthnEnabled); err != nil {
-		return nil, fmt.Errorf("read recovery policy: %w", err)
+	).Scan(pq.Array(&reserved), &hardened, pq.Array(&flags), &totpEnabled, &webauthnEnabled, &credEpoch); err != nil {
+		return nil, "", fmt.Errorf("read recovery policy: %w", err)
 	}
 	_, smsEnabled, err := h.readEmailSmsEnabled(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return recoveryMethods(reserved, flags, hardened, totpEnabled, webauthnEnabled, smsEnabled)
+	methods, err := recoveryMethods(reserved, flags, hardened, totpEnabled, webauthnEnabled, smsEnabled)
+	if err != nil {
+		return nil, "", err
+	}
+	return methods, credEpoch, nil
 }
 
 func recoveryMethods(reserved, flags []string, hardened, totpEnabled, webauthnEnabled, smsEnabled bool) ([]string, error) {
@@ -69,32 +84,75 @@ func recoveryMethods(reserved, flags []string, hardened, totpEnabled, webauthnEn
 	return methods, nil
 }
 
-// ValidateRecoveryClaimsTx linearizes authority with policy and factor writers.
-func (h *Handler) ValidateRecoveryClaimsTx(ctx context.Context, tx *sql.Tx, claims *auth.RecoveryClaims) error {
-	if tx == nil || claims == nil || (claims.RecoveryFactor != "email" && claims.RecoveryFactor != "totp" && claims.RecoveryFactor != "webauthn") {
-		return auth.ErrRecoveryProofInvalid
+// lockRecoveryPolicyTx takes the users row lock every recovery consumer and
+// every credential writer shares, then reads current policy and the credential
+// epoch in one fresh statement snapshot, after waiting for any factor writer.
+func lockRecoveryPolicyTx(ctx context.Context, tx *sql.Tx, userID string) ([]string, string, error) {
+	if err := lockUserForMFAWriteTx(ctx, tx, userID); err != nil {
+		return nil, "", fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
 	}
-	if err := lockUserForMFAWriteTx(ctx, tx, claims.UserID); err != nil {
-		return fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
-	}
-	// Use a fresh statement snapshot after waiting for any factor writer.
 	var reserved, flags []string
 	var hardened, totpEnabled, webauthnEnabled bool
+	var credEpoch string
 	if err := tx.QueryRowContext(ctx, `
   SELECT recovery_only_methods, recovery_hardened, mfa_methods,
    EXISTS (SELECT 1 FROM user_mfa_totp WHERE user_id = users.id AND enabled AND confirmed),
-   EXISTS (SELECT 1 FROM user_mfa_webauthn WHERE user_id = users.id)
-  FROM users WHERE id=$1`, claims.UserID).Scan(pq.Array(&reserved), &hardened, pq.Array(&flags), &totpEnabled, &webauthnEnabled); err != nil {
-		return fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
+   EXISTS (SELECT 1 FROM user_mfa_webauthn WHERE user_id = users.id),
+   COALESCE(credential_epoch, '')
+  FROM users WHERE id=$1`, userID).Scan(pq.Array(&reserved), &hardened, pq.Array(&flags), &totpEnabled, &webauthnEnabled, &credEpoch); err != nil {
+		return nil, "", fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
 	}
 	methods, err := recoveryMethods(reserved, flags, hardened, totpEnabled, webauthnEnabled, false)
 	if err != nil {
-		return fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
+		return nil, "", fmt.Errorf("%w: %w", auth.ErrRecoveryPolicyUnavailable, err)
+	}
+	return methods, credEpoch, nil
+}
+
+// IssueRecoveryTokenTx mints final recovery authority under the users row lock
+// that also evaluated current policy, stamping the credential epoch read in the
+// same statement. The caller never handles the epoch, so it cannot be omitted
+// or confused with another string. Implements auth.MFAChecker.
+func (h *Handler) IssueRecoveryTokenTx(ctx context.Context, tx *sql.Tx, userID, verifiedFactor string) (string, string, error) {
+	if tx == nil || !isRecoveryFactor(verifiedFactor) {
+		return "", "", auth.ErrRecoveryProofInvalid
+	}
+	methods, credEpoch, err := lockRecoveryPolicyTx(ctx, tx, userID)
+	if err != nil {
+		return "", "", err
+	}
+	if len(methods) > 0 && !containsStr(methods, verifiedFactor) {
+		return "", "", auth.ErrRecoveryProofInvalid
+	}
+	return GenerateRecoveryToken(userID, verifiedFactor, JWTSecret(h.jwtSecret), CredEpoch(credEpoch))
+}
+
+// ValidateRecoveryClaimsTx linearizes recovery authority with policy, factor
+// and credential writers. It is the authority every consumer reaches: the
+// token must have been verified as epoch-bound and must name the epoch stored
+// now, under the lock every epoch rotation takes. Strict equality, not
+// credepoch.MatchEpoch, which admits any claim while the stored epoch is NULL.
+func (h *Handler) ValidateRecoveryClaimsTx(ctx context.Context, tx *sql.Tx, claims *auth.RecoveryClaims) error {
+	if tx == nil || claims == nil || !claims.EpochBound || !isRecoveryFactor(claims.RecoveryFactor) {
+		return auth.ErrRecoveryProofInvalid
+	}
+	methods, credEpoch, err := lockRecoveryPolicyTx(ctx, tx, claims.UserID)
+	if err != nil {
+		return err
+	}
+	if !sameRecoveryEpoch(claims.CredentialEpoch, credEpoch) {
+		return auth.ErrRecoveryProofInvalid
 	}
 	if len(methods) > 0 && !containsStr(methods, claims.RecoveryFactor) {
 		return auth.ErrRecoveryProofInvalid
 	}
 	return nil
+}
+
+// sameRecoveryEpoch compares a token's epoch with the stored one. Both empty
+// means a never-rotated account; any other difference is a stale token.
+func sameRecoveryEpoch(claimed, stored string) bool {
+	return subtle.ConstantTimeCompare([]byte(claimed), []byte(stored)) == 1
 }
 
 // GenerateRecoveryChallenge is called only after the single-use email proof.

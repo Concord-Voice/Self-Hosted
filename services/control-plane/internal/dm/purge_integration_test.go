@@ -15,13 +15,13 @@ import (
 	"testing"
 	"time"
 
-	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
+	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	gorillaWS "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -432,14 +432,10 @@ func (purgeBudgetIncrFaultHook) DialHook(next redis.DialHook) redis.DialHook { r
 
 func (h purgeBudgetIncrFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == "incr" {
-			if args := cmd.Args(); len(args) >= 2 {
-				if key, ok := args[1].(string); ok && key == h.key {
-					err := errors.New("forced DM-purge MFA budget failure")
-					cmd.SetErr(err)
-					return err
-				}
-			}
+		if stepup.ChargeCommandKey(cmd) == h.key {
+			err := errors.New("forced DM-purge MFA budget failure")
+			cmd.SetErr(err)
+			return err
 		}
 		return next(ctx, cmd)
 	}
