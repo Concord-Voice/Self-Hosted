@@ -36,7 +36,7 @@ const REFUSALS: Record<string, string> = {
   stepup_required: "This action needs your security key.",
   stepup_failed: "The security key check failed. Try again.",
   authorization_denied:
-    "The host agent rejected this admin's security key proof. Host actions need this admin's dedicated action key, imported by a host-root operator with concord-agent authorizer import --action-credential. Touch that key, not your login key; if this persists, ask a host-root operator to check the import.",
+    "The host agent rejected this admin's security key proof. Touch a key a host-root operator has imported with concord-agent authorizer import; a key added since the last import must be exported and imported again. If this persists, ask a host-root operator to check the import.",
   authorizer_unavailable:
     "The host agent cannot load its trusted authorizers. Ask a host-root operator to check the authorizer file and import it with concord-agent authorizer import.",
   peer_forbidden:

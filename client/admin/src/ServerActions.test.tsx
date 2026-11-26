@@ -355,7 +355,7 @@ describe("ServerActions", () => {
     [
       403,
       "authorization_denied",
-      "dedicated action key.*host-root operator.*--action-credential",
+      "key added since the last import must be exported and imported again",
     ],
     [503, "authorizer_unavailable", "cannot load its trusted authorizers"],
     [403, "peer_forbidden", "agent socket permissions"],

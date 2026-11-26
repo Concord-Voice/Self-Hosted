@@ -13,9 +13,9 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 )
 
-// The operator picks the action key from these lines, so each credential must
-// be listed by its exported ID and label, followed by the purpose reminder.
-func TestAdminCtl_ExportAgentAuthorizerListsCredentialsForPurposeChoice(t *testing.T) {
+// The operator sees every key the import will trust, by its exported ID and
+// label, followed by the one-key reminder.
+func TestAdminCtl_ExportAgentAuthorizerListsEveryCredential(t *testing.T) {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	t.Cleanup(dbCleanup)
 	rdb, rdbCleanup := testhelpers.SetupTestRedis(t)
@@ -46,6 +46,6 @@ func TestAdminCtl_ExportAgentAuthorizerListsCredentialsForPurposeChoice(t *testi
 	enc := base64.RawURLEncoding.EncodeToString
 	require.Equal(t, enc([]byte("a-action-key"))+"  root?[31m key", lines[1], "sorted like the export; control characters replaced")
 	require.Equal(t, enc([]byte("b-login-key"))+"  YubiKey desk", lines[2])
-	require.Equal(t, "import with --action-credential <id> to let a key authorize host writes; that key can then no longer be used to log in", lines[3])
-	require.NotContains(t, stdout.String(), "--action-credential", "stdout stays the machine-readable bundle")
+	require.Equal(t, "import trusts every key listed; each one both logs in and authorizes host writes", lines[3])
+	require.NotContains(t, stdout.String(), "authorizes host writes", "stdout stays the machine-readable bundle")
 }

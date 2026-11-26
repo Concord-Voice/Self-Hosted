@@ -20,11 +20,6 @@ interface Ceremony {
 const UNREADABLE_RESPONSE =
   "The server's response was not recognized. This console may be out of date.";
 
-// Shown when the key used is one host root imported for host actions only
-// (--action-credential): the password was right, the key was the wrong one.
-const ACTION_KEY_LOGIN =
-  "This key is registered for host actions only. Sign in with your login key.";
-
 export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -72,11 +67,6 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
       setCeremony(null);
       if (cause instanceof ApiContractError) {
         setError(UNREADABLE_RESPONSE);
-      } else if (
-        cause instanceof ApiError &&
-        cause.code === "action_credential_not_for_login"
-      ) {
-        setError(ACTION_KEY_LOGIN);
       } else {
         setError("Sign-in failed. Check your credentials and try again.");
       }

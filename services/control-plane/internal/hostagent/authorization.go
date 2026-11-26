@@ -40,8 +40,8 @@ var (
 	// errCloneDetected and errCounterStale are denials the audit names apart.
 	errCloneDetected = fmt.Errorf("%w: authenticator clone warning", ErrAuthorizationDenied)
 	errCounterStale  = fmt.Errorf("%w: %w", ErrAuthorizationDenied, errAuthorizerCounterStale)
-	// errNoActionCredential means root designated no active action credential
-	// for this admin, so no root action can be authorized.
+	// errNoActionCredential means root has imported no active credential for
+	// this admin, so no root action can be authorized.
 	errNoActionCredential = fmt.Errorf("%w: no action credential", ErrAuthorizationDenied)
 )
 
@@ -80,7 +80,8 @@ func NewAuthorizationStore(authorizers *AuthorizerStore, verifier agentWebAuthn,
 // allocating a WebAuthn challenge or an in-memory slot. A request the parser
 // refuses returns that *refusal, so its own status and reason reach the caller;
 // ErrAuthorizationDenied (as errNoActionCredential) is kept for admins with no
-// active action credential: login credentials never enter this ceremony.
+// active imported credential. Every imported credential of the admin is in the
+// allow-list: the same key logs in and authorizes actions.
 func (s *AuthorizationStore) Begin(adminID, action string, req actionRequest) (string, *protocol.CredentialAssertion, error) {
 	if s == nil || s.authorizers == nil || s.webauthn == nil || s.jobs == nil {
 		return "", nil, ErrAuthorizerUnavailable
@@ -112,7 +113,7 @@ func (s *AuthorizationStore) Begin(adminID, action string, req actionRequest) (s
 	if held >= authorizationsPerAdmin {
 		return "", nil, ErrAuthorizationBusy
 	}
-	credentials, err := s.authorizers.actionCredentials(adminID)
+	credentials, err := s.authorizers.Credentials(adminID)
 	if err != nil {
 		log.Printf("concord-agent: authorizer trust unreadable at begin: %v", err)
 		return "", nil, ErrAuthorizerUnavailable
@@ -160,7 +161,7 @@ func (s *AuthorizationStore) consume(handle, action string, assertion []byte) (a
 	if !s.now().Before(pending.expires) || pending.action != action || len(assertion) == 0 || len(assertion) > maxAssertionBytes {
 		return actionRequest{}, pending.adminID, ErrAuthorizationDenied
 	}
-	credentials, err := s.authorizers.actionCredentials(pending.adminID)
+	credentials, err := s.authorizers.Credentials(pending.adminID)
 	if err != nil {
 		log.Printf("concord-agent: authorizer trust unreadable at consume: %v", err)
 		return actionRequest{}, pending.adminID, ErrAuthorizerUnavailable
@@ -176,14 +177,13 @@ func (s *AuthorizationStore) consume(handle, action string, assertion []byte) (a
 	if credential.Authenticator.CloneWarning {
 		return actionRequest{}, pending.adminID, errCloneDetected
 	}
-	// The signing credential's ID, re-checked as an active action credential
-	// under the file lock, not the ID the client claimed.
-	if err := s.authorizers.advanceActionCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
+	// The signing credential's ID, re-checked as active under the file lock,
+	// not the ID the client claimed. This is the same root counter a console
+	// login advances, so a login and an action can never replay each other.
+	if err := s.authorizers.AdvanceCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
 		switch {
 		case errors.Is(err, errAuthorizerCounterStale):
 			return actionRequest{}, pending.adminID, errCounterStale
-		case errors.Is(err, errAuthorizerPurpose):
-			return actionRequest{}, pending.adminID, errNoActionCredential
 		case errors.Is(err, errAuthorizerRevoked):
 			// Revoked between the credential read and the counter write.
 			return actionRequest{}, pending.adminID, ErrAuthorizationDenied

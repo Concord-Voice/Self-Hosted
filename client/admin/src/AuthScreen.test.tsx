@@ -139,40 +139,6 @@ describe("AuthScreen", () => {
     expect(alert).not.toHaveTextContent(/credentials|security.key/i);
   });
 
-  // A key host root imported with --action-credential is refused at login
-  // finish with a stable code; the operator must be told to use the login key
-  // rather than to recheck their password.
-  it("explains that an action-only key cannot sign in", async () => {
-    vi.spyOn(navigator.credentials, "get").mockResolvedValue(
-      assertionCredential(),
-    );
-    server.use(
-      http.post(`${base}/admin/api/v1/auth/password`, () =>
-        HttpResponse.json({
-          handle: "login-handle",
-          publicKey: { publicKey: requestOptions() },
-        }),
-      ),
-      http.post(`${base}/admin/api/v1/auth/webauthn`, () =>
-        HttpResponse.json(
-          { error: "action_credential_not_for_login" },
-          { status: 403 },
-        ),
-      ),
-    );
-
-    render(<AuthScreen onAuthenticated={vi.fn()} />);
-    await userEvent.type(screen.getByLabelText("Username"), "operator");
-    await userEvent.type(screen.getByLabelText("Password"), "correct horse");
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(
-      "This key is registered for host actions only. Sign in with your login key.",
-    );
-    expect(alert).not.toHaveTextContent(/Check your credentials/);
-  });
-
   it("reports an unrecognized response shape as neither a credential nor a key fault", async () => {
     server.use(
       http.post(`${base}/admin/api/v1/auth/password`, () =>
