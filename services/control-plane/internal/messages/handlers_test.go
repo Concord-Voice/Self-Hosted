@@ -265,6 +265,26 @@ func TestGetMessagesSuccess(t *testing.T) {
 	testhelpers.ParseJSON(t, w, &body)
 	messages := body["messages"].([]interface{})
 	assert.GreaterOrEqual(t, len(messages), 1)
+	message := messages[0].(map[string]interface{})
+	assert.NotContains(t, message, "e2ee_format")
+	assert.NotContains(t, message, "request_fingerprint")
+}
+
+func TestGetMessagesExposesStoredFormatWithoutRequestFingerprint(t *testing.T) {
+	ts, user, _, channelID, messageID := setupWithMessage(t)
+	fingerprint := bytes.Repeat([]byte{0x7a}, 32)
+	_, err := ts.DB.Exec(`UPDATE messages SET e2ee_format = 'message-v1', request_fingerprint = $2 WHERE id = $1`, messageID, fingerprint)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/messages", nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	messages := testhelpers.JSONField[[]interface{}](t, body, "messages")
+	require.Len(t, messages, 1)
+	message := testhelpers.JSONElem[map[string]interface{}](t, messages, 0)
+	assert.Equal(t, "message-v1", message["e2ee_format"])
+	assert.NotContains(t, message, "request_fingerprint")
 }
 
 func TestGetMessagesEmpty(t *testing.T) {

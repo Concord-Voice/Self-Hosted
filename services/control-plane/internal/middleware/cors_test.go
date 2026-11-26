@@ -77,7 +77,8 @@ func TestCORSAllowedOriginSetsHeaders(t *testing.T) {
 		middleware.SessionIssuedHeader+", "+middleware.SessionIDHeader+", "+
 			middleware.RateLimitResetHeader+", "+middleware.RateLimitLimitHeader+", "+
 			middleware.RetryAfterHeader+", "+middleware.FileMimeTypeHeader+", "+
-			middleware.FileKeyVersionHeader,
+			middleware.FileKeyVersionHeader+", "+middleware.FileE2EEFormatHeader+", "+
+			middleware.FileUploaderIDHeader+", "+middleware.FileScopeHeader+", "+middleware.FileScopeIDHeader,
 		w.Header().Get("Access-Control-Expose-Headers"),
 	)
 
@@ -89,6 +90,10 @@ func TestCORSAllowedOriginSetsHeaders(t *testing.T) {
 	exposed := w.Header().Get("Access-Control-Expose-Headers")
 	assert.Contains(t, exposed, middleware.FileMimeTypeHeader)
 	assert.Contains(t, exposed, middleware.FileKeyVersionHeader)
+	assert.Contains(t, exposed, middleware.FileE2EEFormatHeader)
+	assert.Contains(t, exposed, middleware.FileUploaderIDHeader)
+	assert.Contains(t, exposed, middleware.FileScopeHeader)
+	assert.Contains(t, exposed, middleware.FileScopeIDHeader)
 
 	// The two rate-limit headers a client must READ, named individually for the
 	// same reason. Setting a response header and exposing it are different

@@ -105,11 +105,14 @@ type ChannelKey struct {
 
 // Message represents a chat message in a channel
 type Message struct {
-	ID               string     `json:"id" db:"id"`
-	ChannelID        string     `json:"channel_id" db:"channel_id"`
-	UserID           string     `json:"user_id" db:"user_id"`
-	Content          string     `json:"content" db:"content"`
-	KeyVersion       int        `json:"key_version" db:"key_version"`
+	ID         string `json:"id" db:"id"`
+	ChannelID  string `json:"channel_id" db:"channel_id"`
+	UserID     string `json:"user_id" db:"user_id"`
+	Content    string `json:"content" db:"content"`
+	KeyVersion int    `json:"key_version" db:"key_version"`
+	// E2EEFormat is passive read metadata. S1 writers remain disabled;
+	// a nil format selects the legacy reader family.
+	E2EEFormat       *string    `json:"e2ee_format,omitempty" db:"e2ee_format"`
 	EmbedsSuppressed bool       `json:"embeds_suppressed" db:"embeds_suppressed"`
 	GifSlug          *string    `json:"gif_slug,omitempty" db:"gif_slug"`
 	ReplyToID        *string    `json:"reply_to_id,omitempty" db:"reply_to_id"`

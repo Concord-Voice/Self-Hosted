@@ -33,8 +33,15 @@ belongs in it, and write it if the section has none. Do not edit the
 New backup codes are stored as salted Argon2id hashes, and existing
 backup-code hashes move to an explicit versioned format.
 
+The server now returns stored E2EE format metadata for message and attachment reads as groundwork for a later client migration. Its internal create-request fingerprints stay out of history responses; no new writer or decrypt path is active.
+
+### Added
+
+- **Encryption:** Added passive stored-format metadata to channel and DM history responses and attachment reads. The reserved create-request fingerprint remains internal and is never returned in message history.
+
 ### Security
 
+- **Encryption:** Added a dormant, permanent global reservation namespace and verified online-baseline gate for future message-v1 identifiers. No message writer or client behavior is enabled ([#403](https://github.com/Concord-Voice/Self-Hosted/pull/403)).
 - **MFA:** New backup codes are stored as salted Argon2id hashes, one random salt per code, so a database read no longer yields unsalted SHA-256 digests of them. Migration 000205 marks each existing hash with an explicit `v1$` prefix. Upgrade only from a release that already reads the versioned formats, or stop every older control-plane process before migrating. Rolling the schema back refuses once any new code has been generated.
 - **MFA:** At most four backup-code Argon2id hashes run at once across the control plane, so a burst of TOTP setup, backup-code regeneration or backup-code sign-in requests can no longer exhaust its memory. A request that cannot get a slot within 5 seconds gets 503 with `Retry-After: 1` on every MFA sign-in and step-up route, and the attempt it was charged is returned, so a busy check never counts toward the 5-attempt step-up budget or the sign-in attempt limit. The attempt goes back only to the window it was counted in, so a request that waits past the end of a window cannot cancel a wrong code counted in the next one and keep the lockout from arming.
 - **MFA:** `POST /mfa/email-sms/setup` and `PUT /mfa/recovery-only` accept only their known methods, at most two and four entries, and refuse a longer list or another method with 400 before the step-up check. A repeated method is sent, coded and stored once.

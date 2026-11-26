@@ -84,7 +84,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000205)
+## Existing Migrations (000001–000206)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -314,6 +314,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000203 | admin_audit_login_success_index | One-statement `CREATE INDEX CONCURRENTLY` of a partial index on `admin_audit_log (admin_id, ts DESC)` for successful sign-ins, the inner lookup of the admin sign-in notice; a first sign-in no longer scans the whole log. Down drops the index concurrently. |
 | 000204 | admin_audit_event_result_ts_index | One-statement `CREATE INDEX CONCURRENTLY` on `admin_audit_log (event_type, result, ts)` for the notice's count of `admin_created` successes since the previous sign-in. Same merge order as 000203. Down drops the index concurrently. |
 | 000205 | prefix_legacy_backup_code_hashes | Rewrites each bare lowercase 64-hex SHA-256 element of `user_mfa_totp.backup_codes_hash` to `v1$` plus the same digest, keeping array order and `backup_codes_used`; other elements are untouched. Run only after every serving replica reads bare, v1 and v2 hashes. The down strips `v1$` under a `SHARE ROW EXCLUSIVE` lock and refuses while any element is neither bare nor v1, such as a generated v2 code. |
+| 000206 | message_id_reservations | Adds a dormant global ID-only reservation namespace for channel and DM message UUIDs, plus the online baseline gate; no message-v1 writer is enabled. |
 
 If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
 
