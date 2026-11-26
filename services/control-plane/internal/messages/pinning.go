@@ -613,7 +613,7 @@ func (h *Handler) GetChannelPins(c *gin.Context) {
 	}
 
 	rows, err := h.db.Query(`
-		SELECT m.id, m.channel_id, m.user_id, m.content, m.key_version,
+		SELECT m.id, m.channel_id, m.user_id, m.content, m.key_version, m.e2ee_format,
 		       m.embeds_suppressed, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_at, m.expires_at, m.created_at, m.updated_at,
 		       u.username, u.display_name, u.avatar_url
 		FROM messages m
@@ -632,7 +632,7 @@ func (h *Handler) GetChannelPins(c *gin.Context) {
 	for rows.Next() {
 		var msg models.MessageWithUser
 		scanErr := rows.Scan(
-			&msg.ID, &msg.ChannelID, &msg.UserID, &msg.Content, &msg.KeyVersion,
+			&msg.ID, &msg.ChannelID, &msg.UserID, &msg.Content, &msg.KeyVersion, &msg.E2EEFormat,
 			&msg.EmbedsSuppressed, &msg.ReplyToID, &msg.PinnedAt, &msg.PinnedBy, &msg.EditedAt,
 			&msg.ExpiresAt, &msg.CreatedAt, &msg.UpdatedAt, &msg.Username, &msg.DisplayName, &msg.AvatarURL,
 		)
@@ -661,6 +661,7 @@ type dmPinnedMessage struct {
 	Content        string     `json:"content"`
 	Type           string     `json:"type"`
 	KeyVersion     int        `json:"key_version"`
+	E2EEFormat     *string    `json:"e2ee_format,omitempty"`
 	PinnedAt       *time.Time `json:"pinned_at"`
 	PinnedBy       *string    `json:"pinned_by"`
 	EditedAt       *time.Time `json:"edited_at,omitempty"`
@@ -703,7 +704,7 @@ func (h *Handler) getDMConversationPins(c *gin.Context, conversationID, userID s
 	//nolint:gosec // G202: concatenated fragment is a compile-time constant; all values parameterized
 	// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query,concord-go-sql-sprintf
 	rows, err := h.db.Query(`
-		SELECT dm.id, dm.conversation_id, dm.user_id, dm.content, dm.type, dm.key_version,
+		SELECT dm.id, dm.conversation_id, dm.user_id, dm.content, dm.type, dm.key_version, dm.e2ee_format,
 		       dm.pinned_at, dm.pinned_by, dm.edited_at, dm.expires_at, dm.created_at, dm.updated_at,
 		       u.username, u.display_name, u.avatar_url
 		FROM dm_messages dm
@@ -724,7 +725,7 @@ func (h *Handler) getDMConversationPins(c *gin.Context, conversationID, userID s
 	for rows.Next() {
 		var m dmPinnedMessage
 		if scanErr := rows.Scan(
-			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.Type, &m.KeyVersion,
+			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.Type, &m.KeyVersion, &m.E2EEFormat,
 			&m.PinnedAt, &m.PinnedBy, &m.EditedAt, &m.ExpiresAt, &m.CreatedAt, &m.UpdatedAt,
 			&m.Username, &m.DisplayName, &m.AvatarURL,
 		); scanErr != nil {

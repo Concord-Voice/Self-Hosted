@@ -23920,10 +23920,10 @@ components:
           type: string
         e2ee_format:
           type: string
-          nullable: true
+          enum: [message-v1]
           description: >-
-            Stored E2EE envelope format. Null selects the legacy reader family.
-            This passive metadata does not enable a writer.
+            Stored E2EE envelope format. Absent for legacy rows; absence selects
+            the legacy reader family. This passive metadata does not enable a writer.
         edited_at:
           type: string
           format: date-time
@@ -23973,20 +23973,20 @@ components:
                 key_version:
                   type: integer
                   minimum: 1
-                  nullable: true
                   description: Stored key epoch when the attachment row carries one; omitted for legacy rows.
                 channel_id:
                   type: string
                   format: uuid
-                  nullable: true
+                  description: Candidate channel scope. Exactly one of channel_id and conversation_id is present.
                 conversation_id:
                   type: string
                   format: uuid
-                  nullable: true
+                  description: Candidate DM scope. Exactly one of channel_id and conversation_id is present.
                 e2ee_format:
                   type: string
-                  nullable: true
+                  enum: [attachment-v4]
                   description: >-
+                    Omitted for legacy rows.
                     Stored attachment envelope format. Descriptive only: attachment
                     decryption still requires verified enclosing-message context.
     ServerMember:
@@ -24414,6 +24414,12 @@ components:
             created_at:
               type: string
               format: date-time
+            e2ee_format:
+              type: string
+              enum: [message-v1]
+              description: >-
+                Stored E2EE envelope format of the preview ciphertext. Absent for
+                legacy rows; absence selects the legacy reader family.
             type:
               type: string
               description: >-
@@ -24517,10 +24523,10 @@ components:
           type: string
         e2ee_format:
           type: string
-          nullable: true
+          enum: [message-v1]
           description: >-
-            Stored E2EE envelope format. Null selects the legacy reader family.
-            This passive metadata does not enable a writer.
+            Stored E2EE envelope format. Absent for legacy rows; absence selects
+            the legacy reader family. This passive metadata does not enable a writer.
         type:
           type: string
           description: >-
@@ -24571,20 +24577,20 @@ components:
               key_version:
                 type: integer
                 minimum: 1
-                nullable: true
                 description: Stored key epoch when the attachment row carries one; omitted for legacy rows.
               channel_id:
                 type: string
                 format: uuid
-                nullable: true
+                description: Candidate channel scope. Exactly one of channel_id and conversation_id is present.
               conversation_id:
                 type: string
                 format: uuid
-                nullable: true
+                description: Candidate DM scope. Exactly one of channel_id and conversation_id is present.
               e2ee_format:
                 type: string
-                nullable: true
+                enum: [attachment-v4]
                 description: >-
+                  Omitted for legacy rows.
                   Stored attachment envelope format. Descriptive only: attachment
                   decryption still requires verified enclosing-message context.
         reactions:
