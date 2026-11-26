@@ -263,6 +263,10 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 type webauthnRequest struct {
 	Handle    string          `json:"handle"`
 	Assertion json.RawMessage `json:"assertion"`
+	// SignInNotice opts in to the admins_added notice fields. A portal tab
+	// loaded before the notice existed accepts only {"status"} and treats any
+	// other field as a broken response, so the default stays status-only.
+	SignInNotice bool `json:"signin_notice"`
 }
 
 // WebAuthnLogin handles step 2 of admin login: redeem the opaque handle, finish
@@ -347,8 +351,10 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	// The window moves only when the portal acknowledges the cursor
 	// (AcknowledgeSignInNotice), so a notice this response never delivers is
 	// shown again at the next sign-in.
-	rec, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username, sid)
-	if !rec.Shown {
+	// A request without signin_notice gets no notice, so none is counted for
+	// this session (RecordSignIn deliver=false) and the window stays put.
+	rec, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username, sid, req.SignInNotice)
+	if req.SignInNotice && !rec.Shown {
 		stage := "notice_read"
 		if isAuditStoreError(rec.NoticeErr) {
 			stage = "audit_write"
@@ -359,7 +365,7 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		h.log.Warn("admin audit write failed", "error", err)
 	}
 	resp := gin.H{"status": "authenticated"}
-	if rec.Shown {
+	if rec.Shown && req.SignInNotice {
 		resp["admins_added"] = rec.Notice.AdminsAdded
 		if rec.Notice.AdminsAdded > 0 {
 			// Opaque to the portal, which sends it back once it has shown the

@@ -279,6 +279,13 @@ func TestAdminsAddedSinceLastSignIn_DBErrorIsReturned(t *testing.T) {
 // signInAdmin runs both sign-in steps and returns the WebAuthn step's recorder.
 func signInAdmin(t *testing.T, engine *gin.Engine, username string, va *virtualAuthenticator) (int, []byte, string) {
 	t.Helper()
+	return signInAdminWith(t, engine, username, va, true)
+}
+
+// signInAdminWith signs in, asking for the notice fields only when optIn is
+// set. A portal tab loaded before the notice existed never asks.
+func signInAdminWith(t *testing.T, engine *gin.Engine, username string, va *virtualAuthenticator, optIn bool) (int, []byte, string) {
+	t.Helper()
 	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{
 		"username": username,
 		"password": adminTestPassword,
@@ -292,10 +299,14 @@ func signInAdmin(t *testing.T, engine *gin.Engine, username string, va *virtualA
 
 	va.signCount++
 	assertion := va.assertionResponse(t, testAdminRPID, pwResp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
-	rec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{
+	body := map[string]any{
 		"handle":    pwResp.Handle,
 		"assertion": json.RawMessage(assertion),
-	})
+	}
+	if optIn {
+		body["signin_notice"] = true
+	}
+	rec := postJSON(engine, "/admin/api/v1/auth/webauthn", body)
 	return rec.Code, rec.Body.Bytes(), rec.Header().Get("Set-Cookie")
 }
 
@@ -355,5 +366,36 @@ func TestWebAuthnLogin_ReportsAdminsAddedSincePreviousSignIn(t *testing.T) {
 	require.NotEmpty(t, cookie)
 	// At least the row above; a creation another test committed in the ten
 	// seconds before the first sign-in may be counted too.
+	assert.GreaterOrEqual(t, decodeSignIn(t, body), 1)
+}
+
+// A portal tab loaded before the notice existed parses only {"status"} and
+// treats any other field as a broken response, so a sign-in that does not ask
+// for the notice gets exactly that body, at a zero count and at a positive one.
+// Without the opt-in gate both responses carry admins_added and this fails.
+func TestWebAuthnLogin_WithoutOptIn_ReturnsStatusOnly(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	_, username, va := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngine(t, db, rdb)
+
+	code, body, cookie := signInAdminWith(t, engine, username, va, false)
+	require.Equal(t, http.StatusOK, code, string(body))
+	require.NotEmpty(t, cookie, "the session is still minted")
+	assert.JSONEq(t, `{"status":"authenticated"}`, string(body), "zero count")
+
+	insertAuditRow(t, db, nil, existingAdmin(t, db, "notice-legacy"), admin.EventAdminCreated, admin.AuditSuccess, "1 minute")
+
+	code, body, cookie = signInAdminWith(t, engine, username, va, false)
+	require.Equal(t, http.StatusOK, code, string(body))
+	require.NotEmpty(t, cookie)
+	assert.JSONEq(t, `{"status":"authenticated"}`, string(body), "positive count")
+
+	// The undelivered notice is not lost: the window moves only on an ack.
+	code, body, _ = signInAdmin(t, engine, username, va)
+	require.Equal(t, http.StatusOK, code, string(body))
 	assert.GreaterOrEqual(t, decodeSignIn(t, body), 1)
 }

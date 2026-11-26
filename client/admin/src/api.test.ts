@@ -177,7 +177,11 @@ describe("api", () => {
     expect(fetchSpy.mock.calls[4]?.[1]?.body).toBeUndefined();
     expect(bodies).toEqual([
       { username: "operator", password: "correct horse" }, // pragma: allowlist secret
-      { handle: "login-handle", assertion: { id: "cred" } },
+      {
+        handle: "login-handle",
+        assertion: { id: "cred" },
+        signin_notice: true,
+      },
       { username: "operator", password: "correct horse", token: "token" }, // pragma: allowlist secret
       {
         handle: "enroll-handle",
