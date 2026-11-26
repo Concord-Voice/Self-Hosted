@@ -35,6 +35,9 @@ const (
 	alertTimeout        = 5 * time.Second
 	alertRetryDelay     = time.Second
 	alertQueueSize      = 32
+	// denialAlertQueueSize bounds denial alerts on their own small queue, so a
+	// denial flood can drop only denial alerts, never an admitted one.
+	denialAlertQueueSize = 4
 )
 
 // ErrAlertNotConfigured means no alert file exists: actions are audited but
@@ -62,7 +65,11 @@ type Alerter struct {
 	client *http.Client
 	now    func() time.Time
 	retry  time.Duration
-	queue  chan AlertEvent
+	// queue carries admitted and test alerts; denials has its own queue so a
+	// flood of denials (a compromised control plane can cause one at will)
+	// cannot crowd out the admitted alert that is the detection signal.
+	queue   chan AlertEvent
+	denials chan AlertEvent
 	// dropLogged rate-limits the queue_full journal line to one per window.
 	dropMu     sync.Mutex
 	dropLogged time.Time
@@ -114,9 +121,10 @@ func newAlerter(webhook, host string) *Alerter {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 			Transport:     &http.Transport{Proxy: nil, TLSHandshakeTimeout: alertTimeout, ResponseHeaderTimeout: alertTimeout},
 		},
-		now:   time.Now,
-		retry: alertRetryDelay,
-		queue: make(chan AlertEvent, alertQueueSize),
+		now:     time.Now,
+		retry:   alertRetryDelay,
+		queue:   make(chan AlertEvent, alertQueueSize),
+		denials: make(chan AlertEvent, denialAlertQueueSize),
 	}
 }
 
@@ -169,14 +177,19 @@ func validAlertURL(raw string) bool {
 	return err == nil && u.Scheme == "https" && u.Host != "" && u.Hostname() != "" && u.Opaque == "" && u.Fragment == ""
 }
 
-// Enqueue hands an event to the worker without waiting. A full queue drops
-// the event and logs the fixed class queue_full.
+// Enqueue hands an event to the worker without waiting. Denials go on their
+// own small queue; everything else on the main one. A full queue drops the
+// event and logs the fixed class queue_full.
 func (a *Alerter) Enqueue(event AlertEvent) {
 	if a == nil {
 		return
 	}
+	q := a.queue
+	if event.Outcome == "denied" {
+		q = a.denials
+	}
 	select {
-	case a.queue <- event:
+	case q <- event:
 	default:
 		a.dropMu.Lock()
 		defer a.dropMu.Unlock()
@@ -189,14 +202,31 @@ func (a *Alerter) Enqueue(event AlertEvent) {
 
 func (a *Alerter) worker(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		event, ok := a.next(ctx)
+		if !ok {
 			return
-		case event := <-a.queue:
-			if err := a.Send(ctx, event); err != nil {
-				log.Printf("concord-agent: alert delivery failed: class=%s", AlertFailureClass(err))
-			}
 		}
+		if err := a.Send(ctx, event); err != nil {
+			log.Printf("concord-agent: alert delivery failed: class=%s", AlertFailureClass(err))
+		}
+	}
+}
+
+// next returns the next event to send, always draining admitted alerts
+// before any denial.
+func (a *Alerter) next(ctx context.Context) (AlertEvent, bool) {
+	select {
+	case event := <-a.queue:
+		return event, true
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return AlertEvent{}, false
+	case event := <-a.queue:
+		return event, true
+	case event := <-a.denials:
+		return event, true
 	}
 }
 

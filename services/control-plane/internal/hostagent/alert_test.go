@@ -194,8 +194,31 @@ func TestAlertQueueIsBoundedAndNeverBlocks(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Enqueue blocked on a full queue")
 	}
-	require.Len(t, a.queue, alertQueueSize)
+	require.Len(t, a.denials, denialAlertQueueSize)
+	require.Empty(t, a.queue, "denials never occupy the admitted queue")
 	require.Equal(t, 1, strings.Count(logs.String(), "class=queue_full"), "drops are reported once per window")
+}
+
+// A compromised control plane can flood denials just before a harvested
+// action. The admitted alert must still be queued and sent first.
+func TestDenialFloodCannotDropOrDelayAnAdmittedAlert(t *testing.T) {
+	_ = captureLog(t)
+	a := newAlerter("https://alerts.example.test/hook", "host") // no worker yet
+	for range alertQueueSize * 4 {
+		a.Enqueue(AlertEvent{Outcome: "denied", Reason: "begin_denied"})
+	}
+	a.Enqueue(AlertEvent{Outcome: "admitted", Action: "update"})
+	require.Len(t, a.queue, 1, "the admitted alert was dropped by the flood")
+
+	// select picks randomly among ready channels, so check priority many
+	// times: without it each round has an even chance of picking a denial.
+	for range 32 {
+		event, ok := a.next(context.Background())
+		require.True(t, ok)
+		require.Equal(t, "admitted", event.Outcome, "admitted alerts are sent before queued denials")
+		a.Enqueue(AlertEvent{Outcome: "admitted", Action: "update"})
+	}
+	require.Len(t, a.denials, denialAlertQueueSize, "denials wait while admitted alerts are queued")
 }
 
 func serverWithAlerts(t *testing.T, runner *fakeRunner) (*Server, *alertReceiver) {
