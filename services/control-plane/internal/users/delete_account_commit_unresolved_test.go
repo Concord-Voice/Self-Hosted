@@ -180,7 +180,7 @@ func TestDeleteAccountCommitUnresolvedPreservesPrivacyOutputButGatesMedia(t *tes
 				reclaimed = append(reclaimed, tier2...)
 			})
 
-			err = service.DeleteAccount(testdb.ActorContext(context.Background(), t, db, erased.String()), erased.String())
+			err = service.DeleteAccountForTest(testdb.ActorContext(context.Background(), t, db, erased.String()), erased.String())
 			require.ErrorIs(t, err, presencecapture.ErrCommitUnresolved)
 			assert.Equal(t, tc.wantAbsent, countUsers(t, db, erased) == 0)
 			assert.Equal(t, 1, drain.clearCount(),

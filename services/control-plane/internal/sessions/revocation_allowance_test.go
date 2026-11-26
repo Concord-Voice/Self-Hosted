@@ -107,7 +107,7 @@ func TestRevokeSessionReadsAuthWindowBeforeUserLock(t *testing.T) {
 	require.NoError(t, err)
 
 	read := make(chan struct{})
-	rig.redis.AddHook(&authWindowReadHook{key: simpleAuthWindowKey(rig.user), observed: read})
+	rig.redis.AddHook(&authWindowReadHook{key: simpleAuthWindowKey(rig.user, rig.familyID(t)), observed: read})
 
 	tx, err := rig.db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
@@ -522,13 +522,13 @@ func TestSimpleMode_LegacyAndResetWindowsCannotBypassAllowance(t *testing.T) {
 	rig.router.POST("/api/v1/sessions/revoke-all", rig.handler.RevokeAllSessions)
 	_, err := rig.db.Exec(`UPDATE users SET revocation_mode='simple',last_session_revoke_at=clock_timestamp() WHERE id=$1`, rig.user)
 	require.NoError(t, err)
-	require.NoError(t, rig.redis.Set(context.Background(), simpleAuthWindowKey(rig.user), "1", time.Minute).Err())
+	require.NoError(t, rig.redis.Set(context.Background(), simpleAuthWindowKey(rig.user, rig.familyID(t)), "1", time.Minute).Err())
 
 	response := rig.request(http.MethodDelete, "/api/v1/sessions/"+targets[0], "")
 	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
 	response = rig.request(http.MethodDelete, "/api/v1/sessions/"+targets[0], `{"password":"`+privacyPassword+`"}`)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
-	oldWindow, err := rig.redis.Get(context.Background(), simpleAuthWindowKey(rig.user)).Result()
+	oldWindow, err := rig.redis.Get(context.Background(), simpleAuthWindowKey(rig.user, rig.familyID(t))).Result()
 	require.NoError(t, err)
 	require.Equal(t, "v2:0", oldWindow)
 	response = rig.request(http.MethodDelete, "/api/v1/sessions/"+targets[1], "")
@@ -538,7 +538,7 @@ func TestSimpleMode_LegacyAndResetWindowsCannotBypassAllowance(t *testing.T) {
 		`{"password":"`+privacyPassword+`","include_current":false}`)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	// Model an old grant arriving after revoke-all removed its Redis key.
-	require.NoError(t, rig.redis.Set(context.Background(), simpleAuthWindowKey(rig.user), oldWindow, time.Minute).Err())
+	require.NoError(t, rig.redis.Set(context.Background(), simpleAuthWindowKey(rig.user, rig.familyID(t)), oldWindow, time.Minute).Err())
 	fresh := issueRevocationTargets(t, rig, 3)
 	response = rig.request(http.MethodDelete, "/api/v1/sessions/"+fresh[0], "")
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
