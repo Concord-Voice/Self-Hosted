@@ -351,8 +351,10 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	// The window moves only when the portal acknowledges the cursor
 	// (AcknowledgeSignInNotice), so a notice this response never delivers is
 	// shown again at the next sign-in.
-	rec, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username, sid)
-	if !rec.Shown {
+	// A request without signin_notice gets no notice, so none is counted for
+	// this session (RecordSignIn deliver=false) and the window stays put.
+	rec, err := h.audit.RecordSignIn(ctx, adminID, challenge.Username, sid, req.SignInNotice)
+	if req.SignInNotice && !rec.Shown {
 		stage := "notice_read"
 		if isAuditStoreError(rec.NoticeErr) {
 			stage = "audit_write"

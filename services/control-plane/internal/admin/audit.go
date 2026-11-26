@@ -502,10 +502,19 @@ func signInNoticeFor(ctx context.Context, db auditRowQuerier, adminID string) (S
 // When the count cannot be read, or that transaction fails for any other
 // reason, the row is written again without the lock and without a count. It
 // moves no window, so a failed read never drops a creation.
-func (a *AuditLog) RecordSignIn(ctx context.Context, adminID, actor, sessionID string) (SignInRecord, error) {
+//
+// When deliver is false the response carries no notice (a portal tab that did
+// not send signin_notice), so the row is written in that same uncounted form:
+// it records no cursor this session could acknowledge, and a notice it never
+// received cannot be acknowledged away.
+func (a *AuditLog) RecordSignIn(ctx context.Context, adminID, actor, sessionID string, deliver bool) (SignInRecord, error) {
 	id := adminID
 	binding := noticeSessionBinding(sessionID)
 	ev := AuditEvent{AdminID: &id, Actor: actor, EventType: EventLoginSuccess, Result: AuditSuccess}
+	if !deliver {
+		ev.Detail = map[string]any{detailNoticeSession: binding}
+		return SignInRecord{}, a.Write(ctx, ev)
+	}
 	var notice SignInNotice
 	noticeErr := a.WriteWith(ctx, ev, func(tx *sql.Tx, ev *AuditEvent) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '"+signInNoticeLockTimeout+"'"); err != nil {
