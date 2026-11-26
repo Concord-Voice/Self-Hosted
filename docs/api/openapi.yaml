@@ -9118,7 +9118,11 @@ paths:
 
         the original MIME type hint is returned in the X-File-Mime-Type header, and the CSK epoch
 
-        the file was sealed under in X-File-Key-Version.
+        the file was sealed under in X-File-Key-Version. If present,
+        X-File-E2EE-Format is descriptive stored-format metadata only; it does
+        not supply authenticated attachment context. X-File-Uploader-ID,
+        X-File-Scope, and X-File-Scope-ID are candidate values from the stored
+        attachment row, not authenticated attachment provenance.
 
         Rate limit: 60 requests per minute.
 
@@ -9156,6 +9160,28 @@ paths:
               schema:
                 type: integer
                 minimum: 1
+            X-File-E2EE-Format:
+              description: >-
+                Stored attachment envelope format. It is not a substitute for
+                verified enclosing-message provenance or authenticated AAD.
+              schema:
+                type: string
+                enum: [attachment-v4]
+            X-File-Uploader-ID:
+              description: Candidate uploader UUID from media metadata; never authenticated AAD by itself.
+              schema:
+                type: string
+                format: uuid
+            X-File-Scope:
+              description: Candidate scope kind from the tier-2 media row.
+              schema:
+                type: string
+                enum: [channel, dm]
+            X-File-Scope-ID:
+              description: Candidate channel or DM UUID from the tier-2 media row.
+              schema:
+                type: string
+                format: uuid
             Cache-Control:
               description: private, no-store
               schema:
@@ -23854,6 +23880,12 @@ components:
           format: uuid
         content:
           type: string
+        e2ee_format:
+          type: string
+          nullable: true
+          description: >-
+            Stored E2EE envelope format. Null selects the legacy reader family.
+            This passive metadata does not enable a writer.
         edited_at:
           type: string
           format: date-time
@@ -23882,6 +23914,43 @@ components:
           avatar_url:
             type: string
             nullable: true
+          attachments:
+            type: array
+            description: Present only when the message has file attachments.
+            items:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                file_type:
+                  type: string
+                mime_type:
+                  type: string
+                file_size:
+                  type: integer
+                uploader_id:
+                  type: string
+                  format: uuid
+                key_version:
+                  type: integer
+                  minimum: 1
+                  nullable: true
+                  description: Stored key epoch when the attachment row carries one; omitted for legacy rows.
+                channel_id:
+                  type: string
+                  format: uuid
+                  nullable: true
+                conversation_id:
+                  type: string
+                  format: uuid
+                  nullable: true
+                e2ee_format:
+                  type: string
+                  nullable: true
+                  description: >-
+                    Stored attachment envelope format. Descriptive only: attachment
+                    decryption still requires verified enclosing-message context.
     ServerMember:
       type: object
       properties:
@@ -24408,6 +24477,12 @@ components:
           format: uuid
         content:
           type: string
+        e2ee_format:
+          type: string
+          nullable: true
+          description: >-
+            Stored E2EE envelope format. Null selects the legacy reader family.
+            This passive metadata does not enable a writer.
         type:
           type: string
           description: >-
@@ -24452,6 +24527,28 @@ components:
                 type: string
               file_size:
                 type: integer
+              uploader_id:
+                type: string
+                format: uuid
+              key_version:
+                type: integer
+                minimum: 1
+                nullable: true
+                description: Stored key epoch when the attachment row carries one; omitted for legacy rows.
+              channel_id:
+                type: string
+                format: uuid
+                nullable: true
+              conversation_id:
+                type: string
+                format: uuid
+                nullable: true
+              e2ee_format:
+                type: string
+                nullable: true
+                description: >-
+                  Stored attachment envelope format. Descriptive only: attachment
+                  decryption still requires verified enclosing-message context.
         reactions:
           type: array
           description: Present only when the message has reactions

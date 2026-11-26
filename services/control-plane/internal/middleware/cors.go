@@ -26,6 +26,17 @@ const (
 	// fails authentication on everything older than the last rotation -- and
 	// reports it as tampering.
 	FileKeyVersionHeader = "X-File-Key-Version"
+	// FileE2EEFormatHeader identifies the stored attachment envelope family.
+	// It is descriptive metadata only: a client must derive attachment AAD from
+	// its verified enclosing message, never from this header.
+	FileE2EEFormatHeader = "X-File-E2EE-Format"
+	// FileUploaderIDHeader carries a candidate uploader UUID from media_files.
+	// It never authenticates a decrypt context on its own.
+	FileUploaderIDHeader = "X-File-Uploader-ID"
+	// FileScopeHeader carries a candidate channel or DM scope kind from media_files.
+	FileScopeHeader = "X-File-Scope"
+	// FileScopeIDHeader carries that candidate channel or DM scope UUID.
+	FileScopeIDHeader = "X-File-Scope-ID"
 )
 
 // CORS returns a middleware that handles CORS.
@@ -74,13 +85,14 @@ func setCORSHeaders(c *gin.Context, origin string) {
 	c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 	c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 	c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Refresh-Token, X-Session-ID, X-Machine-Id, X-Device-Name, X-Request-ID, X-Attestation-Token, "+ClientVersionHeader+", "+ClientPlatformHeader+", X-Concord-SSO-Client-Binding")
-	// Both attachment headers are exposed: a cross-origin renderer (the remote
+	// All attachment headers are exposed: a cross-origin renderer (the remote
 	// SPA mode) cannot READ a response header that is not on this list, and both
 	// carry metadata that only exists here because the body is ciphertext.
 	c.Writer.Header().Set("Access-Control-Expose-Headers",
 		SessionIssuedHeader+", "+SessionIDHeader+", "+RateLimitResetHeader+", "+
 			RateLimitLimitHeader+", "+RetryAfterHeader+", "+FileMimeTypeHeader+", "+
-			FileKeyVersionHeader)
+			FileKeyVersionHeader+", "+FileE2EEFormatHeader+", "+FileUploaderIDHeader+", "+
+			FileScopeHeader+", "+FileScopeIDHeader)
 	c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 	c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 }

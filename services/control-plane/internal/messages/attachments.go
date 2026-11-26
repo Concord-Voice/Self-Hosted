@@ -15,7 +15,8 @@ func loadAttachmentsForMessages(db *sql.DB, messageIDs []string) (map[string][]m
 	}
 
 	rows, err := db.Query(`
-		SELECT ma.message_id, mf.id, mf.file_type, mf.mime_type, mf.file_size
+		SELECT ma.message_id, mf.id, mf.file_type, mf.mime_type, mf.file_size,
+		       mf.uploader_id, mf.key_version, mf.channel_id, mf.conversation_id, mf.e2ee_format
 		FROM message_attachments ma
 		INNER JOIN media_files mf ON ma.file_id = mf.id
 		WHERE ma.message_id = ANY($1::uuid[])
@@ -29,7 +30,8 @@ func loadAttachmentsForMessages(db *sql.DB, messageIDs []string) (map[string][]m
 }
 
 // ScanAttachmentSummaries consumes rows of
-// (message_id, file id, file_type, mime_type, file_size) and groups the
+// (message_id, file ID/type/MIME/size, candidate uploader/key/scope, e2ee_format)
+// and groups the
 // summaries by message ID, closing rows before returning. Shared by the
 // channel-message loader above and the DM loader in internal/dm, whose
 // queries differ only by attachment table (message_attachments vs
@@ -42,7 +44,10 @@ func ScanAttachmentSummaries(rows *sql.Rows) (map[string][]models.AttachmentSumm
 	for rows.Next() {
 		var msgID string
 		var a models.AttachmentSummary
-		if err := rows.Scan(&msgID, &a.ID, &a.FileType, &a.MimeType, &a.FileSize); err != nil {
+		if err := rows.Scan(
+			&msgID, &a.ID, &a.FileType, &a.MimeType, &a.FileSize,
+			&a.UploaderID, &a.KeyVersion, &a.ChannelID, &a.ConversationID, &a.E2EEFormat,
+		); err != nil {
 			return nil, err
 		}
 		result[msgID] = append(result[msgID], a)
