@@ -144,7 +144,12 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	as := actingID
-	engine.Use(func(c *gin.Context) { c.Set("admin_id", as); c.Next() })
+	session := testAdminSessionBinding
+	engine.Use(func(c *gin.Context) {
+		c.Set("admin_id", as)
+		c.Set("admin_session_binding", session)
+		c.Next()
+	})
 	engine.POST("/admin/api/v1/admins", h.CreateAdmin)
 	engine.POST("/admin/api/v1/admins/stepup", h.CreateAdminStepUpBegin)
 	engine.POST("/server/stepup", h.ServerStepUpBegin)
@@ -208,9 +213,15 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 		handle, challenge := stepUpBegin(t, engine, "/server/stepup", map[string]string{"action": "stop"})
 		refused(t, proof(handle, signStepUp(t, va, challenge, flagUP|flagUV)), "stepup_failed")
 	})
+	t.Run("handle begun in another session of this admin", func(t *testing.T) {
+		session = "other-session-binding"
+		handle, challenge := stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
+		session = testAdminSessionBinding
+		refused(t, proof(handle, signStepUp(t, va, challenge, flagUP|flagUV)), "stepup_failed")
+	})
 
 	assert.Equal(t, 1, adminCreatedRows(t, db, actingID, admin.AuditSuccess))
-	assert.Equal(t, 7, adminCreatedRows(t, db, actingID, admin.AuditDenied), "one denied row per refusal above")
+	assert.Equal(t, 8, adminCreatedRows(t, db, actingID, admin.AuditDenied), "one denied row per refusal above")
 	// Each refusal records why, in the order of the subtests above; the
 	// response stays a uniform stepup_failed.
 	assert.Equal(t, []string{
@@ -221,6 +232,7 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 		"stepup_clone_warning",      // counter did not advance
 		"stepup_unknown_handle",     // another admin's handle is not reachable
 		"stepup_unknown_handle",     // server-action handle, other prefix
+		"stepup_wrong_session",      // another session of this admin
 	}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditDenied))
 }
 
