@@ -422,8 +422,8 @@ func TestVerifyCountsAWrongCode(t *testing.T) {
 
 // When the lockout write after the last allowed wrong code fails, that attempt
 // fails closed. The next attempt, even one with the right code, is past the
-// limit and tries to arm the lockout itself; that write fails too, so it also
-// fails closed, and its code is never judged.
+// limit: it gives its charge back and is refused with 429, and its code is
+// never judged.
 func TestVerifyRefusesPastTheLimitWhenTheLockoutWriteFails(t *testing.T) {
 	f := newVerifyFixture(t)
 	require.NoError(t, f.redis.Set(context.Background(), "mfa_verify_attempts:"+enrollUser, failedAttemptLimit-1, time.Minute).Err())
@@ -438,9 +438,11 @@ func TestVerifyRefusesPastTheLimitWhenTheLockoutWriteFails(t *testing.T) {
 	judgedBefore := f.judged()
 	next := f.verify(f.right)
 
-	require.Equal(t, http.StatusInternalServerError, next.Code, next.Body.String())
-	require.Contains(t, next.Body.String(), errMsgMFAVerificationUnavailable)
+	require.Equal(t, http.StatusTooManyRequests, next.Code, next.Body.String())
 	require.False(t, f.completer.called, "a right code must not sign in past the limit")
+	attempts, err := f.redis.Get(context.Background(), "mfa_verify_attempts:"+enrollUser).Int()
+	require.NoError(t, err)
+	require.Equal(t, failedAttemptLimit, attempts, "the refused attempt gave its charge back")
 	require.Equal(t, judgedBefore, f.judged(), "a refused attempt must not have its code judged")
 }
 

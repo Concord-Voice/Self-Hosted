@@ -403,9 +403,10 @@ func TestBusyBackupCheck_SignInRefundAfterTheWindowStillLetsTheLockoutArm(t *tes
 	require.True(t, mr.Exists(lockoutKey), "the fifth wrong code in the window arms the lockout")
 }
 
-// A busy fifth attempt is refunded after a sixth was refused at the limit. No
-// judged attempt then ever held the fifth slot, so the 429 path itself must arm
-// the lockout, or the window would expire and hand out more guesses.
+// A busy fifth attempt is refunded after a sixth was refused at the limit. The
+// refused sixth judged nothing, so it gives its charge back and arms no
+// lockout. After the busy refund the count is 4, so the next code is judged as
+// the fifth, and a wrong one arms the lockout.
 func TestBusyBackupCheck_SignInRefundAfterRefusalStillArmsTheLockout(t *testing.T) {
 	db := iuNewTestDB(t)
 	kr := iuKeyring(t)
@@ -438,12 +439,119 @@ func TestBusyBackupCheck_SignInRefundAfterRefusalStillArmsTheLockout(t *testing.
 		time.Second, time.Millisecond, "the busy request holds the fifth slot")
 
 	require.Equal(t, http.StatusTooManyRequests, verify("totp", "ZZZZZZ").Code)
+	requireCharge(t, mr, attemptsKey, "5") // the refused sixth gave its charge back
+	require.False(t, mr.Exists(lockoutKey), "an attempt refused unjudged arms no lockout")
 	requireBusy(t, <-busy)
-	requireCharge(t, mr, attemptsKey, "5")
-	require.True(t, mr.Exists(lockoutKey), "the refused sixth attempt armed the lockout")
+	requireCharge(t, mr, attemptsKey, "4")
+	require.False(t, mr.Exists(lockoutKey), "four wrong codes do not lock the account out")
+
+	require.Equal(t, http.StatusForbidden, verify("totp", "ZZZZZZ").Code, "the next code is judged as the fifth")
+	require.True(t, mr.Exists(lockoutKey), "the fifth wrong code arms the lockout")
 
 	mr.FastForward(verifyAttemptWindow + time.Second)
 	require.True(t, mr.Exists(lockoutKey), "the lockout outlives the attempt window")
 	require.NotEqual(t, http.StatusForbidden, verify("totp", "ZZZZZZ").Code,
 		"no further code is judged while locked out")
+}
+
+// Six concurrent sign-ins with the RIGHT backup code while every slot is held:
+// five are busy and one is refused at the limit. None judged a code, so all
+// six charges come back, no lockout is armed, and the right code then signs
+// in. Arming the lockout on the refused one locked out an honest user who
+// never sent a wrong code.
+func TestBusyBackupCheck_ConcurrentRightCodesNeverLockOut(t *testing.T) {
+	db := iuNewTestDB(t)
+	kr := iuKeyring(t)
+	rdb, mr := iuLockoutRedis(t)
+	h := iuHandler(db, rdb, kr)
+	completer := &recordingLoginCompleter{}
+	h.SetLoginCompleter(completer)
+	userID, _, codes := busyBackupUser(t, db, kr)
+	token, _, err := h.GenerateLoginChallenge(context.Background(), userID, false, "", securityevent.AuthPassword)
+	require.NoError(t, err)
+	attemptsKey := fmt.Sprintf(redisKeyMFAVerifyAttempts, userID)
+	lockoutKey := fmt.Sprintf(redisKeyMFAVerifyLockout, userID)
+	verify := func(code string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/mfa/verify",
+			strings.NewReader(`{"mfa_challenge_token":"`+token+`","method":"backup_code","code":"`+code+`"}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Verify(c)
+		return w
+	}
+
+	// The busy requests wait for a slot, so all six are counted at once.
+	release := backuphash.HoldAllSlots(time.Second)
+	var once sync.Once
+	free := func() { once.Do(release) }
+	t.Cleanup(free)
+	const n = failedAttemptLimit + 1
+	statuses := make([]int, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			statuses[i] = verify(codes[0]).Code
+		}()
+	}
+	require.Eventually(t, func() bool { got, _ := mr.Get(attemptsKey); return got == "5" },
+		time.Second, time.Millisecond, "five busy requests hold every slot")
+	wg.Wait()
+
+	busy, refused := 0, 0
+	for _, s := range statuses {
+		switch s {
+		case http.StatusServiceUnavailable:
+			busy++
+		case http.StatusTooManyRequests:
+			refused++
+		}
+	}
+	require.Equal(t, failedAttemptLimit, busy, "%v", statuses)
+	require.Equal(t, 1, refused, "%v", statuses)
+	requireCharge(t, mr, attemptsKey, "0")
+	require.False(t, mr.Exists(lockoutKey), "no wrong code was sent, so nothing may lock the account out")
+	require.False(t, completer.called)
+
+	free()
+	require.NotEqual(t, http.StatusTooManyRequests, verify(codes[0]).Code)
+	require.True(t, completer.called, "the right code signs in once the slots free")
+}
+
+// WebAuthn key removal verifies its code through requireFactorRemovalStepUpTx.
+// A busy backup-code check there refunds the charge after the transaction
+// ends and removes nothing.
+func TestBusyBackupCheck_WebAuthnDeleteRefundsTheCharge(t *testing.T) {
+	db := iuNewTestDB(t)
+	kr := iuKeyring(t)
+	rdb, mr := iuLockoutRedis(t)
+	h := iuHandler(db, rdb, kr)
+	userID, _, codes := busyBackupUser(t, db, kr)
+	iuAddWebAuthnCredential(t, db, userID)
+	credentialID := iuWebAuthnCredentialID(t, db, userID)
+	var locked []string
+	rdb.AddHook(tdLockWatchHook{db: db, userID: userID, mu: &sync.Mutex{}, locked: &locked})
+	t.Cleanup(func() { assert.Empty(t, locked, "Redis commands issued under the users-row lock") })
+	remove := func(code string) *httptest.ResponseRecorder {
+		c, w := iuGinContext(http.MethodDelete, "/api/v1/mfa/webauthn/credentials/"+credentialID,
+			fmt.Sprintf(`{"password":%q,"mfa_code":%q}`, iuPassword, code), userID, "")
+		c.Params = gin.Params{{Key: "id", Value: credentialID}}
+		h.WebAuthnDeleteCredential(c)
+		return w
+	}
+
+	release := holdBackupHashSlots(t)
+	for range stepup.BudgetLimit + 1 {
+		w := remove(codes[0])
+		requireBusy(t, w)
+		assert.Equal(t, true, iuBody(t, w)["verification_busy"])
+		requireCharge(t, mr, h.stepUpBudget().Key(userID), "0")
+	}
+	release()
+	assert.Equal(t, 1, iuCountRows(t, db, "user_mfa_webauthn", userID), "a busy check removes nothing")
+
+	require.Equal(t, http.StatusForbidden, remove("WRONGCOD").Code)
+	requireCharge(t, mr, h.stepUpBudget().Key(userID), "1")
 }

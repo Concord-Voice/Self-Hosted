@@ -2169,9 +2169,16 @@ func (h *Handler) reserveVerifyAttempt(ctx context.Context, c *gin.Context, clai
 		return 0, stepup.Charged{}, false
 	}
 	if attempt > failedAttemptLimit {
-		if err := h.redis.SetNX(ctx, lockoutKey, "1", verifyLockoutDuration).Err(); err != nil {
-			h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("lock out MFA verify attempts: %w", err))
-			return 0, stepup.Charged{}, false
+		// A refused attempt judges nothing, so it gives its own charge back and
+		// arms no lockout: only a wrong code may lock the account out, or
+		// concurrent busy answers could lock out a user holding the right code.
+		// A refund that cannot be made would leave the count past the limit,
+		// so that case arms the lockout instead and fails closed without it.
+		if rErr := charged.Refund(ctx); rErr != nil {
+			if err := h.redis.SetNX(ctx, lockoutKey, "1", verifyLockoutDuration).Err(); err != nil {
+				h.verifyDependencyFailed(c, claims.UserID, errors.Join(rErr, fmt.Errorf("lock out MFA verify attempts: %w", err)))
+				return 0, stepup.Charged{}, false
+			}
 		}
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeLocked, RouteTemplate: securityevent.RouteAuthMFAVerify})
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": errMsgTooManyAttempts})

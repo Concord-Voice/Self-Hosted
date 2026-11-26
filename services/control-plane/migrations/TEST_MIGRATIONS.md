@@ -88,8 +88,9 @@ confirm the current value.
 
 Migrations 000203 and 000204 each hold one `CREATE INDEX CONCURRENTLY` for the
 admin sign-in notice and nothing else, because PostgreSQL refuses a concurrent
-build inside a multi-statement query. Version 000202 is unused. After an up,
-check that `idx_admin_audit_login_success` and `idx_admin_audit_event_result_ts` are valid (`pg_index.indisvalid`). If an up stops
+build inside a multi-statement query. Version 000202 belongs to another change and
+must be applied first. After an up, check that `idx_admin_audit_login_success` and
+`idx_admin_audit_event_result_ts` are valid (`pg_index.indisvalid`). If an up stops
 part way, drop the INVALID index before you force the version.
 
 Migration 000160 creates the bounded pending channel-admission table and expiry index.
@@ -103,7 +104,7 @@ accepts. The test checks that up prefixes only the bare elements and keeps order
 flags, and that the deployed verifier still accepts each migrated code once. A clean down
 must restore the bare row exactly. The down must refuse, leaving every row unchanged, while
 a v2 hash or an unreadable element remains. After each refusal the test resets the dirty
-marker to 201, as the 000155 round trip does.
+marker to 207, as the 000155 round trip does.
 
 Migration 000167 creates the permanent `voice_command_transport` singleton. Before
 starting the server or its bootstrap worker, test an unprovisioned up/down/up on
