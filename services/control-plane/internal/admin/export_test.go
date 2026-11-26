@@ -88,3 +88,7 @@ var SignInNoticeLockKeyForTest = signInNoticeLockKey
 // AdminsAddedQueryMarkerForTest starts the sign-in notice count query, so a
 // fault connector can fail exactly that statement.
 const AdminsAddedQueryMarkerForTest = adminsAddedQueryMarker
+
+// SignInNoticeQueryForTest is the sign-in notice count query, so a test can
+// EXPLAIN exactly what production runs.
+var SignInNoticeQueryForTest = signInNoticeQuery
