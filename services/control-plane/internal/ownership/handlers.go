@@ -501,7 +501,8 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 	// Execute the proof and transfer under the same coordinator transaction.
 	// In particular, backup-code redemption must roll back with any rejected
 	// ownership write.
-	mfaVerified, err := h.executeConfirmedTransfer(ctx, serverID, transferID, fromUserID, toUserID, userID,
+	mfaVerified, err := h.executeConfirmedTransfer(ctx,
+		expiredTransfer{id: transferID, serverID: serverID, fromUserID: fromUserID, toUserID: toUserID}, userID,
 		middleware.TokenCredentialEpoch(c), req, attempt)
 	if err != nil {
 		var proofErr *stepup.Error
@@ -1638,10 +1639,10 @@ func (h *Handler) finishOwnershipTransfer(
 // before credentials are checked, and a backup-code redemption is therefore
 // rolled back if any subsequent transfer check or write cannot commit.
 func (h *Handler) executeConfirmedTransfer(
-	ctx context.Context, serverID, transferID, fromUserID, toUserID, actorUserID, tokenEpoch string,
+	ctx context.Context, transfer expiredTransfer, actorUserID, tokenEpoch string,
 	req confirmTransferRequest, attempt *stepup.PasswordAttempt,
 ) (mfaVerified bool, retErr error) {
-	transfer := expiredTransfer{id: transferID, serverID: serverID, fromUserID: fromUserID, toUserID: toUserID}
+	serverID, fromUserID, toUserID := transfer.serverID, transfer.fromUserID, transfer.toUserID
 	var mutation ownershipAuthorityMutation
 	var outcome ownershipWriteOutcome
 	plan, outcome, err := h.withOwnershipCaptureGuardedOutcome(ctx, serverID, []string{fromUserID, toUserID}, actorUserID, tokenEpoch,

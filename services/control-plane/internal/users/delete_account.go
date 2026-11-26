@@ -374,7 +374,7 @@ func (s *AccountService) PrepareEmailErasureConfirmation(
 		return EmailErasureConfirmation{}, fmt.Errorf("prepare erasure email confirmation: commit: %w", err)
 	}
 	if request.MFACode != "" {
-		if err := stepup.DangerousActionBudget(s.redis).Clear(context.Background(), actorID.String()); err != nil && s.log != nil {
+		if err := stepup.DangerousActionBudget(s.redis).Clear(context.WithoutCancel(ctx), actorID.String()); err != nil && s.log != nil {
 			s.log.Warn("Could not clear account-erasure email-confirmation MFA attempt budget", "error", err)
 		}
 	}
@@ -519,7 +519,7 @@ func (s *AccountService) finishCommittedErasure(
 	if mfaCode == "" {
 		return
 	}
-	if err := stepup.DangerousActionBudget(s.redis).Clear(context.Background(), userID); err != nil && s.log != nil {
+	if err := stepup.DangerousActionBudget(s.redis).Clear(context.WithoutCancel(ctx), userID); err != nil && s.log != nil {
 		s.log.Warn("Could not clear account-erasure MFA attempt budget", "error", err)
 	}
 }

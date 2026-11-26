@@ -20,11 +20,11 @@ func (h *Handler) requireFactorRemovalStepUpTx(
 	userID string,
 	subject stepup.Subject,
 	attempt *stepup.PasswordAttempt,
-	password, mfaCode string,
+	creds mfaStepUpCredentials,
 	purpose stepup.Purpose,
 ) *stepup.Error {
-	e, _ := verifyStepUpFactors(attempt, subject, mfaStepUpCredentials{Password: password, MFACode: mfaCode}, factorRemovalCopy, func() *stepup.Error {
-		return stepup.VerifyMFAFactorTx(ctx, tx, h, userID, purpose, mfaCode, subject.MFAMethods)
+	e, _ := verifyStepUpFactors(attempt, subject, creds, factorRemovalCopy, func() *stepup.Error {
+		return stepup.VerifyMFAFactorTx(ctx, tx, h, userID, purpose, creds.MFACode, subject.MFAMethods)
 	})
 	return e
 }

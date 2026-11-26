@@ -3368,6 +3368,8 @@ type ssoStepUp struct {
 	attempt     *stepup.PasswordAttempt
 	mfaCharged  bool
 	mfaVerified bool
+	password    string
+	mfaCode     string
 }
 
 func (h *Handler) reserveSSOStepUp(c *gin.Context, userID, password string) (*stepup.PasswordAttempt, bool) {
@@ -3384,20 +3386,20 @@ func (h *Handler) reserveSSOStepUp(c *gin.Context, userID, password string) (*st
 
 func (h *Handler) verifySSOStepUpTx(
 	ctx context.Context, tx *sql.Tx, userID string, proof *ssoStepUp,
-	password, mfaCode string, purpose stepup.Purpose, epoch string,
+	purpose stepup.Purpose, epoch string,
 ) *stepup.Error {
 	subj, e := stepup.LockSubjectTx(ctx, tx, userID, stepup.LockForNoKeyUpdate, epoch)
 	if e != nil {
 		return e
 	}
-	return h.verifySSOStepUpLockedTx(ctx, tx, userID, subj, proof, password, mfaCode, purpose)
+	return h.verifySSOStepUpLockedTx(ctx, tx, userID, subj, proof, purpose)
 }
 
 func (h *Handler) verifySSOStepUpLockedTx(
 	ctx context.Context, tx *sql.Tx, userID string, subj stepup.Subject, proof *ssoStepUp,
-	password, mfaCode string, purpose stepup.Purpose,
+	purpose stepup.Purpose,
 ) *stepup.Error {
-	if e := stepup.VerifyPasswordFactor(proof.attempt, subj, password, ssoStepUpCopy); e != nil {
+	if e := stepup.VerifyPasswordFactor(proof.attempt, subj, proof.password, ssoStepUpCopy); e != nil {
 		return e
 	}
 	if !subj.MFAEnabled {
@@ -3405,7 +3407,7 @@ func (h *Handler) verifySSOStepUpLockedTx(
 	}
 	// A code the probe found no factor to charge for, against a factor the lock
 	// now shows, would be a free guess: refuse it for a retry, which charges.
-	if mfaCode != "" && !proof.mfaCharged {
+	if proof.mfaCode != "" && !proof.mfaCharged {
 		return &stepup.Error{Status: http.StatusConflict, Body: gin.H{"error": errMsgMFAEnrollmentChanged}}
 	}
 	if h.mfaVerifier == nil {
@@ -3415,7 +3417,7 @@ func (h *Handler) verifySSOStepUpLockedTx(
 			Cause:  errors.New("SSO step-up MFA verifier is not configured"),
 		}
 	}
-	if e := stepup.VerifyMFAFactorTx(ctx, tx, h.mfaVerifier, userID, purpose, mfaCode, subj.MFAMethods); e != nil {
+	if e := stepup.VerifyMFAFactorTx(ctx, tx, h.mfaVerifier, userID, purpose, proof.mfaCode, subj.MFAMethods); e != nil {
 		return e
 	}
 	proof.mfaVerified = true
@@ -3532,7 +3534,7 @@ func (h *Handler) admitSecurityPatch(c *gin.Context, userID string, req patchSec
 	if !ok {
 		return nil, false
 	}
-	return &ssoStepUp{attempt: attempt, mfaCharged: mfaCharged}, true
+	return &ssoStepUp{attempt: attempt, mfaCharged: mfaCharged, password: req.CurrentPassphrase, mfaCode: req.MFACode}, true
 }
 
 // settleSecurityPatchProof settles a trust-enabling request's reserved
@@ -3602,7 +3604,7 @@ func (h *Handler) applySecurityPatch(c *gin.Context, userID string, req patchSec
 	}()
 
 	if proof != nil {
-		if e := h.verifySSOStepUpTx(ctx, tx, userID, proof, req.CurrentPassphrase, req.MFACode, stepup.PurposeSSOTrustEnable, middleware.TokenCredentialEpoch(c)); e != nil {
+		if e := h.verifySSOStepUpTx(ctx, tx, userID, proof, stepup.PurposeSSOTrustEnable, middleware.TokenCredentialEpoch(c)); e != nil {
 			e.Write(c)
 			return false
 		}
@@ -3679,7 +3681,7 @@ func (h *Handler) DeleteSSOIdentity(c *gin.Context) {
 	if !ok {
 		return
 	}
-	proof := &ssoStepUp{attempt: attempt, mfaCharged: mfaCharged}
+	proof := &ssoStepUp{attempt: attempt, mfaCharged: mfaCharged, password: req.Password, mfaCode: req.MFACode}
 	defer func() {
 		if err := attempt.Settle(c.Request.Context()); err != nil {
 			h.log.Warn("Could not settle SSO unlink password attempt", "error", err)
@@ -3701,7 +3703,7 @@ func (h *Handler) DeleteSSOIdentity(c *gin.Context) {
 
 	// The factor proof and the authority check share this transaction's actor
 	// lock, so credentials superseded while it waited cannot unlink an identity.
-	if e := h.verifySSOStepUpTx(ctx, tx, userID, proof, req.Password, req.MFACode, stepup.PurposeSSOUnlink, middleware.TokenCredentialEpoch(c)); e != nil {
+	if e := h.verifySSOStepUpTx(ctx, tx, userID, proof, stepup.PurposeSSOUnlink, middleware.TokenCredentialEpoch(c)); e != nil {
 		e.Write(c)
 		return
 	}

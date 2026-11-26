@@ -1481,7 +1481,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "TOTP enrollment changed; retry"})
 			return
 		}
-		if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, attempt, req.Password, req.Code, stepup.PurposeTOTPDisable); e != nil {
+		if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, attempt, mfaStepUpCredentials{Password: req.Password, MFACode: req.Code}, stepup.PurposeTOTPDisable); e != nil {
 			h.refuseMFASettingsStepUp(c, e, factorRemovalStage(e, req.Password, req.Code))
 			return
 		}
@@ -1911,7 +1911,7 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 		h.refuseMFASettingsStepUp(c, e, subjectStage(e))
 		return
 	}
-	if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, attempt, req.Password, req.MFACode, stepup.PurposeWebAuthnDelete); e != nil {
+	if e := h.requireFactorRemovalStepUpTx(ctx, tx, userID, subj, attempt, mfaStepUpCredentials{Password: req.Password, MFACode: req.MFACode}, stepup.PurposeWebAuthnDelete); e != nil {
 		h.refuseMFASettingsStepUp(c, e, factorRemovalStage(e, req.Password, req.MFACode))
 		return
 	}
