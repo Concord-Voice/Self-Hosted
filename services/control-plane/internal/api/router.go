@@ -1318,7 +1318,8 @@ func NewRouter(
 		dangerousActionGateGap(channelsHandler, membersHandler, rbacHandler, mediaHandler) == "")
 	updatesHandler := updates.NewHandler(cfg, log)
 	privacyHandler, accountService := buildPrivacyHandler(
-		db, redis, log, usersHandler, hub, mfaHandler, emailSvc,
+		db, redis, log, usersHandler, hub,
+		erasureStepUpWiring{mfaVerifier: mfaHandler, emailSender: emailSvc},
 		erasureClearWiring{capture: graphPresenceCapture, nats: natsClient, secret: cfg.MFAEncryptionKey})
 
 	// The erasure drain (#2448). Wired here rather than beside the DM rail for

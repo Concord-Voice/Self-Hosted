@@ -27,6 +27,13 @@ type erasureClearWiring struct {
 	secret  string
 }
 
+// erasureStepUpWiring is what account erasure needs to judge a fresh proof:
+// the MFA code verifier, and the sender of the email confirmation link.
+type erasureStepUpWiring struct {
+	mfaVerifier stepup.MFATxCodeVerifier
+	emailSender *email.Service
+}
+
 // buildPrivacyHandler constructs the privacy handler wired to the
 // account-deletion service. Telemetry-related wiring was removed in #758 (sub-epic G);
 // the handler now exposes only the account-erasure POST and its owned-server preview.
@@ -41,13 +48,12 @@ func buildPrivacyHandler(
 	log *logger.Logger,
 	activityCleanup *users.Handler,
 	hub *websocket.Hub,
-	mfaVerifier stepup.MFATxCodeVerifier,
-	erasureEmailSender *email.Service,
+	stepUp erasureStepUpWiring,
 	erasure erasureClearWiring,
 ) (*privacy.Handler, *users.AccountService) {
 	account := users.NewAccountService(db, log)
 	account.SetRedis(redisClient)
-	account.SetMFAVerifier(mfaVerifier)
+	account.SetMFAVerifier(stepUp.mfaVerifier)
 	account.SetActivitySettingsCleanupHandler(activityCleanup)
 	// #2447: the erasure capture and the cross-replica clear publisher. Returned
 	// alongside the handler so the router's boot guard can interrogate the
@@ -76,7 +82,7 @@ func buildPrivacyHandler(
 		})
 	}
 	handler := privacy.NewHandler(account, redisClient, log)
-	handler.SetErasureEmailSender(erasureEmailSender)
+	handler.SetErasureEmailSender(stepUp.emailSender)
 	handler.SetOwnedServersDB(db)
 	return handler, account
 }
