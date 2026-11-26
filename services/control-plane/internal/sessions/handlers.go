@@ -573,7 +573,8 @@ func (h *Handler) verifyRevokeMFA(ctx context.Context, c *gin.Context, uid, mfaC
 		return true
 	}
 	if !valid {
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: action.route})
+		route := action.route
+		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
 		return true
 	}
