@@ -34,6 +34,8 @@ import (
 type moderationConfirm struct {
 	code  string
 	grace stepup.GraceRead
+	// charged is the budget charge, for a busy refund.
+	charged stepup.Charged
 }
 
 // chargeModerationGate is a moderation gate's pre-transaction half: it charges
@@ -45,11 +47,12 @@ func (h *Handler) chargeModerationGate(
 	c *gin.Context, serverID, actorID, code string, bit rbac.Permission,
 ) (moderationConfirm, bool) {
 	ctx := c.Request.Context()
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), actorID, code); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), actorID, code)
+	if e != nil {
 		mfaenforce.WriteError(c, h.log, e, nil)
 		return moderationConfirm{}, false
 	}
-	confirm := moderationConfirm{code: code}
+	confirm := moderationConfirm{code: code, charged: charged}
 	server, serverErr := uuid.Parse(serverID)
 	actor, actorErr := uuid.Parse(actorID)
 	if serverErr == nil && actorErr == nil {
@@ -117,8 +120,8 @@ func (h *Handler) settleModerationGate(ctx context.Context, outcome mfaenforce.O
 // removal routes call it on their transaction's error, after that transaction
 // has ended: it is a Redis call, and none may run while the transaction is
 // open (A-2, A-9).
-func (h *Handler) refundModerationGateIfBusy(ctx context.Context, err error, actorID string) {
-	if rErr := stepup.RefundIfBusy(ctx, err, actorID, stepup.DangerousActionBudget(h.redis)); rErr != nil {
+func (h *Handler) refundModerationGateIfBusy(ctx context.Context, err error, confirm moderationConfirm) {
+	if rErr := stepup.RefundIfBusy(ctx, err, confirm.charged); rErr != nil {
 		h.log.Warn("Could not refund a busy moderation-gate attempt", "error", rErr)
 	}
 }

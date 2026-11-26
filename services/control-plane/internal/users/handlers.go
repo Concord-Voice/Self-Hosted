@@ -553,7 +553,8 @@ func (h *Handler) replaceMyKeysCoordinated(
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
-	mfaCharged, ok := h.chargeDangerousMFA(c, senderID.String(), req.MFACode)
+	charge, ok := h.chargeDangerousMFA(c, senderID.String(), req.MFACode)
+	mfaCharged := charge.Made()
 	if !ok {
 		return
 	}
@@ -591,7 +592,7 @@ func (h *Handler) replaceMyKeysCoordinated(
 			// End the transaction before the refund's Redis call; the
 			// deferred rollbacks then find it done.
 			h.rollbackKeyReplacement(tx)
-			h.answerBusyStepUp(c, err, senderID.String(), mfaCharged)
+			h.answerBusyStepUp(c, err, charge)
 			return
 		}
 		h.respondKeyReplacementReauthenticationFailure(c, err)
@@ -1625,12 +1626,12 @@ func (e *stepUpReauthenticationError) Unwrap() error { return e.cause }
 // with Retry-After. It returns false, writing nothing, for any other error.
 // Call it only after the request's transaction has ended: the refund is a
 // Redis call.
-func (h *Handler) answerBusyStepUp(c *gin.Context, err error, userID string, mfaCharged bool) bool {
+func (h *Handler) answerBusyStepUp(c *gin.Context, err error, charged stepup.Charged) bool {
 	if !stepup.IsBusy(err) {
 		return false
 	}
-	if mfaCharged {
-		if rErr := stepup.RefundIfBusy(c.Request.Context(), err, userID, stepup.DangerousActionBudget(h.redis)); rErr != nil {
+	if charged.Made() {
+		if rErr := stepup.RefundIfBusy(c.Request.Context(), err, charged); rErr != nil {
 			h.log.Warn("Could not refund a busy MFA attempt", "error", rErr)
 		}
 	}
@@ -2078,7 +2079,8 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
-	mfaCharged, ok := h.chargeDangerousMFA(c, parsedUID.String(), req.MFACode)
+	charge, ok := h.chargeDangerousMFA(c, parsedUID.String(), req.MFACode)
+	mfaCharged := charge.Made()
 	if !ok {
 		return
 	}
@@ -2118,7 +2120,7 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	}
 	if err != nil {
 		// executePasswordChange has rolled its transaction back by now.
-		if h.answerBusyStepUp(c, err, parsedUID.String(), mfaCharged) {
+		if h.answerBusyStepUp(c, err, charge) {
 			return
 		}
 		h.respondChangePasswordError(c, err)
@@ -2156,28 +2158,29 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 // a no-MFA request spend the budget. A factor committed after the probe is
 // refused under the lock (refuseUnchargedInlineFactorTx). It returns whether
 // it charged, and ok=false once it has written a refusal.
-func (h *Handler) chargeDangerousMFA(c *gin.Context, userID, mfaCode string) (charged, ok bool) {
+func (h *Handler) chargeDangerousMFA(c *gin.Context, userID, mfaCode string) (stepup.Charged, bool) {
 	if mfaCode == "" {
-		return false, true
+		return stepup.Charged{}, true
 	}
 	ctx := c.Request.Context()
 	methods, err := stepup.InlineMFAMethods(ctx, h.db, userID)
 	if err != nil {
 		h.log.Error("Failed to read MFA factors before the step-up budget", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-		return false, false
+		return stepup.Charged{}, false
 	}
 	if len(methods) == 0 {
-		return false, true
+		return stepup.Charged{}, true
 	}
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode)
+	if e != nil {
 		if e.Cause != nil {
 			h.log.Error("MFA budget unavailable", "error", e.Cause)
 		}
 		e.Write(c)
-		return false, false
+		return stepup.Charged{}, false
 	}
-	return true, true
+	return charged, true
 }
 
 // clearDangerousMFA resets the budget after a committed change. It runs on a
@@ -2841,6 +2844,8 @@ type purgeFenceAdmission struct {
 	attempt *stepup.PasswordAttempt
 	// mfaCharged: the shared budget was charged for this request's code.
 	mfaCharged bool
+	// fenceCharge and mfaCharge are the two budget charges, for a busy refund.
+	fenceCharge, mfaCharge stepup.Charged
 	// mfaVerified: the gate verified that code under the lock.
 	mfaVerified bool
 }
@@ -2859,41 +2864,42 @@ func (a *purgeFenceAdmission) settle(ctx context.Context) error {
 // other dangerous gates use). It returns whether it charged, and ok=false once
 // it has written a refusal. A factor committed after the probe is refused
 // under the lock (gatePurgeFenceDisable), so the race buys no free guess.
-func (h *Handler) chargePurgeFenceMFA(ctx context.Context, c *gin.Context, userID, mfaCode string) (charged, ok bool) {
+func (h *Handler) chargePurgeFenceMFA(ctx context.Context, c *gin.Context, userID, mfaCode string) (stepup.Charged, bool) {
 	if mfaCode == "" {
-		return false, true
+		return stepup.Charged{}, true
 	}
 	methods, err := stepup.InlineMFAMethods(ctx, h.db, userID)
 	if err != nil {
 		e := &stepup.Error{Status: http.StatusInternalServerError, Body: gin.H{"error": stepup.ErrMsgVerificationFailed}, Cause: err}
 		h.logPurgeFenceStepUpFailure(e)
 		e.Write(c)
-		return false, false
+		return stepup.Charged{}, false
 	}
 	if len(methods) == 0 {
-		return false, true
+		return stepup.Charged{}, true
 	}
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode)
+	if e != nil {
 		h.logPurgeFenceStepUpFailure(e)
 		e.Write(c)
-		return false, false
+		return stepup.Charged{}, false
 	}
-	return true, true
+	return charged, true
 }
 
 // allowPurgeFenceStepUp consumes the fail-closed attempt budget before the
 // transaction begins. It writes the budget's 429 (exhausted) or 503 (cannot
 // be evaluated) and returns false when the budget does not admit the request.
-func (h *Handler) allowPurgeFenceStepUp(ctx context.Context, c *gin.Context, userID string) bool {
-	e := h.purgeFenceStepUpBudget().Consume(ctx, userID)
+func (h *Handler) allowPurgeFenceStepUp(ctx context.Context, c *gin.Context, userID string) (stepup.Charged, bool) {
+	charged, e := h.purgeFenceStepUpBudget().ConsumeAttempt(ctx, userID)
 	if e == nil {
-		return true
+		return charged, true
 	}
 	if e.Cause != nil {
 		h.log.Error("Purge-fence step-up budget unavailable", "error", e.Cause)
 	}
 	e.Write(c)
-	return false
+	return stepup.Charged{}, false
 }
 
 // reservePurgeFencePassword counts a supplied purge-fence password against the
@@ -2952,12 +2958,8 @@ func (h *Handler) clearPurgeFenceStepUpAttempts(ctx context.Context, userID stri
 // the purge fence's own budget, charged on every disable request, and the
 // shared budget only when this request charged it. Call it after the
 // transaction has ended, and only for an IsBusy error.
-func (h *Handler) refundBusyPurgeFence(ctx context.Context, err error, userID string, adm *purgeFenceAdmission) {
-	budgets := []stepup.Budget{h.purgeFenceStepUpBudget()}
-	if adm.mfaCharged {
-		budgets = append(budgets, stepup.DangerousActionBudget(h.redis))
-	}
-	if rErr := stepup.RefundIfBusy(ctx, err, userID, budgets...); rErr != nil {
+func (h *Handler) refundBusyPurgeFence(ctx context.Context, err error, adm *purgeFenceAdmission) {
+	if rErr := stepup.RefundIfBusy(ctx, err, adm.fenceCharge, adm.mfaCharge); rErr != nil {
 		h.log.Warn("Could not refund a busy purge-fence attempt", "error", rErr)
 	}
 }
@@ -3085,15 +3087,16 @@ func (h *Handler) beginPurgeFenceStepUp(
 	if req.RequireAuthBeforePurge == nil || *req.RequireAuthBeforePurge {
 		return false, nil, true
 	}
-	if !h.allowPurgeFenceStepUp(ctx, c, userID) {
+	fenceCharge, admitted := h.allowPurgeFenceStepUp(ctx, c, userID)
+	if !admitted {
 		return true, nil, false
 	}
-	mfaCharged, ok := h.chargePurgeFenceMFA(ctx, c, userID, req.MFACode)
+	mfaCharge, ok := h.chargePurgeFenceMFA(ctx, c, userID, req.MFACode)
 	if !ok {
 		return true, nil, false
 	}
 	attempt, ok := h.reservePurgeFencePassword(ctx, c, userID, req.CurrentPassword)
-	return true, &purgeFenceAdmission{attempt: attempt, mfaCharged: mfaCharged}, ok
+	return true, &purgeFenceAdmission{attempt: attempt, mfaCharged: mfaCharge.Made(), fenceCharge: fenceCharge, mfaCharge: mfaCharge}, ok
 }
 
 // UpdatePrivacySettings updates the current user's privacy settings.
@@ -3186,13 +3189,8 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	}
 
 	txErr := presencehook.WithGatedTx(ctx, gatedCapture, h.db, h.log, spec, func(tx *sql.Tx) error {
-		if gatedCapture != nil {
-			var lockedUserID string
-			if err := tx.QueryRowContext(ctx,
-				`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID,
-			).Scan(&lockedUserID); err != nil {
-				return fmt.Errorf("lock privacy settings actor: %w", err)
-			}
+		if err := lockPrivacyActor(ctx, tx, gatedCapture != nil, userID); err != nil {
+			return err
 		}
 
 		// #2765: disabling require_auth_before_purge requires the same step-up
@@ -3298,22 +3296,7 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 		h.log.Warn("Could not settle a purge-fence password against the lockout", "error", err)
 	}
 	if txErr != nil {
-		// A step-up rejection carries its own status and body and is NOT a
-		// presence-capture failure, so it is classified first and never reaches
-		// respondPresenceTerminal, which replaces the blanket 500 only (#2765).
-		var suErr *stepup.Error
-		if errors.As(txErr, &suErr) {
-			// A busy backup-code check judged nothing, and is reached only
-			// after the password verified: give back both attempts this
-			// request charged. The transaction has ended.
-			if fenceAdmission != nil && stepup.IsBusy(suErr) {
-				h.refundBusyPurgeFence(ctx, suErr, userID, fenceAdmission)
-			}
-			h.logPurgeFenceStepUpFailure(suErr)
-			suErr.Write(c)
-			return
-		}
-		h.respondPresenceTerminal(c, msgFailedUpdatePrivacySettings, txErr)
+		h.respondPrivacyUpdateError(ctx, c, txErr, fenceAdmission)
 		return
 	}
 
@@ -3328,6 +3311,42 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 
 	h.log.Info("Privacy settings updated", "user_id", userID)
 	c.JSON(http.StatusOK, gin.H{"privacy": ps})
+}
+
+// respondPrivacyUpdateError answers UpdatePrivacySettings' transaction error,
+// once the transaction has ended. A step-up rejection carries its own status
+// and body and is NOT a presence-capture failure, so it is classified first
+// and never reaches respondPresenceTerminal, which replaces the blanket 500
+// only (#2765).
+func (h *Handler) respondPrivacyUpdateError(ctx context.Context, c *gin.Context, txErr error, fenceAdmission *purgeFenceAdmission) {
+	var suErr *stepup.Error
+	if !errors.As(txErr, &suErr) {
+		h.respondPresenceTerminal(c, msgFailedUpdatePrivacySettings, txErr)
+		return
+	}
+	// A busy backup-code check judged nothing, and is reached only after the
+	// password verified: give back both attempts this request charged.
+	if fenceAdmission != nil && stepup.IsBusy(suErr) {
+		h.refundBusyPurgeFence(ctx, suErr, fenceAdmission)
+	}
+	h.logPurgeFenceStepUpFailure(suErr)
+	suErr.Write(c)
+}
+
+// lockPrivacyActor takes the actor's users-row lock that a FoF capture needs
+// before its locked read of privacy_settings (users -> privacy_settings ->
+// presence). Without a capture (gated false) it takes nothing.
+func lockPrivacyActor(ctx context.Context, tx *sql.Tx, gated bool, userID string) error {
+	if !gated {
+		return nil
+	}
+	var lockedUserID string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID,
+	).Scan(&lockedUserID); err != nil {
+		return fmt.Errorf("lock privacy settings actor: %w", err)
+	}
+	return nil
 }
 
 // --- SSO settings endpoints (issue #270) ---

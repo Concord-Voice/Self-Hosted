@@ -131,7 +131,8 @@ func (h *Handler) confirmDMMessageDelete(
 ) (dmDeletedMessage, bool) {
 	ctx := c.Request.Context()
 	budget := stepup.NewBudget(h.redis, stepup.MFASettingsBudgetPrefix)
-	if !h.chargeDMDeleteBudget(c, budget, t.userID, in) {
+	charged, admitted := h.chargeDMDeleteBudget(c, budget, t.userID, in)
+	if !admitted {
 		return dmDeletedMessage{}, false
 	}
 	grace := stepup.NewGraceStore(h.redis).Read(ctx,
@@ -156,7 +157,7 @@ func (h *Handler) confirmDMMessageDelete(
 		// attempt back; every other refusal keeps its charge. The soft-lock's
 		// burst and day counters are left alone: they count delete attempts,
 		// not guesses, and only decide whether a confirmation is asked for.
-		if refundErr := stepup.RefundIfBusy(ctx, err, t.userID, budget); refundErr != nil {
+		if refundErr := stepup.RefundIfBusy(ctx, err, charged); refundErr != nil {
 			h.log.Warn("Could not refund a busy delete soft-lock step-up attempt",
 				"failure_class", failureClassSoftLockRefund, "error", refundErr)
 		}
@@ -212,20 +213,20 @@ func (h *Handler) confirmDMDeleteTx(
 // chargeDMDeleteBudget charges the step-up budget when the body carries either
 // factor, and answers the refusal itself when the budget is spent or
 // unavailable. It reports whether the delete may go on.
-func (h *Handler) chargeDMDeleteBudget(c *gin.Context, budget stepup.Budget, userID string, in stepup.Input) bool {
+func (h *Handler) chargeDMDeleteBudget(c *gin.Context, budget stepup.Budget, userID string, in stepup.Input) (stepup.Charged, bool) {
 	if in.MFACode == "" && in.StepUpToken == "" {
-		return true
+		return stepup.Charged{}, true
 	}
-	budgetErr := budget.Consume(c.Request.Context(), userID)
+	charged, budgetErr := budget.ConsumeAttempt(c.Request.Context(), userID)
 	if budgetErr == nil {
-		return true
+		return charged, true
 	}
 	if budgetErr.Cause != nil {
 		h.log.Error("Delete soft-lock step-up budget unavailable",
 			"failure_class", failureClassSoftLockBudget, "error", budgetErr.Cause)
 	}
 	budgetErr.Write(c)
-	return false
+	return stepup.Charged{}, false
 }
 
 // settleDMDeleteConfirmation runs a committed confirmation's writes (A-10):

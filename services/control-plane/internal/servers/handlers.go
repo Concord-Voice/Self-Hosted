@@ -933,7 +933,8 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 	// the request carries a code. servers.delete is always fresh (D-2): no
 	// grace is read for it, and none is granted after it.
 	budget := stepup.DangerousActionBudget(h.redis)
-	if e := stepup.Charge(ctx, budget, userID, stepUp.MFACode); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, budget, userID, stepUp.MFACode)
+	if e != nil {
 		mfaenforce.WriteError(c, h.log, e, nil)
 		return
 	}
@@ -969,7 +970,7 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 			return
 		}
 		// The gated transaction has rolled back and its fence has closed.
-		h.refundBusyCharge(ctx, err, userID, budget)
+		h.refundBusyCharge(ctx, err, charged)
 		h.respondServerDeleteError(c, err, serverDeleteTransactionFailureClass(err))
 		return
 	}

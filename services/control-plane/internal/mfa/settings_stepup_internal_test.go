@@ -571,12 +571,8 @@ func (iuBudgetIncrFaultHook) DialHook(next redis.DialHook) redis.DialHook { retu
 
 func (h iuBudgetIncrFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == "incr" {
-			if args := cmd.Args(); len(args) >= 2 {
-				if k, ok := args[1].(string); ok && k == h.key {
-					return errors.New("iu: forced step-up budget incr failure")
-				}
-			}
+		if stepup.ChargeCommandKey(cmd) == h.key {
+			return errors.New("iu: forced step-up budget charge failure")
 		}
 		return next(ctx, cmd)
 	}
@@ -618,7 +614,7 @@ func TestOpenMFASettingsTx_EpochFence(t *testing.T) {
 	h := iuHandler(db, rdb, kr)
 	c, w := iuGinContext(http.MethodPost, "/api/v1/mfa/email-sms/disable", "", userID, "stale-client-epoch")
 
-	tx, _, _, ok := h.openMFASettingsTx(c, userID, mfaStepUpCredentials{Password: iuPassword}, lockForNoKeyUpdate)
+	tx, _, _, _, ok := h.openMFASettingsTx(c, userID, mfaStepUpCredentials{Password: iuPassword}, lockForNoKeyUpdate)
 
 	assert.False(t, ok, "a mismatched credential epoch must refuse")
 	assert.Nil(t, tx)
@@ -700,7 +696,8 @@ func TestOpenAndVerifyMFASettingsStepUpTx_PoolSafety(t *testing.T) {
 				var tx *sql.Tx
 				var subj stepup.Subject
 				var attempt *stepup.PasswordAttempt
-				tx, subj, attempt, ok = h.openMFASettingsTx(c, s.userID, s.creds(), s.lock)
+				var charged stepup.Charged
+				tx, subj, attempt, charged, ok = h.openMFASettingsTx(c, s.userID, s.creds(), s.lock)
 				if !ok {
 					return
 				}
@@ -711,7 +708,7 @@ func TestOpenAndVerifyMFASettingsStepUpTx_PoolSafety(t *testing.T) {
 						NoFactors:          "no factors",
 						CredentialRequired: "credential required",
 					},
-				}, attempt)
+				}, attempt, charged)
 				if stepErr == nil {
 					_ = tx.Commit()
 				}

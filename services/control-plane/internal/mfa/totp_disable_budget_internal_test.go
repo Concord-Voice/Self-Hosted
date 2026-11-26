@@ -357,3 +357,48 @@ func TestBusyBackupCheck_SignInRefundsTheAttempt(t *testing.T) {
 	verify(codes[0])
 	require.True(t, completer.called, "the right code signs in once the slots free")
 }
+
+// A busy sign-in can wait past the end of the window it was counted in. Its
+// refund must not take back a wrong code counted in the next window: if it
+// did, one busy request straddling each boundary would keep every window
+// below the fifth wrong code, and the lockout would never arm.
+func TestBusyBackupCheck_SignInRefundAfterTheWindowStillLetsTheLockoutArm(t *testing.T) {
+	db := iuNewTestDB(t)
+	kr := iuKeyring(t)
+	rdb, mr := iuLockoutRedis(t)
+	h := iuHandler(db, rdb, kr)
+	h.SetLoginCompleter(&recordingLoginCompleter{})
+	userID, _, codes := busyBackupUser(t, db, kr)
+	token, _, err := h.GenerateLoginChallenge(context.Background(), userID, false, "", securityevent.AuthPassword)
+	require.NoError(t, err)
+	attemptsKey := fmt.Sprintf(redisKeyMFAVerifyAttempts, userID)
+	lockoutKey := fmt.Sprintf(redisKeyMFAVerifyLockout, userID)
+	verify := func(method, code string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/mfa/verify",
+			strings.NewReader(`{"mfa_challenge_token":"`+token+`","method":"`+method+`","code":"`+code+`"}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Verify(c)
+		return w
+	}
+
+	// The busy request waits up to two seconds for a slot: long enough for
+	// the window to end and five wrong codes to arrive in the next one.
+	free := backuphash.HoldAllSlots(2 * time.Second)
+	t.Cleanup(free)
+	busy := make(chan *httptest.ResponseRecorder, 1)
+	go func() { busy <- verify("backup_code", codes[0]) }()
+	require.Eventually(t, func() bool { got, _ := mr.Get(attemptsKey); return got == "1" },
+		time.Second, time.Millisecond, "the busy request is counted")
+
+	mr.FastForward(verifyAttemptWindow + time.Second)
+	for range failedAttemptLimit - 1 {
+		require.Equal(t, http.StatusForbidden, verify("totp", "ZZZZZZ").Code)
+	}
+	requireBusy(t, <-busy) // its refund runs now, in the next window
+	requireCharge(t, mr, attemptsKey, "4")
+
+	require.Equal(t, http.StatusForbidden, verify("totp", "ZZZZZZ").Code)
+	require.True(t, mr.Exists(lockoutKey), "the fifth wrong code in the window arms the lockout")
+}

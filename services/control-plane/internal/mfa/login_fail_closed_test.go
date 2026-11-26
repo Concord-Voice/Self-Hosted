@@ -348,26 +348,27 @@ func judgedIn(state *mfaEventDB) int {
 // right code and a wrong one get the same 500, so an outage tells a guesser
 // nothing, and the right factor is not spent.
 func TestVerifyJudgesNoCodeItCannotCount(t *testing.T) {
-	// The count is INCR followed by EXPIRE NX; either failing leaves it unset.
-	for _, command := range []string{"incr", "expire"} {
-		for _, which := range []string{"right", "wrong"} {
-			t.Run(command+"/"+which, func(t *testing.T) {
-				f := newVerifyFixture(t)
-				f.redis.AddHook(failCommandHook{name: command})
-				code := f.right
-				if which == "wrong" {
-					code = f.wrong
-				}
+	// The count, its EXPIRE NX window and its window ID are one script
+	// (stepup.ChargeKey); a fault on it leaves the attempt uncounted.
+	for _, which := range []string{"right", "wrong"} {
+		t.Run("charge/"+which, func(t *testing.T) {
+			f := newVerifyFixture(t)
+			hook, hits := sfFault("evalsha|eval", "mfa_verify_attempts:")
+			f.redis.AddHook(hook)
+			code := f.right
+			if which == "wrong" {
+				code = f.wrong
+			}
 
-				response := f.verify(code)
+			response := f.verify(code)
 
-				require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
-				require.Contains(t, response.Body.String(), errMsgMFAVerificationUnavailable)
-				require.False(t, f.completer.called)
-				require.Zero(t, f.judged(), "an uncounted request must not have its code judged")
-				require.False(t, f.exists(t, "auth_failures:ip:192.0.2.1"), "a code that was never judged is not a failed attempt")
-			})
-		}
+			sfRequireFired(t, hits)
+			require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+			require.Contains(t, response.Body.String(), errMsgMFAVerificationUnavailable)
+			require.False(t, f.completer.called)
+			require.Zero(t, f.judged(), "an uncounted request must not have its code judged")
+			require.False(t, f.exists(t, "auth_failures:ip:192.0.2.1"), "a code that was never judged is not a failed attempt")
+		})
 	}
 }
 

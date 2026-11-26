@@ -140,28 +140,30 @@ func (h *Handler) rollbackQuietly(tx *sql.Tx) {
 // committed, calls clearTxStepUpAfterCommit.
 func (h *Handler) openMFASettingsTx(
 	c *gin.Context, userID string, creds mfaStepUpCredentials, lock stepUpLock,
-) (tx *sql.Tx, subj stepup.Subject, attempt *stepup.PasswordAttempt, ok bool) {
-	if creds.sent() && !h.allowMFASettingsStepUp(c, userID) {
-		return nil, stepup.Subject{}, nil, false
+) (tx *sql.Tx, subj stepup.Subject, attempt *stepup.PasswordAttempt, charged stepup.Charged, ok bool) {
+	if creds.sent() {
+		if charged, ok = h.allowMFASettingsStepUp(c, userID); !ok {
+			return nil, stepup.Subject{}, nil, stepup.Charged{}, false
+		}
 	}
 	attempt, ok = h.reserveStepUpPassword(c, userID, creds.Password)
 	if !ok {
-		return nil, stepup.Subject{}, nil, false
+		return nil, stepup.Subject{}, nil, stepup.Charged{}, false
 	}
 	ctx := c.Request.Context()
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		h.log.Error("Failed to begin MFA settings transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": stepup.ErrMsgVerificationFailed})
-		return nil, stepup.Subject{}, nil, false
+		return nil, stepup.Subject{}, nil, stepup.Charged{}, false
 	}
 	subj, e := stepup.LockSubjectTx(ctx, tx, userID, lock, middleware.TokenCredentialEpoch(c))
 	if e != nil {
 		h.rollbackQuietly(tx)
 		h.refuseMFASettingsStepUp(c, e, subjectStage(e))
-		return nil, stepup.Subject{}, nil, false
+		return nil, stepup.Subject{}, nil, stepup.Charged{}, false
 	}
-	return tx, subj, attempt, true
+	return tx, subj, attempt, charged, true
 }
 
 // reserveStepUpPassword counts a supplied password against the account's
@@ -233,7 +235,7 @@ func subjectStage(e *stepup.Error) gateStage {
 // pool or Redis.
 func (h *Handler) verifyMFASettingsStepUpTx(
 	ctx context.Context, tx *sql.Tx, userID string, subj stepup.Subject,
-	creds mfaStepUpCredentials, gate settingsStepUp, attempt *stepup.PasswordAttempt,
+	creds mfaStepUpCredentials, gate settingsStepUp, attempt *stepup.PasswordAttempt, charged stepup.Charged,
 ) (*stepup.Error, gateStage) {
 	e, stage := verifyStepUpFactors(attempt, subj, creds, gate.wording, func() *stepup.Error {
 		// Tx form: backup-code redemption is a write that a rollback must be
@@ -246,7 +248,7 @@ func (h *Handler) verifyMFASettingsStepUpTx(
 		// its locks. The caller refuses and returns; its deferred end is then
 		// a no-op rollback.
 		h.rollbackQuietly(tx)
-		h.refundBusyStepUp(ctx, userID, e)
+		h.refundBusyStepUp(ctx, charged, e)
 	}
 	return e, stage
 }
@@ -302,8 +304,12 @@ func verifyStepUpFactors(
 func (h *Handler) requirePasswordAndMFA(
 	c *gin.Context, userID string, creds mfaStepUpCredentials, gate settingsStepUp,
 ) (stepup.Subject, bool) {
-	if creds.sent() && !h.allowMFASettingsStepUp(c, userID) {
-		return stepup.Subject{}, false
+	var charged stepup.Charged
+	if creds.sent() {
+		var ok bool
+		if charged, ok = h.allowMFASettingsStepUp(c, userID); !ok {
+			return stepup.Subject{}, false
+		}
 	}
 	attempt, ok := h.reserveStepUpPassword(c, userID, creds.Password)
 	if !ok {
@@ -319,7 +325,7 @@ func (h *Handler) requirePasswordAndMFA(
 		return stepup.VerifyMFAFactor(ctx, h, userID, gate.purpose, creds.MFACode, subj.MFAMethods)
 	})
 	h.settleStepUpPassword(attempt)
-	h.refundBusyStepUp(ctx, userID, e)
+	h.refundBusyStepUp(ctx, charged, e)
 	if e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return stepup.Subject{}, false
@@ -351,24 +357,24 @@ func (h *Handler) refuseMFASettingsStepUp(c *gin.Context, e *stepup.Error, stage
 // budget, before any transaction opens. On refusal it emits the matching
 // event, writes the budget's 429 (exhausted) or 503 (unevaluable) and returns
 // false.
-func (h *Handler) allowMFASettingsStepUp(c *gin.Context, userID string) bool {
-	e := h.stepUpBudget().Consume(c.Request.Context(), userID)
+func (h *Handler) allowMFASettingsStepUp(c *gin.Context, userID string) (stepup.Charged, bool) {
+	charged, e := h.stepUpBudget().ConsumeAttempt(c.Request.Context(), userID)
 	if e == nil {
-		return true
+		return charged, true
 	}
 	h.refuseMFASettingsBudget(c, e)
-	return false
+	return stepup.Charged{}, false
 }
 
 // chargeMFASettingsCode is the code-only counterpart for the two legacy MFA
 // settings routes that do not use the shared settings gate.
-func (h *Handler) chargeMFASettingsCode(c *gin.Context, userID, code string) bool {
-	e := stepup.Charge(c.Request.Context(), h.stepUpBudget(), userID, code)
+func (h *Handler) chargeMFASettingsCode(c *gin.Context, userID, code string) (stepup.Charged, bool) {
+	charged, e := stepup.ChargeAttempt(c.Request.Context(), h.stepUpBudget(), userID, code)
 	if e == nil {
-		return true
+		return charged, true
 	}
 	h.refuseMFASettingsBudget(c, e)
-	return false
+	return stepup.Charged{}, false
 }
 
 func (h *Handler) refuseMFASettingsBudget(c *gin.Context, e *stepup.Error) {
@@ -402,8 +408,8 @@ func (h *Handler) clearStepUpAfterSuccess(c *gin.Context, userID string) {
 // refundBusyStepUp returns the shared budget's charge when err is a busy
 // backup-code check (stepup.IsBusy): the code was never judged, so it must
 // not cost an attempt. Any other outcome keeps its charge.
-func (h *Handler) refundBusyStepUp(ctx context.Context, userID string, err error) {
-	if rErr := stepup.RefundIfBusy(ctx, err, userID, h.stepUpBudget()); rErr != nil {
+func (h *Handler) refundBusyStepUp(ctx context.Context, charged stepup.Charged, err error) {
+	if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil {
 		h.log.Warn("Could not refund a busy step-up attempt", "error", rErr)
 	}
 }

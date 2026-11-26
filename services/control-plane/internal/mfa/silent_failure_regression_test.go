@@ -71,8 +71,13 @@ func (sfFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 func (h sfFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		if slices.Contains(strings.Split(h.cmd, "|"), cmd.Name()) {
-			if args := cmd.Args(); len(args) >= 2 {
-				if k, ok := args[1].(string); ok && strings.HasPrefix(k, h.prefix) {
+			// A script call's first key follows the script and the key count.
+			keyAt := 1
+			if cmd.Name() == "evalsha" || cmd.Name() == "eval" {
+				keyAt = 3
+			}
+			if args := cmd.Args(); len(args) > keyAt {
+				if k, ok := args[keyAt].(string); ok && strings.HasPrefix(k, h.prefix) {
 					h.hits.Add(1)
 					err := fmt.Errorf("sf: forced %s failure on %s", h.cmd, k)
 					cmd.SetErr(err)
@@ -179,20 +184,14 @@ func TestSilentFailureVerify_UsedPrecheckFault_DoesNotEvaluateCode(t *testing.T)
 	assert.Equal(t, 0, sfAttempts(t, f), "a Redis fault on the single-use pre-check must not let a code be evaluated")
 }
 
-func TestSilentFailureVerify_AttemptIncrFault_FailsClosed(t *testing.T) {
-	hook, hits := sfFault("incr", "mfa_verify_attempts:")
+// The count, its window and its window ID are one script (stepup.ChargeKey),
+// so one fault on that script covers a lost count and a lost window alike.
+func TestSilentFailureVerify_AttemptChargeFault_FailsClosed(t *testing.T) {
+	hook, hits := sfFault("evalsha|eval", "mfa_verify_attempts:")
 	f := sfNewVerifyFixture(t, hook)
 	status, body := sfVerify(t, f, sfWrongCode(t, f.secret))
 	sfRequireFired(t, hits)
 	sfRequireUnavailable(t, status, body, "a wrong code whose attempt could not be counted must fail closed, not answer 'invalid code'")
-}
-
-func TestSilentFailureVerify_AttemptExpireFault_FailsClosed(t *testing.T) {
-	hook, hits := sfFault("expire", "mfa_verify_attempts:")
-	f := sfNewVerifyFixture(t, hook)
-	status, body := sfVerify(t, f, sfWrongCode(t, f.secret))
-	sfRequireFired(t, hits)
-	sfRequireUnavailable(t, status, body, "an attempt counter whose window could not be set must fail closed")
 }
 
 // ── Class B — TOTPVerifySetup ──────────────────────────────────────────────

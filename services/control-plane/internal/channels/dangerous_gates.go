@@ -38,6 +38,8 @@ import (
 type channelGateConfirm struct {
 	code  string
 	grace stepup.GraceRead
+	// charged is the budget charge, for a busy refund.
+	charged stepup.Charged
 }
 
 // chargeChannelGate is a channel gate's pre-transaction half: it charges the
@@ -48,11 +50,12 @@ type channelGateConfirm struct {
 // grace that cannot be read is no grace, so the actor is prompted.
 func (h *Handler) chargeChannelGate(c *gin.Context, serverID, userID, code string, mayFire bool) (channelGateConfirm, bool) {
 	ctx := c.Request.Context()
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, code); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, code)
+	if e != nil {
 		mfaenforce.WriteError(c, h.log, e, nil)
 		return channelGateConfirm{}, false
 	}
-	confirm := channelGateConfirm{code: code}
+	confirm := channelGateConfirm{code: code, charged: charged}
 	if !mayFire {
 		return confirm, true
 	}
@@ -99,8 +102,8 @@ func (h *Handler) settleChannelGate(ctx context.Context, outcome mfaenforce.Outc
 // must not cost an attempt. Any other error keeps its charge. Both gated
 // routes call it only after their transaction has ended: it is a Redis call,
 // and none may run while the transaction is open (A-2, A-9).
-func (h *Handler) refundChannelGateIfBusy(ctx context.Context, err error, userID string) {
-	if rErr := stepup.RefundIfBusy(ctx, err, userID, stepup.DangerousActionBudget(h.redis)); rErr != nil {
+func (h *Handler) refundChannelGateIfBusy(ctx context.Context, err error, confirm channelGateConfirm) {
+	if rErr := stepup.RefundIfBusy(ctx, err, confirm.charged); rErr != nil {
 		h.log.Warn("Could not refund a busy channel-gate attempt", "error", rErr)
 	}
 }

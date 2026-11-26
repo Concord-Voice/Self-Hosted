@@ -259,8 +259,8 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 	sites, packages := censusVerifierCallers(t, internal)
 
 	// owners: each must reach, through its own package's call graph, both the
-	// verifier call's function and a budget charge (stepup.Charge or a
-	// Budget's Consume). That is "a charge in the same function or in its
+	// verifier call's function and a budget charge (stepup.Charge/ChargeAttempt or a
+	// Budget's Consume/ConsumeAttempt). That is "a charge in the same function or in its
 	// handler", checked per function rather than per file. seam: a shared
 	// verifier whose own callers are census entries, so the charge belongs to
 	// them.
@@ -288,7 +288,7 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 		"servers/mfa_enforcement.go:confirmMFAEnforcementRequest:ConfirmTx":  {owners: []string{"PutMFAEnforcement"}},
 		"channels/dangerous_gates.go:requireChannelGate:Require":             {owners: []string{"DeleteChannel", "UpdateExpiration"}},
 		"media/dangerous_gates.go:admitAndStoreServerImage:Require":          {owners: []string{"storeServerImageGated"}},
-		"sessions/handlers.go:authenticateForRevokeWithMFA:VerifyCode":       {owners: []string{"authenticateForRevokeWithMFA"}},
+		"sessions/handlers.go:verifyRevokeMFA:VerifyCode":                    {owners: []string{"verifyRevokeMFA"}},
 		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx":                {seam: "the own-rule seam; each VerifyOwnRuleTx caller is censused"},
 		"stepup/stepup.go:VerifyMFAFactor:VerifyCode":                        {seam: "the pool-side factor seam; each VerifyMFAFactor caller is censused"},
 		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx":                    {seam: "the in-transaction factor seam; each VerifyMFAFactorTx caller is censused"},
@@ -325,7 +325,7 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 			assert.True(t, pkg.reaches(owner, func(name string) bool { return name == s.fn }),
 				"%s: owner %s does not reach %s", site, owner, s.fn)
 			assert.True(t, pkg.reaches(owner, func(name string) bool { return pkg[name].charges }),
-				"%s: owner %s reaches no stepup.Charge or Budget.Consume (candidates reaching %s and a charge: %v)",
+				"%s: owner %s reaches no budget charge (candidates reaching %s and a charge: %v)",
 				site, owner, s.fn, pkg.chargingReachers(s.fn))
 		}
 	}
@@ -432,7 +432,7 @@ func censusVerifierCallers(t *testing.T, internal string) (map[string]censusSite
 					cf.refs[n.Sel.Name] = true
 				case *ast.CallExpr:
 					name, qualifier := censusCallee(n)
-					if (qualifier == "stepup" && name == "Charge") || name == "Consume" {
+					if (qualifier == "stepup" && (name == "Charge" || name == "ChargeAttempt")) || name == "Consume" || name == "ConsumeAttempt" {
 						cf.charges = true
 					}
 					if censusVerifierNames[name] && (name != "Require" || qualifier == "mfaenforce" || (qualifier == "" && dir == "mfaenforce")) {

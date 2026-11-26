@@ -93,6 +93,8 @@ type softLockGate struct {
 	purpose stepup.Purpose
 	input   stepup.Input
 	epoch   string
+	// charged is the budget charge this request made, for a busy refund.
+	charged stepup.Charged
 	// grace is the delete-scope grace read before the transaction, over the
 	// threshold only (armSoftLockConfirmation). The zero value covers nothing,
 	// so every other path is prompted as before.
@@ -321,8 +323,7 @@ func (h *Handler) refundBusyStepUp(ctx context.Context, err error, a *deleteAdmi
 	if !a.budgetCharged() {
 		return
 	}
-	budget := stepup.NewBudget(h.redis, stepup.MFASettingsBudgetPrefix)
-	if refundErr := stepup.RefundIfBusy(ctx, err, a.gate.userID, budget); refundErr != nil {
+	if refundErr := stepup.RefundIfBusy(ctx, err, a.gate.charged); refundErr != nil {
 		h.log.Warn("Could not refund a busy delete soft-lock step-up attempt",
 			"failure_class", failureClassSoftLockRefund, "error", refundErr)
 	}
@@ -397,7 +398,7 @@ func (h *Handler) chargeMessageDelete(ctx context.Context, c *gin.Context, g *so
 // reads as no grace, so the actor is prompted. On a budget refusal it has
 // written the 429 or 503 and returns false.
 func (h *Handler) armSoftLockConfirmation(ctx context.Context, c *gin.Context, g *softLockGate) bool {
-	if !h.consumeSoftLockBudget(ctx, c, *g) {
+	if !h.consumeSoftLockBudget(ctx, c, g) {
 		return false
 	}
 	// chargeSoftLock has already parsed the same inputs, so this cannot fail;
@@ -438,11 +439,13 @@ func (h *Handler) writeSoftLockUnavailable(c *gin.Context, cause error) {
 // confirmation transaction opens, and only when the request carries a factor:
 // a factor-less request learns nothing but the refusal every member gets
 // (X4, H4). On a refusal it has written the 429 or 503 and returns false.
-func (h *Handler) consumeSoftLockBudget(ctx context.Context, c *gin.Context, g softLockGate) bool {
+func (h *Handler) consumeSoftLockBudget(ctx context.Context, c *gin.Context, g *softLockGate) bool {
 	if !g.hasFactor() {
 		return true
 	}
-	return h.admitStepUpCharge(c, stepup.NewBudget(h.redis, stepup.MFASettingsBudgetPrefix).Consume(ctx, g.userID))
+	charged, e := stepup.NewBudget(h.redis, stepup.MFASettingsBudgetPrefix).ConsumeAttempt(ctx, g.userID)
+	g.charged = charged
+	return h.admitStepUpCharge(c, e)
 }
 
 // admitStepUpCharge answers a budget charge's outcome e: nil admits; a 429 or

@@ -1651,7 +1651,8 @@ func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpos
 		return false, fmt.Errorf("MFA required")
 	}
 
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), userID, mfaCode)
+	if e != nil {
 		if e.Cause != nil {
 			h.log.Error("Ownership MFA budget unavailable", "error", e.Cause)
 		}
@@ -1664,7 +1665,7 @@ func (h *Handler) verifyMFA(c *gin.Context, userID string, purpose stepup.Purpos
 		// A busy backup-code check judged nothing: give the attempt back and
 		// answer a retryable 503. No transaction is open here.
 		if stepup.IsBusy(err) {
-			if rErr := stepup.RefundIfBusy(ctx, err, userID, stepup.DangerousActionBudget(h.redis)); rErr != nil {
+			if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil {
 				h.log.Warn("Could not refund a busy ownership MFA attempt", "error", rErr)
 			}
 			busy := stepup.BusyError(err)

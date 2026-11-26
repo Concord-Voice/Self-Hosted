@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -39,10 +40,12 @@ func TestRefundIfBusy_RefundsOnlyABusyCheck(t *testing.T) {
 	own := NewBudget(rdb, "stepup:own:")
 	ctx := context.Background()
 
-	require.Nil(t, shared.Consume(ctx, "u1"))
-	require.Nil(t, own.Consume(ctx, "u1"))
-	require.NoError(t, RefundIfBusy(ctx, errors.New("wrong code"), "u1", shared, own))
-	require.NoError(t, RefundIfBusy(ctx, &Error{Status: http.StatusForbidden}, "u1", shared, own))
+	sharedCharge, e := shared.ConsumeAttempt(ctx, "u1")
+	require.Nil(t, e)
+	ownCharge, e := own.ConsumeAttempt(ctx, "u1")
+	require.Nil(t, e)
+	require.NoError(t, RefundIfBusy(ctx, errors.New("wrong code"), sharedCharge, ownCharge))
+	require.NoError(t, RefundIfBusy(ctx, &Error{Status: http.StatusForbidden}, sharedCharge, ownCharge))
 	for _, k := range []string{"stepup:test:u1", "stepup:own:u1"} {
 		got, err := mr.Get(k)
 		require.NoError(t, err)
@@ -50,7 +53,7 @@ func TestRefundIfBusy_RefundsOnlyABusyCheck(t *testing.T) {
 	}
 
 	ttlBefore := mr.TTL("stepup:test:u1")
-	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), "u1", shared, own))
+	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), sharedCharge, ownCharge))
 	for _, k := range []string{"stepup:test:u1", "stepup:own:u1"} {
 		got, err := mr.Get(k)
 		require.NoError(t, err)
@@ -58,12 +61,12 @@ func TestRefundIfBusy_RefundsOnlyABusyCheck(t *testing.T) {
 	}
 	require.Equal(t, ttlBefore, mr.TTL("stepup:test:u1"), "the refund keeps the window")
 
-	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), "u1", shared))
+	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), sharedCharge))
 	got, err := mr.Get("stepup:test:u1")
 	require.NoError(t, err)
 	require.Equal(t, "0", got, "a refund never goes below zero")
-	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), "u2", shared))
-	require.False(t, mr.Exists("stepup:test:u2"), "a refund never creates a key")
+	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), Charged{}))
+	require.False(t, mr.Exists("stepup:test:u2"), "the zero charge refunds nothing")
 }
 
 func TestRefundIfBusy_FiveBusyThenCorrectNeverReaches429(t *testing.T) {
@@ -71,8 +74,63 @@ func TestRefundIfBusy_FiveBusyThenCorrectNeverReaches429(t *testing.T) {
 	b := NewBudget(rdb, "stepup:test:")
 	ctx := context.Background()
 	for range BudgetLimit + 1 {
-		require.Nil(t, b.Consume(ctx, "u1"))
-		require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), "u1", b))
+		charged, e := b.ConsumeAttempt(ctx, "u1")
+		require.Nil(t, e)
+		require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), charged))
 	}
 	require.Nil(t, b.Consume(ctx, "u1"), "busy checks never exhaust the budget")
+}
+
+// A busy request can wait past the end of the window it was charged in. Its
+// refund must not take back a charge made in the next window, or one request
+// straddling each boundary keeps every window short of its limit.
+func TestRefundIfBusy_LateRefundLeavesTheNextWindowAlone(t *testing.T) {
+	rdb, mr := newBudgetRedis(t)
+	b := NewBudget(rdb, "stepup:test:")
+	ctx := context.Background()
+
+	late, e := b.ConsumeAttempt(ctx, "u1")
+	require.Nil(t, e)
+	mr.FastForward(BudgetWindow + time.Second)
+	require.False(t, mr.Exists("stepup:test:u1"), "the first window has ended")
+
+	_, e = b.ConsumeAttempt(ctx, "u1")
+	require.Nil(t, e)
+	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), late))
+	got, err := mr.Get("stepup:test:u1")
+	require.NoError(t, err)
+	require.Equal(t, "1", got, "a refund from an ended window leaves the new window's charge")
+}
+
+// A refund inside its own window still applies after time has moved on.
+func TestRefundIfBusy_RefundWithinTheWindowAfterTimePasses(t *testing.T) {
+	rdb, mr := newBudgetRedis(t)
+	b := NewBudget(rdb, "stepup:test:")
+	ctx := context.Background()
+
+	charged, e := b.ConsumeAttempt(ctx, "u1")
+	require.Nil(t, e)
+	mr.FastForward(BudgetWindow / 2)
+	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), charged))
+	got, err := mr.Get("stepup:test:u1")
+	require.NoError(t, err)
+	require.Equal(t, "0", got)
+}
+
+// A cleared budget starts a new window: a refund from before the clear must
+// not reach a charge made after it.
+func TestRefundIfBusy_ClearStartsANewWindow(t *testing.T) {
+	rdb, mr := newBudgetRedis(t)
+	b := NewBudget(rdb, "stepup:test:")
+	ctx := context.Background()
+
+	before, e := b.ConsumeAttempt(ctx, "u1")
+	require.Nil(t, e)
+	require.NoError(t, b.Clear(ctx, "u1"))
+	_, e = b.ConsumeAttempt(ctx, "u1")
+	require.Nil(t, e)
+	require.NoError(t, RefundIfBusy(ctx, BusyError(backuphash.ErrBusy), before))
+	got, err := mr.Get("stepup:test:u1")
+	require.NoError(t, err)
+	require.Equal(t, "1", got)
 }

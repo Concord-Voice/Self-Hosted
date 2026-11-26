@@ -1461,8 +1461,12 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	if preflightTOTPExists && !h.chargeMFASettingsCode(c, userID, req.Code) {
-		return
+	var charged stepup.Charged
+	if preflightTOTPExists {
+		var admitted bool
+		if charged, admitted = h.chargeMFASettingsCode(c, userID, req.Code); !admitted {
+			return
+		}
 	}
 
 	es := h.readEmailSmsForSync(ctx, userID)
@@ -1506,7 +1510,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 			return
 		}
 		var verified bool
-		if verified, mfaVerified = h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, req, es); !verified {
+		if verified, mfaVerified = h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, charged, req, es); !verified {
 			return
 		}
 	}
@@ -1537,7 +1541,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 // locked transaction. On refusal or failure it has written the response and
 // returns false; the caller's deferred rollback undoes the delete.
 func (h *Handler) verifyAndDeleteTOTPTx(
-	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, attempt *stepup.PasswordAttempt,
+	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, attempt *stepup.PasswordAttempt, charged stepup.Charged,
 	req totpDisableRequest, es emailSmsState,
 ) (proceed, mfaVerified bool) {
 	ctx := c.Request.Context()
@@ -1550,7 +1554,7 @@ func (h *Handler) verifyAndDeleteTOTPTx(
 	if stepup.IsBusy(err) {
 		// Roll back first so the refund's Redis call runs under no lock.
 		h.rollbackQuietly(tx)
-		h.refundBusyStepUp(ctx, userID, err)
+		h.refundBusyStepUp(ctx, charged, err)
 		stepup.BusyError(err).Write(c)
 		return false, false
 	}
@@ -1633,7 +1637,8 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidTOTPCode})
 		return
 	}
-	if !h.chargeMFASettingsCode(c, userID, req.Code) {
+	charged, admitted := h.chargeMFASettingsCode(c, userID, req.Code)
+	if !admitted {
 		return
 	}
 	step, matched := MatchCodeStep(string(secret), req.Code)
@@ -1646,7 +1651,7 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 	// matched code changed nothing, so it must not cost an attempt.
 	codes, hashes, err := GenerateBackupCodes(ctx)
 	if err != nil {
-		h.refundBusyStepUp(ctx, userID, err)
+		h.refundBusyStepUp(ctx, charged, err)
 		h.log.Error(errMsgFailedBackupCodes, "user_id", userID, "error", err)
 		writeBackupHashFailure(c, err, errMsgFailedBackupCodes)
 		return
@@ -2103,7 +2108,7 @@ func (h *Handler) Verify(c *gin.Context) {
 	}
 
 	attemptsKey := fmt.Sprintf(redisKeyMFAVerifyAttempts, claims.UserID)
-	attempt, ok := h.reserveVerifyAttempt(ctx, c, claims, attemptsKey)
+	attempt, charged, ok := h.reserveVerifyAttempt(ctx, c, claims, attemptsKey)
 	if !ok {
 		return
 	}
@@ -2112,7 +2117,7 @@ func (h *Handler) Verify(c *gin.Context) {
 		h.refuseWrongCode(ctx, c, req.Method, claims.UserID, lockoutKey, attempt)
 		return
 	}
-	verified, matchedMethod, responded := h.verifyByMethod(ctx, c, req, claims, purpose != PurposeRecoveryChallenge && containsStr(restricted, "totp"))
+	verified, matchedMethod, responded := h.verifyByMethod(ctx, c, req, claims, purpose != PurposeRecoveryChallenge && containsStr(restricted, "totp"), charged)
 	if responded {
 		return // Early return already sent a response (e.g. bad request)
 	}
@@ -2183,23 +2188,21 @@ func answeredFactor(requested, matched string) string {
 // attempt and later attempts, refused ones included, do not extend it, so a
 // trickle of requests cannot hold an account's MFA locked. NX also gives a
 // count left without an expiry (an INCR whose EXPIRE failed) one on the next
-// attempt, so a missed expiry is never permanent.
-func (h *Handler) reserveVerifyAttempt(ctx context.Context, c *gin.Context, claims *ChallengeClaims, attemptsKey string) (int64, bool) {
-	attempt, err := h.redis.Incr(ctx, attemptsKey).Result()
+// attempt, so a missed expiry is never permanent. The count, the window and
+// the returned charge come from one script, so a busy refund returns the
+// attempt only to the window it was counted in (stepup.ChargeKey).
+func (h *Handler) reserveVerifyAttempt(ctx context.Context, c *gin.Context, claims *ChallengeClaims, attemptsKey string) (int64, stepup.Charged, bool) {
+	attempt, charged, err := stepup.ChargeKey(ctx, h.redis, attemptsKey, verifyAttemptWindow)
 	if err != nil {
 		h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("count MFA verify attempt: %w", err))
-		return 0, false
-	}
-	if err := h.redis.ExpireNX(ctx, attemptsKey, verifyAttemptWindow).Err(); err != nil {
-		h.verifyDependencyFailed(c, claims.UserID, fmt.Errorf("set MFA verify attempt window: %w", err))
-		return 0, false
+		return 0, stepup.Charged{}, false
 	}
 	if attempt > failedAttemptLimit {
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeLocked, RouteTemplate: securityevent.RouteAuthMFAVerify})
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": errMsgTooManyAttempts})
-		return 0, false
+		return 0, stepup.Charged{}, false
 	}
-	return attempt, true
+	return attempt, charged, true
 }
 
 // releaseOwnedScript deletes each key only while it still holds ARGV[1], the
@@ -2446,7 +2449,7 @@ func (h *Handler) parseChallengeToken(tokenStr string) (*ChallengeClaims, Challe
 // verifyByMethod dispatches verification to the appropriate method handler.
 // Returns (verified, matchedMethod, responded) — responded is true if an HTTP
 // response was already written.
-func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verifyRequest, claims *ChallengeClaims, totpRestricted bool) (bool, string, bool) {
+func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verifyRequest, claims *ChallengeClaims, totpRestricted bool, charged stepup.Charged) (bool, string, bool) {
 	switch req.Method {
 	case "totp", "backup_code":
 		// Backup codes belong to TOTP, so a recovery-only TOTP restricts them
@@ -2457,7 +2460,7 @@ func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verify
 		if totpRestricted && req.Code != "" {
 			return false, "", false
 		}
-		return h.verifyTOTPOrBackup(ctx, c, req.Code, claims.UserID)
+		return h.verifyTOTPOrBackup(ctx, c, req.Code, claims.UserID, charged)
 	case "webauthn":
 		verified, responded := h.verifyWebAuthnChallenge(ctx, c, req.Assertion, claims)
 		return verified, "webauthn", responded
@@ -2471,7 +2474,7 @@ func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verify
 }
 
 // verifyTOTPOrBackup verifies a TOTP or backup code.
-func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, userID string) (bool, string, bool) {
+func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, userID string, charged stepup.Charged) (bool, string, bool) {
 	if code == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCodeRequired})
 		return false, "", true
@@ -2482,7 +2485,7 @@ func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, 
 		// A busy hasher judged nothing (VerifyBackupCode derives under one
 		// slot before comparing, and only an 8-character code reaches it, which
 		// no 6-digit TOTP matches), so it returns the attempt Verify counted.
-		if rErr := stepup.RefundIfBusy(ctx, err, userID, stepup.NewBudget(h.redis, verifyAttemptsPrefix)); rErr != nil {
+		if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil {
 			h.log.Warn("Could not refund a busy MFA verify attempt", "error", rErr)
 		}
 		h.verifyDependencyFailed(c, userID, err)
@@ -3750,13 +3753,13 @@ func (h *Handler) EmailSmsDisable(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequest})
 		return
 	}
-	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForNoKeyUpdate)
+	tx, subj, attempt, charged, ok := h.openMFASettingsTx(c, userID, creds, lockForNoKeyUpdate)
 	if !ok {
 		return
 	}
 	defer h.endMFASettingsTx(tx, attempt)
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, emailSmsDisableStepUp, attempt); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, emailSmsDisableStepUp, attempt, charged); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}
@@ -3893,7 +3896,7 @@ func (h *Handler) SetBackupEmail(c *gin.Context) {
 		return
 	}
 
-	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, req.mfaStepUpCredentials, lockForNoKeyUpdate)
+	tx, subj, attempt, charged, ok := h.openMFASettingsTx(c, userID, req.mfaStepUpCredentials, lockForNoKeyUpdate)
 	if !ok {
 		return
 	}
@@ -3901,7 +3904,7 @@ func (h *Handler) SetBackupEmail(c *gin.Context) {
 	ctx := c.Request.Context()
 	// Gated on the requested action, set or clear alike; the prior value is
 	// never read.
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, req.mfaStepUpCredentials, backupEmailStepUp, attempt); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, req.mfaStepUpCredentials, backupEmailStepUp, attempt, charged); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}
@@ -4051,7 +4054,7 @@ type recoveryKeyMaterial struct {
 // upload) needs no credentials; an overwrite, which can do everything
 // DeleteRecoveryKey can, needs the same step-up. It always writes the response.
 func (h *Handler) storeRecoveryKey(c *gin.Context, userID string, creds mfaStepUpCredentials, m recoveryKeyMaterial) {
-	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
+	tx, subj, attempt, charged, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
 	if !ok {
 		return
 	}
@@ -4080,7 +4083,7 @@ func (h *Handler) storeRecoveryKey(c *gin.Context, userID string, creds mfaStepU
 	if replacing && !creds.sent() && h.answerRepeatedFirstStoreTx(c, tx, userID, m) {
 		return
 	}
-	if replacing && !h.replaceRecoveryKeyTx(c, tx, userID, subj, creds, m, attempt) {
+	if replacing && !h.replaceRecoveryKeyTx(c, tx, userID, subj, creds, m, attempt, charged) {
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -4177,10 +4180,10 @@ func sameRecoveryColumn(a, b []byte) int {
 // written the response and returns false.
 func (h *Handler) replaceRecoveryKeyTx(
 	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, creds mfaStepUpCredentials, m recoveryKeyMaterial,
-	attempt *stepup.PasswordAttempt,
+	attempt *stepup.PasswordAttempt, charged stepup.Charged,
 ) bool {
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyReplaceStepUp, attempt); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyReplaceStepUp, attempt, charged); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return false
 	}
@@ -4237,13 +4240,13 @@ func (h *Handler) DeleteRecoveryKey(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequest})
 		return
 	}
-	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
+	tx, subj, attempt, charged, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
 	if !ok {
 		return
 	}
 	defer h.endMFASettingsTx(tx, attempt)
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyRemoveStepUp, attempt); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyRemoveStepUp, attempt, charged); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}

@@ -53,7 +53,8 @@ func (h *Handler) updateServerGated(
 ) (models.Server, error) {
 	ctx := c.Request.Context()
 	budget := stepup.DangerousActionBudget(h.redis)
-	if e := stepup.Charge(ctx, budget, userID, code); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, budget, userID, code)
+	if e != nil {
 		return models.Server{}, e
 	}
 	store := stepup.NewGraceStore(h.redis)
@@ -93,7 +94,7 @@ func (h *Handler) updateServerGated(
 		return nil
 	})
 	if err != nil {
-		h.refundBusyCharge(ctx, err, userID, budget) // the transaction has rolled back
+		h.refundBusyCharge(ctx, err, charged) // the transaction has rolled back
 		return models.Server{}, err
 	}
 	mfaenforce.Settle(ctx, h.log, outcome, budget, store, grace, userID)
@@ -168,8 +169,8 @@ func (h *Handler) gateServerDeleteTx(
 // after the request's transaction has ended, since it is a Redis call (A-2,
 // A-9). A failed refund leaves the counter high, which fails toward more
 // limiting, so it is logged and the request is answered as it would be.
-func (h *Handler) refundBusyCharge(ctx context.Context, err error, userID string, budget stepup.Budget) {
-	if rErr := stepup.RefundIfBusy(ctx, err, userID, budget); rErr != nil {
+func (h *Handler) refundBusyCharge(ctx context.Context, err error, charged stepup.Charged) {
+	if rErr := stepup.RefundIfBusy(ctx, err, charged); rErr != nil {
 		h.log.Warn("Could not refund a step-up attempt after a busy verification", "error", rErr)
 	}
 }

@@ -1815,7 +1815,7 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 		}, userID,
 	)
 	if err != nil {
-		h.refundChannelGateIfBusy(ctx, err, userID) // the transaction has ended
+		h.refundChannelGateIfBusy(ctx, err, confirm) // the transaction has ended
 		h.respondDeleteChannelError(c, serverID, channelID, err)
 		return
 	}

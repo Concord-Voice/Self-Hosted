@@ -77,7 +77,7 @@ func (h *Handler) UpdateExpiration(c *gin.Context) {
 			// A busy check is refunded only once the transaction has rolled
 			// back: the refund is a Redis call (A-2, A-9).
 			rollback()
-			h.refundChannelGateIfBusy(c.Request.Context(), gateErr, userID)
+			h.refundChannelGateIfBusy(c.Request.Context(), gateErr, confirm)
 		}
 		return
 	}

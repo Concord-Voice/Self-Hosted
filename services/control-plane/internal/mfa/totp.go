@@ -184,13 +184,16 @@ func GenerateBackupCodes(ctx context.Context) (codes []string, hashes []string, 
 // The caller marks a match used through its conditional database update. A v2
 // derivation that gets no slot returns backuphash.ErrBusy and spends nothing.
 func VerifyBackupCode(ctx context.Context, code string, hashes []string, used []bool) (index int, matched bool, err error) {
-	type parsedHash struct{ salt, digest []byte }
-	parsed := make([]parsedHash, len(hashes))
+	parsed := make([]parsedBackupHash, len(hashes))
 	for i, stored := range hashes {
 		parsed[i].salt, parsed[i].digest, err = backuphash.Parse(stored)
 		if err != nil {
 			return -1, false, err
 		}
+		// A code with no used flag is treated as used: the arrays are written
+		// together, so a short one is a damaged row, and the caller indexes
+		// used[i] to mark the match.
+		parsed[i].used = i >= len(used) || used[i]
 	}
 	normalized := strings.TrimSpace(code)
 	if len(normalized) != backupLen {
@@ -199,37 +202,15 @@ func VerifyBackupCode(ctx context.Context, code string, hashes []string, used []
 	normalized = strings.ToUpper(normalized)
 	codeHash := sha256.Sum256([]byte(normalized))
 
-	// A code with no used flag is treated as used: the arrays are written
-	// together, so a short one is a damaged row, and the caller indexes
-	// used[i] to mark the match.
-	n := min(len(parsed), len(used))
-	// Every unused v2 digest is derived under one slot before any comparison,
-	// so a busy hasher (backuphash.ErrBusy) answers before anything is judged
-	// and the caller can refund the attempt.
-	var v2At []int
-	var salts [][]byte
-	for i := range n {
-		if !used[i] && parsed[i].salt != nil {
-			v2At = append(v2At, i)
-			salts = append(salts, parsed[i].salt)
-		}
-	}
-	derived := make(map[int][]byte, len(salts))
-	if len(salts) > 0 {
-		digests, deriveErr := backuphash.DeriveEachV2(ctx, normalized, salts)
-		if deriveErr != nil {
-			return -1, false, deriveErr
-		}
-		for j, i := range v2At {
-			derived[i] = digests[j]
-		}
+	derived, err := deriveUnusedV2(ctx, normalized, parsed)
+	if err != nil {
+		return -1, false, err
 	}
 
-	for i := range n {
-		if used[i] {
+	for i, stored := range parsed {
+		if stored.used {
 			continue
 		}
-		stored := parsed[i]
 		candidate := codeHash[:]
 		if d, ok := derived[i]; ok {
 			candidate = d
@@ -239,4 +220,35 @@ func VerifyBackupCode(ctx context.Context, code string, hashes []string, used []
 		}
 	}
 	return -1, false, nil
+}
+
+type parsedBackupHash struct {
+	salt, digest []byte
+	used         bool
+}
+
+// deriveUnusedV2 derives the code under every unused v2 salt, by index, under
+// one slot and before any comparison, so a busy hasher (backuphash.ErrBusy)
+// answers before anything is judged and the caller can refund the attempt.
+func deriveUnusedV2(ctx context.Context, normalized string, parsed []parsedBackupHash) (map[int][]byte, error) {
+	var v2At []int
+	var salts [][]byte
+	for i, p := range parsed {
+		if !p.used && p.salt != nil {
+			v2At = append(v2At, i)
+			salts = append(salts, p.salt)
+		}
+	}
+	derived := make(map[int][]byte, len(salts))
+	if len(salts) == 0 {
+		return derived, nil
+	}
+	digests, err := backuphash.DeriveEachV2(ctx, normalized, salts)
+	if err != nil {
+		return nil, err
+	}
+	for j, i := range v2At {
+		derived[i] = digests[j]
+	}
+	return derived, nil
 }

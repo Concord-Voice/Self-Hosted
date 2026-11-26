@@ -207,14 +207,10 @@ func (ownershipBudgetIncrFaultHook) DialHook(next redis.DialHook) redis.DialHook
 
 func (h ownershipBudgetIncrFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == "incr" {
-			if args := cmd.Args(); len(args) >= 2 {
-				if key, ok := args[1].(string); ok && key == h.key {
-					err := errors.New("forced ownership MFA budget failure")
-					cmd.SetErr(err)
-					return err
-				}
-			}
+		if stepup.ChargeCommandKey(cmd) == h.key {
+			err := errors.New("forced ownership MFA budget failure")
+			cmd.SetErr(err)
+			return err
 		}
 		return next(ctx, cmd)
 	}
