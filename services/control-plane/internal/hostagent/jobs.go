@@ -77,10 +77,14 @@ type jobs struct {
 	marker    string // exists while a write runs
 	admission string // persistent backup admission timestamp beside marker
 	boundary  string // the security-event log root
-	audit     *Audit
-	list      []*Job // oldest first
-	running   bool
-	now       func() time.Time
+	// version is the install's VERSION file, the running release that
+	// update refuses to go below.
+	version string
+	audit   *Audit
+	alerts  *Alerter
+	list    []*Job // oldest first
+	running bool
+	now     func() time.Time
 }
 
 // EnableWrites lets s run write actions through r, whose output should
@@ -95,7 +99,9 @@ func (s *Server) EnableWrites(r Runner, backups, marker string) {
 		run: r, backups: backups, marker: marker,
 		admission: filepath.Join(filepath.Dir(marker), "backup-last-admitted"),
 		boundary:  securityLogRoot,
+		version:   filepath.Join(filepath.Dir(backups), "VERSION"),
 		audit:     s.audit,
+		alerts:    s.alerts,
 		now:       time.Now,
 	}
 	if s.authorizations != nil {
@@ -147,6 +153,9 @@ func (j *jobs) commands(name string, req actionRequest) ([][]string, time.Durati
 	case "update":
 		if req.Archive != "" || !updateTagPattern.MatchString(req.Tag) {
 			return nil, 0, bad("invalid_tag")
+		}
+		if no := j.refuseDowngrade(req.Tag); no != nil {
+			return nil, 0, no
 		}
 		return [][]string{{"update", "--to", req.Tag, "--confirm", jsonFlag}}, longJobBudget, nil
 	case "restore":
@@ -217,7 +226,7 @@ func (j *jobs) start(action, adminID string, req actionRequest, cmds [][]string,
 		return nil, nil
 	}
 	var backupAt time.Time
-	if action == "backup" {
+	if takesBackup(action) {
 		backupAt = j.now().UTC()
 		if err := j.checkBackupAdmission(backupAt); err != nil {
 			return nil, err
@@ -233,6 +242,8 @@ func (j *jobs) start(action, adminID string, req actionRequest, cmds [][]string,
 		log.Printf("concord-agent: host-agent audit admission event failed job=%s: %v", id, err)
 		return nil, errors.New("host-agent admission audit unavailable")
 	}
+	// The alert follows the fsynced admitted record and never gates the job.
+	j.alerts.Enqueue(AlertEvent{Outcome: "admitted", Reason: admitted.Reason, Action: action, Tag: req.Tag, Archive: req.Archive, AdminID: adminID, JobID: id})
 	rollback := func(cause error) (*Job, error) {
 		failed := event
 		failed.Outcome, failed.Reason = "failed", "admission_failed"
@@ -244,7 +255,7 @@ func (j *jobs) start(action, adminID string, req actionRequest, cmds [][]string,
 	if err := os.WriteFile(j.marker, []byte(id+"\n"), 0o600); err != nil {
 		return rollback(err)
 	}
-	if action == "backup" {
+	if takesBackup(action) {
 		if err := j.writeBackupAdmission(filepath.Dir(j.admission), backupAt); err != nil {
 			if removeErr := os.Remove(j.marker); removeErr != nil {
 				log.Printf("concord-agent: write marker removal failed job=%s: %v", id, removeErr)
@@ -272,6 +283,10 @@ func (j *jobs) start(action, adminID string, req actionRequest, cmds [][]string,
 	}
 	return &snap, nil
 }
+
+// takesBackup reports whether action runs a backup and so spends the hourly
+// backup admission: update runs verb_backup before it switches release.
+func takesBackup(action string) bool { return action == "backup" || action == "update" }
 
 // checkBackupAdmission runs under j.mu before the audit, marker and timestamp
 // commit. A failed backup job still consumes its window once admitted.
@@ -442,7 +457,7 @@ func (j *jobs) snapshot(job *Job, withOutput bool) Job {
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action string) {
 	name := actionName(action)
 	if name == "" {
-		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "assertion_denied"})
+		s.auditDenial(AuditEvent{Outcome: "denied", Reason: "request_refused"})
 		refuse(w, http.StatusNotFound, "unknown_action")
 		log.Printf("concord-agent: refused unknown action")
 		return
@@ -452,7 +467,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 		return
 	}
 	if s.authorizations == nil || s.audit == nil {
-		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied"})
+		s.auditDenial(AuditEvent{Action: name, Outcome: "denied", Reason: "authorizer_unavailable"})
 		refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
 		return
 	}
@@ -463,7 +478,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxActionBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&proof); err != nil || dec.Decode(new(any)) != io.EOF || proof.Handle == "" || len(proof.Assertion) == 0 {
-		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied"})
+		s.auditDenial(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied"})
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
@@ -479,8 +494,11 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 			reason = "counter_stale"
 		case errors.Is(err, errNoActionCredential):
 			reason = "no_action_credential"
+		case errors.Is(err, ErrAuthorizerUnavailable):
+			// Trusted verification could not run; the assertion was not judged.
+			reason = "authorizer_unavailable"
 		}
-		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: reason, AdminID: adminID})
+		s.auditDenial(AuditEvent{Action: name, Outcome: "denied", Reason: reason, AdminID: adminID})
 		if errors.Is(err, ErrAuthorizerUnavailable) {
 			refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
 			return
@@ -491,7 +509,8 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 	}
 	cmds, budget, no := s.writes.commands(name, req)
 	if no != nil {
-		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "assertion_denied", AdminID: adminID})
+		// The assertion verified; the request itself no longer holds.
+		s.auditDenial(AuditEvent{Action: name, Outcome: "denied", Reason: "request_refused", AdminID: adminID})
 		refuse(w, no.code, no.reason)
 		log.Printf("concord-agent: action=%s outcome=refused reason=%s", name, no.reason)
 		return
@@ -499,7 +518,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 	job, err := s.writes.start(name, adminID, req, cmds, budget)
 	if err != nil {
 		if errors.Is(err, errBackupLimited) {
-			if s.audit.Write(AuditEvent{Action: name, Outcome: "denied", Reason: "backup_rate_limited", AdminID: adminID}) != nil {
+			if s.recordDenial(AuditEvent{Action: name, Outcome: "denied", Reason: "backup_rate_limited", AdminID: adminID}, 0) != nil {
 				refuse(w, http.StatusServiceUnavailable, "job_unavailable")
 				log.Printf("concord-agent: action=%s outcome=error", name)
 				return
@@ -507,13 +526,13 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 			refuse(w, http.StatusTooManyRequests, "backup_rate_limited")
 			return
 		}
-		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "job_unavailable", AdminID: adminID})
+		s.auditDenial(AuditEvent{Action: name, Outcome: "denied", Reason: "job_unavailable", AdminID: adminID})
 		refuse(w, http.StatusServiceUnavailable, "job_unavailable")
 		log.Printf("concord-agent: action=%s outcome=error", name)
 		return
 	}
 	if job == nil {
-		s.auditEvent(AuditEvent{Action: name, Outcome: "denied", Reason: "write_in_progress", AdminID: adminID})
+		s.auditDenial(AuditEvent{Action: name, Outcome: "denied", Reason: "write_in_progress", AdminID: adminID})
 		refuse(w, http.StatusConflict, "write_in_progress")
 		log.Printf("concord-agent: action=%s outcome=busy", name)
 		return

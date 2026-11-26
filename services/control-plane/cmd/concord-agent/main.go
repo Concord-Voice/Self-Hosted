@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -56,6 +57,9 @@ const (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "authorizer" {
 		os.Exit(runAuthorizerCLI(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "alert" {
+		os.Exit(runAlertCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	os.Exit(run())
 }
@@ -132,6 +136,7 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	configureAlerts(ctx, agent)
 	// Setup mode is an extra listener; the socket serves either way, so a
 	// setup failure is logged and the agent carries on.
 	if _, _, err := startSetup(ctx, resolved, envOr("CONCORD_AGENT_SETUP_ADDR", defaultSetupAddr),
@@ -150,6 +155,54 @@ func run() int {
 		log.Printf("concord-agent: serve: %v", err)
 		return 1
 	}
+	return 0
+}
+
+// configureAlerts installs the out-of-band alert destination. Alerts are
+// best-effort detection: a missing or unsafe alert file never stops the agent
+// or its writes, it is reported once here.
+func configureAlerts(ctx context.Context, agent *hostagent.Server) {
+	alerts, err := hostagent.LoadAlerter(ctx)
+	switch {
+	case errors.Is(err, hostagent.ErrAlertNotConfigured):
+		log.Printf("concord-agent: warning: no %s; host actions are not alerted out of band", hostagent.AlertConfigPath)
+		return
+	case err != nil:
+		// The loader's errors are fixed strings; the URL never reaches them.
+		log.Printf("concord-agent: warning: alert destination unavailable; host actions are not alerted out of band: %v", err)
+		return
+	}
+	agent.SetAlerter(alerts)
+	log.Print("concord-agent: host actions are alerted out of band")
+}
+
+// runAlertCLI serves `concord-agent alert test`: it sends one test alert to
+// the configured destination and reports the outcome.
+func runAlertCLI(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 || args[0] != "test" {
+		_, _ = fmt.Fprintln(stderr, "usage: concord-agent alert test")
+		return 2
+	}
+	if os.Geteuid() != 0 {
+		_, _ = fmt.Fprintln(stderr, "concord-agent alert test: run as root")
+		return 1
+	}
+	alerts, err := hostagent.LoadAlerterForTest()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "concord-agent alert test: %v\n", err)
+		return 1
+	}
+	return sendTestAlert(alerts, stdout, stderr)
+}
+
+func sendTestAlert(alerts *hostagent.Alerter, stdout, stderr io.Writer) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := alerts.Send(ctx, hostagent.AlertEvent{Outcome: "test"}); err != nil {
+		_, _ = fmt.Fprintf(stderr, "concord-agent alert test: delivery failed: class=%s\n", hostagent.AlertFailureClass(err))
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, "concord-agent alert test: delivered")
 	return 0
 }
 

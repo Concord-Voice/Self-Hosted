@@ -46,7 +46,7 @@ func withPeerContext(ctx context.Context, uid int) context.Context {
 func TestPeerForbiddenAuditIsRateLimitedPerUIDAndCounted(t *testing.T) {
 	server, _ := writeServer(t, &fakeRunner{})
 	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
-	server.peerDenials.now = func() time.Time { return now }
+	server.denials.now = func() time.Time { return now }
 	for range 100 {
 		require.Equal(t, http.StatusForbidden, forbiddenRequest(server, 10007, true))
 	}
@@ -55,7 +55,7 @@ func TestPeerForbiddenAuditIsRateLimitedPerUIDAndCounted(t *testing.T) {
 	}
 	lines := readAuditLines(t, server.audit.path)
 	require.Len(t, lines, 2, "one record per UID per window, however many denials")
-	now = now.Add(peerDenialWindow)
+	now = now.Add(denialWindow)
 	require.Equal(t, http.StatusForbidden, forbiddenRequest(server, 10007, true))
 	lines = readAuditLines(t, server.audit.path)
 	require.Len(t, lines, 3)
@@ -64,24 +64,24 @@ func TestPeerForbiddenAuditIsRateLimitedPerUIDAndCounted(t *testing.T) {
 }
 
 func TestPeerDenialLimiterIsBoundedAcrossManyUIDs(t *testing.T) {
-	var limiter peerDenialLimiter
+	var limiter denialLimiter
 	now := time.Now()
 	limiter.now = func() time.Time { return now }
 	recorded := 0
-	for uid := range maxPeerDenialUIDs * 4 {
-		if ok, _ := limiter.admit(uid); ok {
+	for uid := range maxDenialKeys * 4 {
+		if ok, _ := limiter.admit(denialKey{reason: "peer_forbidden", uid: uid}); ok {
 			recorded++
 		}
 	}
-	require.LessOrEqual(t, len(limiter.entries), maxPeerDenialUIDs+1)
-	require.Equal(t, maxPeerDenialUIDs+1, recorded, "UIDs past the bound share one overflow record")
+	require.LessOrEqual(t, len(limiter.entries), maxDenialKeys+1)
+	require.Equal(t, maxDenialKeys+1, recorded, "UIDs past the bound share one overflow record")
 }
 
 func TestAuditFullLogsOnceAndRefusesWrites(t *testing.T) {
 	logs := captureLog(t)
 	audit := testAudit(t)
 	require.NoError(t, os.Truncate(audit.path, maxAuditFileBytes))
-	event := AuditEvent{Outcome: "denied", Reason: "begin_denied"}
+	event := AuditEvent{Action: "stop", Outcome: "admitted", Reason: "admission_approved"}
 	require.ErrorIs(t, audit.Write(event), errAuditFull)
 	require.ErrorIs(t, audit.Write(event), errAuditFull)
 	require.Equal(t, 1, strings.Count(logs.String(), "host-agent audit full"), "the full stream is reported, once")
@@ -108,7 +108,7 @@ func TestServerLogsAuditWriteFailures(t *testing.T) {
 	logs := captureLog(t)
 	server, _ := writeServer(t, &fakeRunner{})
 	require.NoError(t, os.Truncate(server.audit.path, maxAuditFileBytes))
-	server.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+	server.auditDenial(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
 	require.Contains(t, logs.String(), "host-agent audit write failed: reason=begin_denied")
 }
 

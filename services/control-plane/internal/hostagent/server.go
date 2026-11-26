@@ -67,7 +67,8 @@ type Server struct {
 	writes          *jobs  // nil unless EnableWrites was called
 	managedBy       string // an appliance that owns writes; see SetManagedBy
 	writesDisabled  bool   // writes are off because audit or trust is missing
-	peerDenials     peerDenialLimiter
+	denials         denialLimiter
+	alerts          *Alerter // nil when no alert destination is configured
 	// writeGrace is how long past an action's budget a response may take to
 	// write before the connection is cut.
 	writeGrace time.Duration
@@ -131,40 +132,76 @@ func (s *Server) WritesEnabled() bool { return s.writes != nil }
 // WritesDisabled reports whether write routes answer writes_disabled.
 func (s *Server) WritesDisabled() bool { return s.writesDisabled }
 
-func (s *Server) auditEvent(event AuditEvent) {
-	if s.audit == nil {
-		return
+// SetAlerter installs the out-of-band alert destination before serving.
+func (s *Server) SetAlerter(alerts *Alerter) {
+	s.alerts = alerts
+	if s.writes != nil {
+		s.writes.alerts = alerts
 	}
-	if err := s.audit.Write(event); err != nil {
+}
+
+// auditDenial records a denial through recordDenial, logging a failure.
+func (s *Server) auditDenial(event AuditEvent) {
+	if err := s.recordDenial(event, 0); err != nil {
 		// The audit's errors are fixed strings and the fixed stream path.
 		log.Printf("concord-agent: host-agent audit write failed: reason=%s: %v", event.Reason, err)
 	}
 }
 
-const (
-	peerDenialWindow   = time.Minute
-	maxPeerDenialUIDs  = 256
-	unknownPeerUID     = -1
-	overflowPeerDenial = -2
-)
-
-// peerDenialLimiter keeps any process that can reach the socket from filling
-// the bounded audit with peer_forbidden records: each UID gets at most one
-// record per window, and that record counts the denials dropped before it.
-type peerDenialLimiter struct {
-	mu      sync.Mutex
-	now     func() time.Time
-	entries map[int]*peerDenialEntry
+// recordDenial coalesces denials: each (reason, action, admin, peer) key gets
+// at most one audit record and one alert per window, and that record counts
+// the denials dropped before it. It returns an error only when a due record
+// could not be written; a coalesced denial returns nil.
+func (s *Server) recordDenial(event AuditEvent, uid int) error {
+	record, suppressed := s.denials.admit(denialKey{reason: event.Reason, action: event.Action, adminID: event.AdminID, uid: uid})
+	if !record {
+		return nil
+	}
+	event.Suppressed = suppressed
+	var err error
+	if s.audit == nil {
+		err = errors.New("host-agent audit unavailable")
+	} else {
+		err = s.audit.Write(event)
+	}
+	s.alerts.Enqueue(AlertEvent{Outcome: "denied", Reason: event.Reason, Action: event.Action, AdminID: event.AdminID, JobID: event.JobID, Suppressed: suppressed})
+	return err
 }
 
-type peerDenialEntry struct {
+const (
+	denialWindow   = time.Minute
+	maxDenialKeys  = 256
+	unknownPeerUID = -1
+	overflowDenial = -2
+)
+
+// denialKey identifies one kind of denial. Its fields come from the closed
+// audit vocabulary, a canonical admin UUID and a peer UID.
+type denialKey struct {
+	reason  string
+	action  string
+	adminID string
+	uid     int
+}
+
+// denialLimiter keeps any caller that can reach the socket from filling the
+// bounded audit with denial records: each key gets at most one record per
+// window. Keys past maxDenialKeys share one overflow key per reason, and the
+// reasons are a closed list, so the map stays bounded.
+type denialLimiter struct {
+	mu      sync.Mutex
+	now     func() time.Time
+	entries map[denialKey]*denialEntry
+}
+
+type denialEntry struct {
 	windowStart time.Time
 	suppressed  int
 }
 
-// admit reports whether a denial for uid is recorded now and how many denials
+// admit reports whether a denial for key is recorded now and how many denials
 // for it were dropped since its last record.
-func (l *peerDenialLimiter) admit(uid int) (bool, int) {
+func (l *denialLimiter) admit(key denialKey) (bool, int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -172,29 +209,29 @@ func (l *peerDenialLimiter) admit(uid int) (bool, int) {
 		now = l.now()
 	}
 	if l.entries == nil {
-		l.entries = make(map[int]*peerDenialEntry)
+		l.entries = make(map[denialKey]*denialEntry)
 	}
-	entry, ok := l.entries[uid]
+	entry, ok := l.entries[key]
 	if !ok {
-		for key, e := range l.entries {
-			if now.Sub(e.windowStart) >= peerDenialWindow && e.suppressed == 0 {
-				delete(l.entries, key)
+		for k, e := range l.entries {
+			if now.Sub(e.windowStart) >= denialWindow && e.suppressed == 0 {
+				delete(l.entries, k)
 			}
 		}
-		if len(l.entries) >= maxPeerDenialUIDs {
-			uid = overflowPeerDenial
-			if entry, ok = l.entries[uid]; ok {
+		if len(l.entries) >= maxDenialKeys {
+			key = denialKey{reason: key.reason, uid: overflowDenial}
+			if entry, ok = l.entries[key]; ok {
 				return l.step(entry, now)
 			}
 		}
-		l.entries[uid] = &peerDenialEntry{windowStart: now}
+		l.entries[key] = &denialEntry{windowStart: now}
 		return true, 0
 	}
 	return l.step(entry, now)
 }
 
-func (l *peerDenialLimiter) step(entry *peerDenialEntry, now time.Time) (bool, int) {
-	if now.Sub(entry.windowStart) < peerDenialWindow {
+func (l *denialLimiter) step(entry *denialEntry, now time.Time) (bool, int) {
+	if now.Sub(entry.windowStart) < denialWindow {
 		entry.suppressed++
 		return false, 0
 	}
@@ -213,8 +250,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			uid = peer.UID
 		}
-		if record, suppressed := s.peerDenials.admit(uid); record {
-			s.auditEvent(AuditEvent{Action: requestAction(r.URL.Path), Outcome: "denied", Reason: "peer_forbidden", Suppressed: suppressed})
+		event := AuditEvent{Action: requestAction(r.URL.Path), Outcome: "denied", Reason: "peer_forbidden"}
+		if err := s.recordDenial(event, uid); err != nil {
+			log.Printf("concord-agent: host-agent audit write failed: reason=%s: %v", event.Reason, err)
 		}
 		refuse(w, http.StatusForbidden, "peer_forbidden")
 		return
@@ -305,7 +343,7 @@ func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if s.authorizations == nil {
-		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		s.auditDenial(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
 		refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
 		return
 	}
@@ -317,12 +355,12 @@ func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthorizationBeginBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
-		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		s.auditDenial(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
 		refuse(w, http.StatusBadRequest, "invalid_authorization")
 		return
 	}
 	if dec.Decode(new(any)) != io.EOF {
-		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		s.auditDenial(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
 		refuse(w, http.StatusBadRequest, "invalid_authorization")
 		return
 	}
@@ -332,7 +370,7 @@ func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request
 		if errors.Is(err, errNoActionCredential) {
 			reason = "no_action_credential"
 		}
-		s.auditEvent(AuditEvent{Action: actionName(body.Action), Outcome: "denied", Reason: reason, AdminID: canonicalAuditAdminID(body.AdminID)})
+		s.auditDenial(AuditEvent{Action: actionName(body.Action), Outcome: "denied", Reason: reason, AdminID: canonicalAuditAdminID(body.AdminID)})
 		var no *refusal
 		switch {
 		case errors.As(err, &no):

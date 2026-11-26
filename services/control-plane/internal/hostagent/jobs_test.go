@@ -30,6 +30,7 @@ func writeServer(t *testing.T, f *fakeRunner) (*Server, string) {
 	s := NewServer(&fakeRunner{out: statusJSON})
 	s.EnableWrites(f, dir, filepath.Join(t.TempDir(), "write-in-progress"))
 	s.writes.boundary = t.TempDir()
+	s.writes.version = writeVersionFile(t, "0.1.0")
 	auditRoot := t.TempDir()
 	audit, err := openAuditAt(filepath.Join(auditRoot, "host-agent", "events.jsonl"), testOwnerUID(), auditRoot)
 	if err != nil {

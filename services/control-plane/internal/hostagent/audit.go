@@ -20,9 +20,18 @@ const (
 	HostAgentAuditPath = "/var/log/concord-security/host-agent/events.jsonl"
 	maxAuditLineBytes  = 2048
 	maxAuditFileBytes  = 20 << 20
+	// maxAuditDenialBytes is where denial records stop. It sits below the
+	// 19M logrotate size, so denials alone never trigger a rotation that
+	// would evict older admitted records, and the space above it is kept for
+	// admitted, started, succeeded and failed records.
+	maxAuditDenialBytes = 16 << 20
 )
 
-var errAuditFull = errors.New("host-agent audit full")
+var (
+	errAuditFull = errors.New("host-agent audit full")
+	// errAuditDenialReserve refuses a denial record past maxAuditDenialBytes.
+	errAuditDenialReserve = fmt.Errorf("%w: denial records refused in the reserved space", errAuditFull)
+)
 
 // AuditEvent contains only fixed action/outcome/reason values, opaque IDs and
 // the validated arguments a job ran with. Assertion bytes, credential IDs and
@@ -50,6 +59,8 @@ type Audit struct {
 	syncFile  func(*os.File) error
 	broken    bool
 	full      bool // logged once until a write succeeds again
+	// denialsFull is logged once until a denial write succeeds again.
+	denialsFull bool
 }
 
 // OpenAudit requires a root-owned log boundary and a root-only stream. It
@@ -136,7 +147,7 @@ func validAuditEvent(e AuditEvent) bool {
 		return false
 	}
 	switch e.Reason {
-	case "peer_forbidden", "begin_denied", "assertion_denied", "replay_denied", "clone_detected", "counter_stale", "admission_approved", "admission_failed", "job_started", "job_succeeded", "job_failed", "write_in_progress", "job_unavailable", "backup_rate_limited", "no_action_credential":
+	case "peer_forbidden", "begin_denied", "assertion_denied", "replay_denied", "clone_detected", "counter_stale", "admission_approved", "admission_failed", "job_started", "job_succeeded", "job_failed", "write_in_progress", "job_unavailable", "backup_rate_limited", "no_action_credential", "request_refused", "authorizer_unavailable":
 	default:
 		return false
 	}
@@ -211,6 +222,14 @@ func (a *Audit) Write(event AuditEvent) error {
 		_ = f.Close()
 		return errors.New("unsafe host-agent audit file")
 	}
+	if event.Outcome == "denied" && info.Size()+int64(len(data)) > maxAuditDenialBytes {
+		_ = f.Close()
+		if !a.denialsFull {
+			a.denialsFull = true
+			log.Print("concord-agent: host-agent audit near full; denials are no longer recorded until the stream is rotated")
+		}
+		return errAuditDenialReserve
+	}
 	if info.Size()+int64(len(data)) > maxAuditFileBytes {
 		_ = f.Close()
 		if !a.full {
@@ -233,6 +252,9 @@ func (a *Audit) Write(event AuditEvent) error {
 		return a.breakStream("close")
 	}
 	a.full = false
+	if event.Outcome == "denied" {
+		a.denialsFull = false
+	}
 	return nil
 }
 

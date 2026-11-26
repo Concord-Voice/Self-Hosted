@@ -160,20 +160,27 @@ func ownedBy(info os.FileInfo, uid uint32) bool {
 }
 
 func (s *AuthorizerStore) checkPath() error {
-	path, root := filepath.Clean(s.path), filepath.Clean(s.trustRoot)
+	return checkTrustedPath(s.path, s.trustRoot, s.ownerUID, "authorizer")
+}
+
+// checkTrustedPath requires every directory from path's parent up to the
+// absolute trust root to be owned by ownerUID and not group- or
+// world-writable. what names the file in the fixed error strings.
+func checkTrustedPath(path, trustRoot string, ownerUID uint32, what string) error {
+	path, root := filepath.Clean(path), filepath.Clean(trustRoot)
 	if !filepath.IsAbs(path) || !filepath.IsAbs(root) || !strings.HasPrefix(path, root+string(filepath.Separator)) && root != string(filepath.Separator) {
-		return errors.New("authorizer path outside trust root")
+		return errors.New(what + " path outside trust root")
 	}
 	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
-		info, err := os.Lstat(dir) //nolint:gosec // checkPath confines each component to the absolute trust root and rejects symlinks
-		if err != nil || !info.IsDir() || !ownedBy(info, s.ownerUID) || info.Mode().Perm()&0o022 != 0 {
-			return errors.New("unsafe authorizer directory")
+		info, err := os.Lstat(dir) //nolint:gosec // checkTrustedPath confines each component to the absolute trust root and rejects symlinks
+		if err != nil || !info.IsDir() || !ownedBy(info, ownerUID) || info.Mode().Perm()&0o022 != 0 {
+			return errors.New("unsafe " + what + " directory")
 		}
 		if dir == root {
 			break
 		}
 		if dir == filepath.Dir(dir) {
-			return errors.New("authorizer path outside trust root")
+			return errors.New(what + " path outside trust root")
 		}
 	}
 	return nil
