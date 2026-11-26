@@ -210,15 +210,29 @@ func TestEnroll_TokenIsSingleUse(t *testing.T) {
 
 // --- admin-create endpoint (behind AdminAuthRequired) ---
 
-// adminCreateEngine wires CreateAdmin under a synthetic admin_id (simulating
-// AdminAuthRequired having set it).
+// testAdminSessionBinding is the session binding the synthetic engines put in
+// the context, standing in for the digest AdminAuthRequired sets.
+const testAdminSessionBinding = "test-admin-session-binding"
+
+// asAdminSession simulates AdminAuthRequired: it sets the admin id and the
+// session binding.
+func asAdminSession(adminID string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set("admin_id", adminID)
+		c.Set("admin_session_binding", testAdminSessionBinding)
+		c.Next()
+	}
+}
+
+// adminCreateEngine wires CreateAdmin under a synthetic admin_id and session
+// binding (simulating AdminAuthRequired having set them).
 func adminCreateEngine(t *testing.T, db *sql.DB, rdb *redis.Client, actingAdminID string) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	h, err := admin.NewHandler(db, rdb, logger.NewWithWriter(&bytes.Buffer{}), authHandlerCfg())
 	require.NoError(t, err)
 	r := gin.New()
-	r.Use(func(c *gin.Context) { c.Set("admin_id", actingAdminID); c.Next() })
+	r.Use(asAdminSession(actingAdminID))
 	r.POST("/admin/api/v1/admins", h.CreateAdmin)
 	r.POST("/admin/api/v1/admins/stepup", h.CreateAdminStepUpBegin)
 	return r
