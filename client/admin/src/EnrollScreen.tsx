@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApiContractError, ApiError, api } from "./api";
-import { decodeCreationOptions, encodeAttestation } from "./webauthn";
+import {
+  KEY_NOT_USED,
+  decodeCreationOptions,
+  encodeAttestation,
+  keyNotUsed,
+} from "./webauthn";
 
 interface EnrollScreenProps {
   onContinue: () => void;
@@ -72,8 +77,8 @@ export function EnrollScreen({ onContinue }: Readonly<EnrollScreenProps>) {
       setComplete(true);
       setCeremony(null);
     } catch (cause) {
-      if (cause instanceof DOMException && cause.name === "NotAllowedError") {
-        setError("Security key enrollment was canceled.");
+      if (keyNotUsed(cause)) {
+        setError(KEY_NOT_USED);
         return;
       }
       if (cause instanceof ApiContractError) {

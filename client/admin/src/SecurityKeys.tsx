@@ -3,10 +3,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiContractError, ApiError, api, type SecurityKeyList } from "./api";
 import { formatTimestamp, type TimeMode } from "./time";
 import {
+  KEY_NOT_USED,
   decodeCreationOptions,
   decodeRequestOptions,
   encodeAssertion,
   encodeAttestation,
+  keyNotUsed,
 } from "./webauthn";
 
 interface SecurityKeysProps {
@@ -23,7 +25,8 @@ export const REIMPORT_NOTICE =
 const UNREADABLE_RESPONSE =
   "The server's response was not recognized. This console may be out of date.";
 
-// What each refusal code means to the operator.
+// What each refusal code means to the operator. Only the table's own keys
+// count, so a code such as "constructor" falls back to the generic line.
 const REFUSALS: Record<string, string> = {
   credential_limit_reached:
     "You already have the maximum number of security keys.",
@@ -35,10 +38,6 @@ const REFUSALS: Record<string, string> = {
   registration_failed:
     "The new security key was not accepted. Use a different, allowed key and start again.",
 };
-
-function canceled(cause: unknown): boolean {
-  return cause instanceof DOMException && cause.name === "NotAllowedError";
-}
 
 function invalidState(cause: unknown): boolean {
   return cause instanceof DOMException && cause.name === "InvalidStateError";
@@ -70,7 +69,11 @@ export function SecurityKeys({
         onUnauthorized();
         return null;
       }
-      if (cause instanceof ApiError && cause.code && REFUSALS[cause.code]) {
+      if (
+        cause instanceof ApiError &&
+        cause.code !== null &&
+        Object.hasOwn(REFUSALS, cause.code)
+      ) {
         return REFUSALS[cause.code];
       }
       if (cause instanceof ApiError && cause.status === 403) {
@@ -144,8 +147,8 @@ export function SecurityKeys({
       await load();
     } catch (cause) {
       setStatus("");
-      if (canceled(cause)) {
-        setError("Security key verification was canceled.");
+      if (keyNotUsed(cause)) {
+        setError(KEY_NOT_USED);
       } else if (invalidState(cause)) {
         // The browser refused a key that already holds one of this admin's
         // credentials (excludeCredentials).

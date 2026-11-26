@@ -213,6 +213,31 @@ describe("SecurityKeys", () => {
     expect(onForbidden).not.toHaveBeenCalled();
   });
 
+  it("says a timed-out or canceled key was not used", async () => {
+    server.use(
+      http.get(base, () =>
+        HttpResponse.json({ credentials: [primary], max: 4 }),
+      ),
+      http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
+    );
+    vi.spyOn(navigator.credentials, "get").mockRejectedValue(
+      new DOMException(
+        "The operation either timed out or was not allowed.",
+        "NotAllowedError",
+      ),
+    );
+    renderKeys();
+
+    await userEvent.type(await screen.findByLabelText("New key name"), "Spare");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Add a backup key" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Your security key was not used in time, or the request was canceled. Start again and tap your key within the time limit.",
+    );
+  });
+
   it("tells the operator to use a different key when the browser refuses an excluded one", async () => {
     server.use(
       http.get(base, () =>
@@ -246,6 +271,22 @@ describe("SecurityKeys", () => {
     const { onUnauthorized } = renderKeys();
     await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
   });
+
+  // Before the own-key lookup these names read Object.prototype members.
+  it.each(["constructor", "__proto__", "toString"])(
+    "treats the inherited name %s as an unknown code",
+    async (code) => {
+      server.use(
+        http.get(base, () =>
+          HttpResponse.json({ error: code }, { status: 409 }),
+        ),
+      );
+      renderKeys();
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Your security keys could not be loaded or changed. Try again.",
+      );
+    },
+  );
 
   it.each([
     ["a credential ID", { ...primary, credential_id: "AAAA" }],

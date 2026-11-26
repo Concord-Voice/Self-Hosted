@@ -227,7 +227,7 @@ describe("EnrollScreen", () => {
       screen.getByRole("button", { name: "Enroll security key" }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Security key enrollment was canceled.",
+      "Your security key was not used in time, or the request was canceled. Start again and tap your key within the time limit.",
     );
 
     create.mockResolvedValueOnce(null);

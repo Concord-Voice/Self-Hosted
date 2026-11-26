@@ -196,7 +196,7 @@ describe("AuthScreen", () => {
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "Security key verification was canceled.",
+        "Your security key was not used in time, or the request was canceled. Start again and tap your key within the time limit.",
       ),
     );
     get.mockResolvedValueOnce(null);

@@ -12,7 +12,12 @@ import {
   type ServerJob,
   type WriteAction,
 } from "./server";
-import { decodeRequestOptions, encodeAssertion } from "./webauthn";
+import {
+  KEY_NOT_USED,
+  decodeRequestOptions,
+  encodeAssertion,
+  keyNotUsed,
+} from "./webauthn";
 
 // The Server routes share 30 requests a minute; the runbook says poll a job
 // no faster than every 5 seconds. The jobs list is checked every 30 seconds
@@ -30,7 +35,8 @@ const ACTION_LABELS: Record<WriteAction, string> = {
 };
 
 // What each refusal means to the operator. Unknown codes fall back to the
-// generic line.
+// generic line, and only the table's own keys count, so a code such as
+// "constructor" or "__proto__" is unknown too.
 const REFUSALS: Record<string, string> = {
   write_in_progress: "Another action is still running. Wait for it to finish.",
   stepup_required: "This action needs your security key.",
@@ -42,7 +48,7 @@ const REFUSALS: Record<string, string> = {
   peer_forbidden:
     "The host agent rejected the control-plane connection. Check the service identity and agent socket permissions on the host.",
   authorization_busy:
-    "Another host authorization is in progress. Wait for it to finish, then start again.",
+    "Too many security key requests are open on the host. Wait for the running action to finish, then try again.",
   invalid_authorization:
     "The host agent did not accept this authorization request. Reload the console and start again.",
   backup_rate_limited:
@@ -52,11 +58,28 @@ const REFUSALS: Record<string, string> = {
   running_version_unknown:
     "The host agent cannot read which release this server runs, so it refused the update. Ask a host-root operator to check the VERSION file in the install folder.",
   stepup_unavailable:
-    "Your account has no security key this server can check, so this action is not available.",
+    "The host agent could not start a security key check. Try again shortly. If this keeps happening, ask a host operator to check that the agent is running.",
   audit_unavailable:
     "The audit log is not writable right now, so the action was refused.",
   agent_unavailable:
-    "The host agent is not reachable. Install and start it, then try again.",
+    "The host agent did not answer. Check that it is installed and running. An action you just started may still run, so check the jobs list before you start it again.",
+  job_unavailable:
+    "The host agent could not start the action, so nothing ran. Try again shortly. If this keeps happening, ask a host operator to check the agent log.",
+  alerts_not_configured:
+    "Host actions are off because this host has no out-of-band alert set up. Ask a host operator to configure the agent alert as the host agent runbook describes.",
+  unknown_action:
+    "The host agent does not know this action. Ask a host operator to update the agent to this server's release.",
+  unexpected_argument:
+    "The host agent refused an argument this action does not take. Reload the console and start again.",
+  invalid_body:
+    "The host agent could not read the request. Reload the console and start again.",
+  // The control plane's own codes, for failures around the agent call.
+  agent_error:
+    "The host agent sent an answer the server could not use. An action you just started may still run, so check the jobs list, then try again. If this keeps happening, ask a host operator to check the host agent's journal.",
+  internal_error:
+    "The server failed before it reached the host agent, so nothing ran. Try again. If this keeps happening, ask a host operator to check the control plane log.",
+  invalid_request:
+    "The server refused this request because its action or arguments were not valid. Reload the console and try again. If this keeps happening, ask a host operator to check the control plane log.",
   agent_busy: "The host agent is busy. Try again shortly.",
   security_log_boundary_missing:
     "The security log folder is missing on the host. Restart refused before stopping anything.",
@@ -86,13 +109,11 @@ function describe(
   error: unknown,
   onSessionError: ServerActionsProps["onSessionError"],
 ): string | null {
-  if (error instanceof DOMException && error.name === "NotAllowedError") {
-    return "Security key verification was canceled.";
-  }
+  if (keyNotUsed(error)) return KEY_NOT_USED;
   if (
     error instanceof ServerRequestError &&
-    error.code &&
-    REFUSALS[error.code]
+    error.code !== null &&
+    Object.hasOwn(REFUSALS, error.code)
   ) {
     return REFUSALS[error.code];
   }
