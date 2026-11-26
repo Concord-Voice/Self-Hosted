@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,19 +25,26 @@ import (
 //
 // Invariant: an enrollment token for a new admin exists only after
 //  1. the acting admin's session passed AdminAuthRequired,
-//  2. that same admin answered, within adminStepUpTTL, a challenge this server
-//     issued for (admin id, create_admin), with user verification,
+//  2. that same admin, in that same session, answered within adminStepUpTTL a
+//     challenge this server issued for (admin id, session, create_admin),
+//     with user verification,
 //  3. the handle was redeemed exactly once (GETDEL),
 //  4. the credential's counter advanced and no clone warning was raised, and
 //  5. the admin_created audit row was committed.
 //
-// It breaks if a handle can be redeemed twice, by another admin, or for
-// another action; if an assertion without user verification is accepted; or
-// if a token is minted when the audit row was not written. The handles live
-// under their own key prefix, so a server-action step-up handle can never be
-// redeemed here, nor a create_admin handle for a server action, and the key
-// names the admin who began it, so another admin's attempt neither redeems
-// nor spends it.
+// It breaks if a handle can be redeemed twice, by another admin, by another
+// session of the same admin, or for another action; if an assertion without
+// user verification is accepted; or if a token is minted when the audit row
+// was not written. The handles live under their own key prefix, so a
+// server-action step-up handle can never be redeemed here, nor a create_admin
+// handle for a server action, and the key names the admin who began it, so
+// another admin's attempt neither redeems nor spends it. The record holds the
+// binding of the session that began it (adminSessionBinding, a SHA-256 of the
+// session id, never the id itself). Another session of the same admin reaches
+// the key, so its attempt is refused with stepup_wrong_session after the
+// GETDEL: it spends the handle. That is deliberate: a session holding the
+// handle and the assertion is a leak, and burning the handle ends it; the
+// owner begins a new step-up.
 
 const (
 	adminStepUpPrefix = "admin_create_stepup:"
@@ -59,9 +67,12 @@ func adminStepUpKey(adminID, handle string) string {
 
 // adminStepUp is the value stored under a create_admin step-up handle.
 type adminStepUp struct {
-	AdminID string               `json:"admin_id"`
-	Action  string               `json:"action"`
-	Session webauthn.SessionData `json:"session"`
+	AdminID string `json:"admin_id"`
+	// AdminSession is adminSessionBinding of the admin session that began the
+	// step-up; only that session may redeem it.
+	AdminSession string               `json:"admin_session"`
+	Action       string               `json:"action"`
+	Session      webauthn.SessionData `json:"session"`
 }
 
 // adminStepUpProof is the step-up carried in the create request.
@@ -78,6 +89,15 @@ type adminStepUpProof struct {
 func (h *Handler) CreateAdminStepUpBegin(c *gin.Context) {
 	ctx := c.Request.Context()
 	adminID := c.GetString(adminIDContextKey)
+	adminSession := c.GetString(adminSessionContextKey)
+	if adminSession == "" {
+		// AdminAuthRequired always sets it; without it the handle could not
+		// be bound to a session, so refuse rather than issue an unbound one.
+		h.log.Error("admin create step-up begin without a session binding", "admin_id", adminID)
+		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_no_session", "")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 	var req struct{}
 	if err := decodeStrict(c, &req, maxAdminStepUpBeginBody); err != nil {
 		h.log.Warn("admin create step-up begin body refused", "admin_id", adminID, "error", err)
@@ -104,7 +124,9 @@ func (h *Handler) CreateAdminStepUpBegin(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
-	handle, err := h.storeAdminStepUp(ctx, adminStepUp{AdminID: adminID, Action: actionCreateAdmin, Session: *session})
+	handle, err := h.storeAdminStepUp(ctx, adminStepUp{
+		AdminID: adminID, AdminSession: adminSession, Action: actionCreateAdmin, Session: *session,
+	})
 	if err != nil {
 		h.log.Error("admin create step-up store failed", "admin_id", adminID, "error", err)
 		h.auditCreateAdmin(ctx, adminID, "", AuditFailure, "stepup_begin_failed", "")
@@ -143,7 +165,8 @@ func (h *Handler) requireCreateAdminStepUp(c *gin.Context, username string, proo
 		c.JSON(http.StatusForbidden, gin.H{"error": "stepup_required"})
 		return false
 	}
-	refusal := h.redeemAdminStepUp(ctx, adminID, actionCreateAdmin, proof.Handle, proof.Assertion)
+	adminSession := c.GetString(adminSessionContextKey)
+	refusal := h.redeemAdminStepUp(ctx, adminID, adminSession, actionCreateAdmin, proof.Handle, proof.Assertion)
 	switch {
 	case refusal == nil:
 		return true
@@ -158,10 +181,12 @@ func (h *Handler) requireCreateAdminStepUp(c *gin.Context, username string, proo
 }
 
 // redeemAdminStepUp redeems a step-up handle once. It must belong to this
-// admin and this action, and the assertion must verify with user
-// verification, advance the credential's counter and raise no clone warning.
-// It returns nil only when all of that holds.
-func (h *Handler) redeemAdminStepUp(ctx context.Context, adminID, action, handle string, assertion json.RawMessage) *stepUpRefusal {
+// admin, this admin session and this action, and the assertion must verify
+// with user verification, advance the credential's counter and raise no
+// clone warning. It returns nil only when all of that holds. The GETDEL runs
+// before any of those checks, so a refused attempt that reached the key (the
+// wrong session, the wrong action, a bad assertion) spends the handle.
+func (h *Handler) redeemAdminStepUp(ctx context.Context, adminID, adminSession, action, handle string, assertion json.RawMessage) *stepUpRefusal {
 	if adminID == "" || !adminStepUpHandle.MatchString(handle) || len(assertion) == 0 {
 		return stepUpDenied("stepup_malformed")
 	}
@@ -184,6 +209,9 @@ func (h *Handler) redeemAdminStepUp(ctx context.Context, adminID, action, handle
 	case ch.AdminID != adminID:
 		h.log.Warn("admin create step-up handle used by another admin", "admin_id", adminID)
 		return stepUpDenied("stepup_wrong_admin")
+	case !sameAdminSession(ch.AdminSession, adminSession):
+		h.log.Warn("admin create step-up handle used by another session", "admin_id", adminID)
+		return stepUpDenied("stepup_wrong_session")
 	case ch.Action != action:
 		h.log.Warn("admin create step-up handle used for another action", "admin_id", adminID)
 		return stepUpDenied("stepup_wrong_action")
@@ -216,6 +244,16 @@ func (h *Handler) redeemAdminStepUp(ctx context.Context, adminID, action, handle
 		return stepUpUnavailable("stepup_sign_count_persist_failed")
 	}
 	return nil
+}
+
+// sameAdminSession reports, in constant time, whether two session bindings
+// are equal. An empty binding on either side never matches: a record without
+// one, or a request without one, cannot redeem.
+func sameAdminSession(stored, current string) bool {
+	if stored == "" || current == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(current)) == 1
 }
 
 func (h *Handler) storeAdminStepUp(ctx context.Context, ch adminStepUp) (string, error) {
