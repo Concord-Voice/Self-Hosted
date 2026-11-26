@@ -234,8 +234,10 @@ if n > 0 then return redis.call('DECRBY', KEYS[1], 1) end
 return 0
 `)
 
-// Refund returns this charge when its code was never judged. Only
-// RefundIfBusy calls it: a wrong code, or any other failure, keeps its charge.
+// Refund returns this charge when its code was never judged: on a busy check
+// (RefundIfBusy) or on an MFA sign-in refused past the limit (the mfa
+// package's reserveVerifyAttempt). A wrong code, or any other failure, keeps
+// its charge.
 // It runs on SettleContext so a client that hangs up after a busy answer still
 // gets the attempt back. A charge whose window has ended refunds nothing.
 func (ch Charged) Refund(ctx context.Context) error {

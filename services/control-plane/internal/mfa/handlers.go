@@ -2158,10 +2158,13 @@ func answeredFactor(requested, matched string) string {
 // the returned charge come from one script, so a busy refund returns the
 // attempt only to the window it was counted in (stepup.ChargeKey).
 //
-// An attempt past the limit arms the lockout itself. Otherwise a busy fifth
-// attempt could be refunded after a sixth was refused, so no judged attempt
-// ever held the fifth slot and the lockout never armed. SET NX keeps an
-// existing lockout's expiry, and a lockout that cannot be written fails closed.
+// An attempt refused past the limit judges nothing, so it gives its own
+// charge back and arms no lockout: only a judged wrong code arms the lockout
+// (refuseWrongCode). The bound holds because a judged charge is never
+// refunded, so at most failedAttemptLimit codes are judged per window. If the
+// refusal's refund fails, SET NX arms the lockout instead (keeping any
+// existing expiry), and if that write fails too the request fails closed with
+// a 500.
 func (h *Handler) reserveVerifyAttempt(ctx context.Context, c *gin.Context, claims *ChallengeClaims, attemptsKey, lockoutKey string) (int64, stepup.Charged, bool) {
 	attempt, charged, err := stepup.ChargeKey(ctx, h.redis, attemptsKey, verifyAttemptWindow)
 	if err != nil {
