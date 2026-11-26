@@ -357,6 +357,50 @@ func truncateAllTablesOnce(db *sql.DB) error {
 	`); err != nil {
 		return err
 	}
+	// The message-ID reservation namespace is permanent in a real database.
+	// This is the isolated disposable-test reset, after its source tables have
+	// been truncated under replica mode; reset the otherwise one-way baseline
+	// so separate test cases cannot inherit a completed rollout.
+	if _, err := ExecReplica(db, `TRUNCATE message_id_reservations`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		INSERT INTO message_id_reservation_rollout (singleton, backfill_complete)
+		VALUES (TRUE, FALSE)
+		ON CONFLICT (singleton) DO UPDATE SET backfill_complete = FALSE
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_trigger
+				WHERE tgrelid = 'messages'::regclass
+					AND tgname = 'message_id_reservations_before_delete'
+					AND NOT tgisinternal
+			) THEN
+				CREATE TRIGGER message_id_reservations_before_delete
+				BEFORE DELETE ON messages
+				FOR EACH ROW EXECUTE FUNCTION reserve_message_id_on_delete();
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_trigger
+				WHERE tgrelid = 'dm_messages'::regclass
+					AND tgname = 'message_id_reservations_before_delete'
+					AND NOT tgisinternal
+			) THEN
+				CREATE TRIGGER message_id_reservations_before_delete
+				BEFORE DELETE ON dm_messages
+				FOR EACH ROW EXECUTE FUNCTION reserve_message_id_on_delete();
+			END IF;
+		END;
+		$$;
+		ALTER TABLE messages ENABLE ALWAYS TRIGGER message_id_reservations_before_delete;
+		ALTER TABLE dm_messages ENABLE ALWAYS TRIGGER message_id_reservations_before_delete;
+	`); err != nil {
+		return err
+	}
 	// Transport tests may remove their unprovisioned receipt. Restore only an
 	// absent test fixture; an existing generation and its birth proof stay intact.
 	_, err = db.Exec(`

@@ -10,8 +10,8 @@ The root workspace keeps the scoped `@microsoft/eslint-formatter-sarif` override
 
 The admin and media workspaces each retain their minimatch override and three baseline rows.
 Their lockfiles resolve ESLint 10.15.0 and TypeScript-ESLint 8.73.0. Both lockfiles resolve
-`@typescript/native` to 7.0.2. Each of the four nested `@typescript-eslint/typescript-estree`
-8.73.0 entries declares the optional peer
+`@typescript/native` to 7.0.2. Each lockfile contains four nested
+`@typescript-eslint/typescript-estree` 8.73.0 entries. All eight entries declare the optional peer
 `npm:typescript@>=7.1.0-dev.20261009.1 || >=7.1.0-beta <7.1.0-dev`. The locked compiler version
 falls outside that range. Verify peer compatibility when a supported compiler is available.
 Before retiring either minimatch override, verify that workspace's dependency tree with the

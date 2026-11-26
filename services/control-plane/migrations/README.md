@@ -84,7 +84,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000204)
+## Existing Migrations (000001–000206)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -313,6 +313,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000201 | e2ee_format_metadata | Adds nullable dormant stored-format and request-fingerprint metadata to channel/DM messages and encrypted media, with user/message-v1/attachment-v4 shape constraints; no writer or fallback behavior is enabled. |
 | 000203 | admin_audit_login_success_index | One-statement `CREATE INDEX CONCURRENTLY` of a partial index on `admin_audit_log (admin_id, ts DESC)` for successful sign-ins, the inner lookup of the admin sign-in notice; a first sign-in no longer scans the whole log. Merge after the change that holds 000202: golang-migrate never applies a version below the one recorded. Down drops the index concurrently. |
 | 000204 | admin_audit_event_result_ts_index | One-statement `CREATE INDEX CONCURRENTLY` on `admin_audit_log (event_type, result, ts)` for the notice's count of `admin_created` successes since the previous sign-in. Same merge order as 000203. Down drops the index concurrently. |
+| 000206 | message_id_reservations | Adds a dormant global ID-only reservation namespace for channel and DM message UUIDs, plus the online baseline gate; no message-v1 writer is enabled. |
 
 If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
 
