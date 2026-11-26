@@ -107,6 +107,10 @@ PORT=3000
 REDIS_URL=redis://:concord_dev_redis@localhost:6379
 CONTROL_PLANE_URL=http://localhost:8080
 
+# The handshake admission budget keys on the client source, so production
+# refuses startup without a valid exact trusted-proxy host route.
+# TRUSTED_PROXIES=127.0.0.1/32
+
 # WebRTC settings. ANNOUNCED_IP is what mediasoup ADVERTISES in ICE
 # candidates -- the sockets bind 0.0.0.0 either way. 127.0.0.1 is correct only
 # where every client reaches this host at 127.0.0.1; anywhere else it makes

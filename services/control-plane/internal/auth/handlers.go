@@ -1718,9 +1718,10 @@ func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, 
 	}
 	if !valid {
 		h.recordCheckedFailure(ctx, email)
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return false
+		}
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return false
 	}
@@ -1864,9 +1865,10 @@ func (h *Handler) Login(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 			return
 		}
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
-		middleware.MarkAuthFailureOutcome(c, outcome)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
@@ -2096,10 +2098,10 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool, 
 	c.Header(middleware.SessionIssuedHeader, "true")
 	c.Header(middleware.SessionIDHeader, tokenID)
 
-	// Clear cumulative IP auth failures only after full auth completion
-	// (credentials + MFA if enabled). This prevents resetting the counter
-	// by repeatedly passing the credential step while brute-forcing MFA.
-	middleware.ClearAuthFailures(c.Request.Context(), h.redis, c.ClientIP())
+	// A completed sign-in leaves the shared source failure counter alone. Its
+	// key is a /32 or /64 bucket shared by other clients, so clearing it would
+	// let any account holder there fail, sign in and repeat without a ban. It
+	// decays with its window.
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonAuthenticationSucceeded, AuthMethod: primaryAuthMethod, RouteTemplate: securityevent.RouteAuthLogin})
 
 	h.log.Info("User logged in (MFA verified)", "user_id", userID)
@@ -4006,8 +4008,9 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	record, err := h.consumeRecoveryCode(ctx, recoveryRedisKey(req.Email), req.Code)
 	if errors.Is(err, redis.Nil) {
 		h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
-		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		middleware.MarkAuthFailureOutcome(c, outcome)
+		if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
 		return
 	}
@@ -4044,7 +4047,7 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
-	addr, ok := h.recoveryEmailTokenAddr(ctx, c, token, record)
+	addr, ok := h.recoveryKeyAccountAddr(ctx, c, token, record.UserID, record.Addr)
 	if !ok {
 		return
 	}
@@ -4071,35 +4074,35 @@ func (h *Handler) verifyRecoveryEmailToken(ctx context.Context, c *gin.Context, 
 	}
 }
 
-// recoveryEmailTokenAddr returns the account's current address when it still
-// matches the one the recovery key was sent to. Otherwise it answers the
-// request and returns false.
-func (h *Handler) recoveryEmailTokenAddr(ctx context.Context, c *gin.Context, token string, record recoveryEmailTokenRecord) (string, bool) {
+// recoveryKeyAccountAddr returns the account's current address when it still
+// matches the one the key was sent to. Otherwise it answers the request, and
+// for a gone or moved account it discards the key and refuses it like any
+// other unusable key.
+func (h *Handler) recoveryKeyAccountAddr(ctx context.Context, c *gin.Context, token, userID, sentTo string) (string, bool) {
 	var addr string
-	err := h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, record.UserID).Scan(&addr)
+	err := h.db.QueryRowContext(ctx, `SELECT LOWER(email) FROM users WHERE id = $1`, userID).Scan(&addr)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		h.log.Error("Failed to read account for recovery key", "failure_class", "recovery_key_account_lookup")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return "", false
 	}
-	if err != nil || addr != record.Addr {
-		// The account is gone or no longer uses the address the key was sent
-		// to. Discard the key and answer as for any other unusable key.
-		if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
-			h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
-		}
-		h.refuseRecoveryEmailToken(ctx, c)
-		return "", false
+	if err == nil && addr == sentTo {
+		return addr, true
 	}
-	return addr, true
+	if _, err := h.consumeRecoveryEmailToken(ctx, token); err != nil && !errors.Is(err, redis.Nil) {
+		h.log.Warn("Failed to discard stale recovery key", "failure_class", recoveryKeyReadFailureClass(err))
+	}
+	h.refuseRecoveryEmailToken(ctx, c)
+	return "", false
 }
 
 // refuseRecoveryEmailToken answers an unusable recovery key. The client
 // address auth ban still counts it.
-func (h *Handler) refuseRecoveryEmailToken(ctx context.Context, c *gin.Context) {
+func (h *Handler) refuseRecoveryEmailToken(_ context.Context, c *gin.Context) {
+	if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+		return
+	}
 	h.emitHTTPEvent(c, recoveryInvalidCredentialsEvent())
-	outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-	middleware.MarkAuthFailureOutcome(c, outcome)
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode})
 }
 
@@ -4338,7 +4341,9 @@ func (h *Handler) validateAndConsumeRecoveryToken(c *gin.Context, tokenStr strin
 	}
 	if err != nil {
 		if recordAuthFailure {
-			middleware.MarkAuthFailureOutcome(c, middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig()))
+			if !middleware.RecordAuthFailure(c, h.redis, middleware.DefaultAuthBanConfig()) {
+				return nil, ""
+			}
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return nil, ""
@@ -4819,7 +4824,6 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		return
 	}
 
-	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
 	h.log.Info("Password reset via recovery", "operation", "forced_security_clear")
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonRecoveryReset, AuthMethod: securityevent.AuthRecovery, RouteTemplate: securityevent.RouteRecoveryResetPassword})
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully. Please sign in with your new password."})

@@ -60,7 +60,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 	api := grp.Group("/api/v1")
 	{
 		authRoutes := api.Group("/auth")
-		authRoutes.Use(middleware.RateLimitByIP(rdb, adminAuthRateLimit, adminAuthRateWindow))
+		authRoutes.Use(middleware.RateLimitByIPFailClosed(rdb, adminAuthRateLimit, adminAuthRateWindow))
 		{
 			authRoutes.POST("/password", h.PasswordLogin)
 			authRoutes.POST("/webauthn", h.WebAuthnLogin)
@@ -68,7 +68,7 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 		}
 
 		enrollRoutes := api.Group("/enroll")
-		enrollRoutes.Use(middleware.RateLimitByIP(rdb, adminEnrollRateLimit, adminAuthRateWindow))
+		enrollRoutes.Use(middleware.RateLimitByIPFailClosed(rdb, adminEnrollRateLimit, adminAuthRateWindow))
 		{
 			enrollRoutes.POST("/begin", h.EnrollBegin)
 			enrollRoutes.POST("/finish", h.EnrollFinish)

@@ -223,3 +223,27 @@ func TestAdminRoutes_AdminsRouteIsGated(t *testing.T) {
 	assert.False(t, admin.IsPreAuthRoute("/admin/api/v1/admins"),
 		"the admin-create route must NOT be on the pre-auth allowlist")
 }
+
+// TestAdminPreAuthRoutes_FailClosedWhenLimiterBackendDown pins that the Admin
+// source-budget limiter rejects with the fixed 503 when Redis is unreachable,
+// on every pre-auth route, rather than reaching the handler.
+func TestAdminPreAuthRoutes_FailClosedWhenLimiterBackendDown(t *testing.T) {
+	engine := registerAdminRouteOnlyEngine(t)
+
+	for _, path := range []string{
+		"/admin/api/v1/auth/password",
+		"/admin/api/v1/auth/webauthn",
+		"/admin/api/v1/auth/logout",
+		"/admin/api/v1/enroll/begin",
+		"/admin/api/v1/enroll/finish",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			engine.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+		})
+	}
+}
