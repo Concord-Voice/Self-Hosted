@@ -50,9 +50,9 @@ func TestConsumeBackupCodeRejectsCodeRevokedByConcurrentRegeneration(t *testing.
 	secretEnc, secretNonce, keyVersion, err := keyring.Seal([]byte("invalid-totp-seed"))
 	require.NoError(t, err)
 
-	oldCodes, oldHashes, err := GenerateBackupCodes()
+	oldCodes, oldHashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
-	_, newHashes, err := GenerateBackupCodes()
+	_, newHashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	_, err = db.Exec(`
 		INSERT INTO user_mfa_totp
@@ -85,7 +85,7 @@ func backupCodeClaimFixture(t *testing.T) (*sql.DB, *Handler, string, []string) 
 	require.NoError(t, err)
 	secretEnc, secretNonce, keyVersion, err := keyring.Seal([]byte("invalid-totp-seed"))
 	require.NoError(t, err)
-	codes, hashes, err := GenerateBackupCodes()
+	codes, hashes, err := GenerateBackupCodes(context.Background())
 	require.NoError(t, err)
 	require.NotEqual(t, codes[0], codes[1])
 	_, err = db.Exec(`

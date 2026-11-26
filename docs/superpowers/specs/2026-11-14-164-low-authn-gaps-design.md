@@ -33,13 +33,13 @@ dependency is introduced.
 | VULN-009 | No production edit here; verify the separate refresh-machine binding fix in `internal/auth` | exact-head regression evidence |
 | VULN-021 | `internal/mfa/handlers.go`; existing security-event vocabulary only | MFA WebAuthn and security-event tests |
 | VULN-026 | `internal/mfa/handlers.go`; existing `withMFAFactorWriteTx` | real PostgreSQL concurrent finish test |
-| VULN-022 | `internal/mfa/totp.go`, backup-code callers, migrations `000195_*` | unit, integration, migration up/down tests; architecture docs |
+| VULN-022 | `internal/mfa/totp.go`, backup-code callers, migrations `000201_*` | unit, integration, migration up/down tests; architecture docs |
 | VULN-028 | `internal/mfa/handlers.go` | handler tests; OpenAPI constraints |
 | VULN-002 | `internal/auth/handlers.go`, `pending.go` | registration boundary and work-order tests; OpenAPI limits |
 | VULN-192 | `internal/middleware/attestation.go`, `internal/websocket/handler.go`, router wiring tests | JWT/ticket WebSocket tests; OpenAPI and architecture docs |
 
-The Self-Hosted migration number is `000195` at the inspected `origin/main`
-head (`b3b7f490`). The hosted deployment currently ends at `000197`, so its reviewed mirror is
+The Self-Hosted migration number was `000195` at the inspected `origin/main`
+head (`b3b7f490`); PR B2 re-resolved it and uses `000201`. The hosted deployment currently ends at `000197`, so its reviewed mirror is
 expected to use `000198`. Both numbers are reservations, not constants: each
 implementer must re-resolve the next free number immediately before creating
 the migration.
@@ -171,15 +171,27 @@ lock order is needed.
 closed versioned string:
 
 - `v1$<64 lowercase hex characters>` — the existing unsalted SHA-256 value;
-- `v2$argon2id$v=19$m=8192,t=1,p=1$<base64url salt>$<base64url digest>` — a
+- `v2$argon2id$v=19$m=19456,t=2,p=1$<base64url salt>$<base64url digest>` — a
   16-byte random salt and 32-byte digest for one normalized code.
 
 The v2 parameters are deliberately bounded and exact. A single submitted code
 may be tested against up to eight independent salts, so password-grade 64 MiB
 parameters would multiply into an unauthenticated CPU/memory denial. The codes
-already have a fail-closed per-account attempt budget. Eight
-8 MiB, one-pass computations retain a meaningful database-only cracking cost
-without multiplying one valid request into half a gigabyte of memory. The
+already have a fail-closed per-account attempt budget.
+
+**Decision (PR B2): the writer uses m=19456, t=2, not m=8192, t=1.** This design
+first proposed eight 8 MiB, one-pass computations. The B1 reader, already
+deployed, accepts only the m=19456, t=2 tuple, and the writer must emit exactly
+what every serving reader verifies: a writer on another tuple would produce
+codes B1 refuses, which breaks the B1/B2 overlap and application rollback.
+Changing the tuple would need a new reader release first. The cost is bounded:
+the verifier derives one hash at a time, so peak memory stays near 19 MiB per
+request, and a wrong code against eight unused v2 codes costs eight two-pass
+computations (about 2.4 times the memory and 4.75 times the compute of the
+first proposal). The per-account attempt budget bounds how often an account
+can be made to pay it, and every caller reaches the verifier only after an
+earlier proof: the password at sign-in, or the emailed code in account recovery.
+The
 parser rejects any different algorithm, version, parameter tuple, salt length,
 digest length, or malformed encoding before calling Argon2.
 
@@ -193,12 +205,13 @@ indices, and returns an error for any other stored element. A storage error
 fails the verifier closed. The existing atomic consumption mutation remains
 the sole owner of marking a code used; this work does not redesign existing atomic backup-code consumption.
 
-Migration `000195` rewrites every bare 64-hex legacy element to `v1$...` in
+Migration `000201` rewrites every bare 64-hex legacy element to `v1$...` in
 place while preserving array order and `backup_codes_used`. It does not hash or
 log plaintext because none exists. Its down migration strips `v1$` only after
-holding the table lock and proving that no v2 element exists; if any v2 code
-has been generated, downgrade aborts. Silently discarding v2 codes would lock
-users out and is forbidden.
+holding a `SHARE ROW EXCLUSIVE` table lock, which blocks every write but not
+reads, and proving that every element is bare or v1; if any v2 code has been
+generated, or any element has no bare form, downgrade aborts. Silently
+discarding v2 codes would lock users out and is forbidden.
 
 This storage change uses an expand-then-write rollout:
 

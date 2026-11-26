@@ -2,19 +2,24 @@ package users_test
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 	"github.com/pquerna/otp/totp"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
@@ -684,4 +689,95 @@ func TestUpdatePrivacy_PurgeFenceWithoutCodeLeavesTheSharedBudget(t *testing.T) 
 			require.Equal(t, 3, n, "a request without a code must neither charge nor clear the shared budget")
 		})
 	}
+}
+
+// busyBackupCode is a v2 backup code the busy tests store and submit. Eight
+// characters, so it never matches a TOTP step and always reaches backup-code
+// hashing.
+const busyBackupCode = "MFABUSY1"
+
+// setBackupCode stores code as the user's one unused v2 backup code. The user
+// must already have a TOTP row.
+func setBackupCode(t *testing.T, db *sql.DB, userID, code string) {
+	t.Helper()
+	stored, err := backuphash.NewV2(context.Background(), code)
+	require.NoError(t, err)
+	res, err := db.Exec(`UPDATE user_mfa_totp SET backup_codes_hash = $1, backup_codes_used = $2 WHERE user_id = $3`,
+		pq.Array([]string{stored}), pq.Array([]bool{false}), userID)
+	require.NoError(t, err)
+	n, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "setBackupCode needs a TOTP row")
+}
+
+// holdBackupHashSlots takes every backup-hash slot, so each backup-code check
+// answers backuphash.ErrBusy. The returned release is safe to call twice and
+// also runs at cleanup.
+func holdBackupHashSlots(t *testing.T) func() {
+	t.Helper()
+	release := backuphash.HoldAllSlots(50 * time.Millisecond)
+	var once sync.Once
+	releaseOnce := func() { once.Do(release) }
+	t.Cleanup(releaseOnce)
+	return releaseOnce
+}
+
+// redisCount reads a budget counter, treating an absent key as zero.
+func redisCount(t *testing.T, rdb *redis.Client, key string) int {
+	t.Helper()
+	n, err := rdb.Get(context.Background(), key).Int()
+	if errors.Is(err, redis.Nil) {
+		return 0
+	}
+	require.NoError(t, err)
+	return n
+}
+
+// requireVerificationBusy asserts the retryable busy answer.
+func requireVerificationBusy(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Equal(t, "1", w.Header().Get("Retry-After"))
+	require.JSONEq(t, `{"error":"Verification is busy. Try again.","verification_busy":true}`, w.Body.String())
+}
+
+// A busy backup-code check judged nothing. The purge fence charged two budgets
+// for the request (its own, and the shared one for the code), and both get
+// the attempt back: repeated busy answers never reach 429 and leave the fence
+// up. A wrong code then costs exactly one of each, and the right code lowers
+// the fence.
+func TestUpdatePrivacy_PurgeFenceBusyBackupCheckRefundsBothBudgets(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "purgefencebusy")
+	materializePrivacyRow(t, ts, user)
+	enableTOTP(t, ts, user)
+	setBackupCode(t, ts.DB, user.ID, busyBackupCode)
+	shared := stepup.DangerousActionBudget(ts.Redis).Key(user.ID)
+	fence := "stepup:privacy_purge_fence:" + user.ID
+	disable := func(code string) *httptest.ResponseRecorder {
+		return patchPrivacy(t, ts, user.AccessToken, map[string]interface{}{
+			keyRequireAuthBeforePurge: false,
+			keyCurrentPassword:        testhelpers.TestAuthPlaintext,
+			keyMFACode:                code,
+		})
+	}
+
+	release := holdBackupHashSlots(t)
+	for i := 0; i <= stepup.BudgetLimit; i++ {
+		sharedBefore, fenceBefore := redisCount(t, ts.Redis, shared), redisCount(t, ts.Redis, fence)
+		requireVerificationBusy(t, disable(busyBackupCode))
+		require.Equal(t, sharedBefore, redisCount(t, ts.Redis, shared), "a busy check must not cost a shared attempt")
+		require.Equal(t, fenceBefore, redisCount(t, ts.Redis, fence), "a busy check must not cost a purge-fence attempt")
+		require.True(t, storedPurgeFence(t, ts, user.ID))
+	}
+	release()
+
+	w := disable("00000000")
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	require.Equal(t, 1, redisCount(t, ts.Redis, shared), "a wrong code costs exactly one shared attempt")
+	require.Equal(t, 1, redisCount(t, ts.Redis, fence), "a wrong code costs exactly one purge-fence attempt")
+
+	w = disable(busyBackupCode)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.False(t, storedPurgeFence(t, ts, user.ID), "the right code lowers the fence")
 }

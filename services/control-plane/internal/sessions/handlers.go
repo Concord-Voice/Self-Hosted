@@ -77,6 +77,7 @@ var (
 	revokeAllSessionsAction        = revokeAction{desc: "revoke all sessions", route: securityevent.RouteSessionsRevokeAll, purpose: stepup.PurposeSessionsRevokeAll}
 	revocationModeSetAction        = revokeAction{desc: "change revocation mode", route: securityevent.RouteSessionsRevocationMode, purpose: stepup.PurposeRevocationModeSet}
 	errSimpleAuthWindowUnavailable = errors.New("simple-mode authentication window Redis client unavailable")
+	errSimpleAuthWindowNoFamily    = errors.New("simple-mode authentication window needs a verified login family")
 )
 
 // Revocation rate-limiting constants.
@@ -161,20 +162,54 @@ func revokeTrackingKey(userID string) string {
 	return fmt.Sprintf("session_revokes:%s", userID)
 }
 
-func simpleAuthWindowKey(userID string) string {
+// simpleAuthWindowKey names one login family's Simple-mode window. Only the
+// family that proved its credentials can spend the window, so a second
+// session of the same account cannot revoke on another family's proof.
+func simpleAuthWindowKey(userID, familyID string) string {
+	return fmt.Sprintf("session_revoke_auth:%s:%s", userID, familyID)
+}
+
+// legacySimpleAuthWindowKey is the account-wide window key that predates
+// per-family windows. Nothing reads it; revoke-all still deletes it.
+func legacySimpleAuthWindowKey(userID string) string {
 	return fmt.Sprintf("session_revoke_auth:%s", userID)
 }
 
-func (h *Handler) readSimpleAuthWindow(ctx context.Context, userID string) (string, error) {
+// simpleAuthWindowKeys lists the window keys a request may delete: the legacy
+// account-wide key, and the requesting family's key when it has one.
+func simpleAuthWindowKeys(userID, familyID string) []string {
+	keys := []string{legacySimpleAuthWindowKey(userID)}
+	if familyID != "" {
+		keys = append(keys, simpleAuthWindowKey(userID, familyID))
+	}
+	return keys
+}
+
+// authenticatingFamily returns the login family AuthRequired verified for this
+// request's bearer token, or "" when there is no verified family. It never
+// reads a request header or the target session ID. An empty family earns and
+// spends no window, so a request without verified provenance must prove.
+func authenticatingFamily(c *gin.Context, userID string) string {
+	identity, grant, ok := middleware.VerifiedAccessFromContext(c)
+	if !ok || grant.FamilyID == uuid.Nil || identity.UserID.String() != userID {
+		return ""
+	}
+	return grant.FamilyID.String()
+}
+
+func (h *Handler) readSimpleAuthWindow(ctx context.Context, userID, familyID string) (string, error) {
+	if familyID == "" {
+		return "", errSimpleAuthWindowNoFamily
+	}
 	if h.redis == nil {
 		return "", errSimpleAuthWindowUnavailable
 	}
-	return h.redis.Get(ctx, simpleAuthWindowKey(userID)).Result()
+	return h.redis.Get(ctx, simpleAuthWindowKey(userID, familyID)).Result()
 }
 
 func (h *Handler) simpleAuthWindowMatches(userID, value string, err error, generation int64) bool {
 	if err != nil {
-		if !errors.Is(err, redis.Nil) {
+		if !errors.Is(err, redis.Nil) && !errors.Is(err, errSimpleAuthWindowNoFamily) {
 			h.log.Warn("Simple-mode authentication window unavailable", "user_id", userID, "error", err)
 		}
 		return false
@@ -182,28 +217,35 @@ func (h *Handler) simpleAuthWindowMatches(userID, value string, err error, gener
 	return value == fmt.Sprintf("%s%d", simpleAuthWindowVersion, generation)
 }
 
-// grantSimpleAuthWindow sets a 5-minute authentication window in Redis.
-func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID string, generation int64) {
+// grantSimpleAuthWindow sets a 5-minute authentication window in Redis for the
+// login family that just proved its credentials. No verified family earns none.
+func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID, familyID string, generation int64) {
+	if familyID == "" {
+		return
+	}
 	if h.redis == nil {
 		h.log.Warn("Could not grant simple-mode authentication window")
 		return
 	}
 	ctx, cancel := stepup.SettleContext(ctx)
 	defer cancel()
-	if err := h.redis.Set(ctx, simpleAuthWindowKey(userID), fmt.Sprintf("%s%d", simpleAuthWindowVersion, generation), simpleAuthWindowTTL).Err(); err != nil {
+	if err := h.redis.Set(ctx, simpleAuthWindowKey(userID, familyID), fmt.Sprintf("%s%d", simpleAuthWindowVersion, generation), simpleAuthWindowTTL).Err(); err != nil {
 		h.log.Warn("Could not grant simple-mode authentication window")
 	}
 }
 
-// resetRevokeTracking removes the legacy Redis tracking set and auth window.
-func (h *Handler) resetRevokeTracking(ctx context.Context, userID string) {
+// resetRevokeTracking removes the legacy Redis tracking set, the legacy
+// account-wide window and the requesting family's window. Every other
+// family's window is ended by the authorization generation revoke-all bumps.
+func (h *Handler) resetRevokeTracking(ctx context.Context, userID, familyID string) {
 	if h.redis == nil {
 		h.log.Warn("Could not clear session-revocation caches")
 		return
 	}
 	ctx, cancel := stepup.SettleContext(ctx)
 	defer cancel()
-	if err := h.redis.Del(ctx, revokeTrackingKey(userID), simpleAuthWindowKey(userID)).Err(); err != nil {
+	keys := append([]string{revokeTrackingKey(userID)}, simpleAuthWindowKeys(userID, familyID)...)
+	if err := h.redis.Del(ctx, keys...).Err(); err != nil {
 		h.log.Warn("Could not clear session-revocation caches")
 	}
 }
@@ -391,6 +433,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	if !h.verifySessionOwnership(ctx, c, sessionID, uid) {
 		return
 	}
+	family := authenticatingFamily(c, uid)
 
 	// Parse optional password from request body
 	var req struct {
@@ -401,7 +444,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		_ = c.ShouldBindJSON(&req)
 	}
 
-	result, revokeErr := h.executeRevocation(ctx, uid, sessionID, middleware.TokenCredentialEpoch(c), false)
+	result, revokeErr := h.executeRevocation(ctx, uid, family, sessionID, middleware.TokenCredentialEpoch(c), false)
 	authenticated, mfaVerified := false, false
 	if errors.Is(revokeErr, errRevokeAuthenticationNeeded) && !errors.Is(revokeErr, loginfamily.ErrUnavailable) {
 		blocked, verified := h.authenticateForRevokeWithMFA(ctx, c, uid, req.Password, req.MFACode, revokeSessionAction)
@@ -409,7 +452,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 			return
 		}
 		authenticated, mfaVerified = true, verified
-		result, revokeErr = h.executeRevocation(ctx, uid, sessionID, middleware.TokenCredentialEpoch(c), true)
+		result, revokeErr = h.executeRevocation(ctx, uid, family, sessionID, middleware.TokenCredentialEpoch(c), true)
 	}
 	if revokeErr != nil {
 		h.handleRevokeSessionError(ctx, c, uid, result, revokeErr)
@@ -425,7 +468,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	}
 	_ = h.closeCommittedFamilies(ctx, result.revocation, []loginfamily.Binding{result.target})
 	if authenticated && result.mode == "simple" {
-		h.grantSimpleAuthWindow(ctx, uid, result.generation)
+		h.grantSimpleAuthWindow(ctx, uid, family, result.generation)
 	}
 	if mfaVerified {
 		h.clearRevokeMFABudget(ctx, uid)
@@ -521,42 +564,64 @@ func (h *Handler) authenticateForRevokeWithMFA(ctx context.Context, c *gin.Conte
 		return true, false
 	}
 
-	if hasMFA {
-		if mfaCode == "" {
-			methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
-			if err != nil {
-				h.log.Error("Failed to read MFA methods during session revoke", "error", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-				return true, false
-			}
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":   "auth_required",
-				"message": "Authentication required to " + action.desc,
-				"methods": methods,
-			})
-			return true, false
-		}
-		if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), uid, mfaCode); e != nil {
-			if e.Cause != nil {
-				h.log.Error("Session-revoke MFA budget unavailable", "error", e.Cause)
-			}
-			e.Write(c)
-			return true, false
-		}
-		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
-		if mfaErr != nil {
-			h.log.Error("MFA verification error during session revoke", "error", mfaErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
-			return true, false
-		}
-		if !valid {
-			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
-			return true, false
-		}
-		mfaVerified = true
+	if !hasMFA {
+		return false, false
 	}
-	return false, mfaVerified
+	if h.verifyRevokeMFA(ctx, c, uid, mfaCode, action) {
+		return true, false
+	}
+	return false, true
+}
+
+// verifyRevokeMFA is the MFA leg of authenticateForRevokeWithMFA, for an
+// account that has an inline factor. It charges the shared budget, verifies
+// the code and refunds a busy check. It returns true once it has written a
+// refusal.
+func (h *Handler) verifyRevokeMFA(ctx context.Context, c *gin.Context, uid, mfaCode string, action revokeAction) (blocked bool) {
+	if mfaCode == "" {
+		methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+		if err != nil {
+			h.log.Error("Failed to read MFA methods during session revoke", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+			return true
+		}
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "auth_required",
+			"message": "Authentication required to " + action.desc,
+			"methods": methods,
+		})
+		return true
+	}
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), uid, mfaCode)
+	if e != nil {
+		if e.Cause != nil {
+			h.log.Error("Session-revoke MFA budget unavailable", "error", e.Cause)
+		}
+		e.Write(c)
+		return true
+	}
+	valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, action.purpose, mfaCode)
+	if mfaErr != nil {
+		// A busy backup-code check judged nothing: give the attempt back
+		// and answer a retryable 503. No transaction is open here.
+		if stepup.IsBusy(mfaErr) {
+			if err := stepup.RefundIfBusy(ctx, mfaErr, charged); err != nil {
+				h.log.Warn("Could not refund a busy session-revoke MFA attempt", "error", err)
+			}
+			stepup.BusyError(mfaErr).Write(c)
+			return true
+		}
+		h.log.Error("MFA verification error during session revoke", "error", mfaErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+		return true
+	}
+	if !valid {
+		route := action.route
+		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonChallengeInvalid, RouteTemplate: route})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInvalidMFACode})
+		return true
+	}
+	return false
 }
 
 // clearRevokeMFABudget resets the budget after a committed revocation, on a
@@ -578,12 +643,14 @@ type singleRevocationResult struct {
 
 // executeRevocation reads Redis policy state before the transaction, then
 // validates it against the generation read under the revocation's user lock.
-func (h *Handler) executeRevocation(ctx context.Context, uid, sessionID, epoch string, authenticated bool) (singleRevocationResult, error) {
+// family is the requester's verified login family: only that family's own
+// window can waive the proof, and an empty family has no window.
+func (h *Handler) executeRevocation(ctx context.Context, uid, family, sessionID, epoch string, authenticated bool) (singleRevocationResult, error) {
 	var result singleRevocationResult
 	var authWindowValue string
 	var authWindowErr error
 	if !authenticated {
-		authWindowValue, authWindowErr = h.readSimpleAuthWindow(ctx, uid)
+		authWindowValue, authWindowErr = h.readSimpleAuthWindow(ctx, uid, family)
 	}
 	policy := func(ctx context.Context, tx *sql.Tx) error {
 		var freeAvailable bool
@@ -684,7 +751,7 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 		h.clearRevokeMFABudget(ctx, uid)
 	}
 
-	h.resetRevokeTracking(ctx, uid)
+	h.resetRevokeTracking(ctx, uid, authenticatingFamily(c, uid))
 	message := "All other sessions revoked successfully"
 	if req.IncludeCurrent {
 		message = "All sessions revoked successfully"
@@ -902,7 +969,7 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	if req.Mode == "secure" {
 		if h.redis == nil {
 			h.log.Warn("Could not clear simple-mode authentication window")
-		} else if err := h.redis.Del(ctx, simpleAuthWindowKey(uid)).Err(); err != nil {
+		} else if err := h.redis.Del(ctx, simpleAuthWindowKeys(uid, authenticatingFamily(c, uid))...).Err(); err != nil {
 			h.log.Warn("Could not clear simple-mode authentication window")
 		}
 	}

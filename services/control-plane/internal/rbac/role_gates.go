@@ -78,6 +78,7 @@ type roleGateConfirm struct {
 	code       string
 	grace      stepup.GraceRead
 	tokenEpoch string
+	charged    stepup.Charged
 }
 
 // chargeRoleGate is a role gate's pre-transaction half. It charges the
@@ -91,11 +92,12 @@ func (h *Handler) chargeRoleGate(
 	c *gin.Context, serverID, actorID string, purpose stepup.Purpose, code string,
 ) (roleGateConfirm, bool) {
 	ctx := c.Request.Context()
-	if e := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), actorID, code); e != nil {
+	charged, e := stepup.ChargeAttempt(ctx, stepup.DangerousActionBudget(h.redis), actorID, code)
+	if e != nil {
 		mfaenforce.WriteError(c, h.log, e, nil)
 		return roleGateConfirm{}, false
 	}
-	confirm := roleGateConfirm{purpose: purpose, code: code, tokenEpoch: middleware.TokenCredentialEpoch(c)}
+	confirm := roleGateConfirm{purpose: purpose, code: code, tokenEpoch: middleware.TokenCredentialEpoch(c), charged: charged}
 	if !purpose.GraceEligible() {
 		return confirm, true
 	}
@@ -168,6 +170,17 @@ func (h *Handler) requireRoleGate(
 func (h *Handler) settleRoleGate(ctx context.Context, outcome mfaenforce.Outcome, in roleGateConfirm, actorID string) {
 	mfaenforce.Settle(ctx, h.log, outcome, stepup.DangerousActionBudget(h.redis), stepup.NewGraceStore(h.redis),
 		in.grace, actorID)
+}
+
+// refundRoleGateIfBusy returns chargeRoleGate's attempt when err is a busy
+// backup-code check (stepup.IsBusy): the code was never judged, so it must not
+// cost an attempt. Any other error keeps its charge. Each gated route calls it
+// on its transaction's error, after that transaction has ended: it is a Redis
+// call, and none may run while the transaction is open (A-2, A-9).
+func (h *Handler) refundRoleGateIfBusy(ctx context.Context, err error, confirm roleGateConfirm) {
+	if rErr := stepup.RefundIfBusy(ctx, err, confirm.charged); rErr != nil {
+		h.log.Warn("Could not refund a busy role-gate attempt", "error", rErr)
+	}
 }
 
 // isRoleGateError reports whether err is the gate's to answer through

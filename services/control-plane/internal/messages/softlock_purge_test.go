@@ -340,3 +340,25 @@ func TestSelfPurge_BodyIsOneBoundedDocument(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfPurge_BusyVerificationNeverCharges: an over-threshold self-purge
+// whose backup-code check was busy answers 503 with Retry-After: 1, purges
+// nothing, and returns the attempt the soft-lock charged.
+//
+// Mutant killed: dropping the refund in refuseSelfPurge (the budget climbs on
+// each busy answer and the fourth one is a 429).
+func TestSelfPurge_BusyVerificationNeverCharges(t *testing.T) {
+	s := newSoftLockHarness(t)
+	w := s.world(t, false)
+	s.enroll(t, w.author.ID)
+	s.seed(t, w.channelID, w.author, 16)
+
+	s.requireBusyNeverCharges(t, w.author.ID, func(code string) *httptest.ResponseRecorder {
+		res := s.purgeChannel(t, w.author.ID, w.channelID, map[string]any{"range": "all", "mfa_code": code})
+		if res.Code != http.StatusOK {
+			assert.Equal(t, 16, s.countBy(t, w.author.ID), "a refused self-purge deletes nothing")
+		}
+		return res
+	})
+	assert.Zero(t, s.countBy(t, w.author.ID))
+}

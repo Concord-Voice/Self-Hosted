@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
@@ -55,13 +57,19 @@ type softLockVerifier struct {
 	err      error
 	purposes []stepup.Purpose
 	onVerify func()
+	// pool admits the pool-side VerifyCode, which only DM purge uses: it
+	// verifies with no transaction open.
+	pool bool
 }
 
 func (v *softLockVerifier) IsEnabled(context.Context, string) bool { return true }
 func (v *softLockVerifier) GetEnabledMethods(context.Context, string) ([]string, error) {
 	return nil, errors.New("the delete route must use the locked subject's methods")
 }
-func (v *softLockVerifier) VerifyCode(context.Context, string, stepup.Purpose, string) (bool, error) {
+func (v *softLockVerifier) VerifyCode(ctx context.Context, userID string, purpose stepup.Purpose, code string) (bool, error) {
+	if v.pool {
+		return v.VerifyCodeTx(ctx, nil, userID, purpose, code)
+	}
 	return false, errors.New("the delete route must verify inside its transaction")
 }
 func (v *softLockVerifier) VerifyCodeTx(_ context.Context, _ *sql.Tx, _ string, purpose stepup.Purpose, code string) (bool, error) {
@@ -777,4 +785,131 @@ func mustRedisGet(t *testing.T, mr *miniredis.Miniredis, key string) string {
 	v, err := mr.Get(key)
 	require.NoError(t, err, key)
 	return v
+}
+
+// errVerifyBusy is what a verifier returns when backup-code hashing had no
+// free slot: no code was judged.
+var errVerifyBusy = fmt.Errorf("verify: %w", backuphash.ErrBusy)
+
+// serveAs sends one request as userID through a router that mounts route at
+// pattern, with the same identity and claims deleteAs gives the delete.
+func (hs *softLockHarness) serveAs(t *testing.T, userID, method, pattern, path, body string, route gin.HandlerFunc) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Handle(method, pattern, func(c *gin.Context) {
+		c.Set("user_id", userID)
+		c.Set(middleware.JWTClaimsContextKey, jwt.MapClaims{"cred_epoch": hs.epoch})
+		hs.withIdentity(c, userID)
+		route(c)
+	})
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// requireBusyNeverCharges runs the busy-verification protocol against one
+// route. send makes one request carrying code. Starting from a budget already
+// charged twice: a busy check answers 503 with Retry-After: 1 and leaves the
+// budget at 2, and BudgetLimit+1 busy requests in a row never reach the 429;
+// then a wrong code is charged exactly once; then the correct code succeeds.
+func (hs *softLockHarness) requireBusyNeverCharges(t *testing.T, send func(code string) *httptest.ResponseRecorder) {
+	t.Helper()
+	key := hs.budgetKey()
+	require.NoError(t, hs.mr.Set(key, "2"))
+
+	hs.verifier.err = errVerifyBusy
+	for i := range stepup.BudgetLimit + 1 {
+		w := send(softLockGoodCode)
+		require.Equalf(t, http.StatusServiceUnavailable, w.Code, "busy attempt %d: %s", i+1, w.Body.String())
+		require.Equal(t, "1", w.Header().Get("Retry-After"), "a busy check asks for a retry in one second")
+		body := decodeBody(t, w)
+		require.Equal(t, true, body["verification_busy"], body)
+		require.Equal(t, stepup.ErrMsgVerificationBusy, body["error"])
+		require.Equalf(t, "2", mustRedisGet(t, hs.mr, key), "busy attempt %d must not cost an attempt", i+1)
+	}
+
+	hs.verifier.err = nil
+	wrong := send("000000")
+	require.Equal(t, http.StatusForbidden, wrong.Code, wrong.Body.String())
+	require.Equal(t, "3", mustRedisGet(t, hs.mr, key), "a wrong code keeps its charge")
+
+	ok := send(softLockGoodCode)
+	require.Equal(t, http.StatusOK, ok.Code, ok.Body.String())
+}
+
+// TestDMDeleteSoftLock_BusyVerificationNeverCharges: an over-threshold DM
+// delete whose backup-code check was busy answers 503 with Retry-After: 1,
+// deletes nothing, and returns the attempt it charged.
+//
+// Mutant killed: dropping the refund after the delete transaction (the budget
+// climbs on each busy answer and the fourth one is a 429).
+func TestDMDeleteSoftLock_BusyVerificationNeverCharges(t *testing.T) {
+	hs := newSoftLockHarness(t)
+	hs.enrollMFA(t)
+	hs.overThreshold(t)
+	messageID := hs.message(t)
+
+	hs.requireBusyNeverCharges(t, func(code string) *httptest.ResponseRecorder {
+		w := hs.delete(t, messageID, codeBody(code))
+		if w.Code != http.StatusOK {
+			require.True(t, hs.messageExists(t, messageID), "a refused delete deletes nothing")
+		}
+		return w
+	})
+	assert.False(t, hs.messageExists(t, messageID))
+}
+
+// TestDMClear_BusyVerificationNeverCharges: a Clear whose backup-code check
+// was busy answers 503 with Retry-After: 1, writes no range, and returns the
+// attempt admitClearRequest charged, after its transaction rolled back.
+//
+// Mutant killed: dropping the refund in enforceClearStepUp (the budget climbs
+// on each busy answer and the fourth one is a 429).
+func TestDMClear_BusyVerificationNeverCharges(t *testing.T) {
+	hs := newSoftLockHarness(t)
+	hs.enrollMFA(t)
+	clearRanges := func() int {
+		var n int
+		require.NoError(t, hs.db.QueryRow(`SELECT count(*) FROM dm_message_hidden_ranges WHERE user_id = $1 AND conversation_id = $2`,
+			hs.actor, hs.convID).Scan(&n))
+		return n
+	}
+
+	hs.requireBusyNeverCharges(t, func(code string) *httptest.ResponseRecorder {
+		w := hs.serveAs(t, hs.actor, http.MethodPost, "/dm/conversations/:id/clear",
+			"/dm/conversations/"+hs.convID+"/clear", codeBody(code), hs.handler.ClearConversation)
+		if w.Code != http.StatusOK {
+			require.Zero(t, clearRanges(), "a refused Clear writes no range")
+		}
+		return w
+	})
+	assert.Equal(t, 1, clearRanges())
+}
+
+// TestDMPurge_BusyVerificationNeverCharges: a DM purge whose backup-code check
+// was busy answers 503 with Retry-After: 1, deletes nothing, and returns the
+// attempt its MFA leg charged. No transaction is open at that point.
+//
+// Mutant killed: dropping the refund in verifyPurgeStepUpWithMFA (the budget
+// climbs on each busy answer and the fourth one is a 429).
+func TestDMPurge_BusyVerificationNeverCharges(t *testing.T) {
+	hs := newSoftLockHarness(t)
+	hs.setPassword(t)
+	hs.enrollMFA(t)
+	hs.verifier.pool = true
+	messageID := hs.message(t)
+
+	hs.requireBusyNeverCharges(t, func(code string) *httptest.ResponseRecorder {
+		body := `{"range":"all","current_password":"` + softLockPlaintext + `","mfa_code":"` + code + `"}`
+		w := hs.serveAs(t, hs.actor, http.MethodDelete, "/dm/conversations/:id/messages",
+			"/dm/conversations/"+hs.convID+"/messages", body, hs.handler.PurgeConversation)
+		if w.Code != http.StatusOK {
+			require.True(t, hs.messageExists(t, messageID), "a refused purge deletes nothing")
+		}
+		return w
+	})
+	assert.False(t, hs.messageExists(t, messageID))
 }

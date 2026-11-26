@@ -11,10 +11,13 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/channels"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
@@ -556,4 +560,84 @@ func TestChannelGate_GraceSpansBothRoutes(t *testing.T) {
 	ttlAfter, err := ts.Redis.TTL(context.Background(), ttlKeys[0]).Result()
 	require.NoError(t, err)
 	assert.LessOrEqual(t, ttlAfter, ttlBefore, "a covered action never slides the grace")
+}
+
+// chanGateBudgetCount is chanGateBudget as a count, 0 when the key is absent.
+func chanGateBudgetCount(t *testing.T, ts *testhelpers.TestServer, userID string) int {
+	t.Helper()
+	v := chanGateBudget(t, ts, userID)
+	if v == "absent" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	require.NoError(t, err)
+	return n
+}
+
+// A busy backup-code check judged nothing, so on DeleteChannel and on a
+// shortening it is a 503 with Retry-After: 1 that writes nothing and leaves
+// the shared budget where it was. Busy answers past the budget's limit never
+// become 429; a wrong code afterwards costs exactly one attempt, and the right
+// code still lands.
+// Kills: the busy refund dropped from DeleteChannel or UpdateExpiration (the
+// budget climbs and the sixth busy request answers 429).
+func TestChannelGate_BusyVerificationRefundsTheAttempt(t *testing.T) {
+	ts := setupTS(t)
+	const accept = "246810"
+	for _, route := range chanGateRoutes() {
+		t.Run(route.name, func(t *testing.T) {
+			f := newChanGateFixture(t, ts)
+			testhelpers.SetServerMFAEnforcement(t, ts.DB, f.serverID, true)
+			testhelpers.EnrollInlineTOTP(t, ts.DB, f.mod.ID)
+			verifier := &testhelpers.FakeMFAVerifier{Err: fmt.Errorf("verify: %w", backuphash.ErrBusy)}
+			log := logger.NewWithWriter(&bytes.Buffer{})
+			resolver := rbac.NewResolver(ts.DB, rbac.NewPermissionCache(ts.Redis), log)
+			handler := channels.NewHandler(ts.DB, log, ts.Hub, resolver, ts.Redis)
+			handler.SetAuthorityHandler(rbac.NewHandler(ts.DB, log, ts.Redis, ts.Hub, resolver, rbac.NewPermissionCache(ts.Redis), nil))
+			handler.SetMFAVerifier(verifier)
+			sid := uuid.NewString()
+			router := gin.New()
+			router.Use(func(c *gin.Context) {
+				c.Set("user_id", f.mod.ID)
+				testhelpers.AttachUserIdentity(t, c, f.mod.ID)
+				c.Set(middleware.JWTClaimsContextKey, jwt.MapClaims{"sid": sid})
+				c.Next()
+			})
+			router.DELETE("/api/v1/channels/:id", handler.DeleteChannel)
+			router.PATCH("/api/v1/channels/:id/expiration", handler.UpdateExpiration)
+			do := func(code string) *httptest.ResponseRecorder {
+				body, err := json.Marshal(route.body(code))
+				require.NoError(t, err)
+				req := httptest.NewRequest(route.method, route.path(f), bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				return w
+			}
+
+			for i := 0; i <= stepup.BudgetLimit; i++ {
+				before := chanGateBudgetCount(t, ts, f.mod.ID)
+				w := do(accept)
+				require.Equal(t, http.StatusServiceUnavailable, w.Code, "busy attempt %d: %s", i+1, w.Body.String())
+				assert.JSONEq(t, fmt.Sprintf(`{"error":%q,"verification_busy":true}`, stepup.ErrMsgVerificationBusy), w.Body.String())
+				assert.Equal(t, "1", w.Header().Get("Retry-After"))
+				assert.Equal(t, before, chanGateBudgetCount(t, ts, f.mod.ID), "a busy check costs no attempt")
+				assertChanGateNothingWritten(t, ts.DB, f)
+			}
+			require.Equal(t, stepup.BudgetLimit+1, verifier.Calls(), "every busy request reached the verifier")
+
+			verifier.Err = nil
+			verifier.AcceptCode = accept
+			w := do(chanGateWrongCode)
+			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			assert.JSONEq(t, chanGateBodyInvalidCode, w.Body.String())
+			assert.Equal(t, 1, chanGateBudgetCount(t, ts, f.mod.ID), "a wrong code burns exactly one attempt")
+			assertChanGateNothingWritten(t, ts.DB, f)
+
+			w = do(accept)
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.True(t, route.done(t, ts.DB, f), "the right code lands")
+			assert.Equal(t, 0, chanGateBudgetCount(t, ts, f.mod.ID), "a verified commit clears the budget")
+		})
+	}
 }

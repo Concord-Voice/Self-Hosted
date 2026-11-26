@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/backuphash"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
@@ -1016,4 +1017,111 @@ func TestRoleGate_DeleteRoleGraceCoversTheSameSessionOnly(t *testing.T) {
 	create := roleGateRoutes()[0]
 	assert.Equal(t, rgRequired, classifyRoleGate(create, create.do(ts, first, f, "")), "roles.create is always fresh")
 	assert.False(t, create.applied(t, ts.DB, f.serverID, ""))
+}
+
+// rgBusyRoute is one gated rbac route driven straight at its handler, so the
+// test can install a verifier that reports a busy backup-code check.
+type rgBusyRoute struct {
+	name     string
+	method   string
+	okStatus int
+	call     func(h *rbac.Handler, c *gin.Context)
+	params   func(f ogFixture) gin.Params
+	body     func(f ogFixture, code string) any
+	applied  func(t *testing.T, ts *testhelpers.TestServer, f ogFixture) bool
+}
+
+func rgBusyRoutes() []rgBusyRoute {
+	roles := roleGateRoutes()
+	overrides := overrideGateRoutes()
+	role := func(i int, call func(h *rbac.Handler, c *gin.Context)) rgBusyRoute {
+		r := roles[i]
+		return rgBusyRoute{
+			name: r.name, method: r.method, okStatus: r.okStatus, call: call,
+			params: func(f ogFixture) gin.Params {
+				return gin.Params{{Key: "id", Value: f.serverID}, {Key: "role_id", Value: f.roleID}}
+			},
+			body: func(_ ogFixture, code string) any { return r.body(code) },
+			applied: func(t *testing.T, ts *testhelpers.TestServer, f ogFixture) bool {
+				return r.applied(t, ts.DB, f.serverID, f.roleID)
+			},
+		}
+	}
+	override := func(i int, parent func(f ogFixture) string, call func(h *rbac.Handler, c *gin.Context)) rgBusyRoute {
+		r := overrides[i]
+		return rgBusyRoute{
+			name: r.name, method: http.MethodPut, okStatus: http.StatusOK, call: call,
+			params: func(f ogFixture) gin.Params { return gin.Params{{Key: "id", Value: parent(f)}} },
+			body:   func(f ogFixture, code string) any { return ogBody(f.roleID, rgDangerous, 0, code) },
+			applied: func(t *testing.T, ts *testhelpers.TestServer, f ogFixture) bool {
+				return r.applied(t, ts, f)
+			},
+		}
+	}
+	return []rgBusyRoute{
+		role(0, (*rbac.Handler).CreateRole),
+		role(1, (*rbac.Handler).UpdateRole),
+		role(2, (*rbac.Handler).DeleteRole),
+		override(0, func(f ogFixture) string { return f.channelID }, (*rbac.Handler).UpsertChannelOverride),
+		override(1, func(f ogFixture) string { return f.categoryID }, (*rbac.Handler).UpsertCategoryOverride),
+	}
+}
+
+func (r rgBusyRoute) do(t *testing.T, ts *testhelpers.TestServer, h *rbac.Handler, f ogFixture, code string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(r.body(f, code))
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = r.params(f)
+	c.Set("user_id", f.owner.ID)
+	c.Request = httptest.NewRequest(r.method, "/", bytes.NewReader(body))
+	ts.AttachActorIdentity(t, c, f.owner.ID)
+	r.call(h, c)
+	return w
+}
+
+// A busy backup-code check judged nothing, so on every gated rbac route it is
+// a 503 with Retry-After: 1 that writes nothing and leaves the shared budget
+// where it was. Busy answers past the budget's limit never become 429; a wrong
+// code afterwards costs exactly one attempt, and the right code still lands.
+// Kills: the busy refund dropped from any of the five routes (the budget
+// climbs and the sixth busy request answers 429).
+func TestRoleGate_BusyVerificationRefundsTheAttempt(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	const accept = "246810"
+	for _, r := range rgBusyRoutes() {
+		t.Run(r.name, func(t *testing.T) {
+			f := newOGFixture(t, ts, true, true)
+			verifier := &testhelpers.FakeMFAVerifier{Err: fmt.Errorf("verify: %w", backuphash.ErrBusy)}
+			log := logger.New("test")
+			cache := rbac.NewPermissionCache(ts.Redis)
+			h := rbac.NewHandler(ts.DB, log, ts.Redis, websocket.NewHub(ts.DB, ts.Redis), rbac.NewResolver(ts.DB, cache, log), cache, nil)
+			h.SetMFAVerifier(verifier)
+
+			for i := 0; i <= stepup.BudgetLimit; i++ {
+				before := rgBudget(t, ts.Redis, f.owner.ID)
+				w := r.do(t, ts, h, f, accept)
+				require.Equal(t, http.StatusServiceUnavailable, w.Code, "busy attempt %d: %s", i+1, w.Body.String())
+				assert.True(t, rgSameJSON(w.Body.String(),
+					fmt.Sprintf(`{"error":%q,"verification_busy":true}`, stepup.ErrMsgVerificationBusy)), w.Body.String())
+				assert.Equal(t, "1", w.Header().Get("Retry-After"))
+				assert.Equal(t, before, rgBudget(t, ts.Redis, f.owner.ID), "a busy check costs no attempt")
+				assert.False(t, r.applied(t, ts, f), "a busy check writes nothing")
+			}
+			require.Equal(t, stepup.BudgetLimit+1, verifier.Calls(), "every busy request reached the verifier")
+
+			verifier.Err = nil
+			verifier.AcceptCode = accept
+			w := r.do(t, ts, h, f, rgWrongCode)
+			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			assert.Equal(t, 1, rgBudget(t, ts.Redis, f.owner.ID), "a wrong code burns exactly one attempt")
+			assert.False(t, r.applied(t, ts, f))
+
+			w = r.do(t, ts, h, f, accept)
+			require.Equal(t, r.okStatus, w.Code, w.Body.String())
+			assert.True(t, r.applied(t, ts, f), "the right code lands")
+			assert.Equal(t, 0, rgBudget(t, ts.Redis, f.owner.ID), "a verified commit clears the budget")
+		})
+	}
 }

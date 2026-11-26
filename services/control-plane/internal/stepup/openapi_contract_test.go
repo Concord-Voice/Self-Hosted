@@ -157,8 +157,8 @@ func TestRefusalFlags_DeclaredByTheResponseSchemas(t *testing.T) {
 	for response, flags := range map[string][]string{
 		"StepUpAttemptsExhausted":   {"step_up_budget_exhausted"},
 		"DeleteRateOrBudgetLimited": {"step_up_budget_exhausted"},
-		"StepUpBudgetUnavailable":   {"step_up_budget_unavailable"},
-		"DeleteSoftLockUnavailable": {"step_up_budget_unavailable", "lock_conflict"},
+		"StepUpBudgetUnavailable":   {"step_up_budget_unavailable", "verification_busy"},
+		"DeleteSoftLockUnavailable": {"step_up_budget_unavailable", "lock_conflict", "verification_busy"},
 		"DeleteSoftLockForbidden":   {"step_up_token_invalid", "delete_rate_limited"},
 	} {
 		refs := schemaRef.FindAllStringSubmatch(strings.Join(component(t, lines, "responses", response), "\n"), -1)

@@ -4,7 +4,7 @@ package mfa
 // RS11). Tokens come from a real ceremony (ipMintInlineToken), never from a
 // seeded key, so these tests do not depend on how a token is stored.
 //
-// Levels: the fourteen MFA-settings consumers are driven at the HANDLER; the
+// Levels: the fifteen MFA-settings consumers are driven at the HANDLER; the
 // twenty-eight consumers outside this package are driven through the entry point each
 // calls with the real verifier (stepup.VerifyMFAFactor/Tx, mfaenforce.ConfirmTx,
 // or VerifyCode/VerifyCodeTx directly), because their handlers live in packages
@@ -61,16 +61,22 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString([]byte("ip-overwrite-recovery-key-32-byt"))
 	salt := base64.StdEncoding.EncodeToString([]byte("ip-overwrite-salt-16"))
 	routes := []struct {
-		purpose stepup.Purpose
-		method  string
-		body    string // %[1]q = password, %[2]q = mfa code
-		param   string
-		prepare func(t *testing.T, userID string)
-		handler func(*gin.Context)
+		purpose  stepup.Purpose
+		method   string
+		body     string // %[1]q = password, %[2]q = mfa code
+		param    string
+		paramFor func(t *testing.T, userID string) string
+		prepare  func(t *testing.T, userID string)
+		handler  func(*gin.Context)
 	}{
 		{purpose: stepup.PurposeTOTPSetup, method: http.MethodPost, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.TOTPSetup},
 		{purpose: stepup.PurposeTOTPDisable, method: http.MethodPost, body: `{"password":%[1]q,"code":%[2]q}`, handler: h.TOTPDisable,
 			prepare: func(t *testing.T, userID string) { iuEnrollTOTP(t, db, kr, userID) }},
+		{purpose: stepup.PurposeWebAuthnDelete, method: http.MethodDelete, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.WebAuthnDeleteCredential,
+			prepare: func(t *testing.T, userID string) { iuEnrollTOTP(t, db, kr, userID) },
+			paramFor: func(t *testing.T, userID string) string {
+				return iuWebAuthnCredentialID(t, db, userID)
+			}},
 		{purpose: stepup.PurposeWebAuthnRegister, method: http.MethodPost, body: `{"password":%[1]q,"mfa_code":%[2]q,"credential_name":"k","credential_type":"hardware"}`, handler: h.WebAuthnRegisterBegin},
 		{purpose: stepup.PurposeRecoveryOnlySet, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"methods":[]}`, handler: h.SetRecoveryOnly},
 		{purpose: stepup.PurposeRecoveryHardenedSet, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"enabled":true}`, handler: h.SetRecoveryHardened},
@@ -89,7 +95,7 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 		{purpose: stepup.PurposeRecoveryCircleUpsert, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"threshold_k":2,"total_shares_n":3,"shares":[]}`, handler: h.UpsertRecoveryCircle},
 		{purpose: stepup.PurposeRecoveryCircleDelete, method: http.MethodDelete, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.DeleteRecoveryCircle},
 	}
-	require.Len(t, routes, 14, "every MFA-settings consumer, including TOTPDisable")
+	require.Len(t, routes, 15, "every MFA-settings consumer, including factor removal")
 
 	for _, r := range routes {
 		t.Run(string(r.purpose), func(t *testing.T) {
@@ -100,8 +106,12 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 			}
 			drive := func(token string) (int, map[string]interface{}) {
 				c, w := iuGinContext(r.method, "/api/v1/mfa/x", fmt.Sprintf(r.body, iuPassword, token), userID, "")
-				if r.param != "" {
-					c.Params = gin.Params{{Key: "id", Value: r.param}}
+				param := r.param
+				if r.paramFor != nil {
+					param = r.paramFor(t, userID)
+				}
+				if param != "" {
+					c.Params = gin.Params{{Key: "id", Value: param}}
 				}
 				r.handler(c)
 				return w.Code, iuBody(t, w)
@@ -193,6 +203,7 @@ func TestInlinePurpose_EveryOtherConsumerPurpose(t *testing.T) {
 		{stepup.PurposeSessionsRevokeAll, "VerifyCode (sessions.authenticateForRevoke)", pool},
 		{stepup.PurposeRevocationModeSet, "VerifyCode (sessions.authenticateForRevoke)", pool},
 		{stepup.PurposeOwnershipTransfer, "VerifyCode (ownership.verifyMFA)", pool},
+		{stepup.PurposeOwnershipTransferConfirm, "stepup.VerifyMFAFactorTx (ownership.verifyOwnershipConfirmProofTx)", factorTx},
 		{stepup.PurposeOwnershipReverse, "VerifyCode (ownership.verifyMFA)", pool},
 		{stepup.PurposeDMPurge, "stepup.VerifyMFAFactor (dm.verifyPurgeStepUp)", factor},
 		{stepup.PurposeDMClear, "stepup.VerifyMFAFactorTx (dm.verifyClearStepUp)", factorTx},
@@ -238,7 +249,7 @@ func TestInlinePurpose_EveryOtherConsumerPurpose(t *testing.T) {
 // route passing another route's purpose: that is pinned at the handler, as in
 // internal/users/key_reset_inline_purpose_test.go.
 func TestInlinePurpose_TablesCoverTheClosedSet(t *testing.T) {
-	require.Len(t, stepup.Purposes(), 14+28)
+	require.Len(t, stepup.Purposes(), 14+33)
 }
 
 // TestInlinePurpose_ProductionVerifierCallerCensus makes a new verifier caller
@@ -259,41 +270,48 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 	sites, packages := censusVerifierCallers(t, internal)
 
 	// owners: each must reach, through its own package's call graph, both the
-	// verifier call's function and a budget charge (stepup.Charge or a
-	// Budget's Consume). That is "a charge in the same function or in its
+	// verifier call's function and a budget charge (stepup.Charge/ChargeAttempt or a
+	// Budget's Consume/ConsumeAttempt). That is "a charge in the same function or in its
 	// handler", checked per function rather than per file. seam: a shared
 	// verifier whose own callers are census entries, so the charge belongs to
 	// them.
 	type entry struct {
 		owners []string
 		seam   string
+		// ownerDir names the package holding owners when they charge and
+		// verify through calls into the site's package, as the erasure
+		// handler does through the account service.
+		ownerDir string
 	}
 	want := map[string]entry{
-		"dm/message_delete_softlock.go:confirmDMDeleteTx:VerifyOwnRuleTx":    {owners: []string{"confirmDMMessageDelete"}},
-		"dm/purge.go:verifyPurgeStepUpWithMFA:VerifyMFAFactor":               {owners: []string{"verifyPurgeStepUpWithMFA"}},
-		"dm/visibility.go:verifyClearStepUp:VerifyOwnRuleTx":                 {owners: []string{"ClearConversation"}},
-		"messages/softlock.go:confirmServerRuleTx:ConfirmTx":                 {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
-		"messages/softlock.go:verifyOwnRuleTx:VerifyOwnRuleTx":               {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
-		"mfa/handlers.go:verifyAndDeleteTOTPTx:VerifyCodeTx":                 {owners: []string{"TOTPDisable"}},
-		"mfa/settings_stepup.go:requirePasswordAndMFA:VerifyMFAFactor":       {owners: []string{"requirePasswordAndMFA"}},
-		"mfa/settings_stepup.go:verifyMFASettingsStepUpTx:VerifyMFAFactorTx": {owners: []string{"EmailSmsDisable", "SetBackupEmail", "StoreRecoveryKey", "DeleteRecoveryKey"}},
-		"mfaenforce/dangerous.go:Require:ConfirmTx":                          {seam: "the dangerous-action gate; each mfaenforce.Require caller is censused and charges before its gate"},
-		"mfaenforce/mfaenforce.go:ConfirmTx:VerifyMFAFactorTx":               {seam: "the server-rule confirmation; each ConfirmTx caller is censused"},
-		"mfaenforce/mfaenforce.go:RequireConfirmationTx:ConfirmTx":           {seam: "a ConfirmTx wrapper; it has no production caller today, and any added one is censused"},
-		"ownership/handlers.go:verifyMFA:VerifyCode":                         {owners: []string{"verifyMFA"}},
-		"rbac/role_gates.go:requireRoleGate:Require":                         {owners: []string{"CreateRole", "UpdateRole", "DeleteRole", "UpsertChannelOverride", "UpsertCategoryOverride"}},
-		"members/moderation_gate.go:requireModerationGate:Require":           {owners: []string{"RemoveMember", "BanMember"}},
-		"servers/dangerous_gates.go:updateServerGated:Require":               {owners: []string{"updateServerGated"}},
-		"servers/dangerous_gates.go:gateServerDeleteTx:Require":              {owners: []string{"DeleteServer"}},
-		"servers/mfa_enforcement.go:confirmMFAEnforcementRequest:ConfirmTx":  {owners: []string{"PutMFAEnforcement"}},
-		"channels/dangerous_gates.go:requireChannelGate:Require":             {owners: []string{"DeleteChannel", "UpdateExpiration"}},
-		"media/dangerous_gates.go:admitAndStoreServerImage:Require":          {owners: []string{"storeServerImageGated"}},
-		"sessions/handlers.go:authenticateForRevokeWithMFA:VerifyCode":       {owners: []string{"authenticateForRevokeWithMFA"}},
-		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx":                {seam: "the own-rule seam; each VerifyOwnRuleTx caller is censused"},
-		"stepup/stepup.go:VerifyMFAFactor:VerifyCode":                        {seam: "the pool-side factor seam; each VerifyMFAFactor caller is censused"},
-		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx":                    {seam: "the in-transaction factor seam; each VerifyMFAFactorTx caller is censused"},
-		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx":          {owners: []string{"UpdatePrivacySettings"}},
-		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx":             {owners: []string{"ChangePassword", "ReplaceMyKeys"}},
+		"dm/message_delete_softlock.go:confirmDMDeleteTx:VerifyOwnRuleTx":             {owners: []string{"confirmDMMessageDelete"}},
+		"dm/purge.go:verifyPurgeStepUpWithMFA:VerifyMFAFactor":                        {owners: []string{"verifyPurgeStepUpWithMFA"}},
+		"dm/visibility.go:verifyClearStepUp:VerifyOwnRuleTx":                          {owners: []string{"ClearConversation"}},
+		"messages/softlock.go:confirmServerRuleTx:ConfirmTx":                          {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
+		"messages/softlock.go:verifyOwnRuleTx:VerifyOwnRuleTx":                        {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
+		"mfa/factor_removal_stepup.go:requireFactorRemovalStepUpTx:VerifyMFAFactorTx": {owners: []string{"TOTPDisable", "WebAuthnDeleteCredential"}},
+		"mfa/settings_stepup.go:requirePasswordAndMFA:VerifyMFAFactor":                {owners: []string{"requirePasswordAndMFA"}},
+		"mfa/settings_stepup.go:verifyMFASettingsStepUpTx:VerifyMFAFactorTx":          {owners: []string{"EmailSmsDisable", "SetBackupEmail", "StoreRecoveryKey", "DeleteRecoveryKey"}},
+		"mfaenforce/dangerous.go:Require:ConfirmTx":                                   {seam: "the dangerous-action gate; each mfaenforce.Require caller is censused and charges before its gate"},
+		"mfaenforce/mfaenforce.go:ConfirmTx:VerifyMFAFactorTx":                        {seam: "the server-rule confirmation; each ConfirmTx caller is censused"},
+		"mfaenforce/mfaenforce.go:RequireConfirmationTx:ConfirmTx":                    {seam: "a ConfirmTx wrapper; it has no production caller today, and any added one is censused"},
+		"ownership/handlers.go:verifyOwnershipConfirmProofTx:VerifyMFAFactorTx":       {owners: []string{"ConfirmTransfer"}},
+		"ownership/handlers.go:verifyMFA:VerifyCode":                                  {owners: []string{"verifyMFA"}},
+		"rbac/role_gates.go:requireRoleGate:Require":                                  {owners: []string{"CreateRole", "UpdateRole", "DeleteRole", "UpsertChannelOverride", "UpsertCategoryOverride"}},
+		"members/moderation_gate.go:requireModerationGate:Require":                    {owners: []string{"RemoveMember", "BanMember"}},
+		"servers/dangerous_gates.go:updateServerGated:Require":                        {owners: []string{"updateServerGated"}},
+		"servers/dangerous_gates.go:gateServerDeleteTx:Require":                       {owners: []string{"DeleteServer"}},
+		"servers/mfa_enforcement.go:confirmMFAEnforcementRequest:ConfirmTx":           {owners: []string{"PutMFAEnforcement"}},
+		"channels/dangerous_gates.go:requireChannelGate:Require":                      {owners: []string{"DeleteChannel", "UpdateExpiration"}},
+		"media/dangerous_gates.go:admitAndStoreServerImage:Require":                   {owners: []string{"storeServerImageGated"}},
+		"sessions/handlers.go:verifyRevokeMFA:VerifyCode":                             {owners: []string{"verifyRevokeMFA"}},
+		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx":                         {seam: "the own-rule seam; each VerifyOwnRuleTx caller is censused"},
+		"stepup/stepup.go:VerifyMFAFactor:VerifyCode":                                 {seam: "the pool-side factor seam; each VerifyMFAFactor caller is censused"},
+		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx":                             {seam: "the in-transaction factor seam; each VerifyMFAFactorTx caller is censused"},
+		"users/delete_account.go:verifyErasureStepUpTx:VerifyMFAFactorTx":             {owners: []string{"EraseAccount"}, ownerDir: "privacy"},
+		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx":                   {owners: []string{"UpdatePrivacySettings"}},
+		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx":                      {owners: []string{"ChangePassword", "ReplaceMyKeys"}},
+		"users/handlers.go:verifySSOStepUpLockedTx:VerifyMFAFactorTx":                 {owners: []string{"PatchSecurity", "DeleteSSOIdentity"}},
 	}
 
 	gotSites := make([]string, 0, len(sites))
@@ -317,6 +335,20 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 			continue
 		}
 		require.NotEmpty(t, e.owners, "%s: name the functions that charge the budget before it", site)
+		if e.ownerDir != "" {
+			owning := packages[e.ownerDir]
+			for _, owner := range e.owners {
+				_, ok := owning[owner]
+				if !assert.True(t, ok, "%s: owner %s is not a function in %s", site, owner, e.ownerDir) {
+					continue
+				}
+				assert.True(t, owning.reachesInto(owner, pkg, func(name string) bool { return name == s.fn }),
+					"%s: owner %s does not reach %s through %s", site, owner, s.fn, s.dir)
+				assert.True(t, owning.reachesInto(owner, pkg, func(name string) bool { return pkg[name].charges }),
+					"%s: owner %s reaches no %s function that charges a budget", site, owner, s.dir)
+			}
+			continue
+		}
 		for _, owner := range e.owners {
 			_, ok := pkg[owner]
 			if !assert.True(t, ok, "%s: owner %s is not a function in %s", site, owner, s.dir) {
@@ -325,7 +357,7 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 			assert.True(t, pkg.reaches(owner, func(name string) bool { return name == s.fn }),
 				"%s: owner %s does not reach %s", site, owner, s.fn)
 			assert.True(t, pkg.reaches(owner, func(name string) bool { return pkg[name].charges }),
-				"%s: owner %s reaches no stepup.Charge or Budget.Consume (candidates reaching %s and a charge: %v)",
+				"%s: owner %s reaches no budget charge (candidates reaching %s and a charge: %v)",
 				site, owner, s.fn, pkg.chargingReachers(s.fn))
 		}
 	}
@@ -374,6 +406,22 @@ func (p censusPackage) reaches(from string, match func(string) bool) bool {
 		}
 	}
 	return false
+}
+
+// reachesInto reports whether from, or any function it transitively references
+// within p, references a function of target that reaches match there. It
+// crosses one package boundary, for a handler that charges and verifies through
+// calls into a service package. Names are matched as in reaches, so a shared
+// name can only add edges.
+func (p censusPackage) reachesInto(from string, target censusPackage, match func(string) bool) bool {
+	return p.reaches(from, func(name string) bool {
+		for ref := range p[name].refs {
+			if _, ok := target[ref]; ok && target.reaches(ref, match) {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // chargingReachers lists the package functions that reach both target and a
@@ -432,7 +480,7 @@ func censusVerifierCallers(t *testing.T, internal string) (map[string]censusSite
 					cf.refs[n.Sel.Name] = true
 				case *ast.CallExpr:
 					name, qualifier := censusCallee(n)
-					if (qualifier == "stepup" && name == "Charge") || name == "Consume" {
+					if (qualifier == "stepup" && (name == "Charge" || name == "ChargeAttempt")) || name == "Consume" || name == "ConsumeAttempt" {
 						cf.charges = true
 					}
 					if censusVerifierNames[name] && (name != "Require" || qualifier == "mfaenforce" || (qualifier == "" && dir == "mfaenforce")) {
