@@ -69,6 +69,90 @@
       "authority": "#3879; #3842; [internal]rules/deployment.md § The pin-exception register",
       "recorded": "2026-10-15",
       "review_by": "2027-09-30"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "pip",
+      "workspace": ".github/semgrep",
+      "package": "boltons",
+      "pinned": "21.0.0",
+      "available": "26.2.0",
+      "reason": "semgrep 1.186.0 declares boltons~=21.0, and the lock does not override it, so 26.2.0 is outside what semgrep accepts and the install would run a combination semgrep does not support (the lock installs with --no-deps, so pip would not catch it). The ignore covers only the update types that the pin forbids, so bumps inside the range still arrive. Re-check when SEMGREP_VERSION moves: drop or widen the rule if the new semgrep accepts 26.2.0.",
+      "authority": "#415; #416",
+      "recorded": "2026-11-27",
+      "review_by": "2027-05-31"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "pip",
+      "workspace": ".github/semgrep",
+      "package": "peewee",
+      "pinned": "3.19.0",
+      "available": "4.5.3",
+      "reason": "semgrep 1.186.0 declares peewee~=3.14, and the lock does not override it, so 4.5.3 is outside what semgrep accepts and the install would run a combination semgrep does not support (the lock installs with --no-deps, so pip would not catch it). The ignore covers only the update types that the pin forbids, so bumps inside the range still arrive. Re-check when SEMGREP_VERSION moves: drop or widen the rule if the new semgrep accepts 4.5.3.",
+      "authority": "#415; #416",
+      "recorded": "2026-11-27",
+      "review_by": "2027-05-31"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "pip",
+      "workspace": ".github/semgrep",
+      "package": "pywin32",
+      "pinned": "311",
+      "available": "312",
+      "reason": "semgrep 1.186.0 declares pywin32==311, and the lock does not override it, so 312 is outside what semgrep accepts and the install would run a combination semgrep does not support (the lock installs with --no-deps, so pip would not catch it). The ignore covers only the update types that the pin forbids, so bumps inside the range still arrive. Re-check when SEMGREP_VERSION moves: drop or widen the rule if the new semgrep accepts 312.",
+      "authority": "#415; #416",
+      "recorded": "2026-11-27",
+      "review_by": "2027-05-31"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "pip",
+      "workspace": ".github/semgrep",
+      "package": "click",
+      "pinned": "8.4.2",
+      "available": "8.5.1",
+      "reason": "semgrep 1.186.0 declares click~=8.4.2, and the lock does not override it, so 8.5.1 is outside what semgrep accepts and the install would run a combination semgrep does not support (the lock installs with --no-deps, so pip would not catch it). The ignore covers only the update types that the pin forbids, so bumps inside the range still arrive. Re-check when SEMGREP_VERSION moves: drop or widen the rule if the new semgrep accepts 8.5.1.",
+      "authority": "#415; #416",
+      "recorded": "2026-11-27",
+      "review_by": "2027-05-31"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "pip",
+      "workspace": ".github/semgrep",
+      "package": "exceptiongroup",
+      "pinned": "1.2.2",
+      "available": "1.3.2",
+      "reason": "semgrep 1.186.0 declares exceptiongroup~=1.2.0, and the lock does not override it, so 1.3.2 is outside what semgrep accepts and the install would run a combination semgrep does not support (the lock installs with --no-deps, so pip would not catch it). The ignore covers only the update types that the pin forbids, so bumps inside the range still arrive. Re-check when SEMGREP_VERSION moves: drop or widen the rule if the new semgrep accepts 1.3.2.",
+      "authority": "#415; #416",
+      "recorded": "2026-11-27",
+      "review_by": "2027-05-31"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "pip",
+      "workspace": ".github/semgrep",
+      "package": "jsonschema",
+      "pinned": "4.25.1",
+      "available": "4.26.0",
+      "reason": "semgrep 1.186.0 declares jsonschema~=4.25.1, and the lock does not override it, so 4.26.0 is outside what semgrep accepts and the install would run a combination semgrep does not support (the lock installs with --no-deps, so pip would not catch it). The ignore covers only the update types that the pin forbids, so bumps inside the range still arrive. Re-check when SEMGREP_VERSION moves: drop or widen the rule if the new semgrep accepts 4.26.0.",
+      "authority": "#415; #416",
+      "recorded": "2026-11-27",
+      "review_by": "2027-05-31"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "pip",
+      "workspace": ".github/semgrep",
+      "package": "tomli",
+      "pinned": "2.4.1",
+      "available": "2.5.0",
+      "reason": "semgrep 1.186.0 declares tomli~=2.4.0, and the lock does not override it, so 2.5.0 is outside what semgrep accepts and the install would run a combination semgrep does not support (the lock installs with --no-deps, so pip would not catch it). The ignore covers only the update types that the pin forbids, so bumps inside the range still arrive. Re-check when SEMGREP_VERSION moves: drop or widen the rule if the new semgrep accepts 2.5.0.",
+      "authority": "#415; #416",
+      "recorded": "2026-11-27",
+      "review_by": "2027-05-31"
     }
   ]
 }
