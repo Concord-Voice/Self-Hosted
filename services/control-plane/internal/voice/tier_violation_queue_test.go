@@ -19,6 +19,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats/natstest"
 )
 
 type countingViolationSink struct {
@@ -49,10 +50,7 @@ func totalViolationCalls(sinks ...*countingViolationSink) int {
 func TestTierViolationReportIsCountedByExactlyOneReplica(t *testing.T) {
 	natsURL := natsTestURL()
 	connect := func() *natsclient.Client {
-		c, err := natsclient.Connect(natsURL)
-		if err != nil {
-			t.Skipf("NATS unavailable (%v); skipping live queue-group test (runs in CI)", err)
-		}
+		c := natstest.Connect(t, natsURL)
 		t.Cleanup(func() { _ = c.Close() })
 		return c
 	}

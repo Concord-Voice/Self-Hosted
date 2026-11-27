@@ -13,6 +13,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/voice"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats/natstest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,10 +33,7 @@ type enforcerTestRig struct {
 
 func setupEnforcerRig(t *testing.T) *enforcerTestRig {
 	t.Helper()
-	pubClient, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live enforcer test (runs in CI)", err)
-	}
+	pubClient := natstest.Connect(t, natsTestURL())
 	t.Cleanup(func() { _ = pubClient.Close() })
 
 	obsClient, err := natsclient.Connect(natsTestURL())
