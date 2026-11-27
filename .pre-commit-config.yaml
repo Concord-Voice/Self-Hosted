@@ -283,7 +283,7 @@ repos:
         name: semgrep SARIF suppression filter self-test
         entry: bash .github/scripts/tests/strip-suppressed-sarif.test.sh
         language: system
-        files: '^(\.github/scripts/strip-suppressed-sarif\.sh|\.github/scripts/tests/strip-suppressed-sarif\.test\.sh|\.github/workflows/semgrep\.ya?ml)$'
+        files: '^(\.github/scripts/tests/strip-suppressed-sarif\.test\.sh|\.github/workflows/semgrep\.ya?ml)$'
         pass_filenames: false
 
       # container-image-scan.yml must not let a scan that saw nothing read as

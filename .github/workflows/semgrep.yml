@@ -403,9 +403,31 @@ jobs:
         # annotated match, and the protected verifier then blocks on the open alert
         # (PR 399, alert 517). Same fix as eslint-sarif.yml: drop results carrying
         # a suppression before upload; unsuppressed results are untouched. Falls
-        # back to the unfiltered upload with a warning. Logic and self-test:
-        # .github/scripts/strip-suppressed-sarif.sh, tests/strip-suppressed-sarif.test.sh.
-        run: bash .github/scripts/strip-suppressed-sarif.sh semgrep-custom.sarif semgrep-community.sarif
+        # back to the unfiltered upload with a warning. Inline on purpose: the
+        # protected run checks out the PR merge SHA, so a script file in the
+        # checkout would be PR-controlled; this workflow comes from main. Every
+        # dropped result is listed in the log so an added `nosemgrep` stays
+        # visible. The self-test runs the block between the BEGIN/END markers.
+        run: |
+          # BEGIN strip-suppressed-sarif
+          for f in semgrep-custom.sarif semgrep-community.sarif; do
+            [ -f "$f" ] || continue
+            before=$(jq '[.runs[]?.results[]?] | length' "$f" 2>/dev/null) || before='?'
+            # Match on PRESENCE of a suppression, not suppressions[].state: raw
+            # scanner output sets no state. `. // []` tolerates a run without results.
+            if jq '(.runs[]?.results) |= ((. // []) | map(select((.suppressions | length // 0) == 0)))' \
+                 "$f" > "$f.filtered"; then
+              jq -r '.runs[]?.results[]? | select((.suppressions | length // 0) > 0)
+                | "  dropped suppressed: \(.ruleId) \(.locations[0].physicalLocation.artifactLocation.uri // "?"):\(.locations[0].physicalLocation.region.startLine // "?")"' "$f" || true
+              after=$(jq '[.runs[]?.results[]?] | length' "$f.filtered")
+              mv "$f.filtered" "$f"
+              echo "SARIF results in $f: ${before} -> ${after} (dropped in-source-suppressed)"
+            else
+              echo "::warning::SARIF suppression filter failed for $f; uploading unfiltered SARIF"
+              rm -f "$f.filtered"
+            fi
+          done
+          # END strip-suppressed-sarif
 
       - name: Upload custom-rules SARIF to Code Scanning
         if: inputs.run-custom &&(inputs.external-verdict || github.event_name != 'pull_request')
