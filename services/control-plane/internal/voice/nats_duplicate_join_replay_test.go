@@ -10,6 +10,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats/natstest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,10 +33,7 @@ type duplicateJoinFixture struct {
 
 func newDuplicateJoinFixture(t *testing.T) duplicateJoinFixture {
 	t.Helper()
-	publisher, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping duplicate-join replay test", err)
-	}
+	publisher := natstest.Connect(t, natsTestURL())
 	t.Cleanup(func() { _ = publisher.Close() })
 	ts := testhelpers.SetupTestServer(t)
 	user := ts.CreateTestUser(t, "dup_join_replay_user")

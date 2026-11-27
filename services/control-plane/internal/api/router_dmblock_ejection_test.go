@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/mediaproof"
-	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats/natstest"
 	"github.com/google/uuid"
 	rawnats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
@@ -273,10 +273,7 @@ func TestRedTeamUnauthenticatedNATSResponderCannotSpoofMediaTeardownACK(t *testi
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	require.NoError(t, attacker.Flush())
 
-	requester, err := natsclient.Connect(url)
-	if err != nil {
-		t.Skipf("live NATS unavailable: %v", err)
-	}
+	requester := natstest.Connect(t, url)
 	t.Cleanup(func() { _ = requester.Close() })
 	err = publishDMBlockVoiceEjection(
 		context.Background(), requester, dmBlockVoiceEjectionTestSecret, uuid.NewString(), uuid.New(),
