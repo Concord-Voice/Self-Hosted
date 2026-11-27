@@ -136,7 +136,7 @@ Add a closed control-plane action `create_admin`:
 - Failure before `CreatePending` creates no admin row. A token-mint failure after row creation must remove the pending row or return an explicit recoverable state; the implementation may not silently leave an undisclosed pending admin.
 - The committed `EventBootstrap` audit emits the existing privileged-action security event.
 
-`GET /admin/api/v1/security-notices` returns at most 20 sanitized admin-creation audit records from the last 24 hours. It contains actor, target username, fixed event kind, and timestamp; never tokens, passwords, credential IDs, assertions, IPs, or source references. The admin SPA polls it with the existing authenticated refresh cadence and renders an accessible security notice. This reuses the append-only audit table rather than adding notification storage.
+As built, there is no `security-notices` route. The sign-in response (`POST /admin/api/v1/auth/webauthn`) carries `admins_added`, the number of admins created since the signing-in admin last acknowledged the notice, and a `notice_cursor`. The console shows an accessible "Admins added" notice when the count is above zero, and `POST /admin/api/v1/signin-notice/ack` records the cursor so the same admins are not reported again. The count comes from the append-only audit table, so no notification storage is added, and the notice carries no usernames, tokens, credential IDs, assertions or IP addresses.
 
 ## 8. Root-owned authorizer trust
 
