@@ -37,6 +37,8 @@ printf 'c\n'                                > up.go
 printf 'd\n'                                > eq.go
 printf 'p // nosemgrep: r.r\nq\nbad()\n'    > reloc.go  # annotation on line 1, match later moves
 printf 'plain()\n'                          > plain.go  # no annotation anywhere
+printf 'e\n'                                > binattr.go # PR adds an annotation AND marks the file binary
+printf 'm // nosemgrep: r.m\nn\n'           > reloc2.go # annotation on line 1, moves to line 2 in ONE hunk
 printf 'x\n'                                > link-target.go
 ln -s nosemgrep-t.go stay-link.go                       # unchanged symlink whose target text reads like an annotation
 git add . && g commit -q -m base
@@ -46,6 +48,9 @@ printf 'b // nosemgrep: r.new\n'            > new.go    # annotation added
 printf 'c // NOSEMGREP: r.up\n'             > up.go     # added in upper case
 printf 'd // nosem=r.eq/x\n'                > eq.go     # added with `=` and a rule id of odd shape
 printf 'p\nq\nbad() // nosemgrep: r.r\n'    > reloc.go  # annotation moved from line 1 to the match
+printf 'e // nosemgrep: r.b\n'              > binattr.go
+printf 'binattr.go binary\n'                > .gitattributes   # `git diff` now says "Binary files differ"
+printf 'm\nn // nosemgrep: r.m\n'           > reloc2.go
 ln -s link-target.go link.go                            # symlink: HEAD content is a path
 git add . && g commit -q -m head
 
@@ -60,6 +65,8 @@ mk_sarif() {
     r up.rule '"up.go"' 1; printf ','
     r eq.rule '"eq.go"' 1; printf ','
     r reloc.rule '"reloc.go"' 3; printf ','
+    r binattr.rule '"binattr.go"' 1; printf ','
+    r reloc2.rule '"reloc2.go"' 2; printf ','
     r link.rule '"link.go"' 1; printf ','
     r stayl.rule '"stay-link.go"' 1; printf ','
     r plain.rule '"plain.go"' 1; printf ','
@@ -77,12 +84,12 @@ mk_sarif; cp semgrep-community.sarif bad.orig
 out=$(BASELINE_COMMIT="$BASE" bash -eo pipefail "$TMP/step.sh" 2>/dev/null); rc=$?
 check "step exits 0" "$rc" "0"
 check "only base-carried annotations dropped" "$(ids)" \
-  '["new.rule","up.rule","eq.rule","reloc.rule","link.rule","stayl.rule","plain.rule","ghost.rule","forged.rule","live.rule","live.empty"]'
+  '["new.rule","up.rule","eq.rule","reloc.rule","binattr.rule","reloc2.rule","link.rule","stayl.rule","plain.rule","ghost.rule","forged.rule","live.rule","live.empty"]'
 check "run without results survives" "$(jq '.runs | length' semgrep-custom.sarif)" "2"
-check "counts logged" "$(grep -c -- '13 -> 11' <<<"$out")" "1"
+check "counts logged" "$(grep -c -- '15 -> 13' <<<"$out")" "1"
 check "edited annotated line dropped" "$(grep -cF 'dropped suppressed: ["old.rule","old.go",1]' <<<"$out")" "1"
 check "untouched annotation dropped" "$(grep -cF 'dropped suppressed: ["stay.rule","stay.go",1]' <<<"$out")" "1"
-for id in new up eq reloc link stayl plain ghost; do
+for id in new up eq reloc binattr reloc2 link stayl plain ghost; do
   check "$id kept with a warning" "$(warned "$id.rule")" "1"
 done
 check "control chars in a path cannot forge a command" "$(grep -c '^::warning::forged' <<<"$out")" "0"
@@ -95,7 +102,7 @@ check "no temp left" "$(ls | grep -c filtered)" "0"
 mk_sarif
 out=$(env -u BASELINE_COMMIT bash -eo pipefail "$TMP/step.sh" 2>/dev/null); rc=$?
 check "no base: exits 0" "$rc" "0"
-check "no base: every suppressed result kept" "$(jq '[.runs[0].results[]] | length' semgrep-custom.sarif)" "13"
+check "no base: every suppressed result kept" "$(jq '[.runs[0].results[]] | length' semgrep-custom.sarif)" "15"
 
 # --- run 3: no SARIF files ------------------------------------------------------
 rm -f semgrep-custom.sarif semgrep-community.sarif
