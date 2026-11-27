@@ -364,6 +364,11 @@ operator must use the direct path, host root must first explicitly revoke the
 administrator's imported authorizers, then run the reset; prefer the wrapper
 so that ordering is enforced.
 
+A revoked key can neither approve a host action nor sign in to the console:
+the agent refuses its login assertion with 403, and the control plane then
+refuses the sign-in. A console session that is already open is not ended by
+the revoke; see the next section. `import --reinstate` restores both.
+
 ### Rollout dependencies
 
 Session-generation reset and indexed handle revocation remain separate work.

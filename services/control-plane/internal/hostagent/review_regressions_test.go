@@ -279,11 +279,7 @@ func TestAdvanceCounterRefusesARevokedCredential(t *testing.T) {
 	require.ErrorIs(t, authorizers.AdvanceCounter(credential.ID, 9), errAuthorizerRevoked)
 	list, err := authorizers.List()
 	require.NoError(t, err)
-	require.Equal(t, uint32(4), list[0].SignCount, "a revoked counter is not advanced by an action")
-	require.NoError(t, authorizers.advanceLoginCounter(credential.ID, 9), "a login still advances the one root counter of a revoked key")
-	list, err = authorizers.List()
-	require.NoError(t, err)
-	require.Equal(t, uint32(9), list[0].SignCount)
+	require.Equal(t, uint32(4), list[0].SignCount, "a revoked key's counter is not advanced")
 
 	// Revocation racing the ceremony: Credentials() still saw the key, but the
 	// revoke lands before the counter write.

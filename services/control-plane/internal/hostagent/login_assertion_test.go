@@ -16,6 +16,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfa"
@@ -88,7 +89,7 @@ func TestLoginAssertionChecksRootCounterWithoutActionAuthority(t *testing.T) {
 	require.Empty(t, server.authorizations.pending, "login proof cannot allocate action authority")
 }
 
-func TestLoginAssertionRevokedKeyRetainsCounterButCannotAuthorizeActions(t *testing.T) {
+func TestLoginAssertionRevokedKeyCannotSignInOrAuthorizeActions(t *testing.T) {
 	server, store, adminID, session, assertion, private := loginAssertionFixture(t)
 	id := testCredentials(t, store, adminID)[0].ID
 	require.Equal(t, http.StatusOK, postLoginAssertion(t, server, adminID, session, assertion))
@@ -110,11 +111,13 @@ func TestLoginAssertionRevokedKeyRetainsCounterButCannotAuthorizeActions(t *test
 	require.Equal(t, http.StatusForbidden, postLoginAssertion(t, server, adminID, session, assertion), "a revoked stale clone remains known and denied")
 
 	next := signedAgentAssertion(t, private, id, adminWebAuthnUserHandle, session.Challenge, "admin.example.test", "https://admin.example.test", 0x05, 6)
-	require.Equal(t, http.StatusOK, postLoginAssertion(t, server, adminID, session, next), "a revoked credential may still log in after root counter verification")
+	// 403, not 404 authorizer_not_imported: the control plane admits a
+	// not-imported key, so that answer would let a revoked key sign in.
+	require.Equal(t, http.StatusForbidden, postLoginAssertion(t, server, adminID, session, next), "a key root revoked must not sign in")
 	list, err = store.List()
 	require.NoError(t, err)
 	require.True(t, list[0].Revoked)
-	require.Equal(t, uint32(6), list[0].SignCount)
+	require.Equal(t, uint32(5), list[0].SignCount, "a refused login does not move the counter")
 
 	doc, err := store.read()
 	require.NoError(t, err)
@@ -131,12 +134,13 @@ func TestLoginAssertionRevokedKeyRetainsCounterButCannotAuthorizeActions(t *test
 	require.ErrorIs(t, err, ErrAuthorizationDenied)
 	_, err = store.ImportMany(reimport, true)
 	require.NoError(t, err)
-	require.Equal(t, uint32(6), testCredentials(t, store, adminID)[0].Authenticator.SignCount, "reimport cannot lower the durable counter")
+	require.Equal(t, uint32(5), testCredentials(t, store, adminID)[0].Authenticator.SignCount, "reimport cannot lower the durable counter")
 	list, err = store.List()
 	require.NoError(t, err)
 	require.False(t, list[0].Revoked)
 	_, _, err = server.authorizations.Begin(adminID, "start", actionRequest{})
 	require.NoError(t, err, "explicit reimport restores root action authority")
+	require.Equal(t, http.StatusOK, postLoginAssertion(t, server, adminID, session, next), "explicit reimport restores sign-in")
 }
 
 // TestOneKeyLogsInAndAuthorizesAnActionOnOneRootCounter proves the same
@@ -193,4 +197,23 @@ func TestLoginAssertionRemovedTrustFailsClosed(t *testing.T) {
 	server, store, adminID, session, assertion, _ := loginAssertionFixture(t)
 	require.NoError(t, os.Remove(store.path))
 	require.Equal(t, http.StatusServiceUnavailable, postLoginAssertion(t, server, adminID, session, assertion), "removed trust must never become DB-only fallback")
+}
+
+// The selection check, not only the counter write, refuses a revoked key, so
+// a revoked key is never verified at all. Each check alone must refuse.
+func TestSelectLoginAuthorizerRefusesRevokedKey(t *testing.T) {
+	id := []byte("credential-1")
+	adminID := uuid.NewString()
+	doc := authorizerFile{RPID: "admin.example.test", Authorizers: []authorizerRecord{{
+		AdminID: adminID, CredentialID: base64.RawURLEncoding.EncodeToString(id), Revoked: true,
+	}}}
+	session := webauthn.SessionData{RelyingPartyID: "admin.example.test", AllowedCredentialIDs: [][]byte{id}}
+	_, err := selectLoginAuthorizer(doc, session, id, adminID)
+	require.ErrorIs(t, err, ErrAuthorizationDenied)
+	require.NotErrorIs(t, err, errAuthorizerNotImported, "not-imported would let the control plane sign the key in")
+
+	doc.Authorizers[0].Revoked = false
+	selected, err := selectLoginAuthorizer(doc, session, id, adminID)
+	require.NoError(t, err, "control: the same key is selected once active")
+	require.Equal(t, adminID, selected.AdminID)
 }

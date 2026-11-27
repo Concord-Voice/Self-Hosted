@@ -62,8 +62,9 @@ func (s *AuthorizationStore) verifyLoginAssertion(adminID string, session webaut
 	if err != nil || credential == nil || credential.Authenticator.CloneWarning {
 		return ErrAuthorizationDenied
 	}
-	if err := s.authorizers.advanceLoginCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
-		if errors.Is(err, errAuthorizerCounterStale) {
+	if err := s.authorizers.AdvanceCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
+		// Revoked between the read above and this write: refuse, as above.
+		if errors.Is(err, errAuthorizerCounterStale) || errors.Is(err, errAuthorizerRevoked) {
 			return ErrAuthorizationDenied
 		}
 		log.Printf("concord-agent: authorizer counter update failed at login: %v", err)
@@ -103,7 +104,10 @@ func selectLoginAuthorizer(doc authorizerFile, session webauthn.SessionData, cre
 	if selected == nil {
 		return nil, errAuthorizerNotImported
 	}
-	if selected.AdminID != adminID {
+	// A key root revoked signs nothing, console login included. It is a
+	// refusal (403), never errAuthorizerNotImported: the control plane lets a
+	// not-imported key sign in, so that answer would fail open.
+	if selected.AdminID != adminID || selected.Revoked {
 		return nil, ErrAuthorizationDenied
 	}
 	return selected, nil

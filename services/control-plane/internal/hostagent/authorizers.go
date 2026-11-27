@@ -422,20 +422,9 @@ func encodeAuthorizerFile(doc *authorizerFile) ([]byte, error) {
 // AdvanceCounter refuses stale counters and revoked credentials, and writes a
 // new root-owned snapshot. The revocation check runs under the file lock, so a
 // revoke that lands after Credentials() but before this write still wins. It is
-// the action-time advance of the single root counter each key has.
+// the advance of the single root counter each key has, at login and at action
+// time alike.
 func (s *AuthorizerStore) AdvanceCounter(credentialID []byte, count uint32) error {
-	return s.advanceCounter(credentialID, count, false)
-}
-
-// advanceLoginCounter is the login-time advance of the same root counter. It
-// also advances a revoked credential: an admin login is not root authority,
-// and the durable counter must keep moving so a clone of a revoked key stays
-// detectable.
-func (s *AuthorizerStore) advanceLoginCounter(credentialID []byte, count uint32) error {
-	return s.advanceCounter(credentialID, count, true)
-}
-
-func (s *AuthorizerStore) advanceCounter(credentialID []byte, count uint32, allowRevoked bool) error {
 	return s.mutate(func(doc *authorizerFile) (bool, error) {
 		found := false
 		for i := range doc.Authorizers {
@@ -443,7 +432,7 @@ func (s *AuthorizerStore) advanceCounter(credentialID []byte, count uint32, allo
 			if !bytes.Equal(id, credentialID) {
 				continue
 			}
-			if doc.Authorizers[i].Revoked && !allowRevoked {
+			if doc.Authorizers[i].Revoked {
 				return false, errAuthorizerRevoked
 			}
 			old := doc.Authorizers[i].SignCount

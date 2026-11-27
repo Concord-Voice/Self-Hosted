@@ -158,7 +158,7 @@ The control-plane container receives a read-only mount of the directory only so 
 
 - `import` accepts one bounded JSON export from `control-plane admin export-agent-authorizer --username <handle>`, prints the SHA-256 fingerprint, and requires an exact `--confirm-sha256` value before changing the file.
 - Import is explicit and idempotent by credential ID. Enrolling or creating an admin does not auto-trust it for host writes.
-- `revoke --admin-id` disables every credential for that admin for root actions and keeps each record as a tombstone with its counter, so login clone detection keeps working. The supported reset wrapper invokes it before the database reset. Re-enabling a revoked key needs `import --reinstate`.
+- `revoke --admin-id` disables every credential for that admin, for root actions and for console sign-in alike (decided 2026-11-27), and keeps each record as a tombstone with its frozen counter. The agent refuses a revoked key's login assertion with 403, never `authorizer_not_imported`, which the control plane would admit. The supported reset wrapper invokes it before the database reset. Re-enabling a revoked key needs `import --reinstate`.
 - The store holds at most 64 active records; revoked records do not count and are never dropped to make room. A write past the 1 MiB file limit fails closed.
 - Existing installations require an explicit one-time import. Until then, host-agent reads continue, all writes return `authorizer_unavailable`, and admin WebAuthn login also fails closed (503) when the overlay sets `HOST_AGENT_AUTHORIZER_PROJECTION=1`.
 
