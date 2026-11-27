@@ -17,6 +17,7 @@ import (
 	concordws "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats/natstest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -178,10 +179,7 @@ func TestServerVoiceMoveFencesTheRemovedChannelTerminalDelivery(t *testing.T) {
 }
 
 func TestServerVoiceCrossServerMoveFencesTheRemovedChannelTerminalDelivery(t *testing.T) {
-	publisher, err := natsclient.Connect(natsTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping cross-server admission fence test", err)
-	}
+	publisher := natstest.Connect(t, natsTestURL())
 	t.Cleanup(func() { _ = publisher.Close() })
 	observer, err := natsclient.Connect(natsTestURL())
 	require.NoError(t, err)
