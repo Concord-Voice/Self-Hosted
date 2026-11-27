@@ -339,7 +339,7 @@ describe("ServerActions", () => {
     [
       429,
       "authorization_busy",
-      "Too many security key requests are open on the host. Wait for the running action to finish, then try again.",
+      "Too many security key requests are still open on the host. A request you did not finish, such as a cancelled key prompt, expires after 2 minutes. Wait, then try again.",
     ],
     [503, "stepup_unavailable", "could not start a security key check"],
     [400, "invalid_tag", "Enter a release tag such as v0.3.1."],
@@ -376,7 +376,11 @@ describe("ServerActions", () => {
     ],
     [503, "authorizer_unavailable", "cannot load its trusted authorizers"],
     [403, "peer_forbidden", "agent socket permissions"],
-    [429, "authorization_busy", "Wait for the running action to finish"],
+    [
+      429,
+      "authorization_busy",
+      "cancelled key prompt, expires after 2 minutes",
+    ],
     [400, "invalid_authorization", "did not accept this authorization request"],
     [429, "backup_rate_limited", "one attempt per hour"],
     [409, "update_downgrade_refused", "older than the one this server runs"],

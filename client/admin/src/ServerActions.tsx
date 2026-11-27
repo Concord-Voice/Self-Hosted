@@ -48,7 +48,7 @@ const REFUSALS: Record<string, string> = {
   peer_forbidden:
     "The host agent rejected the control-plane connection. Check the service identity and agent socket permissions on the host.",
   authorization_busy:
-    "Too many security key requests are open on the host. Wait for the running action to finish, then try again.",
+    "Too many security key requests are still open on the host. A request you did not finish, such as a cancelled key prompt, expires after 2 minutes. Wait, then try again.",
   invalid_authorization:
     "The host agent did not accept this authorization request. Reload the console and start again.",
   backup_rate_limited:
