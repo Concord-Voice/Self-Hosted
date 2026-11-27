@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -138,6 +139,20 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	configureAlerts(ctx, agent)
+	// The server's trust and write state is fixed once it serves. An agent
+	// that started without usable trust (no authorizer file before the first
+	// import) restarts itself once the file would load, instead of waiting
+	// for an operator. Its writes are off until then, so no job is cut short.
+	var restartForTrust atomic.Bool
+	if !trusted {
+		go func() {
+			if waitForTrust(ctx, trustPollInterval, func() bool { return authorizerTrustReady(authorizerPath) }) {
+				log.Print("concord-agent: authorizer trust is now available; restarting to enable it")
+				restartForTrust.Store(true)
+				stop()
+			}
+		}()
+	}
 	// Setup mode is an extra listener; the socket serves either way, so a
 	// setup failure is logged and the agent carries on.
 	if _, _, err := startSetup(ctx, resolved, envOr("CONCORD_AGENT_SETUP_ADDR", defaultSetupAddr),
@@ -155,6 +170,9 @@ func run() int {
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Printf("concord-agent: serve: %v", err)
 		return 1
+	}
+	if restartForTrust.Load() {
+		return exitTrustReady
 	}
 	return 0
 }
@@ -234,6 +252,47 @@ func configureAuthorizerTrust(agent *hostagent.Server, path string) bool {
 		return false
 	}
 	return true
+}
+
+// trustPollInterval is how often an agent that started without usable
+// authorizer trust checks again.
+// ponytail: polls, not inotify; enabling 10 s after a first import is enough.
+const trustPollInterval = 10 * time.Second
+
+// exitTrustReady is the exit status after trust became available. It is not
+// 0, so systemd's Restart=on-failure starts the agent again with trust on.
+const exitTrustReady = 75
+
+// authorizerTrustReady reports whether configureAuthorizerTrust would now
+// succeed for path, without installing anything.
+func authorizerTrustReady(path string) bool {
+	authorizers, err := hostagent.LoadAuthorizers(path)
+	if err != nil {
+		return false
+	}
+	rpID, origins, err := authorizers.RPConfig()
+	if err != nil {
+		return false
+	}
+	_, err = mfa.NewWebAuthnService(rpID, "Concord Voice Admin", origins)
+	return err == nil
+}
+
+// waitForTrust checks ready every interval and returns true once it reports
+// true, or false when ctx ends first.
+func waitForTrust(ctx context.Context, every time.Duration, ready func() bool) bool {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			if ready() {
+				return true
+			}
+		}
+	}
 }
 
 // configureWriteAccess leaves the agent read-only unless its local audit and

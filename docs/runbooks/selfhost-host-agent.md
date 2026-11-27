@@ -202,13 +202,19 @@ key is refused. A reinstated key keeps its saved counter. These are host-root
 recovery and administration operations; the control plane only receives a
 read-only projection.
 
-The agent loads its initial authorizer configuration at startup. After the
-first successful import, the currently running agent remains read-only until
-host root reloads that configuration:
+The agent loads its authorizer configuration at startup. If no usable file
+existed then, it checks again every 10 seconds; after the first successful
+import it shuts down cleanly and exits with status 75, and systemd
+(`Restart=on-failure`) starts it again with the new keys enabled. Its writes
+are off until then, so no host action is interrupted. To enable the keys at
+once instead of waiting, restart it yourself:
 
 ```bash
 sudo systemctl restart concord-agent
 ```
+
+Later imports, revocations and counter updates take effect without a restart,
+because the agent reads the file on every check.
 
 Then have the imported administrator begin a host write from the Admin Console.
 It must reach the WebAuthn authorization prompt rather than report
@@ -307,8 +313,9 @@ SHA-256 printed to standard error. Import that exact file into the Host Agent:
 ```bash
 sudo docker exec concordvoice-control-plane ./main admin export-agent-authorizer --username <handle> > admin-authorizer.json
 sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256>
-sudo systemctl restart concord-agent
 ```
+
+The agent enables the first import by itself within about 15 seconds.
 
 Export and import again after the administrator registers the backup key.
 Configure the [out-of-band alert](#out-of-band-action-alert) before the first

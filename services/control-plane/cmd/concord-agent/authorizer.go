@@ -145,8 +145,9 @@ func importAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 	if err != nil {
 		return err
 	}
-	// A running agent that found no usable trust at startup keeps writes off
-	// until it restarts, so hint whenever nothing was active before.
+	// A running agent that found no usable trust at startup restarts itself
+	// within trustPollInterval of this import; say so whenever nothing was
+	// active before.
 	before, err := store.List()
 	if err != nil {
 		return err
@@ -166,7 +167,7 @@ func importAuthorizersWith(stores authorizerStoreLoader, path string, args []str
 		return err
 	}
 	if firstImport && added > 0 {
-		_, err = fmt.Fprintln(stdout, "Restart the running agent to enable newly imported authorizers: sudo systemctl restart concord-agent")
+		_, err = fmt.Fprintln(stdout, "The running agent restarts itself within 15 seconds to enable newly imported authorizers. To enable them now: sudo systemctl restart concord-agent")
 	}
 	return err
 }
