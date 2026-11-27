@@ -277,6 +277,15 @@ repos:
         files: '^(\.github/scripts/resolve-hotfix-label\.sh|\.github/scripts/tests/resolve-hotfix-label\.test\.sh|\.github/workflows/main-ci\.ya?ml)$'
         pass_filenames: false
 
+      # GitHub ignores Semgrep's `suppressions` array, so semgrep.yml strips
+      # suppressed results before upload; this locks the filter's behaviour.
+      - id: test-strip-suppressed-sarif
+        name: semgrep SARIF suppression filter self-test
+        entry: bash .github/scripts/tests/strip-suppressed-sarif.test.sh
+        language: system
+        files: '^(\.github/scripts/strip-suppressed-sarif\.sh|\.github/scripts/tests/strip-suppressed-sarif\.test\.sh|\.github/workflows/semgrep\.ya?ml)$'
+        pass_filenames: false
+
       # container-image-scan.yml must not let a scan that saw nothing read as
       # clean: every Trivy call reads the local daemon only (--image-src docker),
       # and each leg's report must detect the expected OS with its packages.

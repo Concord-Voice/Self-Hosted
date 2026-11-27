@@ -395,8 +395,20 @@ jobs:
                   f.write('\n')
           PY
 
+      - name: Strip in-source-suppressed results from SARIF
+        if: (inputs.run-custom || inputs.run-community) && (inputs.external-verdict || github.event_name != 'pull_request')
+        # Semgrep marks a `// nosemgrep:` match with a `suppressions` array, which
+        # GitHub Code Scanning ignores, so a suppressed match opens an alert. Under
+        # --baseline-commit that happens whenever a PR edits the text of an already
+        # annotated match, and the protected verifier then blocks on the open alert
+        # (PR 399, alert 517). Same fix as eslint-sarif.yml: drop results carrying
+        # a suppression before upload; unsuppressed results are untouched. Falls
+        # back to the unfiltered upload with a warning. Logic and self-test:
+        # .github/scripts/strip-suppressed-sarif.sh, tests/strip-suppressed-sarif.test.sh.
+        run: bash .github/scripts/strip-suppressed-sarif.sh semgrep-custom.sarif semgrep-community.sarif
+
       - name: Upload custom-rules SARIF to Code Scanning
-        if: inputs.run-custom && (inputs.external-verdict || github.event_name != 'pull_request')
+        if: inputs.run-custom &&(inputs.external-verdict || github.event_name != 'pull_request')
         # Ordinary PR runs scan but do not upload: the protected run owns these
         # categories on the PR merge ref, and the verifier requires its upload to
         # be the latest one there. A later ordinary upload would fail the verdict.
