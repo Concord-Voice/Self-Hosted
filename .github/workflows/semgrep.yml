@@ -444,8 +444,11 @@ jobs:
             gained='[]'
             if jq -e . "$f" >/dev/null 2>&1; then
               while IFS= read -r t; do
-                uri=$(jq -r '.[0]' <<<"$t"); s=$(jq -r '.[1]' <<<"$t"); e=$(jq -r '.[2]' <<<"$t")
-                lo=$(( s > 1 ? s - 1 : 1 ))
+                uri=$(printf '%s' "$t" | jq -r '.[0]')
+                s=$(printf '%s' "$t" | jq -r '.[1]')
+                e=$(printf '%s' "$t" | jq -r '.[2]')
+                lo=$((s - 1))
+                [ "$lo" -ge 1 ] || lo=1
                 entry=$(git ls-tree HEAD -- "$uri" 2>/dev/null | head -n1)
                 if [ "$base_ok" = true ] && [ -n "$uri" ] && [ "$s" -gt 0 ] && [ "$e" -ge "$s" ] \
                    && [[ "$entry" =~ ^100(644|755)\ blob\  ]] && [ "${entry#*$'\t'}" = "$uri" ] \
@@ -455,7 +458,7 @@ jobs:
                            | awk -v s="$lo" -v e="$e" "$added_annotation"; }; then
                   continue
                 fi
-                gained=$(jq -c --argjson t "$t" '. + [$t]' <<<"$gained")
+                gained=$(printf '%s' "$gained" | jq -c --argjson t "$t" '. + [$t]')
               done < <(jq -c '[.runs[]?.results[]? | select((.suppressions | length // 0) > 0)
                 | [(.locations[0].physicalLocation.artifactLocation.uri // ""),
                    (.locations[0].physicalLocation.region.startLine // 0),
