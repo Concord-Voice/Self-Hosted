@@ -403,24 +403,50 @@ jobs:
         # annotated match, and the protected verifier then blocks on the open alert
         # (PR 399, alert 517). Same fix as eslint-sarif.yml: drop results carrying
         # a suppression before upload; unsuppressed results are untouched. Falls
-        # back to the unfiltered upload with a warning. Inline on purpose: the
-        # protected run checks out the PR merge SHA, so a script file in the
-        # checkout would be PR-controlled; this workflow comes from main. Every
-        # dropped result is listed in the log so an added `nosemgrep` stays
-        # visible. The self-test runs the block between the BEGIN/END markers.
+        # back to the unfiltered upload with a warning. A suppression the PR
+        # itself adds is NOT dropped: a file whose `nosemgrep` annotations, set
+        # against the base commit, gained one (or that cannot be read at HEAD, or
+        # when the base is unavailable) keeps its suppressed results, so a PR
+        # cannot silence its own finding. Inline on purpose: the protected run
+        # checks out the PR merge SHA, so a script file in the checkout would be
+        # PR-controlled; this workflow comes from main. Every dropped or kept
+        # result is listed in the log. The self-test runs the block between the
+        # BEGIN/END markers.
         run: |
           # BEGIN strip-suppressed-sarif
+          # Annotation tokens (`nosemgrep`, `nosem`, with any rule ids), sorted.
+          ann() { grep -oE 'nosem(grep)?(:[[:space:]]*[A-Za-z0-9_.-]+([[:space:]]*,[[:space:]]*[A-Za-z0-9_.-]+)*)?' | LC_ALL=C sort; }
+          tmp=$(mktemp -d)
+          base_ok=false
+          if [[ "${BASELINE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "${BASELINE_COMMIT}^{commit}" 2>/dev/null; then base_ok=true; fi
           for f in semgrep-custom.sarif semgrep-community.sarif; do
             [ -f "$f" ] || continue
             before=$(jq '[.runs[]?.results[]?] | length' "$f" 2>/dev/null) || before='?'
+            # Files in which this PR added an annotation. Fail closed: a file that is
+            # not a blob at HEAD, or no base to compare with, counts as added.
+            gained='[]'
+            if jq -e . "$f" >/dev/null 2>&1; then
+              while IFS= read -r b64; do
+                uri=$(printf '%s' "$b64" | base64 -d)
+                if [ "$base_ok" = true ] && [ -n "$uri" ] && [ "$(git cat-file -t "HEAD:$uri" 2>/dev/null)" = blob ]; then
+                  git show "HEAD:$uri" | ann > "$tmp/head" || true
+                  git show "${BASELINE_COMMIT}:$uri" 2>/dev/null | ann > "$tmp/base" || true
+                  [ -z "$(LC_ALL=C comm -13 "$tmp/base" "$tmp/head")" ] && continue
+                fi
+                gained=$(jq -c --arg u "$uri" '. + [$u]' <<<"$gained")
+              done < <(jq -r '[.runs[]?.results[]? | select((.suppressions | length // 0) > 0) | (.locations[0].physicalLocation.artifactLocation.uri // "")] | unique[] | @base64' "$f")
+            fi
             # Match on PRESENCE of a suppression, not suppressions[].state: raw
             # scanner output sets no state. `. // []` tolerates a run without results.
-            if jq '(.runs[]?.results) |= ((. // []) | map(select((.suppressions | length // 0) == 0)))' \
+            if jq --argjson g "$gained" '(.runs[]?.results) |= ((. // []) | map(select(((.suppressions | length // 0) == 0) or ((.locations[0].physicalLocation.artifactLocation.uri // "") as $u | $g | any(. == $u)))))' \
                  "$f" > "$f.filtered"; then
               # @json escapes control characters: the file URI is a PR-controlled
               # filename, and a raw newline plus `::` would forge a workflow command.
-              jq -r '.runs[]?.results[]? | select((.suppressions | length // 0) > 0)
-                | "  dropped suppressed: " + ([.ruleId, (.locations[0].physicalLocation.artifactLocation.uri // "?"), (.locations[0].physicalLocation.region.startLine // "?")] | @json)' "$f" || true
+              jq -r --argjson g "$gained" '.runs[]?.results[]? | select((.suppressions | length // 0) > 0)
+                | (.locations[0].physicalLocation.artifactLocation.uri // "") as $u
+                | ([.ruleId, (if $u == "" then "?" else $u end), (.locations[0].physicalLocation.region.startLine // "?")] | @json) as $w
+                | if ($g | any(. == $u)) then "::warning::nosemgrep added by this PR or not verifiable against the base, result kept: " + $w
+                  else "  dropped suppressed: " + $w end' "$f" || true
               after=$(jq '[.runs[]?.results[]?] | length' "$f.filtered")
               mv "$f.filtered" "$f"
               echo "SARIF results in $f: ${before} -> ${after} (dropped in-source-suppressed)"
@@ -429,10 +455,11 @@ jobs:
               rm -f "$f.filtered"
             fi
           done
+          rm -rf "$tmp"
           # END strip-suppressed-sarif
 
       - name: Upload custom-rules SARIF to Code Scanning
-        if: inputs.run-custom &&(inputs.external-verdict || github.event_name != 'pull_request')
+        if: inputs.run-custom && (inputs.external-verdict || github.event_name != 'pull_request')
         # Ordinary PR runs scan but do not upload: the protected run owns these
         # categories on the PR merge ref, and the verifier requires its upload to
         # be the latest one there. A later ordinary upload would fail the verdict.
