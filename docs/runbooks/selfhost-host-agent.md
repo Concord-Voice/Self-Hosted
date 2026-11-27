@@ -47,6 +47,23 @@ and the caller polls the job:
   takes only a tag shaped like `vX.Y.Z`; the CLI then refuses any tag that is
   not signed by a release key. Any other field, a body on an action that
   takes none, or a body over 1 KiB gets 400.
+- `update` never moves the host to an older release. The agent compares the
+  tag with the install's `VERSION` file and refuses an older tag with 409
+  `update_downgrade_refused`. If it cannot read `VERSION`, it refuses with
+  409 `running_version_unknown`. To roll back on purpose, run
+  `concord-selfhost` as root on the host (see [Break-glass](#break-glass)).
+- The agent admits at most one `backup` or `update` per hour (`update` takes
+  a backup first). A second one within the hour gets 429
+  `backup_rate_limited`. The time of the last admission is kept in the
+  agent's root-only audit directory, so a restart or reboot does not reset
+  it. A backup that fails still uses its hour.
+- With no alert destination, every write gets 503 `alerts_not_configured`
+  (see [Out-of-band action alert](#out-of-band-action-alert)). Reads keep
+  working.
+- A missing alert destination is refused before the key prompt. The agent
+  checks `write_in_progress`, `backup_rate_limited` and
+  `alerts_not_configured` again after the tap but before it spends the
+  approval, so these refusals do not use up the admin's key tap.
 - `GET /v1/jobs` lists the last 16 jobs, newest first. `GET /v1/jobs/<id>`
   returns one with `state` (`running`, `succeeded`, `failed`), its start and
   finish times, the archive a backup wrote, and the last 64 KiB of the CLI's
@@ -111,8 +128,8 @@ of 30 requests per minute per client address; more get 429 `rate_limited`.
    two minutes, and is spent before the assertion is checked. A retry always
    needs a new ceremony. The assertion is bound to the agent's own record of
    the action, not to what the user sees: the authenticator shows the relying
-   party, not the action. Action and login ceremonies share the RP ID but not
-   credentials: only the admin's action credentials can sign an action.
+   party, not the action. Login and host actions use the same keys and the
+   same root-owned sign counter for each key.
 3. The console then submits only the handle and assertion. The agent executes
    the normalized arguments stored at begin time after it verifies the
    assertion, persists the authenticator counter, and durably records the
@@ -133,7 +150,8 @@ of 30 requests per minute per client address; more get 429 `rate_limited`.
    agent's own refusals (for example 409 `write_in_progress`) pass through
    with its code; anything else from the agent becomes 502 `agent_error`. Job
    polls answer 400 `invalid_request`, 404 `unknown_job`, 502 `agent_error`
-   or 503 `agent_unavailable`. On an appliance-managed host, jobs, job polls
+   or 503 `agent_unavailable`. The console shows a plain message for each
+   refusal code. On an appliance-managed host, jobs, job polls
    and backups answer 409 `appliance_managed` with the appliance's name, and
    writes answer 409 `appliance_managed`.
 
@@ -171,9 +189,16 @@ requires the exact SHA-256 printed for an admin's exported authorizer file.
 Revoke disables every listed credential for root actions, but retains its
 public key and highest authenticator counter as a tombstone. Admin login still
 checks that independent counter, so it cannot fall back to stale database-only
-trust. The store has a 64-record lifetime cap: revoked records count toward
-that cap. A later explicit, root-confirmed import of the same administrator
-and key re-enables it without lowering its saved counter. These are host-root
+trust. The store holds at most 64 active records; revoked records do not count
+toward that limit. A revoked record is never removed to make room, because its
+counter keeps login clone detection working and stops a later import from
+bringing back an old count. The file itself is limited to 1 MiB. A write that
+would pass that limit is refused with `authorizer file size limit reached`,
+and the file stays as it was. Reaching it takes thousands of records; to clear
+it, host root removes revoked records from the file by hand and restarts the
+agent. To re-enable a revoked key, import the same administrator's export
+again with `--reinstate`. Without that flag, an export that holds a revoked
+key is refused. A reinstated key keeps its saved counter. These are host-root
 recovery and administration operations; the control plane only receives a
 read-only projection.
 
@@ -192,25 +217,75 @@ operation. While the Host Agent overlay is active, admin WebAuthn login also
 checks the imported credential's root-owned counter. If the Host Agent is
 unavailable, login fails closed rather than accepting a database-only result.
 
-#### Why two keys
+#### One key per administrator
 
-Host root decides at import which of an administrator's credentials may
-authorize root actions. A credential named with `--action-credential` is an
-action credential; every other imported credential is a login credential. An
-action credential never satisfies an admin login: the control plane leaves it
-out of the login allow-list and answers its login assertion with 403
-`action_credential_not_for_login`, and the agent refuses it too. A login
-credential never authorizes a root action. So register two keys per
-administrator in the console, one for sign-in and one for host actions.
+Each administrator uses the same hardware key to sign in and to approve host
+actions. Register two hardware keys per administrator, a primary and a
+backup, and keep them apart. Either one signs in and approves host actions. Each key has one root-owned sign counter that both login and host
+actions advance, so a cloned key shows up as a clone warning on whichever use
+comes second.
 
-With no action credential imported, every host write is refused
-(`authorization_denied`, audit reason `no_action_credential`).
+With no active (unrevoked) key imported for an administrator, every host
+write is refused (`authorization_denied`, audit reason
+`no_action_credential`).
 
-The residual risk is the user's own touch. A user who deliberately touches the
-action key at a sign-in prompt, or whose action key is also usable at another
-relying party's prompt for the same RP ID, can still be tricked into
-authorizing the action that prompt was minted for. The agent's record of what
-was authorized remains the authority.
+The residual risk is the shared key. The control plane serves the console. If
+it is compromised, it can show an admin a sign-in prompt and use that tap to
+approve a host action instead. The authenticator shows the relying party, not
+the action, so the admin cannot tell the two apart. The out-of-band alert
+below is the detection control for this. The update downgrade guard and the
+hourly backup limit bound what one harvested tap can do.
+
+#### Out-of-band action alert
+
+The agent reports every admitted action, and refusals, to a webhook that only
+host root configures. The control plane never reads or sets it. **The alert is
+required:** without a valid alert file, every host write is refused with 503
+`alerts_not_configured`. Reads and login keep working.
+
+Create `/etc/concord-voice/agent-alert.json`, owned by root, mode `0600`
+(the URL may carry a receiver token):
+
+```json
+{"webhook_url": "https://hooks.example.com/<receiver-path>"}
+```
+
+The URL must be an absolute `https` URL of at most 2048 bytes with no
+fragment. The file is at most 4 KiB and must hold only that field. The agent
+reads it at startup, so restart the agent after you change it, then send a
+test alert:
+
+```bash
+sudo systemctl restart concord-agent
+sudo /usr/libexec/concord-agent alert test
+```
+
+`alert test` prints `delivered`, or `delivery failed: class=<class>` (one of
+`timeout`, `network`, `status`, `request`, `encode`). If the file is missing
+or invalid, the agent logs a warning at startup and refuses writes.
+
+Each alert is a JSON `POST` with a readable `text` line and the fields
+`source` (`concord-host-agent`), `event` (`admitted`, `denied` or `test`),
+`reason`, `action`, `tag`, `archive`, `admin_id`, `job_id`,
+`suppressed_count`, `host` and `time`. It never carries assertion data. Point
+it at a channel a human reads, such as a chat webhook, on a service that does
+not depend on this server. **If an alert says an action was approved and no
+admin asked for it, treat the control plane as compromised.**
+
+Delivery is best effort and never blocks an action: a 5-second timeout, one
+retry, no redirects and no proxy. The durable record is the agent audit log.
+Admitted alerts and refusal alerts use separate queues, so a flood of
+refusals cannot crowd out an admitted alert. Repeated refusals are reported
+together with a count.
+
+#### Break-glass
+
+If the console or the control plane is unavailable, or you must do something
+the agent refuses (for example a rollback to an older release), sign in to the
+host as root, through SSH or the provider's console, and run `concord-selfhost`
+directly. For example: `sudo ./infrastructure/deploy/concord-selfhost status`.
+Do not run it by hand while the agent is running a write. The agent does not
+gate root on the host.
 
 #### First import on a new overlay
 
@@ -223,19 +298,21 @@ fails closed with a service-unavailable response. This does not block the
 separate pre-auth enrollment route.
 
 Bootstrap the administrator through the out-of-band control-plane CLI, then
-complete the one-time enrollment link and register two hardware keys: one for
-sign-in and one for host actions. Before the
-administrator's first normal login, host root must export the now-active
-administrator's public-key bundle from the running control-plane, record the
-SHA-256 printed to standard error, and note the action key's credential ID from
-the `credential-id  label` list the export prints. Import that exact file into
-the Host Agent, naming the action key with `--action-credential`:
+complete the one-time enrollment link with the primary key. After the first
+sign-in, register the backup key from the console's Security keys page. Before
+the administrator's first normal login, host root must export the now-active
+administrator's public-key bundle from the running control-plane and record the
+SHA-256 printed to standard error. Import that exact file into the Host Agent:
 
 ```bash
 sudo docker exec concordvoice-control-plane ./main admin export-agent-authorizer --username <handle> > admin-authorizer.json
-sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256> --action-credential <action-credential-id>
+sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256>
 sudo systemctl restart concord-agent
 ```
+
+Export and import again after the administrator registers the backup key.
+Configure the [out-of-band alert](#out-of-band-action-alert) before the first
+host action.
 
 `concordvoice-control-plane` is the fixed control-plane container name. The
 import command above is for a package install; a checkout install uses
@@ -260,6 +337,17 @@ The wrapper resolves the administrator ID, revokes that administrator's Host
 Agent authorizers, then runs the control-plane reset. Each step must succeed;
 on a lookup, revoke, or reset failure it stops and does not print a new
 enrollment token.
+
+On a terminal, the wrapper shows the resolved ID and asks you to type the
+username to confirm the account. Without a terminal (a script), nobody can
+confirm, so you must pass the expected ID:
+
+```bash
+sudo ./infrastructure/deploy/concord-selfhost admin reset-enrollment --username <handle> --admin-id <uuid>
+```
+
+Take the ID from `sudo /usr/libexec/concord-agent authorizer list`. If the
+username resolves to a different ID, the wrapper stops and changes nothing.
 
 The direct `control-plane admin reset-enrollment --username <handle>` path
 fails closed while the administrator remains in the imported, root-owned
@@ -466,16 +554,20 @@ import is done.
 3. For each administrator, export the credentials from the running control
    plane and note the SHA-256 printed to standard error:
    `sudo docker exec concordvoice-control-plane ./main admin export-agent-authorizer --username <handle> > admin-authorizer.json`.
-   The export lists `credential-id  label` for each key. Each administrator
-   needs a second key registered in the console for host actions; see "Why two
-   keys". Note that key's credential ID.
-4. Import each export with its exact fingerprint, naming the action key:
-   `sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256> --action-credential <action-credential-id>`
-   (`/usr/local/libexec/concord-agent` on a checkout install). Repeat the flag
-   for more than one action key. Without it, every host write is refused.
-5. Restart the agent: `sudo systemctl restart concord-agent`.
-6. Run `concord-selfhost up` to apply the overlay, then check the store with
-   `sudo concord-agent authorizer list`.
+   Each administrator should have a primary and a backup key registered; see
+   "One key per administrator".
+4. Import each export with its exact fingerprint:
+   `sudo /usr/libexec/concord-agent authorizer import --file admin-authorizer.json --confirm-sha256 <printed-sha256>`
+   (`/usr/local/libexec/concord-agent` on a checkout install).
+5. Create the alert file and test it; see "Out-of-band action alert". Without
+   it, every host write is refused.
+6. Restart the agent: `sudo systemctl restart concord-agent`.
+7. Run `concord-selfhost up` to apply the overlay, then check the store with
+   `sudo /usr/libexec/concord-agent authorizer list`.
+
+Upgrade the control plane before or together with the agent. A control plane
+older than this agent cannot read an authorizers file that holds more than 64
+records in total, active and revoked, and admin login then fails closed.
 
 ### From a checkout
 

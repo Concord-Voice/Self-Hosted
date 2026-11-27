@@ -789,7 +789,8 @@ Every attempt that reaches the step-up check writes an `admin_created` row: a re
 | Verb | What it does |
 |---|---|
 | `bootstrap --username <handle>` | Creates a pending admin and prints a one-time enrollment URL and token. |
-| `reset-enrollment --username <handle>` | Revokes the admin's hardware keys and sessions, invalidates in-flight enrollment, returns the admin to pending, and prints a new enrollment token. It does not change the password. |
+| `reset-enrollment --username <handle>` | Revokes the admin's hardware keys and sessions, invalidates in-flight enrollment, returns the admin to pending, and prints a new enrollment token. It does not change the password. It refuses while the admin is still in the Host Agent's authorizer store; on a self-hosted install use `concord-selfhost admin reset-enrollment --username <handle> [--admin-id <uuid>]`, which revokes that trust first and needs `--admin-id` when it has no terminal to confirm on. |
+| `export-agent-authorizer --username <handle>` | Prints an active admin's public keys and sign counters as the Host Agent import file, with its SHA-256 on standard error. Host root imports it with `concord-agent authorizer import`. |
 | `unlock [--] <username>` | Clears the admin's sign-in lock, failed attempts and escalation level, so the next correct sign-in succeeds. A `--` ends the options, so a legacy name that begins with `-` is unlocked with `unlock -- <username>`; `reset-enrollment` takes such a name as `--username=<username>`. It does not touch the IP lock, which expires within an hour. It writes one audit row. |
 
 After upgrading to the release that adds enrollment and session generations, every admin signs in once again, and enrollment tokens issued before the upgrade fail closed; reissue them with `reset-enrollment`. Do not run `reset-enrollment` or finish an enrollment while containers from an earlier release still serve, because they do not check the generations.
@@ -836,7 +837,14 @@ restore to a CLI-named regular file in a root-only `backups/`; a marker file
 held during a job stops the package scripts restarting the agent mid-run. The
 console reaches them through `POST /admin/api/v1/server/actions/<action>` and
 `GET /server/jobs[/<id>]`. The agent itself requires an expected peer UID and
-a fresh user-verified WebAuthn assertion for all six actions. Its root-owned
+a fresh user-verified WebAuthn assertion for all six actions, signed by one of
+the admin's own keys (the same keys used to sign in, sharing one root-owned
+sign counter per key). It refuses every write with 503
+`alerts_not_configured` until host root configures an out-of-band alert
+webhook (`/etc/concord-voice/agent-alert.json`), and then reports each
+admitted action and refusal there; that alert is the detection control for a
+compromised control plane spending a sign-in tap on a host action. `update`
+refuses an older release (409 `update_downgrade_refused`). Its root-owned
 authorizer store verifies a one-use, two-minute handle bound to the exact
 normalized action arguments, persists the authenticator counter, then appends
 a durable `host-agent-audit.v1` admission record before job creation. This
@@ -863,8 +871,11 @@ top of the global 16-connection cap. The install route's response has an
 11-minute write deadline: the 10-minute install budget plus time to serialize
 the result.
 
-**Backup admission:** the agent admits one backup job per rolling hour and
-refuses another with 429 `backup_rate_limited`. `selfhost-backup.sh` refuses
+**Backup admission:** the agent admits one `backup` or `update` job (update
+takes a backup first) per rolling hour and refuses another with 429
+`backup_rate_limited`. The last admission time lives in the agent's root-only
+audit directory, so a restart does not reset it, and the check runs before the
+admin's approval is spent. `selfhost-backup.sh` refuses
 when the target already holds 24 archives or when free space is below twice
 the source size plus 1 GiB. It never prunes old backups.
 
