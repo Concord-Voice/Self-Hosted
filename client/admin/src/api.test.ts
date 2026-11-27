@@ -451,6 +451,49 @@ describe("api", () => {
     },
   );
 
+  it.each([
+    [
+      "a JSON body with a string code",
+      () => json({ error: "stepup_required" }, 403),
+      403,
+      "stepup_required",
+    ],
+    [
+      "a JSON body without a code",
+      () => json({ status: "refused" }, 409),
+      409,
+      null,
+    ],
+    ["a JSON null body", () => json(null, 409), 409, null],
+    [
+      "a body that is not JSON",
+      () =>
+        new HttpResponse("<html>bad gateway</html>", {
+          status: 502,
+          headers: { "Content-Type": "text/html" },
+        }),
+      502,
+      null,
+    ],
+    ["an empty body", () => new HttpResponse(null, { status: 500 }), 500, null],
+    ["a code that is not a string", () => json({ error: 42 }, 400), 400, null],
+    [
+      "a code that is an object",
+      () => json({ error: { code: "stepup_required" } }, 400),
+      400,
+      null,
+    ],
+  ])("reads the error code from %s", async (_name, reply, status, code) => {
+    server.use(http.get(`${base}/admin/api/v1/credentials`, reply));
+
+    const error: unknown = await api
+      .listSecurityKeys()
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status, code });
+  });
+
   it("does not report a rejected response shape as a transport failure", async () => {
     server.use(
       http.get(`${base}/admin/api/v1/metrics/current`, () =>

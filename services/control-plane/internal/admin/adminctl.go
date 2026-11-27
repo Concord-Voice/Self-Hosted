@@ -351,11 +351,11 @@ func runExportAgentAuthorizer(ctx context.Context, deps adminCtlDeps, args []str
 	}
 	digest := sha256.Sum256(data)
 	outf(deps.stderr, "Authorizer export SHA-256: %s\n", hex.EncodeToString(digest[:]))
-	// Host root picks each key's purpose at import, so list them by ID.
+	// List each key so host root can see what the import will trust.
 	for _, credential := range doc.Credentials {
 		outf(deps.stderr, "%s  %s\n", credential.CredentialID, printableLabel(credential.Label))
 	}
-	outf(deps.stderr, "import with --action-credential <id> to let a key authorize host writes; that key can then no longer be used to log in\n")
+	outf(deps.stderr, "import trusts every key listed; each one both logs in and authorizes host writes\n")
 	return nil
 }
 

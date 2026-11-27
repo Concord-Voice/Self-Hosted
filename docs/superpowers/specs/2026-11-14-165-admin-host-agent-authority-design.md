@@ -136,7 +136,7 @@ Add a closed control-plane action `create_admin`:
 - Failure before `CreatePending` creates no admin row. A token-mint failure after row creation must remove the pending row or return an explicit recoverable state; the implementation may not silently leave an undisclosed pending admin.
 - The committed `EventBootstrap` audit emits the existing privileged-action security event.
 
-`GET /admin/api/v1/security-notices` returns at most 20 sanitized admin-creation audit records from the last 24 hours. It contains actor, target username, fixed event kind, and timestamp; never tokens, passwords, credential IDs, assertions, IPs, or source references. The admin SPA polls it with the existing authenticated refresh cadence and renders an accessible security notice. This reuses the append-only audit table rather than adding notification storage.
+As built, there is no `security-notices` route. The sign-in response (`POST /admin/api/v1/auth/webauthn`) carries `admins_added`, the number of admins created since the signing-in admin last acknowledged the notice, and a `notice_cursor`. The console shows an accessible "Admins added" notice when the count is above zero, and `POST /admin/api/v1/signin-notice/ack` records the cursor so the same admins are not reported again. The count comes from the append-only audit table, so no notification storage is added, and the notice carries no usernames, tokens, credential IDs, assertions or IP addresses.
 
 ## 8. Root-owned authorizer trust
 
@@ -158,17 +158,19 @@ The control-plane container receives a read-only mount of the directory only so 
 
 - `import` accepts one bounded JSON export from `control-plane admin export-agent-authorizer --username <handle>`, prints the SHA-256 fingerprint, and requires an exact `--confirm-sha256` value before changing the file.
 - Import is explicit and idempotent by credential ID. Enrolling or creating an admin does not auto-trust it for host writes.
-- `revoke --admin-id` removes every credential for that admin. The supported reset wrapper invokes it before the database reset.
+- `revoke --admin-id` disables every credential for that admin, for root actions and for console sign-in alike (decided 2026-11-27), and keeps each record as a tombstone with its frozen counter. The agent refuses a revoked key's login assertion with 403, never `authorizer_not_imported`, which the control plane would admit. The supported reset wrapper invokes it before the database reset. Re-enabling a revoked key needs `import --reinstate`.
+- The store holds at most 64 active records; revoked records do not count and are never dropped to make room. A write past the 1 MiB file limit fails closed.
 - Existing installations require an explicit one-time import. Until then, host-agent reads continue, all writes return `authorizer_unavailable`, and admin WebAuthn login also fails closed (503) when the overlay sets `HOST_AGENT_AUTHORIZER_PROJECTION=1`.
 
-Dedicated action credentials: at import, host root decides which of an admin's credentials may authorize root actions. `import --action-credential <base64url credential id>` is repeatable. Credentials not named are `login` credentials.
+One key per admin (decided 2026-11-26, superseding the dedicated action-credential split). Each admin's keys both sign in and authorize root actions, and each key has one root-owned sign counter that both uses advance. Register a primary and a backup key per admin. With no active key imported, every host write is refused (`authorization_denied`, audit reason `no_action_credential`).
 
-- An action credential never satisfies an admin login. The control plane omits it from the login allow-list and rejects its login assertion with 403 `action_credential_not_for_login`; the agent also refuses it.
-- A login credential never authorizes a root action. The agent's action options contain only action credentials, and Consume rejects any other signer.
-- With no action credential imported, every host write is refused (`authorization_denied`, audit reason `no_action_credential`).
-- `control-plane admin export-agent-authorizer` prints `credential-id  label` for each key so the operator can choose.
+A separate action key was rejected: it defends only against theft of one key without the other, it is defeated when both keys sit on one key ring, and with a backup for each it doubles the number of hardware keys per admin. The accepted residual is that a compromised control plane can show a sign-in prompt and spend that tap on a host action. Three controls bound it:
 
-An operator therefore registers two keys per admin in the console, one for sign-in and one for host actions. A login gesture cannot authorize a root action: the signing key differs, and root, not the admin or the control plane, assigns each key's purpose.
+- **Out-of-band alert (required).** The agent reports every admitted action, and refusals, to a webhook in root-only `/etc/concord-voice/agent-alert.json`, which the control plane never reads. Without a valid alert file every write is refused with 503 `alerts_not_configured`. Admitted alerts and refusal alerts use separate queues, so a refusal flood cannot drop an admitted alert.
+- **Update downgrade guard.** `update` refuses a tag older than the install's `VERSION` (409 `update_downgrade_refused`; 409 `running_version_unknown` when `VERSION` cannot be read).
+- **Hourly backup admission.** At most one `backup` or `update` per hour, persisted in the root-only audit directory.
+
+Refusals that need no proof (`write_in_progress`, `backup_rate_limited`, `alerts_not_configured`) run before the action handle is spent. Break-glass is root on the host, through SSH or the provider console, running `concord-selfhost` directly.
 
 The root confirmation is an operational trust decision. It prevents a compromised container from silently adding a key; it does not claim independent attestation provenance.
 
@@ -300,11 +302,11 @@ No migration reviewer should fire because this design adds no SQL migration. The
 | Reset revokes DB state but not agent trust | Medium | Root wrapper revokes first; read-only projection makes direct reset refuse while trust remains; fail closed on every intermediate error. |
 | Control plane replays or changes action arguments | High without binding | Agent owns the single-use ceremony and executes the stored normalized request. |
 | Sign-counter update fails after assertion | Low | Persist atomically before starting the job; failure refuses. |
-| New agent and old control plane roll out separately | Medium | Writes remain unavailable until both support the ceremony; forward-only recovery. |
+| New agent and old control plane roll out separately | Medium | Writes remain unavailable until both support the ceremony; forward-only recovery. An older control plane rejects an authorizers file with more than 64 total records, so upgrade the control plane first or together. |
 | Per-request DB status check adds latency/outage coupling | Medium | It is the durable authority check; failures intentionally return 401. Measure but do not cache away the invariant. |
 | Backup estimate is conservative | Medium | Clear refusal with measured required/available bytes; operator may move backups or free space. |
 | Admin SPA compromise mislabels a signed action | Residual | Action/args are bound to the agent's own record and audited; a trusted display or separate signer is future work. |
-| A user touches their action key at a prompt that is not the action prompt | Residual | A login gesture cannot authorize an action, because the keys differ. A user who deliberately touches the action key at a sign-in prompt, or whose action key is also usable at another relying party's prompt for the same RP ID, can still be tricked into authorizing the action that prompt was minted for. The agent's record of what was authorized remains the authority. |
+| A compromised control plane spends a sign-in tap on a host action | Residual (accepted 2026-11-26) | One key both signs in and authorizes actions, so the authenticator cannot tell the prompts apart. The required out-of-band alert detects it; the downgrade guard and hourly backup admission bound what one tap can do; the agent's record of what was authorized remains the authority. |
 
 ## 17. References
 

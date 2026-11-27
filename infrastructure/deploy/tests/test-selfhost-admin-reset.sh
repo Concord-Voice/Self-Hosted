@@ -23,6 +23,7 @@ run_reset() (
   # shellcheck source=../concord-selfhost
   source "$DEPLOY/concord-selfhost"
   require_root() { return "${STUB_ROOT_RC:-0}"; }
+  stdin_is_terminal() { return "${STUB_TTY_RC:-1}"; }
   find_agent_binary() {
     [[ "${STUB_AGENT_PRESENT:-1}" == 1 ]] || return 1
     printf '%s\n' "$WORK/agent"
@@ -47,13 +48,13 @@ run_reset() (
 )
 
 : >"$CALLS"
-out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice)"; rc=$?
+out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID")"; rc=$?
 expected="$(printf 'compose exec -T control-plane ./main admin lookup-id --username alice\nagent authorizer list\nagent authorizer revoke --admin-id %s\ncompose exec -T control-plane ./main admin reset-enrollment --username alice' "$ADMIN_ID")"
 [[ "$rc" == 0 && "$out" == 'new-enrollment-token' && "$(cat "$CALLS")" == "$expected" ]] \
   && pass 'lookup, root revoke, then DB reset' || fail "happy path rc=$rc calls=$(cat "$CALLS")"
 
 : >"$CALLS"
-out="$(STUB_EMPTY_TRUST=0 CALLS="$CALLS" run_reset reset-enrollment --username alice)"; rc=$?
+out="$(STUB_EMPTY_TRUST=0 CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID")"; rc=$?
 expected="$(printf 'compose exec -T control-plane ./main admin lookup-id --username alice\ncompose exec -T control-plane ./main admin reset-enrollment --username alice')"
 [[ "$rc" == 0 && "$out" == 'new-enrollment-token' && "$(cat "$CALLS")" == "$expected" ]] \
   && pass 'safe never-imported trust skips revoke and permits reset' || fail "fresh host rc=$rc calls=$(cat "$CALLS")"
@@ -112,20 +113,20 @@ check_binary "$WORK/agent-link/concord-agent" >/dev/null 2>&1 \
 
 # A host with no Host Agent at all has nothing to revoke; it must still reset.
 : >"$CALLS"
-out="$(STUB_NO_AGENT_HOST=0 STUB_AGENT_PRESENT=0 CALLS="$CALLS" run_reset reset-enrollment --username alice)"; rc=$?
+out="$(STUB_NO_AGENT_HOST=0 STUB_AGENT_PRESENT=0 CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID")"; rc=$?
 expected="$(printf 'compose exec -T control-plane ./main admin lookup-id --username alice\ncompose exec -T control-plane ./main admin reset-enrollment --username alice')"
 [[ "$rc" == 0 && "$out" == 'new-enrollment-token' && "$(cat "$CALLS")" == "$expected" ]] \
   && pass 'host with no Host Agent installed resets without a revoke' || fail "no-agent host rc=$rc calls=$(cat "$CALLS")"
 
 # The reset failing AFTER the revoke must say trust is already revoked.
 : >"$CALLS"
-err="$(STUB_RESET_RC=1 CALLS="$CALLS" run_reset reset-enrollment --username alice 2>&1 >/dev/null)"; rc=$?
+err="$(STUB_RESET_RC=1 CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID" 2>&1 >/dev/null)"; rc=$?
 [[ "$rc" != 0 && "$err" == *'AFTER Host Agent trust was revoked'* ]] \
   && pass 'reset failure after revoke tells the operator trust is already revoked' || fail "post-revoke failure rc=$rc err=$err"
 
 # The operator sees the root store before anything is revoked.
 : >"$CALLS"
-CALLS="$CALLS" run_reset reset-enrollment --username alice >/dev/null 2>&1
+CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID" >/dev/null 2>&1
 list_line="$(grep -n '^agent authorizer list$' "$CALLS" | cut -d: -f1)"; revoke_line="$(grep -n '^agent authorizer revoke ' "$CALLS" | cut -d: -f1)"
 [[ -n "$list_line" && -n "$revoke_line" && "$list_line" -lt "$revoke_line" ]] \
   && pass 'authorizer list is shown before the revoke' || fail "list/revoke order list=$list_line revoke=$revoke_line"
@@ -133,11 +134,11 @@ list_line="$(grep -n '^agent authorizer list$' "$CALLS" | cut -d: -f1)"; revoke_
 for scenario in root lookup malformed agent revoke; do
   : >"$CALLS"
   case "$scenario" in
-    root) STUB_ROOT_RC=1 out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice 2>/dev/null)"; rc=$? ;;
-    lookup) STUB_LOOKUP_RC=1 out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice 2>/dev/null)"; rc=$? ;;
-    malformed) STUB_LOOKUP_ID='not-a-uuid' out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice 2>/dev/null)"; rc=$? ;;
-    agent) STUB_AGENT_PRESENT=0 out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice 2>/dev/null)"; rc=$? ;;
-    revoke) STUB_REVOKE_RC=1 out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice 2>/dev/null)"; rc=$? ;;
+    root) out="$(STUB_ROOT_RC=1 CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID" 2>/dev/null)"; rc=$? ;;
+    lookup) out="$(STUB_LOOKUP_RC=1 CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID" 2>/dev/null)"; rc=$? ;;
+    malformed) out="$(STUB_LOOKUP_ID='not-a-uuid' CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID" 2>/dev/null)"; rc=$? ;;
+    agent) out="$(STUB_AGENT_PRESENT=0 CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID" 2>/dev/null)"; rc=$? ;;
+    revoke) out="$(STUB_REVOKE_RC=1 CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$ADMIN_ID" 2>/dev/null)"; rc=$? ;;
   esac
   if [[ "$rc" != 0 && "$out" == '' ]] && ! grep -q 'reset-enrollment --username' "$CALLS"; then
     pass "$scenario failure cannot mint a new enrollment token"
@@ -150,6 +151,38 @@ done
 run_reset reset-enrollment --username alice extra >/dev/null 2>&1; rc=$?
 [[ "$rc" != 0 && ! -s "$CALLS" ]] && pass 'unknown trailing argument refuses before lookup' \
   || fail "argument refusal rc=$rc calls=$(cat "$CALLS")"
+
+# Without a terminal nobody confirms the account, so --admin-id is mandatory
+# and must match the admin the lookup resolved.
+OTHER_ID=0b9a3f55-2f1c-4d8e-9c55-6b2b0f1e7a10
+LOOKUP_ONLY='compose exec -T control-plane ./main admin lookup-id --username alice'
+: >"$CALLS"
+err="$(CALLS="$CALLS" run_reset reset-enrollment --username alice 2>&1 >/dev/null)"; rc=$?
+[[ "$rc" != 0 && "$err" == *'--admin-id'* && ! -s "$CALLS" ]] \
+  && pass 'non-interactive reset without --admin-id refuses before lookup' || fail "missing --admin-id rc=$rc calls=$(cat "$CALLS")"
+: >"$CALLS"
+out="$(CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$OTHER_ID" 2>/dev/null)"; rc=$?
+[[ "$rc" != 0 && "$out" == '' && "$(cat "$CALLS")" == "$LOOKUP_ONLY" ]] \
+  && pass 'non-interactive reset refuses an --admin-id the lookup did not resolve' || fail "mismatched --admin-id rc=$rc calls=$(cat "$CALLS")"
+: >"$CALLS"
+CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id NOT-A-UUID >/dev/null 2>&1; rc=$?
+[[ "$rc" != 0 && ! -s "$CALLS" ]] && pass 'malformed --admin-id refuses before lookup' \
+  || fail "malformed --admin-id rc=$rc calls=$(cat "$CALLS")"
+
+# A terminal keeps the typed-username confirmation and needs no --admin-id.
+: >"$CALLS"
+out="$(STUB_TTY_RC=0 CALLS="$CALLS" run_reset reset-enrollment --username alice <<<alice 2>/dev/null)"; rc=$?
+expected="$(printf '%s\nagent authorizer list\nagent authorizer revoke --allow-missing --admin-id %s\ncompose exec -T control-plane ./main admin reset-enrollment --username alice' "$LOOKUP_ONLY" "$ADMIN_ID")"
+[[ "$rc" == 0 && "$out" == 'new-enrollment-token' && "$(cat "$CALLS")" == "$expected" ]] \
+  && pass 'interactive reset confirms the username without --admin-id' || fail "interactive rc=$rc calls=$(cat "$CALLS")"
+: >"$CALLS"
+out="$(STUB_TTY_RC=0 CALLS="$CALLS" run_reset reset-enrollment --username alice <<<mallory 2>/dev/null)"; rc=$?
+[[ "$rc" != 0 && "$out" == '' ]] && ! grep -q -e '^agent authorizer revoke' -e 'reset-enrollment --username' "$CALLS" \
+  && pass 'interactive reset refuses a wrong confirmation' || fail "wrong confirmation rc=$rc calls=$(cat "$CALLS")"
+: >"$CALLS"
+out="$(STUB_TTY_RC=0 CALLS="$CALLS" run_reset reset-enrollment --username alice --admin-id "$OTHER_ID" <<<alice 2>/dev/null)"; rc=$?
+[[ "$rc" != 0 && "$out" == '' && "$(cat "$CALLS")" == "$LOOKUP_ONLY" ]] \
+  && pass 'interactive reset also refuses a mismatched --admin-id' || fail "interactive mismatch rc=$rc calls=$(cat "$CALLS")"
 
 (( fails == 0 )) && { echo 'ALL PASS'; exit 0; }
 echo "$fails FAILED"

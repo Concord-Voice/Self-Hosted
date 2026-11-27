@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -41,11 +43,12 @@ const (
 	// writeMarkerFile exists while a write action runs; the package scripts
 	// read it so an upgrade does not restart the agent mid-restore.
 	writeMarkerFile = "write-in-progress"
-	// backupAdmissionFile survives agent restarts so backup admission remains
-	// rate limited across processes. It shares the dedicated socket directory.
+	// backupAdmissionFile is where earlier releases kept the backup admission
+	// state. It now lives beside the host-agent audit, which survives a reboot;
+	// a copy left here by an upgrade is tolerated and no longer read.
 	backupAdmissionFile = "backup-last-admitted"
-	// backupAdmissionTempPrefix is the CreateTemp prefix hostagent uses while
-	// publishing backupAdmissionFile; a crash can leave one behind.
+	// backupAdmissionTempPrefix is the CreateTemp prefix earlier releases used
+	// while publishing backupAdmissionFile here; a crash can leave one behind.
 	backupAdmissionTempPrefix = ".backup-admission-"
 	// setupMaxConns bounds the TLS connections a LAN client can hold open.
 	setupMaxConns          = 16
@@ -56,6 +59,9 @@ const (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "authorizer" {
 		os.Exit(runAuthorizerCLI(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "alert" {
+		os.Exit(runAlertCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	os.Exit(run())
 }
@@ -132,6 +138,21 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	configureAlerts(ctx, agent)
+	// The server's trust and write state is fixed once it serves. An agent
+	// that started without usable trust (no authorizer file before the first
+	// import) restarts itself once the file would load, instead of waiting
+	// for an operator. Its writes are off until then, so no job is cut short.
+	var restartForTrust atomic.Bool
+	if !trusted {
+		go func() {
+			if waitForTrust(ctx, trustPollInterval, func() bool { return authorizerTrustReady(authorizerPath) }) {
+				log.Print("concord-agent: authorizer trust is now available; restarting to enable it")
+				restartForTrust.Store(true)
+				stop()
+			}
+		}()
+	}
 	// Setup mode is an extra listener; the socket serves either way, so a
 	// setup failure is logged and the agent carries on.
 	if _, _, err := startSetup(ctx, resolved, envOr("CONCORD_AGENT_SETUP_ADDR", defaultSetupAddr),
@@ -150,6 +171,59 @@ func run() int {
 		log.Printf("concord-agent: serve: %v", err)
 		return 1
 	}
+	if restartForTrust.Load() {
+		return exitTrustReady
+	}
+	return 0
+}
+
+// configureAlerts installs the out-of-band alert destination. The alert is the
+// only detection control for a control plane that spends a harvested login tap
+// on a host action, so a missing, unsafe or invalid alert file leaves no
+// alerter and the agent refuses every write with alerts_not_configured; reads
+// and login keep working. It is reported once here.
+func configureAlerts(ctx context.Context, agent *hostagent.Server) {
+	alerts, err := hostagent.LoadAlerter(ctx)
+	switch {
+	case errors.Is(err, hostagent.ErrAlertNotConfigured):
+		log.Printf("concord-agent: warning: no %s; host writes are refused until an out-of-band alert destination is configured", hostagent.AlertConfigPath)
+		return
+	case err != nil:
+		// The loader's errors are fixed strings; the URL never reaches them.
+		log.Printf("concord-agent: warning: alert destination unavailable; host writes are refused: %v", err)
+		return
+	}
+	agent.SetAlerter(alerts)
+	log.Print("concord-agent: host actions are alerted out of band")
+}
+
+// runAlertCLI serves `concord-agent alert test`: it sends one test alert to
+// the configured destination and reports the outcome.
+func runAlertCLI(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 || args[0] != "test" {
+		_, _ = fmt.Fprintln(stderr, "usage: concord-agent alert test")
+		return 2
+	}
+	if os.Geteuid() != 0 {
+		_, _ = fmt.Fprintln(stderr, "concord-agent alert test: run as root")
+		return 1
+	}
+	alerts, err := hostagent.LoadAlerterForTest()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "concord-agent alert test: %v\n", err)
+		return 1
+	}
+	return sendTestAlert(alerts, stdout, stderr)
+}
+
+func sendTestAlert(alerts *hostagent.Alerter, stdout, stderr io.Writer) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := alerts.Send(ctx, hostagent.AlertEvent{Outcome: "test"}); err != nil {
+		_, _ = fmt.Fprintf(stderr, "concord-agent alert test: delivery failed: class=%s\n", hostagent.AlertFailureClass(err))
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, "concord-agent alert test: delivered")
 	return 0
 }
 
@@ -178,6 +252,47 @@ func configureAuthorizerTrust(agent *hostagent.Server, path string) bool {
 		return false
 	}
 	return true
+}
+
+// trustPollInterval is how often an agent that started without usable
+// authorizer trust checks again.
+// ponytail: polls, not inotify; enabling 10 s after a first import is enough.
+const trustPollInterval = 10 * time.Second
+
+// exitTrustReady is the exit status after trust became available. It is not
+// 0, so systemd's Restart=on-failure starts the agent again with trust on.
+const exitTrustReady = 75
+
+// authorizerTrustReady reports whether configureAuthorizerTrust would now
+// succeed for path, without installing anything.
+func authorizerTrustReady(path string) bool {
+	authorizers, err := hostagent.LoadAuthorizers(path)
+	if err != nil {
+		return false
+	}
+	rpID, origins, err := authorizers.RPConfig()
+	if err != nil {
+		return false
+	}
+	_, err = mfa.NewWebAuthnService(rpID, "Concord Voice Admin", origins)
+	return err == nil
+}
+
+// waitForTrust checks ready every interval and returns true once it reports
+// true, or false when ctx ends first.
+func waitForTrust(ctx context.Context, every time.Duration, ready func() bool) bool {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			if ready() {
+				return true
+			}
+		}
+	}
 }
 
 // configureWriteAccess leaves the agent read-only unless its local audit and

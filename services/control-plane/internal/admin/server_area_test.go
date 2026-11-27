@@ -147,7 +147,7 @@ func TestServerAreaAgentFailures(t *testing.T) {
 		body   string
 		want   int
 	}{
-		{"busy", http.StatusTooManyRequests, "", http.StatusTooManyRequests},
+		{"busy", http.StatusTooManyRequests, `{"error":"busy"}`, http.StatusTooManyRequests},
 		{"error", http.StatusBadGateway, "", http.StatusBadGateway},
 		{"not json", http.StatusOK, "nope", http.StatusBadGateway},
 		{"too large", http.StatusOK, strings.Repeat(" ", maxAgentJSON+1), http.StatusBadGateway},
@@ -161,6 +161,10 @@ func TestServerAreaAgentFailures(t *testing.T) {
 		rec := call(serverEngine(newArea(sock, audit)), "/server/status")
 		if rec.Code != tc.want || audit.events[0].Result != AuditFailure {
 			t.Errorf("%s: got %d %+v", tc.name, rec.Code, audit.events)
+		}
+		// The agent's read-route busy reaches the console as agent_busy.
+		if tc.name == "busy" && strings.TrimSpace(rec.Body.String()) != `{"error":"agent_busy"}` {
+			t.Errorf("busy: body %s", rec.Body)
 		}
 	}
 

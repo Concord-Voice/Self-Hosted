@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApiContractError, ApiError, type SignInNotice, api } from "./api";
-import { decodeRequestOptions, encodeAssertion } from "./webauthn";
+import {
+  KEY_NOT_USED,
+  decodeRequestOptions,
+  encodeAssertion,
+  keyNotUsed,
+} from "./webauthn";
 
 interface AuthScreenProps {
   // notice is what the sign-in response says about admins added since this
@@ -19,11 +24,6 @@ interface Ceremony {
 // blaming either would send the operator hunting the wrong fault (#3005).
 const UNREADABLE_RESPONSE =
   "The server's response was not recognized. This console may be out of date.";
-
-// Shown when the key used is one host root imported for host actions only
-// (--action-credential): the password was right, the key was the wrong one.
-const ACTION_KEY_LOGIN =
-  "This key is registered for host actions only. Sign in with your login key.";
 
 export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
   const [username, setUsername] = useState("");
@@ -65,18 +65,13 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
       setCeremony(null);
       onAuthenticated(notice);
     } catch (cause) {
-      if (cause instanceof DOMException && cause.name === "NotAllowedError") {
-        setError("Security key verification was canceled.");
+      if (keyNotUsed(cause)) {
+        setError(KEY_NOT_USED);
         return;
       }
       setCeremony(null);
       if (cause instanceof ApiContractError) {
         setError(UNREADABLE_RESPONSE);
-      } else if (
-        cause instanceof ApiError &&
-        cause.code === "action_credential_not_for_login"
-      ) {
-        setError(ACTION_KEY_LOGIN);
       } else {
         setError("Sign-in failed. Check your credentials and try again.");
       }

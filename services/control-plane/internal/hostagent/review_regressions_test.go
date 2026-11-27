@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,12 +22,36 @@ import (
 )
 
 // captureLog redirects the package's standard logger for one test.
-func captureLog(t *testing.T) *bytes.Buffer {
+// lockedBuffer lets a test read logs while a background worker writes them.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
+func captureLog(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
+	buf := &lockedBuffer{}
+	log.SetOutput(buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	return &buf
+	return buf
 }
 
 func forbiddenRequest(s *Server, uid int, withPeer bool) int {
@@ -46,7 +71,7 @@ func withPeerContext(ctx context.Context, uid int) context.Context {
 func TestPeerForbiddenAuditIsRateLimitedPerUIDAndCounted(t *testing.T) {
 	server, _ := writeServer(t, &fakeRunner{})
 	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
-	server.peerDenials.now = func() time.Time { return now }
+	server.denials.now = func() time.Time { return now }
 	for range 100 {
 		require.Equal(t, http.StatusForbidden, forbiddenRequest(server, 10007, true))
 	}
@@ -55,7 +80,7 @@ func TestPeerForbiddenAuditIsRateLimitedPerUIDAndCounted(t *testing.T) {
 	}
 	lines := readAuditLines(t, server.audit.path)
 	require.Len(t, lines, 2, "one record per UID per window, however many denials")
-	now = now.Add(peerDenialWindow)
+	now = now.Add(denialWindow)
 	require.Equal(t, http.StatusForbidden, forbiddenRequest(server, 10007, true))
 	lines = readAuditLines(t, server.audit.path)
 	require.Len(t, lines, 3)
@@ -64,24 +89,24 @@ func TestPeerForbiddenAuditIsRateLimitedPerUIDAndCounted(t *testing.T) {
 }
 
 func TestPeerDenialLimiterIsBoundedAcrossManyUIDs(t *testing.T) {
-	var limiter peerDenialLimiter
+	var limiter denialLimiter
 	now := time.Now()
 	limiter.now = func() time.Time { return now }
 	recorded := 0
-	for uid := range maxPeerDenialUIDs * 4 {
-		if ok, _ := limiter.admit(uid); ok {
+	for uid := range maxDenialKeys * 4 {
+		if ok, _ := limiter.admit(denialKey{reason: "peer_forbidden", uid: uid}); ok {
 			recorded++
 		}
 	}
-	require.LessOrEqual(t, len(limiter.entries), maxPeerDenialUIDs+1)
-	require.Equal(t, maxPeerDenialUIDs+1, recorded, "UIDs past the bound share one overflow record")
+	require.LessOrEqual(t, len(limiter.entries), maxDenialKeys+1)
+	require.Equal(t, maxDenialKeys+1, recorded, "UIDs past the bound share one overflow record")
 }
 
 func TestAuditFullLogsOnceAndRefusesWrites(t *testing.T) {
 	logs := captureLog(t)
 	audit := testAudit(t)
 	require.NoError(t, os.Truncate(audit.path, maxAuditFileBytes))
-	event := AuditEvent{Outcome: "denied", Reason: "begin_denied"}
+	event := AuditEvent{Action: "stop", Outcome: "admitted", Reason: "admission_approved"}
 	require.ErrorIs(t, audit.Write(event), errAuditFull)
 	require.ErrorIs(t, audit.Write(event), errAuditFull)
 	require.Equal(t, 1, strings.Count(logs.String(), "host-agent audit full"), "the full stream is reported, once")
@@ -108,7 +133,7 @@ func TestServerLogsAuditWriteFailures(t *testing.T) {
 	logs := captureLog(t)
 	server, _ := writeServer(t, &fakeRunner{})
 	require.NoError(t, os.Truncate(server.audit.path, maxAuditFileBytes))
-	server.auditEvent(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+	server.auditDenial(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
 	require.Contains(t, logs.String(), "host-agent audit write failed: reason=begin_denied")
 }
 
@@ -254,16 +279,12 @@ func TestAdvanceCounterRefusesARevokedCredential(t *testing.T) {
 	require.ErrorIs(t, authorizers.AdvanceCounter(credential.ID, 9), errAuthorizerRevoked)
 	list, err := authorizers.List()
 	require.NoError(t, err)
-	require.Equal(t, uint32(4), list[0].SignCount, "a revoked counter is not advanced by an action")
-	require.ErrorIs(t, authorizers.advanceLoginCounter(credential.ID, 9), errAuthorizerPurpose, "an action credential never advances on a login")
-	list, err = authorizers.List()
-	require.NoError(t, err)
-	require.Equal(t, uint32(4), list[0].SignCount, "a login attempt by an action credential changes nothing")
+	require.Equal(t, uint32(4), list[0].SignCount, "a revoked key's counter is not advanced")
 
 	// Revocation racing the ceremony: Credentials() still saw the key, but the
 	// revoke lands before the counter write.
 	reimport := testAuthorizerImportFor(t, authorizers, adminID)
-	_, err = authorizers.ImportWithPurposes(reimport, true, []string{reimport.Credentials[0].CredentialID})
+	_, err = authorizers.ImportMany(reimport, true)
 	require.NoError(t, err)
 	handle, _, err := store.Begin(adminID, "stop", actionRequest{})
 	require.NoError(t, err)

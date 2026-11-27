@@ -144,6 +144,38 @@ func TestConfigureAuthorizerTrustMissingProjectionKeepsAgentReadOnly(t *testing.
 	}
 }
 
+func TestAuthorizerTrustReadyRefusesMissingFile(t *testing.T) {
+	if authorizerTrustReady(filepath.Join(t.TempDir(), "missing.json")) {
+		t.Fatal("missing authorizer file reported ready")
+	}
+}
+
+func TestWaitForTrustReturnsOnceReady(t *testing.T) {
+	calls := 0
+	ready := func() bool { calls++; return calls == 3 }
+	if !waitForTrust(context.Background(), time.Millisecond, ready) {
+		t.Fatal("waitForTrust gave up before trust was ready")
+	}
+	if calls != 3 {
+		t.Fatalf("ready checked %d times, want 3: it must stop at the first success", calls)
+	}
+}
+
+func TestWaitForTrustStopsWhenContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitForTrust(ctx, time.Hour, func() bool { return true }) {
+		t.Fatal("waitForTrust reported ready after its context ended")
+	}
+}
+
+func TestExitTrustReadyMakesSystemdRestart(t *testing.T) {
+	// Restart=on-failure restarts only on a non-zero exit.
+	if exitTrustReady == 0 {
+		t.Fatal("exitTrustReady is 0, so systemd would not restart the agent")
+	}
+}
+
 func TestWriteTokenFileCreatesPrivateFileAndRefusesOverwrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), setupTokenFile)
 	if err := writeTokenFile(path, "one-time-token\n"); err != nil {

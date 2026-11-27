@@ -130,8 +130,8 @@ func TestConfigureWriteAccessNeedsBothAuditAndTrust(t *testing.T) {
 		{false, true, false, http.StatusServiceUnavailable, "writes_disabled"},
 		{false, false, false, http.StatusServiceUnavailable, "writes_disabled"},
 		// Positive control: the write route is reached and refuses for want of
-		// an authorization store, not because writes are off.
-		{true, true, true, http.StatusServiceUnavailable, "authorizer_unavailable"},
+		// an alert destination, not because writes are off.
+		{true, true, true, http.StatusServiceUnavailable, "alerts_not_configured"},
 	} {
 		agent := hostagent.NewServer(hostagent.ExecRunner{})
 		if peerVisible {

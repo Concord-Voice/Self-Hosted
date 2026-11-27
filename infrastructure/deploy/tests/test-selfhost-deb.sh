@@ -60,8 +60,9 @@ want '-rw-r--r--' 'usr/share/concord-agent/wizard/assets/app.js'
 want '-rw-r--r--' 'usr/share/doc/concord-selfhost/copyright'
 grep -q '\./opt' <<<"$listing" && fail 'package owns /opt' || pass 'package does not own /opt'
 grep -vq ' root/root ' <<<"$listing" && fail 'an entry is not root-owned' || pass 'every entry is root-owned'
-grep -q 'ReadWritePaths=/etc/concord-voice/agent-authorizers' "$REPO/infrastructure/host-agent/concord-agent.service" &&
-  pass 'agent can update root-owned authorizers' || fail 'agent unit lacks authorizer write path'
+# The "-" keeps a missing directory from stopping the agent at start.
+grep -qx 'ReadWritePaths=-/etc/concord-voice/agent-authorizers' "$REPO/infrastructure/host-agent/concord-agent.service" &&
+  pass 'agent can update root-owned authorizers, and starts without them' || fail 'agent unit lacks the optional authorizer write path'
 grep -q '/etc/concord-voice/agent-authorizers:/etc/concord-voice/agent-authorizers:ro' "$REPO/docker-compose.host-agent.yml" &&
   pass 'control plane receives read-only authorizer projection' || fail 'authorizer projection is not read-only'
 grep -q 'HOST_AGENT_AUTHORIZER_PROJECTION: "1"' "$REPO/docker-compose.host-agent.yml" &&

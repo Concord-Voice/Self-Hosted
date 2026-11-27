@@ -108,12 +108,6 @@ func RunAdminCtlWithStderrForTest(ctx context.Context, db *sql.DB, rdb *redis.Cl
 	return runAdminCtl(ctx, deps, args)
 }
 
-// UseActionCredentialLoaderForTest replaces the Host Agent projection read
-// that names an admin's action-only credentials.
-func UseActionCredentialLoaderForTest(h *Handler, load func(adminID string) (map[string]struct{}, error)) {
-	h.loadActionCredentialIDs = load
-}
-
 // SignInNoticeLockKeyForTest is the advisory key that orders admin creations
 // against sign-in notice reads.
 var SignInNoticeLockKeyForTest = signInNoticeLockKey

@@ -155,14 +155,15 @@ export interface ServerActionArguments {
 }
 
 // A refused request with the reason the server gave, if it gave a known one.
+// The code lives on ApiError alone, so the two classes cannot disagree on it.
 export class ServerRequestError extends ApiError {
   constructor(
     status: number,
-    public readonly code: string | null,
+    code: string | null,
     public readonly appliance: Appliance | null = null,
     retryAfterSeconds: number | null = null,
   ) {
-    super(status, retryAfterSeconds);
+    super(status, retryAfterSeconds, code);
     this.name = "ServerRequestError";
   }
 }

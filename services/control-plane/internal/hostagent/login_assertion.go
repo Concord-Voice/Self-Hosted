@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -19,15 +18,12 @@ import (
 
 const maxLoginAssertionBody = 128 << 10
 
-var (
-	errAuthorizerNotImported = errors.New("authorizer not imported")
-	// errActionCredentialLogin refuses a login signed by a credential root
-	// designated for root actions; nothing is verified or advanced.
-	errActionCredentialLogin = fmt.Errorf("%w: action credential cannot log in", ErrAuthorizationDenied)
-)
+var errAuthorizerNotImported = errors.New("authorizer not imported")
 
 // verifyLoginAssertion checks a CP-validated login assertion against root's
-// current credential and durable counter. It creates no action authorization.
+// current credential and advances its durable counter: the one counter that
+// both console logins and root actions move. It creates no action
+// authorization.
 func (s *AuthorizationStore) verifyLoginAssertion(adminID string, session webauthn.SessionData, assertion []byte) error {
 	if s == nil || s.authorizers == nil || s.webauthn == nil {
 		return ErrAuthorizerUnavailable
@@ -66,13 +62,10 @@ func (s *AuthorizationStore) verifyLoginAssertion(adminID string, session webaut
 	if err != nil || credential == nil || credential.Authenticator.CloneWarning {
 		return ErrAuthorizationDenied
 	}
-	if err := s.authorizers.advanceLoginCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
-		if errors.Is(err, errAuthorizerCounterStale) {
+	if err := s.authorizers.AdvanceCounter(credential.ID, credential.Authenticator.SignCount); err != nil {
+		// Revoked between the read above and this write: refuse, as above.
+		if errors.Is(err, errAuthorizerCounterStale) || errors.Is(err, errAuthorizerRevoked) {
 			return ErrAuthorizationDenied
-		}
-		if errors.Is(err, errAuthorizerPurpose) {
-			// Re-imported as an action credential after the read above.
-			return errActionCredentialLogin
 		}
 		log.Printf("concord-agent: authorizer counter update failed at login: %v", err)
 		return ErrAuthorizerUnavailable
@@ -111,11 +104,11 @@ func selectLoginAuthorizer(doc authorizerFile, session webauthn.SessionData, cre
 	if selected == nil {
 		return nil, errAuthorizerNotImported
 	}
-	if selected.AdminID != adminID {
+	// A key root revoked signs nothing, console login included. It is a
+	// refusal (403), never errAuthorizerNotImported: the control plane lets a
+	// not-imported key sign in, so that answer would fail open.
+	if selected.AdminID != adminID || selected.Revoked {
 		return nil, ErrAuthorizationDenied
-	}
-	if selected.Purpose != AuthorizerPurposeLogin {
-		return nil, errActionCredentialLogin
 	}
 	return selected, nil
 }
@@ -147,9 +140,6 @@ func (s *Server) handleLoginAssertion(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusNotFound, "authorizer_not_imported")
 	case errors.Is(err, ErrAuthorizerUnavailable):
 		refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
-	case errors.Is(err, errActionCredentialLogin):
-		s.auditEvent(AuditEvent{Outcome: "denied", Reason: "action_credential_login", AdminID: canonicalAuditAdminID(body.AdminID)})
-		refuse(w, http.StatusForbidden, "authorization_denied")
 	default:
 		refuse(w, http.StatusForbidden, "authorization_denied")
 	}

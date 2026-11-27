@@ -420,3 +420,12 @@ export function encodeAttestation(
     },
   };
 }
+
+// The browser rejects a ceremony that timed out and one the user canceled
+// with the same NotAllowedError, so the copy names both.
+export const KEY_NOT_USED =
+  "Your security key was not used in time, or the request was canceled. Start again and tap your key within the time limit.";
+
+export function keyNotUsed(cause: unknown): boolean {
+  return cause instanceof DOMException && cause.name === "NotAllowedError";
+}

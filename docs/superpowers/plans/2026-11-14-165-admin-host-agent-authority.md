@@ -201,7 +201,7 @@
 
 **Interfaces:**
 - Consumes: Task 3 indexed action-step-up store; existing WebAuthn service and audit table.
-- Produces: `POST /admin/api/v1/admins/stepup`, protected `POST /admins` step-up request shape, `GET /security-notices`.
+- Produces: `POST /admin/api/v1/admins/stepup`, protected `POST /admins` step-up request shape, the sign-in `admins_added` count with `POST /signin-notice/ack` (built in place of a `GET /security-notices` route).
 
 - [ ] **Step 1: Add create-admin denial tests.** Missing, wrong-admin, wrong-action, expired, replayed, non-UV, clone-warning, and limiter-store-failure cases create no row and no token.
 - [ ] **Step 2: Add token-mint compensation test.** Force mint failure after insert and assert no undisclosed pending admin remains.

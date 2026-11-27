@@ -30,6 +30,7 @@ func writeServer(t *testing.T, f *fakeRunner) (*Server, string) {
 	s := NewServer(&fakeRunner{out: statusJSON})
 	s.EnableWrites(f, dir, filepath.Join(t.TempDir(), "write-in-progress"))
 	s.writes.boundary = t.TempDir()
+	s.writes.version = writeVersionFile(t, "0.1.0")
 	auditRoot := t.TempDir()
 	audit, err := openAuditAt(filepath.Join(auditRoot, "host-agent", "events.jsonl"), testOwnerUID(), auditRoot)
 	if err != nil {
@@ -42,7 +43,14 @@ func writeServer(t *testing.T, f *fakeRunner) (*Server, string) {
 	if err := s.SetAuthorizationStore(authorizations); err != nil {
 		t.Fatal(err)
 	}
+	s.SetAlerter(testAlerter())
 	return s, dir
+}
+
+// testAlerter is a configured destination with no worker: alerts queue and
+// are dropped when the queue is full, which never blocks a write.
+func testAlerter() *Alerter {
+	return newAlerter("https://alerts.example.test/hook", "concord-test-host")
 }
 
 func postAuthorized(t *testing.T, s *Server, target, arguments string) *httptest.ResponseRecorder {
@@ -148,6 +156,8 @@ func TestAllSixWritesRequireAgentProofAndStoredArguments(t *testing.T) {
 	if !reflect.DeepEqual(f.args, [][]string{{"update", "--to", "v1.2.3", "--confirm", "--json"}}) {
 		t.Fatalf("ran %v; must use the args bound at begin", f.args)
 	}
+	// Past the update's backup window, so the replay reaches the handle check.
+	s.writes.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	if response := post(t, s, "/v1/actions/update", fmt.Sprintf(`{"handle":%q,"assertion":{"test":true}}`, handle)); response.Code != http.StatusForbidden {
 		t.Fatalf("replayed handle: %d %s", response.Code, response.Body)
 	}
@@ -299,6 +309,7 @@ func TestMarkerExistsOnlyWhileAWriteRuns(t *testing.T) {
 	f := &fakeRunner{wait: make(chan struct{})}
 	s := NewServer(&fakeRunner{})
 	s.EnableWrites(f, t.TempDir(), marker)
+	s.SetAlerter(testAlerter())
 	auditRoot := t.TempDir()
 	audit, err := openAuditAt(filepath.Join(auditRoot, "host-agent", "events.jsonl"), testOwnerUID(), auditRoot)
 	if err != nil {

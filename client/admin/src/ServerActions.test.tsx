@@ -3,7 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
-import { parseServerBackups, parseServerJob, parseServerJobs } from "./server";
+import { ApiError } from "./api";
+import {
+  ServerRequestError,
+  parseServerBackups,
+  parseServerJob,
+  parseServerJobs,
+  serverWriteApi,
+} from "./server";
 import { ServerActions } from "./ServerActions";
 import { server } from "./test/server";
 
@@ -329,7 +336,17 @@ describe("ServerActions", () => {
     [409, "unknown_archive", "no longer in the backups folder"],
     [409, "untrusted_backups", "not owned by root"],
     [400, "invalid_authorization", "did not accept this authorization request"],
-    [429, "authorization_busy", "Another host authorization is in progress"],
+    [
+      429,
+      "authorization_busy",
+      "Too many security key requests are still open on the host. A request you did not finish, such as a cancelled key prompt, expires after 2 minutes. Wait, then try again.",
+    ],
+    [503, "stepup_unavailable", "could not start a security key check"],
+    [400, "invalid_tag", "Enter a release tag such as v0.3.1."],
+    [400, "invalid_archive", "Choose a backup from the list."],
+    [400, "invalid_request", "its action or arguments were not valid"],
+    [500, "internal_error", "failed before it reached the host agent"],
+    [502, "agent_error", "an answer the server could not use"],
   ])(
     "shows begin refusal %s %s without a key failure",
     async (status, code, text) => {
@@ -355,13 +372,42 @@ describe("ServerActions", () => {
     [
       403,
       "authorization_denied",
-      "dedicated action key.*host-root operator.*--action-credential",
+      "key added since the last import must be exported and imported again",
     ],
     [503, "authorizer_unavailable", "cannot load its trusted authorizers"],
     [403, "peer_forbidden", "agent socket permissions"],
-    [429, "authorization_busy", "Another host authorization is in progress"],
+    [
+      429,
+      "authorization_busy",
+      "cancelled key prompt, expires after 2 minutes",
+    ],
     [400, "invalid_authorization", "did not accept this authorization request"],
     [429, "backup_rate_limited", "one attempt per hour"],
+    [409, "update_downgrade_refused", "older than the one this server runs"],
+    [
+      409,
+      "running_version_unknown",
+      "cannot read which release this server runs",
+    ],
+    [503, "job_unavailable", "could not start the action, so nothing ran"],
+    [503, "alerts_not_configured", "no out-of-band alert set up"],
+    [503, "alerts_not_configured", "configure the agent alert"],
+    [404, "unknown_action", "does not know this action"],
+    [400, "unexpected_argument", "an argument this action does not take"],
+    [400, "invalid_body", "could not read the request"],
+    [503, "agent_unavailable", "may still run, so check the jobs list"],
+    [409, "write_in_progress", "Another action is still running"],
+    [409, "security_log_boundary_missing", "security log folder is missing"],
+    [409, "unknown_job", "no longer knows that action"],
+    [409, "appliance_managed", "this console only reads"],
+    [503, "writes_disabled", "Host writes are switched off"],
+    [500, "internal_error", "so nothing ran. Try again."],
+    [
+      502,
+      "agent_error",
+      "may still run, so check the jobs list, then try again",
+    ],
+    [502, "agent_error", "check the host agent's journal"],
   ])("explains agent refusal %s %s", async (status, code, guidance) => {
     lists();
     server.use(
@@ -379,7 +425,48 @@ describe("ServerActions", () => {
     expect(onSessionError).not.toHaveBeenCalled();
   });
 
-  it("reports a canceled security key", async () => {
+  // Only the table's own keys are refusals. Before the own-key lookup these
+  // names read Object.prototype members and crashed or garbled the notice.
+  it.each(["constructor", "__proto__", "toString", "hasOwnProperty"])(
+    "treats the inherited name %s as an unknown code",
+    async (code) => {
+      lists();
+      server.use(
+        http.post(`${base}/actions/backup`, () =>
+          HttpResponse.json({ error: code }, { status: 409 }),
+        ),
+      );
+      const { onSessionError } = renderActions();
+
+      await userEvent
+        .setup()
+        .click(await screen.findByRole("button", { name: "Back up now" }));
+
+      expect(await screen.findByText("session error")).toBeVisible();
+      expect(onSessionError).toHaveBeenCalledWith(
+        expect.objectContaining({ code, status: 409 }),
+      );
+    },
+  );
+
+  it("keeps a refusal code on ApiError alone", async () => {
+    server.use(
+      http.post(`${base}/stepup`, () =>
+        HttpResponse.json({ error: "write_in_progress" }, { status: 409 }),
+      ),
+    );
+    const error: unknown = await serverWriteApi
+      .stepUp("stop", {})
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ServerRequestError);
+    // Read through the base class, the way any ApiError consumer reads it.
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("write_in_progress");
+    expect((error as ApiError).status).toBe(409);
+  });
+
+  it("reports a canceled or timed-out security key", async () => {
     lists();
     server.use(
       http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
@@ -392,7 +479,9 @@ describe("ServerActions", () => {
       .setup()
       .click(await screen.findByRole("button", { name: "Restart" }));
     expect(
-      await screen.findByText("Security key verification was canceled."),
+      await screen.findByText(
+        "Your security key was not used in time, or the request was canceled. Start again and tap your key within the time limit.",
+      ),
     ).toBeVisible();
   });
 

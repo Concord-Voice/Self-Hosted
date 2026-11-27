@@ -20,9 +20,18 @@ const (
 	HostAgentAuditPath = "/var/log/concord-security/host-agent/events.jsonl"
 	maxAuditLineBytes  = 2048
 	maxAuditFileBytes  = 20 << 20
+	// maxAuditDenialBytes is where denial records stop. It sits below the
+	// 19M logrotate size, so denials alone never trigger a rotation that
+	// would evict older admitted records, and the space above it is kept for
+	// admitted, started, succeeded and failed records.
+	maxAuditDenialBytes = 16 << 20
 )
 
-var errAuditFull = errors.New("host-agent audit full")
+var (
+	errAuditFull = errors.New("host-agent audit full")
+	// errAuditDenialReserve refuses a denial record past maxAuditDenialBytes.
+	errAuditDenialReserve = fmt.Errorf("%w: denial records refused in the reserved space", errAuditFull)
+)
 
 // AuditEvent contains only fixed action/outcome/reason values, opaque IDs and
 // the validated arguments a job ran with. Assertion bytes, credential IDs and
@@ -50,6 +59,11 @@ type Audit struct {
 	syncFile  func(*os.File) error
 	broken    bool
 	full      bool // logged once until a write succeeds again
+	// denialsFull is logged once until a denial write succeeds again.
+	denialsFull bool
+	// deniedPastReserve counts denials refused past maxAuditDenialBytes
+	// since the last summary record.
+	deniedPastReserve int
 }
 
 // OpenAudit requires a root-owned log boundary and a root-only stream. It
@@ -136,7 +150,7 @@ func validAuditEvent(e AuditEvent) bool {
 		return false
 	}
 	switch e.Reason {
-	case "peer_forbidden", "begin_denied", "assertion_denied", "replay_denied", "clone_detected", "counter_stale", "admission_approved", "admission_failed", "job_started", "job_succeeded", "job_failed", "write_in_progress", "job_unavailable", "backup_rate_limited", "no_action_credential", "action_credential_login":
+	case "peer_forbidden", "begin_denied", "assertion_denied", "replay_denied", "clone_detected", "counter_stale", "admission_approved", "admission_failed", "job_started", "job_succeeded", "job_failed", "write_in_progress", "job_unavailable", "backup_rate_limited", "no_action_credential", "request_refused", "authorizer_unavailable", "denials_suppressed":
 	default:
 		return false
 	}
@@ -166,9 +180,18 @@ func (a *Audit) Write(event AuditEvent) error {
 	if a == nil || !validAuditEvent(event) {
 		return errors.New("invalid host-agent audit event")
 	}
+	data, err := encodeAuditEvent(event)
+	if err != nil {
+		return err
+	}
+	return a.appendRecord(event, data)
+}
+
+// encodeAuditEvent renders one validated event as a bounded JSONL line.
+func encodeAuditEvent(event AuditEvent) ([]byte, error) {
 	id, err := uuid.NewRandom()
 	if err != nil {
-		return errors.New("host-agent audit ID unavailable")
+		return nil, errors.New("host-agent audit ID unavailable")
 	}
 	record := struct {
 		Schema     string `json:"schema_version"`
@@ -187,9 +210,13 @@ func (a *Audit) Write(event AuditEvent) error {
 	}{"host-agent-audit.v1", id.String(), time.Now().UTC().Format(time.RFC3339Nano), "host-agent", "privileged_action", event.Action, event.Outcome, event.Reason, event.AdminID, event.JobID, event.Tag, event.Archive, event.Suppressed}
 	data, err := json.Marshal(record)
 	if err != nil || len(data)+1 > maxAuditLineBytes {
-		return errors.New("host-agent audit event too large")
+		return nil, errors.New("host-agent audit event too large")
 	}
-	data = append(data, '\n')
+	return append(data, '\n'), nil
+}
+
+// appendRecord writes one encoded record under the stream's checks and caps.
+func (a *Audit) appendRecord(event AuditEvent, data []byte) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.broken {
@@ -211,6 +238,15 @@ func (a *Audit) Write(event AuditEvent) error {
 		_ = f.Close()
 		return errors.New("unsafe host-agent audit file")
 	}
+	if event.Outcome == "denied" && info.Size()+int64(len(data)) > maxAuditDenialBytes {
+		_ = f.Close()
+		a.deniedPastReserve += 1 + event.Suppressed
+		if !a.denialsFull {
+			a.denialsFull = true
+			log.Print("concord-agent: host-agent audit near full; denials are no longer recorded until the stream is rotated")
+		}
+		return errAuditDenialReserve
+	}
 	if info.Size()+int64(len(data)) > maxAuditFileBytes {
 		_ = f.Close()
 		if !a.full {
@@ -218,6 +254,21 @@ func (a *Audit) Write(event AuditEvent) error {
 			log.Print("concord-agent: host-agent audit full; privileged writes refused until the stream is rotated")
 		}
 		return errAuditFull
+	}
+	// One summary record counts the denials refused past the reserve. It goes
+	// ahead of the first record that fits with it: an admission inside the
+	// reserve, or anything after a rotation.
+	summarized := 0
+	if n := a.deniedPastReserve; n > 0 {
+		limit := int64(maxAuditFileBytes)
+		if event.Outcome == "denied" {
+			limit = maxAuditDenialBytes
+		}
+		summary, err := encodeAuditEvent(AuditEvent{Outcome: "denied", Reason: "denials_suppressed", Suppressed: n})
+		if err == nil && info.Size()+int64(len(summary)+len(data)) <= limit {
+			data = append(summary, data...)
+			summarized = n
+		}
 	}
 	written, writeErr := f.Write(data)
 	if written != len(data) || writeErr != nil {
@@ -233,6 +284,10 @@ func (a *Audit) Write(event AuditEvent) error {
 		return a.breakStream("close")
 	}
 	a.full = false
+	a.deniedPastReserve -= summarized
+	if event.Outcome == "denied" {
+		a.denialsFull = false
+	}
 	return nil
 }
 

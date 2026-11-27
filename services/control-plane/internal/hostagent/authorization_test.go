@@ -92,8 +92,18 @@ func newAuthorizationFixture(t *testing.T) (*AuthorizationStore, *fakeAgentWebAu
 	}
 	now := time.Now()
 	store := NewAuthorizationStore(authorizers, verifier, func() time.Time { return now })
-	store.jobs = &jobs{backups: root, boundary: root}
+	store.jobs = &jobs{backups: root, boundary: root, version: writeVersionFile(t, "0.1.0")}
 	return store, verifier, adminID, authorizers, &now
+}
+
+// writeVersionFile writes an install VERSION file and returns its path.
+func writeVersionFile(t *testing.T, version string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "VERSION")
+	if err := os.WriteFile(path, []byte(version+"\n"), 0o644); err != nil { //nolint:gosec // test fixture, root-readable like the install's
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestAuthorizationBeginIsBoundedAndRequiresTrustedAdminAndArgs(t *testing.T) {
@@ -264,6 +274,7 @@ func TestAuthorizationBeginRouteIsPeerGatedAndReturnsNoActionAuthority(t *testin
 	marker := filepath.Join(t.TempDir(), "write-in-progress")
 	server.EnableWrites(runner, t.TempDir(), marker)
 	require.NoError(t, server.SetAuthorizationStore(store))
+	server.SetAlerter(testAlerter())
 	response := post(t, server, "/v1/authorizations", `{"admin_id":"`+adminID+`","action":"start","arguments":{}}`)
 	require.Equal(t, http.StatusOK, response.Code)
 	var body struct {
@@ -363,7 +374,7 @@ func TestAuthorizationRealVerifierRejectsRepeatedOrLowerCounters(t *testing.T) {
 	verifier, err := mfa.NewWebAuthnService("admin.example.test", "Concord Voice", []string{"https://admin.example.test"})
 	require.NoError(t, err)
 	store := NewAuthorizationStore(authorizers, verifier, time.Now)
-	store.jobs = &jobs{backups: root, boundary: root}
+	store.jobs = &jobs{backups: root, boundary: root, version: writeVersionFile(t, "0.1.0")}
 
 	authorize := func(signCount uint32) error {
 		handle, options, beginErr := store.Begin(adminID, "update", actionRequest{Tag: "v1.2.3"})

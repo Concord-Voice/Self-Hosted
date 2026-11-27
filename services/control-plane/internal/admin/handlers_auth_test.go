@@ -98,11 +98,6 @@ func adminAuthEngineWithAgent(t *testing.T, db *sql.DB, rdb *redis.Client, sock 
 	if sock != "" {
 		admin.UseServerAgentForTest(h, sock)
 	}
-	// These tests model the agent's answers, not the action-credential
-	// projection: present it as absent so login behaves as before purposes.
-	admin.UseActionCredentialLoaderForTest(h, func(string) (map[string]struct{}, error) {
-		return nil, os.ErrNotExist
-	})
 	r := gin.New()
 	r.POST("/admin/api/v1/auth/password", h.PasswordLogin)
 	r.POST("/admin/api/v1/auth/webauthn", h.WebAuthnLogin)
