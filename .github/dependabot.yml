@@ -339,8 +339,13 @@ updates:
   # carries the cp312-cp314 x86_64 wheel hashes. It was the repo's first pip manifest and
   # the sole pkg:pypi component in the CycloneDX SBOM, so it was the one
   # ecosystem in the SBOM with no dependabot coverage at all.
+  # `exclude-paths` globs are relative to `directory`, so "semgrep/**" keeps
+  # .github/semgrep/requirements.txt out of this block. The semgrep block below
+  # owns that file; without the exclusion both blocks opened the same PR.
   - package-ecosystem: "pip"
     directory: "/.github"
+    exclude-paths:
+      - "semgrep/**"
     schedule:
       interval: "weekly"
       day: "tuesday"
@@ -380,6 +385,26 @@ updates:
       - "area: deps"
       - "area: ci-cd"
     open-pull-requests-limit: 5
+    # semgrep's own metadata pins these (~=X.Y allows only X.*; ~=X.Y.Z allows
+    # only X.Y.*). The lock does not override them, so a bump past the pin is an
+    # incompatible proposal. Re-check this list when SEMGREP_VERSION moves. The
+    # overridden packages (mcp, wcmatch, opentelemetry-*) stay unignored so
+    # security fixes still arrive.
+    ignore:
+      - dependency-name: "boltons" # ~=21.0
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "peewee" # ~=3.14
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pywin32" # ==311; its versions are majors
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "click" # ~=8.4.2
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "exceptiongroup" # ~=1.2.0
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "jsonschema" # ~=4.25.1
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "tomli" # ~=2.4.0
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       semgrep-tooling:
         patterns:
