@@ -28,7 +28,7 @@ RUN npm prune --omit=dev \
 # stubs/ must persist at runtime — fetch-blob resolves the symlink at require time.
 # See [internal]rules/media-plane.md "Docker Build Context Invariant" for the discipline.
 # Pin the runtime independently so deploy rebuilds cannot reuse a stale floating Node base.
-FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
 
 LABEL org.opencontainers.image.source="https://github.com/Concord-Voice/Self-Hosted"
 LABEL org.opencontainers.image.description="Concord Voice media-plane (mediasoup SFU)"
