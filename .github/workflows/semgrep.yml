@@ -423,6 +423,7 @@ jobs:
           # compared, so `NOSEMGREP`, `nosem=rule` and an edited rule id all count as
           # added; an annotation that moves, even within one hunk, counts as added; an
           # annotation that rides along unchanged on an edited line does not.
+          # shellcheck disable=SC2016  # $0 and $3 are awk fields, not shell variables
           added_annotation='
             /^@@/ { inh = 1; hunks++; nr = 0; na = 0; delete rt; split($3, p, ","); ln = substr(p[1], 2) + 0; next }
             !inh { next }
