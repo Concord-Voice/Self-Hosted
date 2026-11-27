@@ -23,6 +23,8 @@ cat > semgrep-custom.sarif <<'JSON'
 {"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS"}},"results":[
  {"ruleId":"suppressed.rule","suppressions":[{"kind":"inSource"}],
   "locations":[{"physicalLocation":{"artifactLocation":{"uri":"a.go"},"region":{"startLine":7}}}]},
+ {"ruleId":"forged.rule","suppressions":[{"kind":"inSource"}],
+  "locations":[{"physicalLocation":{"artifactLocation":{"uri":"x.go\n::warning::forged"},"region":{"startLine":1}}}]},
  {"ruleId":"live.rule"},
  {"ruleId":"live.empty","suppressions":[]}]},
  {"tool":{"driver":{"name":"Semgrep OSS"}}}]}
@@ -34,8 +36,10 @@ out=$(bash -eo pipefail step.sh 2>/dev/null); rc=$?
 check "step exits 0" "$rc" "0"
 check "ids kept" "$(jq -c '[.runs[0].results[].ruleId]' semgrep-custom.sarif)" '["live.rule","live.empty"]'
 check "run without results survives" "$(jq '.runs | length' semgrep-custom.sarif)" "2"
-check "counts logged" "$(grep -c -- '3 -> 2' <<<"$out")" "1"
-check "dropped result listed" "$(grep -c 'dropped suppressed: suppressed.rule a.go:7' <<<"$out")" "1"
+check "counts logged" "$(grep -c -- '4 -> 2' <<<"$out")" "1"
+check "dropped result listed" "$(grep -cF 'dropped suppressed: ["suppressed.rule","a.go",7]' <<<"$out")" "1"
+check "control chars in a path cannot forge a command" "$(grep -c '^::warning::forged' <<<"$out")" "0"
+check "escaped path still listed" "$(grep -cF 'x.go\n::warning::forged' <<<"$out")" "1"
 check "bad file warns" "$(grep -c '^::warning::' <<<"$out")" "1"
 check "bad file untouched" "$(cmp -s semgrep-community.sarif bad.orig && echo same)" "same"
 check "no temp left" "$(ls | grep -c filtered)" "0"

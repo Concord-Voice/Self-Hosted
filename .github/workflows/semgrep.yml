@@ -417,8 +417,10 @@ jobs:
             # scanner output sets no state. `. // []` tolerates a run without results.
             if jq '(.runs[]?.results) |= ((. // []) | map(select((.suppressions | length // 0) == 0)))' \
                  "$f" > "$f.filtered"; then
+              # @json escapes control characters: the file URI is a PR-controlled
+              # filename, and a raw newline plus `::` would forge a workflow command.
               jq -r '.runs[]?.results[]? | select((.suppressions | length // 0) > 0)
-                | "  dropped suppressed: \(.ruleId) \(.locations[0].physicalLocation.artifactLocation.uri // "?"):\(.locations[0].physicalLocation.region.startLine // "?")"' "$f" || true
+                | "  dropped suppressed: " + ([.ruleId, (.locations[0].physicalLocation.artifactLocation.uri // "?"), (.locations[0].physicalLocation.region.startLine // "?")] | @json)' "$f" || true
               after=$(jq '[.runs[]?.results[]?] | length' "$f.filtered")
               mv "$f.filtered" "$f"
               echo "SARIF results in $f: ${before} -> ${after} (dropped in-source-suppressed)"
