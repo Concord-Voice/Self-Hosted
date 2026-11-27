@@ -1,4 +1,4 @@
-FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS builder
+FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -9,7 +9,7 @@ RUN GOTOOLCHAIN=local go version | grep -q '^go version go1\.27\.4 ' \
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/redis-auth-controller ./cmd/redis-auth-controller
 
-FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 # zlib: CVE-2026-85091 is fixed in 1.3.2-r1, which the pinned base predates.
 RUN grep -Eq '^3\.24\.' /etc/alpine-release \
     && apk --no-cache upgrade zlib \
