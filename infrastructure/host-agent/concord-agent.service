@@ -24,7 +24,8 @@ UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
-ReadWritePaths=/etc/concord-voice/agent-authorizers
+# "-": a missing directory must not stop the agent; it then refuses writes.
+ReadWritePaths=-/etc/concord-voice/agent-authorizers
 ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
