@@ -189,7 +189,7 @@ export function SecurityKeys({
           <output className="form-status">Loading security keys</output>
         ) : null}
         {list ? (
-          <table>
+          <table className="security-keys-table">
             <caption>
               Your security keys ({list.keys.length} of {list.max})
             </caption>
@@ -227,17 +227,22 @@ export function SecurityKeys({
           </p>
         ) : null}
         {list && !full ? (
-          <form onSubmit={addKey}>
-            <label htmlFor="backup-key-name">New key name</label>
-            <input
-              id="backup-key-name"
-              autoComplete="off"
-              disabled={busy}
-              maxLength={64}
-              value={name}
-              onChange={(event) => setName(event.currentTarget.value)}
-            />
-            <button disabled={busy || !name.trim()} type="submit">
+          <form className="series-controls" onSubmit={addKey}>
+            <label>
+              <span>New key name</span>
+              <input
+                autoComplete="off"
+                disabled={busy}
+                maxLength={64}
+                value={name}
+                onChange={(event) => setName(event.currentTarget.value)}
+              />
+            </label>
+            <button
+              className="server-action"
+              disabled={busy || !name.trim()}
+              type="submit"
+            >
               {busy ? "Adding key" : "Add a backup key"}
             </button>
           </form>

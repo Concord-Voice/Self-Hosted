@@ -49,7 +49,7 @@ export function AdminsAddedNotice({
       </h2>
       <p role="alert">{adminsAddedMessage(count)}</p>
       <p>If you did not expect this, check the admin audit log.</p>
-      <button type="button" onClick={onDismiss}>
+      <button className="server-action" type="button" onClick={onDismiss}>
         Dismiss
       </button>
     </section>

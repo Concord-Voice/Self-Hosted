@@ -331,6 +331,12 @@ export function ServerActions({
           </p>
         </div>
       </div>
+      {/* Above the controls: a refusal can come from any of them, so it must
+          not sit under the restore form. */}
+      {status && (
+        <output className="resource-notice resource-loading">{status}</output>
+      )}
+      {error && <output className="resource-notice">{error}</output>}
       <div className="server-action-row">
         {(["start", "stop", "restart", "backup"] as const).map((action) => (
           <button
@@ -401,10 +407,6 @@ export function ServerActions({
           Restore
         </button>
       </form>
-      {status && (
-        <output className="resource-notice resource-loading">{status}</output>
-      )}
-      {error && <output className="resource-notice">{error}</output>}
       {current && (
         <>
           <p className="server-logs-caption">
