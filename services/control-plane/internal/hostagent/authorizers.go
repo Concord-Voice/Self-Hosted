@@ -426,31 +426,41 @@ func encodeAuthorizerFile(doc *authorizerFile) ([]byte, error) {
 // time alike.
 func (s *AuthorizerStore) AdvanceCounter(credentialID []byte, count uint32) error {
 	return s.mutate(func(doc *authorizerFile) (bool, error) {
-		found := false
-		for i := range doc.Authorizers {
-			id, _ := decodeAuthorizerField(doc.Authorizers[i].CredentialID, maxAuthorizerIDBytes)
-			if !bytes.Equal(id, credentialID) {
-				continue
-			}
-			if doc.Authorizers[i].Revoked {
-				return false, errAuthorizerRevoked
-			}
-			old := doc.Authorizers[i].SignCount
-			if count <= old && (count != 0 || old != 0) {
-				return false, errAuthorizerCounterStale
-			}
-			if count == old {
-				return false, nil
-			}
-			doc.Authorizers[i].SignCount = count
-			found = true
-			break
-		}
-		if !found {
+		record := findAuthorizerRecord(doc, credentialID)
+		if record == nil {
 			return false, errors.New("unknown authorizer credential")
 		}
-		return true, nil
+		return advanceRecordCounter(record, count)
 	})
+}
+
+// findAuthorizerRecord returns the record whose credential ID is id, or nil.
+func findAuthorizerRecord(doc *authorizerFile, id []byte) *authorizerRecord {
+	for i := range doc.Authorizers {
+		recordID, _ := decodeAuthorizerField(doc.Authorizers[i].CredentialID, maxAuthorizerIDBytes)
+		if bytes.Equal(recordID, id) {
+			return &doc.Authorizers[i]
+		}
+	}
+	return nil
+}
+
+// advanceRecordCounter moves one record's counter forward. It refuses a
+// revoked record and a stale count, and reports false when nothing changed
+// (an authenticator without a counter keeps sending 0).
+func advanceRecordCounter(record *authorizerRecord, count uint32) (bool, error) {
+	if record.Revoked {
+		return false, errAuthorizerRevoked
+	}
+	old := record.SignCount
+	if count <= old && (count != 0 || old != 0) {
+		return false, errAuthorizerCounterStale
+	}
+	if count == old {
+		return false, nil
+	}
+	record.SignCount = count
+	return true, nil
 }
 
 // ImportMany validates and installs every credential of one root-confirmed

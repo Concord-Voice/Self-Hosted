@@ -96,22 +96,8 @@ func (s *AuthorizationStore) Begin(adminID, action string, req actionRequest) (s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	for handle, pending := range s.pending {
-		if !now.Before(pending.expires) {
-			delete(s.pending, handle)
-		}
-	}
-	if len(s.pending) >= authorizationCapacity {
-		return "", nil, ErrAuthorizationBusy
-	}
-	held := 0
-	for _, pending := range s.pending {
-		if pending.adminID == adminID {
-			held++
-		}
-	}
-	if held >= authorizationsPerAdmin {
-		return "", nil, ErrAuthorizationBusy
+	if err := s.checkCapacityLocked(adminID, now); err != nil {
+		return "", nil, err
 	}
 	credentials, err := s.authorizers.Credentials(adminID)
 	if err != nil {
@@ -136,6 +122,24 @@ func (s *AuthorizationStore) Begin(adminID, action string, req actionRequest) (s
 	}
 	s.pending[handle] = pendingAuthorization{adminID: adminID, action: action, req: req, session: *session, expires: now.Add(authorizationTTL)}
 	return handle, options, nil
+}
+
+// checkCapacityLocked drops expired ceremonies, then refuses a new one when the
+// store or this admin's share of it is full. The caller holds s.mu.
+func (s *AuthorizationStore) checkCapacityLocked(adminID string, now time.Time) error {
+	held := 0
+	for handle, pending := range s.pending {
+		switch {
+		case !now.Before(pending.expires):
+			delete(s.pending, handle)
+		case pending.adminID == adminID:
+			held++
+		}
+	}
+	if len(s.pending) >= authorizationCapacity || held >= authorizationsPerAdmin {
+		return ErrAuthorizationBusy
+	}
+	return nil
 }
 
 // consume removes the handle before checking the assertion. Failed, expired,

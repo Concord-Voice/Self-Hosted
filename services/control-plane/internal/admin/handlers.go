@@ -333,28 +333,8 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		return
 	}
 
-	if hostAgentProjectionEnabled(filepath.Dir(agentAuthorizerProjectionPath)) {
-		// An imported key's authoritative counter is the root-owned one that
-		// host actions also advance: one key, one counter. The agent must
-		// reverify this assertion against it and advance it before any session
-		// is minted; a key it has never imported answers 404 and continues to
-		// the database-only finalization below. An unreadable root file
-		// answers 503 (fail closed).
-		if verifyErr := h.verifyImportedCredential(ctx, challenge.AdminID, req.Assertion, challenge.Session); verifyErr != nil {
-			h.auditFailure(ctx, challenge.Username, EventLoginFailure)
-			switch {
-			case errors.Is(verifyErr, errImportedCredentialRejected):
-				h.log.Warn("admin imported credential assertion rejected")
-				c.JSON(http.StatusUnauthorized, genericAuthError)
-			case errors.Is(verifyErr, errHostAgentUnavailable):
-				h.log.Warn("admin imported credential verification unavailable")
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": msgInternalError})
-			default:
-				h.log.Error("admin imported credential verification failed")
-				c.JSON(http.StatusBadGateway, gin.H{"error": msgInternalError})
-			}
-			return
-		}
+	if h.refuseImportedCredential(c, challenge.AdminID, challenge.Username, req.Assertion, challenge.Session) {
+		return
 	}
 
 	// Every credential, imported or not, persists its advanced counter and mints
@@ -1136,4 +1116,34 @@ func (h *Handler) removeUnfinishedPending(ctx context.Context, created AdminUser
 		h.log.Error("admin remove unfinished pending admin failed", "created_admin_id", created.ID, "error", err)
 		return pendingKept
 	}
+}
+
+// refuseImportedCredential has the host agent reverify a login assertion for a
+// key it imported, and answers the request when it refuses. An imported key's
+// authoritative counter is the root-owned one that host actions also advance:
+// one key, one counter. The agent must reverify this assertion against it and
+// advance it before any session is minted; a key it has never imported answers
+// 404 and continues to the database-only finalization. An unreadable root file
+// answers 503 (fail closed). It reports whether it answered.
+func (h *Handler) refuseImportedCredential(c *gin.Context, adminID, username string, assertion json.RawMessage, session webauthn.SessionData) bool {
+	if !hostAgentProjectionEnabled(filepath.Dir(agentAuthorizerProjectionPath)) {
+		return false
+	}
+	verifyErr := h.verifyImportedCredential(c.Request.Context(), adminID, assertion, session)
+	if verifyErr == nil {
+		return false
+	}
+	h.auditFailure(c.Request.Context(), username, EventLoginFailure)
+	switch {
+	case errors.Is(verifyErr, errImportedCredentialRejected):
+		h.log.Warn("admin imported credential assertion rejected")
+		c.JSON(http.StatusUnauthorized, genericAuthError)
+	case errors.Is(verifyErr, errHostAgentUnavailable):
+		h.log.Warn("admin imported credential verification unavailable")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": msgInternalError})
+	default:
+		h.log.Error("admin imported credential verification failed")
+		c.JSON(http.StatusBadGateway, gin.H{"error": msgInternalError})
+	}
+	return true
 }

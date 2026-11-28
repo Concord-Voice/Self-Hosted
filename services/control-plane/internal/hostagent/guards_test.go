@@ -196,7 +196,9 @@ func TestDenialFloodCannotBlockOrEvictAdmission(t *testing.T) {
 	admitted := map[string]bool{}
 	for _, line := range readAuditLines(t, s.audit.path) {
 		if line["outcome"] == "admitted" {
-			admitted[line["job_id"].(string)] = true //nolint:forcetypeassert // written by Audit as a string
+			jobID, ok := line["job_id"].(string)
+			require.True(t, ok, "an admitted record carries a string job_id")
+			admitted[jobID] = true
 		}
 	}
 	require.True(t, admitted[first.ID] && admitted[second.ID], "both admitted records are in the stream")

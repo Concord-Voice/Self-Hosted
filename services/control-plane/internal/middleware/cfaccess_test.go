@@ -790,7 +790,8 @@ func TestAccessVerifierLogsSkippedMalformedJWKByKID(t *testing.T) {
 	good := jwksJSONMulti(t, map[string]*rsa.PrivateKey{"good": key})
 	var doc map[string]any
 	require.NoError(t, json.Unmarshal(good, &doc))
-	keys := doc["keys"].([]any)
+	keys, ok := doc["keys"].([]any)
+	require.True(t, ok, "JWKS fixture has a keys array")
 	keys = append(keys, map[string]string{"kid": "bad-kid", "kty": "RSA", "alg": "RS256", "n": "!!!notbase64", "e": "AQAB"})
 	doc["keys"] = keys
 	body, err := json.Marshal(doc)

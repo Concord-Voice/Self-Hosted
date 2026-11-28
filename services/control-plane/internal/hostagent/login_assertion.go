@@ -77,30 +77,13 @@ func selectLoginAuthorizer(doc authorizerFile, session webauthn.SessionData, cre
 	if session.RelyingPartyID != doc.RPID {
 		return nil, ErrAuthorizationDenied
 	}
-	if session.Origin != "" {
-		trusted := false
-		for _, origin := range doc.Origins {
-			trusted = trusted || session.Origin == origin
-		}
-		if !trusted {
-			return nil, ErrAuthorizationDenied
-		}
-	}
-	allowed := false
-	for _, id := range session.AllowedCredentialIDs {
-		allowed = allowed || bytes.Equal(id, credentialID)
-	}
-	if !allowed {
+	if session.Origin != "" && !slices.Contains(doc.Origins, session.Origin) {
 		return nil, ErrAuthorizationDenied
 	}
-	var selected *authorizerRecord
-	for i := range doc.Authorizers {
-		id, _ := decodeAuthorizerField(doc.Authorizers[i].CredentialID, maxAuthorizerIDBytes)
-		if bytes.Equal(id, credentialID) {
-			selected = &doc.Authorizers[i]
-			break
-		}
+	if !slices.ContainsFunc(session.AllowedCredentialIDs, func(id []byte) bool { return bytes.Equal(id, credentialID) }) {
+		return nil, ErrAuthorizationDenied
 	}
+	selected := findAuthorizerRecord(&doc, credentialID)
 	if selected == nil {
 		return nil, errAuthorizerNotImported
 	}

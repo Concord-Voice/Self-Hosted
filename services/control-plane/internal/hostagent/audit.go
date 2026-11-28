@@ -238,38 +238,11 @@ func (a *Audit) appendRecord(event AuditEvent, data []byte) error {
 		_ = f.Close()
 		return errors.New("unsafe host-agent audit file")
 	}
-	if event.Outcome == "denied" && info.Size()+int64(len(data)) > maxAuditDenialBytes {
+	if err := a.checkRoomLocked(event, info.Size(), len(data)); err != nil {
 		_ = f.Close()
-		a.deniedPastReserve += 1 + event.Suppressed
-		if !a.denialsFull {
-			a.denialsFull = true
-			log.Print("concord-agent: host-agent audit near full; denials are no longer recorded until the stream is rotated")
-		}
-		return errAuditDenialReserve
+		return err
 	}
-	if info.Size()+int64(len(data)) > maxAuditFileBytes {
-		_ = f.Close()
-		if !a.full {
-			a.full = true
-			log.Print("concord-agent: host-agent audit full; privileged writes refused until the stream is rotated")
-		}
-		return errAuditFull
-	}
-	// One summary record counts the denials refused past the reserve. It goes
-	// ahead of the first record that fits with it: an admission inside the
-	// reserve, or anything after a rotation.
-	summarized := 0
-	if n := a.deniedPastReserve; n > 0 {
-		limit := int64(maxAuditFileBytes)
-		if event.Outcome == "denied" {
-			limit = maxAuditDenialBytes
-		}
-		summary, err := encodeAuditEvent(AuditEvent{Outcome: "denied", Reason: "denials_suppressed", Suppressed: n})
-		if err == nil && info.Size()+int64(len(summary)+len(data)) <= limit {
-			data = append(summary, data...)
-			summarized = n
-		}
-	}
+	data, summarized := a.withSummaryLocked(event, info.Size(), data)
 	written, writeErr := f.Write(data)
 	if written != len(data) || writeErr != nil {
 		_ = f.Truncate(info.Size())
@@ -289,6 +262,48 @@ func (a *Audit) appendRecord(event AuditEvent, data []byte) error {
 		a.denialsFull = false
 	}
 	return nil
+}
+
+// checkRoomLocked refuses a record that does not fit: a denial past the
+// denial reserve (counted for a later summary) or any record past the file
+// limit. It logs each condition once until a write succeeds again.
+func (a *Audit) checkRoomLocked(event AuditEvent, size int64, n int) error {
+	if event.Outcome == "denied" && size+int64(n) > maxAuditDenialBytes {
+		a.deniedPastReserve += 1 + event.Suppressed
+		if !a.denialsFull {
+			a.denialsFull = true
+			log.Print("concord-agent: host-agent audit near full; denials are no longer recorded until the stream is rotated")
+		}
+		return errAuditDenialReserve
+	}
+	if size+int64(n) > maxAuditFileBytes {
+		if !a.full {
+			a.full = true
+			log.Print("concord-agent: host-agent audit full; privileged writes refused until the stream is rotated")
+		}
+		return errAuditFull
+	}
+	return nil
+}
+
+// withSummaryLocked puts one summary record, counting the denials refused
+// past the reserve, ahead of data when both fit: an admission inside the
+// reserve, or anything after a rotation. It returns the records to write and
+// how many denials the summary covers.
+func (a *Audit) withSummaryLocked(event AuditEvent, size int64, data []byte) ([]byte, int) {
+	n := a.deniedPastReserve
+	if n == 0 {
+		return data, 0
+	}
+	limit := int64(maxAuditFileBytes)
+	if event.Outcome == "denied" {
+		limit = maxAuditDenialBytes
+	}
+	summary, err := encodeAuditEvent(AuditEvent{Outcome: "denied", Reason: "denials_suppressed", Suppressed: n})
+	if err != nil || size+int64(len(summary)+len(data)) > limit {
+		return data, 0
+	}
+	return append(summary, data...), n
 }
 
 // breakStream latches the audit off after a failed append, sync or close: the

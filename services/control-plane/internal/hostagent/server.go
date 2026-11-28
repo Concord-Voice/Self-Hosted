@@ -262,22 +262,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleLoginAssertion(w, r)
 		return
 	}
-	if s.managedBy != "" && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {
-		s.refuseManaged(w)
-		return
-	}
-	if s.writes == nil && s.writesDisabled && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {
-		refuse(w, http.StatusServiceUnavailable, "writes_disabled")
-		return
-	}
-	// With one key for login and host actions, the out-of-band alert is the
-	// only detection control for a control plane that spends a harvested
-	// login tap on a host action: no write, and no key tap for one, without it.
-	if s.writes != nil && s.alerts == nil && (writePath(r.URL.Path) || r.URL.Path == "/v1/authorizations") {
-		refuse(w, http.StatusServiceUnavailable, "alerts_not_configured")
-		return
-	}
-	if s.handleWriteRoute(w, r) {
+	if s.refuseWriteGate(w, r.URL.Path) || s.handleWriteRoute(w, r) {
 		return
 	}
 	handle, action := s.readRoute(r.URL.Path)
@@ -304,6 +289,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("concord-agent: action=%s outcome=%s", action, outcome)
 }
 
+const authorizationsPath = "/v1/authorizations"
+
+// refuseWriteGate refuses a write route, or the authorization begin that
+// precedes one, when this agent cannot run writes. It reports whether it
+// refused.
+func (s *Server) refuseWriteGate(w http.ResponseWriter, path string) bool {
+	if !writePath(path) && path != authorizationsPath {
+		return false
+	}
+	switch {
+	case s.managedBy != "":
+		s.refuseManaged(w)
+	case s.writes == nil && s.writesDisabled:
+		refuse(w, http.StatusServiceUnavailable, "writes_disabled")
+	case s.writes != nil && s.alerts == nil:
+		// With one key for login and host actions, the out-of-band alert is
+		// the only detection control for a control plane that spends a
+		// harvested login tap on a host action: no write, and no key tap for
+		// one, without it.
+		refuse(w, http.StatusServiceUnavailable, "alerts_not_configured")
+	default:
+		return false
+	}
+	return true
+}
+
 func requestAction(path string) string {
 	action, _ := strings.CutPrefix(path, "/v1/actions/")
 	return actionName(action)
@@ -314,7 +325,7 @@ func (s *Server) handleWriteRoute(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/v1/authorizations":
+	case authorizationsPath:
 		s.handleAuthorizationBegin(w, r)
 	case "/v1/backups":
 		s.handleBackups(w, r)
