@@ -5847,7 +5847,7 @@ paths:
                 - $ref: '#/components/schemas/Error'
                 - $ref: '#/components/schemas/UnissuedKeyEpochError'
         '403':
-          description: Not a participant, or not the message author
+          description: Not a participant, not the message author, or a server-authored row (type other than `user`) that is never editable
           content:
             application/json:
               schema:
@@ -10787,7 +10787,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Not the message author or missing PermManageOwnMessages
+          description: Not the message author, missing PermManageOwnMessages, or a server-authored row (type other than `user`) that is never editable
           content:
             application/json:
               schema:
