@@ -139,6 +139,13 @@ const (
 // must serialize with its deletion; taking FOR SHARE and upgrading later lets
 // concurrent writers deadlock.
 func (h *Handler) lockChannelMessageMutationTx(c *gin.Context, tx *sql.Tx, messageID, userID string, required rbac.Permission, genericMsg string) (string, string, string, bool) {
+	return h.lockChannelMessageMutationWithOptionsTx(c, tx, messageID, userID, required, genericMsg, false)
+}
+
+// lockChannelMessageMutationWithOptionsTx is lockChannelMessageMutationTx with
+// manageAllCoversOwn exposed: when true, PermManageAllMessages also satisfies a
+// PermManageOwnMessages requirement. Only message delete passes true.
+func (h *Handler) lockChannelMessageMutationWithOptionsTx(c *gin.Context, tx *sql.Tx, messageID, userID string, required rbac.Permission, genericMsg string, manageAllCoversOwn bool) (string, string, string, bool) {
 	var channelID, serverID, channelType string
 	if err := tx.QueryRowContext(c.Request.Context(), `
 		SELECT m.channel_id, ch.server_id FROM messages m
@@ -159,6 +166,7 @@ func (h *Handler) lockChannelMessageMutationTx(c *gin.Context, tx *sql.Tx, messa
 	authorization := messageChannelAuthorization{
 		serverID: serverID, channelID: channelID, userID: userID,
 		required: required, genericMsg: genericMsg,
+		manageAllCoversOwn: manageAllCoversOwn,
 	}
 	channelType, locked := h.lockMessageChannelTx(c.Request.Context(), c, tx, authorization)
 	if !locked {

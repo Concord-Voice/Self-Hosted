@@ -62,7 +62,7 @@ func insertUpdateTestMessage(t *testing.T, db *sql.DB, convID, userID, content s
 	var messageID string
 	require.NoError(t, db.QueryRow(`
 		INSERT INTO dm_messages (conversation_id, user_id, content, type, key_version)
-		VALUES ($1, $2, $3, 'text', 1) RETURNING id`, convID, userID, content).Scan(&messageID))
+		VALUES ($1, $2, $3, 'user', 1) RETURNING id`, convID, userID, content).Scan(&messageID))
 	return messageID
 }
 

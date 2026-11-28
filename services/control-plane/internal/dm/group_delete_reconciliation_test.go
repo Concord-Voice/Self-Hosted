@@ -844,7 +844,7 @@ func TestUpdateDMMessageCiphertextRetriesLegacyMembershipDriftWithoutDuplicateWr
 	editor, removed := participants[0], participants[1]
 	messageID := uuid.New()
 	_, err := db.Exec(`INSERT INTO dm_messages (id, conversation_id, user_id, content, key_version, type)
-		VALUES ($1, $2, $3, 'before', 1, 'text')`, messageID, convID, editor)
+		VALUES ($1, $2, $3, 'before', 1, 'user')`, messageID, convID, editor)
 	require.NoError(t, err)
 
 	editCtx := actorCtx(context.Background(), t, db, editor.String()) // before the test takes any lock

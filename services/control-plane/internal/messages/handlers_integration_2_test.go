@@ -546,6 +546,42 @@ func TestUpdateMessage_RequiresManageOwnMessages(t *testing.T) {
 	assert.Equal(t, 1, storedKeyVersion)
 }
 
+// Pins: server-authored rows (type != 'user') are never user-editable, even
+// when the row records the acting member as user_id (expiration_event rows do).
+func TestUpdateMessage_RefusesExpirationEventRow(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "updmsgevtowner")
+	member := ts.CreateTestUser(t, "updmsgevtmember")
+	serverID := ts.CreateTestServer(t, owner.ID, "Update Event Row Server")
+	channelID := ts.CreateTestChannel(t, serverID, "eventrow")
+	ts.AddMemberToServer(t, serverID, member.ID, "member")
+
+	// Positive control: the same member can edit an ordinary message.
+	ownMsgID := ts.CreateTestMessage(t, channelID, member, testhelpers.ValidCiphertext())
+	w := ts.DoRequest("PATCH", pathAPIMsgSlash+ownMsgID, map[string]interface{}{
+		"content": testhelpers.ValidCiphertext(), "key_version": 1,
+	}, testhelpers.AuthHeaders(member.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	eventID := uuid.New().String()
+	_, err := ts.DB.Exec(`
+		INSERT INTO messages (id, channel_id, user_id, content, type, key_version, expiration_event_payload)
+		VALUES ($1, $2, $3, '', 'expiration_event', 1, '{"window_seconds":3600}'::jsonb)`,
+		eventID, channelID, member.ID)
+	require.NoError(t, err)
+
+	w = ts.DoRequest("PATCH", pathAPIMsgSlash+eventID, map[string]interface{}{
+		"content": testhelpers.ValidCiphertext(), "key_version": 1,
+	}, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+
+	var content string
+	var editedAt *string
+	require.NoError(t, ts.DB.QueryRow(`SELECT content, edited_at::text FROM messages WHERE id = $1`, eventID).Scan(&content, &editedAt))
+	assert.Equal(t, "", content)
+	assert.Nil(t, editedAt)
+}
+
 // Pins: an author who still holds ManageOwn but is denied view of the channel
 // cannot edit; the in-transaction view gate refuses what the preflight allows.
 func TestUpdateMessage_DeniedWhenAuthorCannotViewChannel(t *testing.T) {
