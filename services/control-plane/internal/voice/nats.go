@@ -6912,7 +6912,7 @@ func (s *NATSSubscriber) persistDMRoomEmptySummary(
 		// from the replacement lifecycle.
 		respawned, insertErr := dm.InsertCompletedCallEvent(ctx, s.db, conversationID, summary)
 		if insertErr != nil {
-			s.logDMCallEventFailure("Failed to insert completed call_event row", insertErr)
+			s.logDMCallEventFailure(insertErr)
 		}
 		s.publishDMRespawn(ctx, conversationID, respawned)
 	default:
@@ -6926,12 +6926,12 @@ func (s *NATSSubscriber) persistDMRoomEmptySummary(
 	return hasSummary, err
 }
 
-func (s *NATSSubscriber) logDMCallEventFailure(message string, err error) {
+func (s *NATSSubscriber) logDMCallEventFailure(err error) {
 	if reservationquota.IsExhausted(err) {
 		s.log.Warn("DM call history omitted at message storage capacity", "failure_class", "capacity")
 		return
 	}
-	s.log.Error(message, "failure_class", "state_write")
+	s.log.Error("Failed to insert DM call_event row", "failure_class", "state_write")
 }
 
 func parseDMRoomEmptyCallID(rawCallID string) (uuid.UUID, error) {
@@ -7380,7 +7380,7 @@ func (s *NATSSubscriber) persistDMRoomEmptyFallback(
 	if event.CallID == "" {
 		respawned, err := dm.InsertCompletedCallEventForDMRoom(ctx, s.db, conversationID)
 		if err != nil {
-			s.logDMCallEventFailure("Failed to insert legacy completed call_event row", err)
+			s.logDMCallEventFailure(err)
 		}
 		s.publishDMRespawn(ctx, conversationID, respawned)
 		return
@@ -7408,7 +7408,7 @@ func (s *NATSSubscriber) persistDMRoomEmptyFallback(
 		ctx, s.db, conversationID, callID, ringID, callerUserID, endedAt,
 	)
 	if err != nil {
-		s.logDMCallEventFailure("Failed to insert exact heartbeat completed call_event row", err)
+		s.logDMCallEventFailure(err)
 	}
 	s.publishDMRespawn(ctx, conversationID, respawned)
 }
