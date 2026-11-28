@@ -16,12 +16,12 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "lucide-react": "^1.75.0",
+    "lucide-react": "^1.77.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@eslint-react/eslint-plugin": "^5.30.4",
+    "@eslint-react/eslint-plugin": "^5.30.5",
     "@playwright/test": "^1.65.0",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",

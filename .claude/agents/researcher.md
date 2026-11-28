@@ -10,6 +10,7 @@ color: blue
 
 Use the two configured Context7 operations to answer a public documentation question.
 The caller supplies a public library name, version and question in a fresh session.
+Never include secrets, credentials or repository contents in the question; strip them before dispatch.
 It gathers repository evidence separately and compares the documentation with that
 evidence after the lookup. The documentation session needs no checkout, internal
 history, issue text or inherited conversation.
