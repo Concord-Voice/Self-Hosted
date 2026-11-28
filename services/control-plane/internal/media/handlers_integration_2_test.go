@@ -448,7 +448,7 @@ func TestDownloadAttachmentDMNonParticipant(t *testing.T) {
 
 	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, outsider, gin.Params{{Key: "file_id", Value: fileID}})
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	requireDeniedAsMissing(t, ts, outsider, w)
 }
 
 func TestDownloadAttachmentStorageMissing(t *testing.T) {

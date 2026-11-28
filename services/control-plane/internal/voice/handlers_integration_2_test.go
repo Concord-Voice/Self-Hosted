@@ -104,6 +104,63 @@ func TestGetParticipants_MemberCanView(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+// A non-voice channel must be indistinguishable from a channel that does not
+// exist: a member learns nothing about the channel's type or its visibility
+// from the participants endpoint.
+func TestGetParticipants_NonVoiceChannelMatchesNonexistent(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "vpnvowner")
+	member := ts.CreateTestUser(t, "vpnvmember")
+	serverID := ts.CreateTestServer(t, owner.ID, "VP Non Voice")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+
+	visibleText := ts.CreateTestChannel(t, serverID, "visible-text")
+	hiddenText := ts.CreateTestChannel(t, serverID, "hidden-text")
+	voiceID := ts.CreateVoiceChannel(t, serverID, "plain-voice")
+
+	// Deny only the view bit for the default role; read-history stays granted,
+	// so the view bit is the sole reason the channel is hidden. Overrides are
+	// created before the member's first request so no cached result predates them.
+	rows, err := ts.DB.Query(`SELECT id FROM roles WHERE server_id = $1 AND is_default = TRUE`, serverID)
+	require.NoError(t, err)
+	var defaultRoleIDs []string
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		defaultRoleIDs = append(defaultRoleIDs, id)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.NotEmpty(t, defaultRoleIDs)
+	for _, roleID := range defaultRoleIDs {
+		ts.CreateChannelOverride(t, hiddenText, "role", roleID, 0, int64(rbac.PermViewTextChannels))
+	}
+
+	get := func(channelID string) (int, string) {
+		w := ts.DoRequest("GET", pathChannelsPrefix+channelID+pathVoiceParticipants, nil, testhelpers.AuthHeaders(member.AccessToken))
+		return w.Code, w.Body.String()
+	}
+
+	missingCode, missingBody := get(uuid.New().String())
+	require.Equal(t, http.StatusForbidden, missingCode, "body: %s", missingBody)
+
+	for name, channelID := range map[string]string{
+		"visible text channel": visibleText,
+		"hidden text channel":  hiddenText,
+	} {
+		t.Run(name, func(t *testing.T) {
+			code, body := get(channelID)
+			assert.Equal(t, http.StatusForbidden, code, "body: %s", body)
+			assert.Equal(t, missingBody, body, "must be byte-equal to the nonexistent-channel response")
+		})
+	}
+
+	t.Run("voice channel control", func(t *testing.T) {
+		code, body := get(voiceID)
+		assert.Equal(t, http.StatusOK, code, "body: %s", body)
+	})
+}
+
 // =============================================================================
 // AuthorizeJoin additional edge cases
 // =============================================================================
