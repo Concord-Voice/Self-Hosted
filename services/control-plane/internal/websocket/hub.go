@@ -4188,7 +4188,7 @@ func (h *Hub) persistMessageWithExpiry(p persistMessageParams) (uuid.UUID, time.
 	if err != nil {
 		if reservationquota.IsExhausted(err) {
 			log.Printf("Message ID issuance quota exhausted: %v", err)
-			return messageID, createdAt, updatedAt, expiresAt, nil, reservationquota.Code, nil
+			return uuid.Nil, time.Time{}, time.Time{}, nil, nil, reservationquota.Code, nil
 		}
 		log.Printf("Failed to persist message: %v", err)
 		return messageID, createdAt, updatedAt, expiresAt, nil, errMsgFailedSaveMessage, nil

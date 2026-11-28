@@ -63,9 +63,14 @@ It never drops retained reservation state just to make a downgrade succeed.
 Migration 000208 bounds the growth identified after the baseline merged. It
 does not remove or rewrite any reservation. It counts actual new channel and
 DM message inserts after installation across 64 permanent budget rows totaling
-5,000,000, plus an active-account ceiling of 250,000. Each new insert uses a
+5,000,000, plus an active-account lifetime ceiling of 250,000. Each new insert uses a
 server-selected starting shard and probes remaining shards if that row is full.
-Account counters are removed on account deletion. Both ceilings can be raised
+Every inserted system message, including expiration-policy events and DM call
+events, spends the attributed user's account budget. Deleting or expiring a
+message never restores that budget. A long-lived active account can reach its
+lifetime ceiling through ordinary use and then cannot send messages or create
+new durable system events until an operator raises the account ceiling. Account
+counters are removed on account deletion. Both ceilings can be raised
 by an operator only after checking free space. The initial limits are
 operational headroom, not a claim that every self-hosted disk can hold that
 many rows.
@@ -84,6 +89,10 @@ reservation. HTTP `POST /messages` returns 507 with
 global ceilings. Deleting messages never returns quota.
 Channel and DM expiration-policy changes that require a durable event row also
 return 507 at the ceiling and roll back the policy change.
+DM call-event history is best effort: at the ceiling the call lifecycle still
+completes, but the event row and its same-transaction conversation respawn are
+omitted. The server logs this as a capacity warning; a later call event is not
+automatically retried against a permanently full budget.
 
 Before deployment, record current size and disk headroom:
 

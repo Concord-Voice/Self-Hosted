@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	"github.com/google/uuid"
 )
 
@@ -70,6 +71,18 @@ type CompletedCallSummary struct {
 	ParticipantUserIDs []uuid.UUID
 	StartedAt          time.Time
 	EndedAt            time.Time
+}
+
+// Call-event history is best effort after the voice transition. Keep a
+// capacity refusal distinct from a database fault for operators; the caller
+// still completes the call lifecycle without retrying a permanently full quota.
+func (h *Handler) logCallEventFailure(message string, err error, attrs ...any) {
+	attrs = append(attrs, "error", err)
+	if reservationquota.IsExhausted(err) {
+		h.log.Warn("DM call history omitted at message storage capacity", append(attrs, "failure_class", "capacity")...)
+		return
+	}
+	h.log.Error(message, attrs...)
 }
 
 // insertCallEvent persists a call-event row to dm_messages. The caller_user_id

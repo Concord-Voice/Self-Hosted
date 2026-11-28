@@ -10745,7 +10745,9 @@ paths:
                 $ref: '#/components/schemas/Error'
         '507':
           description: The permanent message-ID issuance quota is exhausted.
-            The account and global ceilings use the same response.
+            The account and global ceilings use the same response. The account
+            ceiling counts lifetime message and attributed system-event inserts;
+            deleting or expiring rows does not restore capacity.
           content:
             application/json:
               schema:
