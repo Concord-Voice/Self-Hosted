@@ -40,8 +40,9 @@ CREATE FUNCTION protect_message_id_reservation_quota() RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- The disposable test harness may restore a fresh singleton under the
-    -- superuser-only replica setting. Production writes cannot reduce usage.
+    -- Disposable tests reset the shards with privileged replica mode. A DB
+    -- superuser can also bypass this guard; ordinary application statements
+    -- do not change session_replication_role.
     IF current_setting('session_replication_role') = 'replica' THEN
         IF TG_OP = 'DELETE' THEN
             RETURN OLD;

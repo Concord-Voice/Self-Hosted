@@ -6,7 +6,7 @@ SET LOCAL statement_timeout = '30s';
 LOCK TABLE messages, dm_messages, message_id_reservations,
     message_id_reservation_account_usage, message_id_reservation_quota,
     message_id_reservation_policy
-    IN ACCESS EXCLUSIVE MODE;
+    IN ACCESS EXCLUSIVE MODE NOWAIT;
 
 DO $$
 BEGIN

@@ -147,7 +147,15 @@ func TestMigration000208_DownGuardAndUnusedRoundTrip(t *testing.T) {
 	up := migrationReadFile(t, "../../migrations/000208_bound_message_id_reservation_growth.up.sql")
 
 	_, _, _, _, _ = migration000206Fixture(t, db)
-	_, err := db.Exec(down)
+	locker, err := db.Begin()
+	require.NoError(t, err)
+	_, err = locker.Exec(`LOCK TABLE dm_messages IN ROW EXCLUSIVE MODE`)
+	require.NoError(t, err)
+	_, err = db.Exec(down)
+	migrationRequirePQError(t, err, "55P03", "")
+	require.NoError(t, locker.Rollback())
+
+	_, err = db.Exec(down)
 	require.ErrorContains(t, err, "refusing to remove message ID issuance quota")
 
 	// An unused installation can round-trip. Keep this in a transaction so
