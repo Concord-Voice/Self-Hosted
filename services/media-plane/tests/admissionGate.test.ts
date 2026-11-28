@@ -74,7 +74,7 @@ describe('resolveClientIp', () => {
     expect(resolveClientIp(r, trust('10.0.0.9'))).toBe('10.0.0.9');
   });
 
-  it('treats an IPv4-compatible X-Real-IP that ipaddr.js rejects as unusable', () => {
+  it('treats an IPv4-compatible X-Real-IP as unusable', () => {
     expect(resolveClientIp(req({ 'x-real-ip': '::1.2.3.4' }), trust('10.0.0.9'))).toBe('10.0.0.9');
   });
 

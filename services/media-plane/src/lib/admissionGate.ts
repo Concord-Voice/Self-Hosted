@@ -69,13 +69,15 @@ const ipv4AddressSpace = new BlockList();
 ipv4AddressSpace.addSubnet('0.0.0.0', 0, 'ipv4');
 
 // ipaddr.isValid keeps this guard and bucketClientIp's ipaddr.process in
-// agreement: node:net accepts forms (such as the deprecated IPv4-compatible
-// `::1.2.3.4`) that ipaddr.process throws on.
+// agreement. The only dotted-quad IPv6 form accepted is IPv4-mapped
+// (`::ffff:1.2.3.4`); the deprecated IPv4-compatible `::1.2.3.4` and other
+// embeddings are rejected, as ipaddr.js 1.x did, whatever ipaddr.js accepts.
 function ipFamily(address: string): IpFamily | null {
   if (!ipaddr.isValid(address)) return null;
   if (isIPv4(address)) return 'ipv4';
-  if (isIPv6(address)) return 'ipv6';
-  return null;
+  if (!isIPv6(address)) return null;
+  if (address.includes('.') && !ipv4AddressSpace.check(address, 'ipv6')) return null;
+  return 'ipv6';
 }
 
 function isIPv4MappedIPv6(address: string, family: IpFamily): boolean {
