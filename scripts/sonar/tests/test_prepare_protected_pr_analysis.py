@@ -247,12 +247,16 @@ class PrepareTest(unittest.TestCase):
                 "changed_files": 1, "hotfix": False, "advisory": {}, "workers": [],
                 "npm_workspaces": [], "license_go": False, "codeql_matrix": '{"include":[]}'}
 
-    def bind_v2_merge(self, base_changes=False, head_changes=False, executable=False):
+    def bind_v2_merge(self, base_changes=False, head_changes=False, executable=False, head_executable=False):
         shared = self.upstream / "services/control-plane/internal/shared.go"
-        if head_changes:
+        if head_changes or head_executable:
             run(self.upstream, "checkout", "--detach", self.head)
-            shared.write_text(shared.read_text().replace("FromHead = 1", "FromHead = 2"))
-            run(self.upstream, "commit", "-qam", "head changes shared file")
+            if head_changes:
+                shared.write_text(shared.read_text().replace("FromHead = 1", "FromHead = 2"))
+            if head_executable:
+                shared.chmod(0o755)
+            run(self.upstream, "add", str(shared))
+            run(self.upstream, "commit", "-qm", "head changes shared file")
             self.head = run(self.upstream, "rev-parse", "HEAD")
             run(self.upstream, "update-ref", "refs/pull/7/head", self.head)
             self.candidate["expected_head_sha"] = self.head
@@ -332,6 +336,12 @@ class PrepareTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.Reject, "Go coverage source differs on PR head"):
             self.prepare()
 
+    def test_schema_v2_refuses_to_drop_coverage_when_pr_changes_mode_and_base_changes_source(self):
+        self.bind_v2_merge(base_changes=True, head_executable=True)
+        self.add_coverage("shared.go")
+        with self.assertRaisesRegex(MODULE.Reject, "Go coverage source differs on PR head"):
+            self.prepare()
+
     def test_schema_v2_rejects_signed_first_parent_mismatch(self):
         self.bind_v2_merge(base_changes=True)
         self.payload["selection"]["merge_base_sha"] = self.base
@@ -347,7 +357,8 @@ class PrepareTest(unittest.TestCase):
     def test_schema_v2_rejects_caller_event_mismatch_and_moved_merge(self):
         signed = self.bind_v2_merge()
         self.verified["claims"].pop("event_sha")
-        with self.assertRaisesRegex(MODULE.Reject, "merge revision differs from caller event"):
+        with patch.object(MODULE, "prepare_git", side_effect=AssertionError("Git accessed before event validation")), self.assertRaisesRegex(
+                MODULE.Reject, "merge revision differs from caller event"):
             self.prepare()
         self.verified["claims"]["event_sha"] = self.head
         with self.assertRaisesRegex(MODULE.Reject, "merge revision differs from caller event"):

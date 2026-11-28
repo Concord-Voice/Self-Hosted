@@ -344,6 +344,8 @@ def validate_evidence(candidate, verified, run, pr, jobs):
             or any(v not in ("success", "skipped") for v in verdicts.values())
             or set(coverage) != set(COMPONENTS) or not all(isinstance(v, bool) for v in coverage.values())):
         raise Reject("signed scan selection or verdict invalid")
+    if version == 2 and coverage["control_plane"] and claims.get("event_sha") != selection["merge_sha"]:
+        raise Reject("Go coverage merge revision differs from caller event")
     if any(selection["coverage_required"][c] and not coverage[c] for c in COMPONENTS):
         raise Reject("selected coverage was not uploaded")
     selected = selection["selected"]
@@ -405,14 +407,20 @@ def go_coverage_sources(repo, merge, base, head):
             if entry.endswith(b".go"):
                 header, path = entry.split(b"\t", 1)
                 mode, kind, oid = header.decode("ascii").split(" ")
-                # Go source bytes are independent of the executable bit.
-                entry_type = "file" if mode in ("100644", "100755") and kind == "blob" else mode
-                result[safe_path(path)] = (entry_type, oid)
+                result[safe_path(path)] = (mode, kind, oid)
         return result
 
+    def regular_blob(entry):
+        if entry is not None and entry[0] in ("100644", "100755") and entry[1] == "blob" and sha(entry[2]):
+            return entry[2]
+        return None
+
     merge_entries, head_entries = entries(merge), entries(head)
-    merged = {path for path, (kind, oid) in merge_entries.items() if kind == "file" and sha(oid)}
-    different = {path for path in merged if merge_entries[path] != head_entries.get(path)}
+    merged = {path for path, entry in merge_entries.items() if regular_blob(entry) is not None}
+    # Executable bits do not affect covered source bytes. Keep exact Git entries
+    # below when proving that the PR side did not change a differing path.
+    different = {path for path in merged
+                 if regular_blob(merge_entries[path]) != regular_blob(head_entries.get(path))}
     if not different:
         return merged, different, set()
     common = git(repo, "merge-base", "--all", base, head, limit=4096).decode().split()
@@ -459,10 +467,9 @@ def prepare_git(repo, claims, payload, candidate, token):
     git(repo, "read-tree", "HEAD")
 
     selection = payload["selection"]
-    if selection["version"] != 2 or not payload["coverage"]["control_plane"]:
+    # A legacy v1 report stays on the original strict PR-tree import path.
+    if selection["version"] == 1 or not payload["coverage"]["control_plane"]:
         return None
-    if claims.get("event_sha") != selection["merge_sha"]:
-        raise Reject("Go coverage merge revision differs from caller event")
     git(repo, "fetch", "--no-tags", "origin", f"+refs/pull/{candidate['pr_number']}/merge:refs/remotes/origin/merge",
         limit=1024, env=fetch_env)
     merge = git(repo, "rev-parse", "refs/remotes/origin/merge").decode().strip()
