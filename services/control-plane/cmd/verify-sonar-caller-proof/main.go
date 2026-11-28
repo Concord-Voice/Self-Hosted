@@ -79,7 +79,7 @@ type verifiedClaims struct {
 	RunAttempt   string `json:"run_attempt"`
 	WorkflowRef  string `json:"workflow_ref"`
 	WorkflowSHA  string `json:"workflow_sha"`
-	EventSHA     string `json:"event_sha"`
+	EventSHA     string `json:"event_sha,omitempty"`
 	Subject      string `json:"subject"`
 }
 
@@ -238,7 +238,7 @@ func validClaims(token *oidc.IDToken, c signedClaims, p payload, now time.Time) 
 		c.RunID != strconv.FormatInt(p.CallerRunID, 10) ||
 		c.RunAttempt != strconv.FormatInt(p.CallerRunAttempt, 10) ||
 		c.WorkflowRef != workflowRef || !shaPattern.MatchString(c.WorkflowSHA) ||
-		!shaPattern.MatchString(c.EventSHA) || c.Subject == "" {
+		(c.EventSHA != "" && !shaPattern.MatchString(c.EventSHA)) || c.Subject == "" {
 		return false
 	}
 	if token.IssuedAt.IsZero() || token.Expiry.IsZero() || c.NotBefore <= 0 {

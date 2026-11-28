@@ -132,8 +132,8 @@ func TestVerifyProofRejectsBadProofs(t *testing.T) {
 		name   string
 		mutate func(*testing.T, map[string]any, *[]byte) *rsa.PrivateKey
 	}{
-		{"missing event SHA", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {
-			delete(c, "sha")
+		{"invalid event SHA", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {
+			c["sha"] = "invalid"
 			return f.key
 		}},
 		{"signature", func(t *testing.T, _ map[string]any, _ *[]byte) *rsa.PrivateKey {

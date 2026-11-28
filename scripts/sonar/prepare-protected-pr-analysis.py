@@ -395,9 +395,6 @@ def go_coverage_sources(repo, merge, base, head):
     parents = git(repo, "rev-list", "--parents", "-n", "1", merge, limit=200).decode().split()
     if parents != [merge, base, head]:
         raise Reject("Go coverage merge parents differ from signed proof")
-    common = git(repo, "merge-base", "--all", base, head, limit=4096).decode().split()
-    if len(common) != 1 or not sha(common[0]):
-        raise Reject("Go coverage requires one verified branch point")
     directory = COMPONENTS["control_plane"][3]
 
     def entries(ref):
@@ -410,14 +407,20 @@ def go_coverage_sources(repo, merge, base, head):
                 result[safe_path(path)] = tuple(header.decode("ascii").split(" "))
         return result
 
-    merge_entries, base_entries, head_entries, common_entries = (
-        entries(ref) for ref in (merge, base, head, common[0])
-    )
+    merge_entries, head_entries = entries(merge), entries(head)
     merged = {path for path, (mode, kind, oid) in merge_entries.items()
               if mode in ("100644", "100755") and kind == "blob" and sha(oid)}
     different = {path for path in merged if merge_entries[path] != head_entries.get(path)}
-    # Omit only a net base-side change. Typed entries distinguish absence from
-    # a directory or symlink replacing a file at the same path.
+    if not different:
+        return merged, different, set()
+    common = git(repo, "merge-base", "--all", base, head, limit=4096).decode().split()
+    if len(common) != 1 or not sha(common[0]):
+        # Still keep identical sources. There is no unique branch point
+        # to prove that a differing path belongs to the base side.
+        return merged, different, set()
+    base_entries, common_entries = entries(base), entries(common[0])
+    # Typed entries distinguish absence from a directory or symlink
+    # replacing a file at the same path.
     omit = {path for path in different if merge_entries[path] == base_entries.get(path)
             and head_entries.get(path) == common_entries.get(path)}
     return merged, different, omit
