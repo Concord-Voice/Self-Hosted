@@ -336,6 +336,9 @@ class PrepareTest(unittest.TestCase):
 
     def test_schema_v2_rejects_caller_event_mismatch_and_moved_merge(self):
         signed = self.bind_v2_merge()
+        self.verified["claims"].pop("event_sha")
+        with self.assertRaisesRegex(MODULE.Reject, "merge revision differs from caller event"):
+            self.prepare()
         self.verified["claims"]["event_sha"] = self.head
         with self.assertRaisesRegex(MODULE.Reject, "merge revision differs from caller event"):
             self.prepare()

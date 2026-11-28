@@ -126,6 +126,15 @@ func TestVerifyProofAcceptsSignedCanonicalPayload(t *testing.T) {
 	require.Equal(t, strings.Repeat("d", 40), got.Claims.EventSHA)
 }
 
+func TestVerifyProofWithoutEventSHAKeepsLegacyClaims(t *testing.T) {
+	f := newOIDCFixture(t)
+	delete(f.claims, "sha")
+	raw := f.proof(t, f.key, f.claims, f.raw)
+	out, err := verifyProof(context.Background(), raw, f.server.URL, func() time.Time { return f.now })
+	require.NoError(t, err)
+	require.NotContains(t, string(out), "event_sha")
+}
+
 func TestVerifyProofRejectsBadProofs(t *testing.T) {
 	f := newOIDCFixture(t)
 	tests := []struct {
