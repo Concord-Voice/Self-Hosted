@@ -48,6 +48,11 @@ This is automatically run when the control-plane server starts.
 make migrate-down
 ```
 
+Migration 000208 refuses this command on a used installation because removing
+its quota would restore unbounded permanent reservation growth. Keep that
+migration and use a compatible server binary; see the
+[reservation operator procedure](../../../docs/design/message-id-reservation-baseline.md#prospective-issuance-quota-migration-000208).
+
 ### Check Current Version
 
 ```bash

@@ -375,7 +375,7 @@ server binary; see the [message-ID reservation operator procedure](../../docs/de
 ### Migration Best Practices
 
 - Always create both UP and DOWN migrations
-- Test rollbacks to confirm they properly reverse changes
+- Test unused rollbacks and any guard that refuses an unsafe rollback
 - One logical change per migration
 - Never modify committed migrations (create new ones instead)
 - Migrations run in transactions automatically

@@ -102,6 +102,9 @@ SELECT count(*) AS reserved_ids,
 FROM message_id_reservations;
 ```
 
+The exact count scans the reservation table; run it during a quiet period on
+large installations.
+
 Monitor the prospective budget with this read-only query:
 
 ```sql
