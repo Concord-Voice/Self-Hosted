@@ -57,6 +57,13 @@ type Hook struct {
 	commitFault   error
 	commitCommits bool
 	admission     admissionArm
+	// rowFragment, when non-empty, arms ArmRowValue: the next query containing
+	// it has column rowColumn of every returned row replaced by rowValue.
+	// Independent of Arm and ArmCommit; rowHits counts the rows rewritten.
+	rowFragment string
+	rowColumn   int
+	rowValue    driver.Value
+	rowHits     int
 }
 
 // AdmissionReport distinguishes an unobserved boundary, a running callback,
@@ -277,11 +284,61 @@ func (c *hookConn) QueryContext(ctx context.Context, query string, args []driver
 	if err := c.hook.beforeQuery(ctx, query, args); err != nil {
 		return nil, err
 	}
+	column, value, rewrite := c.hook.takeRowRewrite(query)
 	rows, err := c.hookableConn.QueryContext(ctx, query, args)
 	if err == nil {
 		c.admission.observe(query, args)
+		if rewrite {
+			rows = &rewriteRows{Rows: rows, hook: c.hook, column: column, value: value}
+		}
 	}
 	return rows, err
+}
+
+// ArmRowValue makes the NEXT query whose text contains fragment return value in
+// place of column (zero-based) of every row it yields. It fires once, restarts
+// RowValueHits, and is independent of Arm and ArmCommit.
+func (h *Hook) ArmRowValue(fragment string, column int, value driver.Value) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.rowFragment, h.rowColumn, h.rowValue, h.rowHits = fragment, column, value, 0
+}
+
+// RowValueHits reports how many rows ArmRowValue has rewritten since it was last armed.
+func (h *Hook) RowValueHits() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.rowHits
+}
+
+// takeRowRewrite disarms ArmRowValue when query matches it.
+func (h *Hook) takeRowRewrite(query string) (column int, value driver.Value, ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.rowFragment == "" || !strings.Contains(query, h.rowFragment) {
+		return 0, nil, false
+	}
+	h.rowFragment = ""
+	return h.rowColumn, h.rowValue, true
+}
+
+// rewriteRows replaces one column of every row its inner Rows yields.
+type rewriteRows struct {
+	driver.Rows
+	hook   *Hook
+	column int
+	value  driver.Value
+}
+
+func (r *rewriteRows) Next(dest []driver.Value) error {
+	if err := r.Rows.Next(dest); err != nil {
+		return err
+	}
+	dest[r.column] = r.value
+	r.hook.mu.Lock()
+	r.hook.rowHits++
+	r.hook.mu.Unlock()
+	return nil
 }
 
 func (c *hookConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
