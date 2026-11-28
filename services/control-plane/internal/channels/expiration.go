@@ -108,9 +108,7 @@ func (h *Handler) UpdateExpiration(c *gin.Context) {
 	// either can arrive first. The issue order is pinned by
 	// TestChannelExpiration_PolicyIsAnnouncedWhileTheDueDeletionIsStillHeld.
 	h.settleChannelGate(c.Request.Context(), outcome, confirm, userID)
-	if staged.Present {
-		h.broadcastChannelExpirationEvent(channelID, staged.MessageID, userID, staged.Payload, policy)
-	}
+	h.broadcastChannelExpirationEvent(channelID, userID, staged, policy)
 	// The deletion and the backfill share one deadline measured from the
 	// handler's start, so the response still goes out inside the server's
 	// write timeout however long the steps before them took.

@@ -70,7 +70,10 @@ func insertChannelExpirationEvent(
 // for a WS-originated chat send: the acting user's PATCH response carries
 // only the Policy, never this row, so they need the broadcast exactly like
 // every other viewer.
-func (h *Handler) broadcastChannelExpirationEvent(channelID string, messageID uuid.UUID, actorUserID string, payload expiration.EventPayload, policy expiration.Policy) {
+func (h *Handler) broadcastChannelExpirationEvent(channelID, actorUserID string, staged expiration.StagedEvent, policy expiration.Policy) {
+	if !staged.Present {
+		return
+	}
 	// Both packages guard every other broadcast helper this way. Without it a nil hub
 	// panics here — after the policy row has already committed, so the write survives
 	// and the request 500s.
@@ -92,14 +95,14 @@ func (h *Handler) broadcastChannelExpirationEvent(channelID string, messageID uu
 	defer cancelName()
 	actorUsername, actorDisplayName := expiration.ActorName(nameCtx, h.db, actorUserID)
 	data := map[string]interface{}{
-		"id":                 messageID.String(),
+		"id":                 staged.MessageID.String(),
 		"channel_id":         channelID,
 		"actor_user_id":      actorUserID,
 		"actor_username":     actorUsername,
 		"actor_display_name": actorDisplayName,
-		"kind":               payload.Kind,
-		"window_seconds":     payload.WindowSeconds,
-		"created_at":         payload.ChangedAt.UTC().Format(time.RFC3339),
+		"kind":               staged.Payload.Kind,
+		"window_seconds":     staged.Payload.WindowSeconds,
+		"created_at":         staged.Payload.ChangedAt.UTC().Format(time.RFC3339),
 		// The policy's own revision travels with the event so the receiving
 		// client can advance its composer indicator in the same tick it renders
 		// the system row. Without it the row would announce a new window beside
@@ -110,6 +113,6 @@ func (h *Handler) broadcastChannelExpirationEvent(channelID string, messageID uu
 		"updated_at":       expiration.UpdatedAtRFC3339(policy),
 		"backfill_pending": policy.BackfillPending,
 	}
-	expiration.AddPinnedEventFields(data, payload, policy)
+	expiration.AddPinnedEventFields(data, staged.Payload, policy)
 	h.hub.BroadcastToChannelAuthorized(channelUUID, websocket.OutgoingMessage{Type: wsExpirationEvent, Data: data})
 }
