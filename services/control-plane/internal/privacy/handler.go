@@ -235,7 +235,7 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 		}
 		defer h.settleEmailErasureConfirmation(claim, &err)
 	} else if request.EmailConfirmation != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
+		h.writeErasurePreparationError(c, users.ErrErasureEmailAlreadyVerified)
 		return
 	}
 

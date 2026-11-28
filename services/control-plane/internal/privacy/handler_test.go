@@ -556,13 +556,13 @@ func TestEraseAccount_EmailStatusUnavailableIs503(t *testing.T) {
 	assert.False(t, stub.called)
 }
 
-func TestEraseAccount_VerifiedAccountRefusesEmailConfirmation(t *testing.T) {
+func TestEraseAccount_VerifiedAccountReportsStaleEmailConfirmation(t *testing.T) {
 	stub := &stubAccountDeleter{}
 	h := privacy.NewHandler(stub, nil, logger.New("test"))
 	c, w := newTestContext(t, `{"password":"p","confirmed_owned_server_ids":[],"email_confirmation":{"request_id":"r","token":"t"}}`, "verified-user")
 	h.EraseAccount(c)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.JSONEq(t, `{"error":"invalid_request"}`, w.Body.String())
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.JSONEq(t, `{"error_code":"email_confirmation_stale"}`, w.Body.String())
 	assert.False(t, stub.called)
 }
 
