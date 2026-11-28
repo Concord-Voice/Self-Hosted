@@ -82,6 +82,8 @@ reservation. HTTP `POST /messages` returns 507 with
 `code: message_storage_capacity`; WebSocket channel and DM sends emit an
 `error` frame with the same code. No response distinguishes the account and
 global ceilings. Deleting messages never returns quota.
+Channel and DM expiration-policy changes that require a durable event row also
+return 507 at the ceiling and roll back the policy change.
 
 Before deployment, record current size and disk headroom:
 

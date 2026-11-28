@@ -3084,6 +3084,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '507':
+          description: The durable expiration-event message exhausted its message-ID issuance quota; the policy change was rolled back
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageStorageCapacityError'
         '413':
           description: Request JSON document exceeds 1 KiB
           content:
@@ -5110,6 +5116,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '507':
+          description: The durable expiration-event message exhausted its message-ID issuance quota; the policy change was rolled back
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageStorageCapacityError'
         '413':
           description: Request JSON document exceeds 1 KiB
           content:

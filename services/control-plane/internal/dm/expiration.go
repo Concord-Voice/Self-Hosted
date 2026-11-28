@@ -12,6 +12,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/dmvisibility"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/expiration"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -208,6 +209,13 @@ func (h *Handler) stageDMExpirationEvent(
 	}
 	messageID, respawned, err := insertDMExpirationEvent(ctx, tx, conversationID, userID, payload)
 	if err != nil {
+		if reservationquota.IsExhausted(err) {
+			h.log.Warn("Message ID issuance quota exhausted during DM expiration update", "error", err)
+			c.JSON(http.StatusInsufficientStorage, gin.H{
+				"error": reservationquota.Message, "code": reservationquota.Code,
+			})
+			return expiration.StagedEvent{}, nil, false
+		}
 		h.log.Error("Failed to insert DM expiration_event row", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateConversation})
 		return expiration.StagedEvent{}, nil, false

@@ -12,6 +12,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/mfaenforce"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -304,6 +305,13 @@ func (h *Handler) stageChannelExpirationEvent(
 	}
 	messageID, err := insertChannelExpirationEvent(c.Request.Context(), tx, channelID, userID, payload)
 	if err != nil {
+		if reservationquota.IsExhausted(err) {
+			h.log.Warn("Message ID issuance quota exhausted during channel expiration update", "error", err)
+			c.JSON(http.StatusInsufficientStorage, gin.H{
+				"error": reservationquota.Message, "code": reservationquota.Code,
+			})
+			return expiration.StagedEvent{}, false
+		}
 		h.log.Error("Failed to insert channel expiration_event row", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
 		return expiration.StagedEvent{}, false
