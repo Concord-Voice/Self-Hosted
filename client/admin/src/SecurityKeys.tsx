@@ -214,14 +214,16 @@ export function SecurityKeys({
             {error}
           </p>
         ) : null}
-        {status ? <output className="form-status">{status}</output> : null}
+        {status ? (
+          <output className="form-status security-key-message">{status}</output>
+        ) : null}
         {added ? (
-          <output className="form-status">
+          <output className="form-status security-key-message">
             Security key added. {REIMPORT_NOTICE}
           </output>
         ) : null}
         {full ? (
-          <output>
+          <output className="security-key-message">
             You have the maximum of {list.max} security keys. No more can be
             added.
           </output>

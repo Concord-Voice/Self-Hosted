@@ -534,6 +534,11 @@ code,
   margin-bottom: 14px;
 }
 
+/* The <p> these replaced had a 1em block margin; keep the messages apart. */
+.security-key-message {
+  margin-block: 1em;
+}
+
 .security-keys-table caption {
   padding-bottom: 8px;
   text-align: start;
