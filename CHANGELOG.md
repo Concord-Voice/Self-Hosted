@@ -30,19 +30,17 @@ belongs in it, and write it if the section has none. Do not edit the
 
 ## [Prerelease]
 
-New backup codes are stored as salted Argon2id hashes, and existing
-backup-code hashes move to an explicit versioned format.
-
-Factor removal, SSO unlinking and trust, account erasure and ownership
-transfer now require a fresh, route-bound proof, and a session can log out
-only its own login family.
+Factor removal, SSO unlinking and trust, account erasure, ownership transfer
+and admin creation now require a fresh, route-bound proof, and new backup codes
+are stored as salted Argon2id hashes. The server also returns stored E2EE format
+metadata on message and attachment reads as groundwork for a later client
+migration; no writer or decrypt path is active.
 Host Agent writes from the Admin Console now need a fresh hardware-key
 approval and an out-of-band alert destination configured by host root.
-The server now returns stored E2EE format metadata for message and attachment reads as groundwork for a later client migration. Its internal create-request fingerprints stay out of history responses; no new writer or decrypt path is active.
 
 ### Added
 
-- **Encryption:** Added passive stored-format metadata to channel and DM history responses and attachment reads. The reserved create-request fingerprint remains internal and is never returned in message history.
+- **Encryption:** Added passive stored-format metadata (`e2ee_format`) to channel and DM history, pinned-message, reply-preview and edit responses, and to attachment reads. Attachment summaries in history and WebSocket message payloads also carry candidate uploader, key-epoch and scope fields, and attachment downloads return them as `X-File-E2EE-Format`, `X-File-Uploader-ID`, `X-File-Scope` and `X-File-Scope-ID` headers; none of these values is authenticated. The reserved create-request fingerprint remains internal and is never returned in message history.
 
 ### Security
 
