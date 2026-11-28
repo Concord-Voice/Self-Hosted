@@ -216,15 +216,15 @@ export function SecurityKeys({
         ) : null}
         {status ? <output className="form-status">{status}</output> : null}
         {added ? (
-          <p role="status" className="form-status">
+          <output className="form-status">
             Security key added. {REIMPORT_NOTICE}
-          </p>
+          </output>
         ) : null}
         {full ? (
-          <p role="status">
+          <output>
             You have the maximum of {list.max} security keys. No more can be
             added.
-          </p>
+          </output>
         ) : null}
         {list && !full ? (
           <form className="series-controls" onSubmit={addKey}>
