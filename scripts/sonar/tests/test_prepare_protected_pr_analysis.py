@@ -148,6 +148,9 @@ class PrepareTest(unittest.TestCase):
         run(self.upstream, "config", "user.email", "test@example.invalid")
         run(self.upstream, "config", "user.name", "Fixture")
         (self.upstream / "README.md").write_text("base\n")
+        shared = self.upstream / "services/control-plane/internal/shared.go"
+        shared.parent.mkdir(parents=True)
+        shared.write_text("package x\n\nconst FromBase = 1\n\n\n\n\nconst FromHead = 1\n")
         for name in MODULE.SUPPORT | {"sonar-project.properties"}:
             destination = self.upstream / name
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -175,6 +178,7 @@ class PrepareTest(unittest.TestCase):
         run(self.upstream, "add", ".")
         run(self.upstream, "commit", "-qm", "head")
         self.head = run(self.upstream, "rev-parse", "HEAD")
+        run(self.upstream, "checkout", "--detach", self.head)
         run(self.upstream, "update-ref", "refs/pull/7/head", self.head)
         run(self.upstream, "update-ref", "refs/heads/main", self.base)
         self.candidate = {"caller_run_id": 42, "caller_run_attempt": 2, "pr_number": 7,
@@ -243,6 +247,37 @@ class PrepareTest(unittest.TestCase):
                 "changed_files": 1, "hotfix": False, "advisory": {}, "workers": [],
                 "npm_workspaces": [], "license_go": False, "codeql_matrix": '{"include":[]}'}
 
+    def bind_v2_merge(self, base_changes=False, head_changes=False):
+        shared = self.upstream / "services/control-plane/internal/shared.go"
+        if head_changes:
+            run(self.upstream, "checkout", "--detach", self.head)
+            shared.write_text(shared.read_text().replace("FromHead = 1", "FromHead = 2"))
+            run(self.upstream, "commit", "-qam", "head changes shared file")
+            self.head = run(self.upstream, "rev-parse", "HEAD")
+            run(self.upstream, "update-ref", "refs/pull/7/head", self.head)
+            self.candidate["expected_head_sha"] = self.head
+            self.payload["expected_head_sha"] = self.head
+            self.payload["selection"]["head_sha"] = self.head
+            self.run_data["head_sha"] = self.head
+            self.pr_data["head"]["sha"] = self.head
+            for job in self.jobs_data:
+                job["head_sha"] = self.head
+        run(self.upstream, "checkout", "--detach", self.base)
+        if base_changes:
+            shared.write_text(shared.read_text().replace("FromBase = 1", "FromBase = 2"))
+            (shared.parent / "base_only.go").write_text("package x\n")
+            run(self.upstream, "add", ".")
+            run(self.upstream, "commit", "-qm", "new default branch source")
+        first = run(self.upstream, "rev-parse", "HEAD")
+        run(self.upstream, "update-ref", "refs/heads/main", first)
+        run(self.upstream, "merge", "--no-ff", "-qm", "fixture merge", self.head)
+        merge = run(self.upstream, "rev-parse", "HEAD")
+        run(self.upstream, "update-ref", "refs/pull/7/merge", merge)
+        self.pr_data["merge_commit_sha"] = merge
+        self.verified["claims"]["event_sha"] = merge
+        self.payload["selection"] = {**self.v2_selection(), "merge_sha": merge, "merge_base_sha": first}
+        return merge
+
     def test_valid_proof_prepares_inert_sources_full_history_and_all_reports(self):
         self.prepare()
         analysis = self.root / "analysis"
@@ -261,9 +296,53 @@ class PrepareTest(unittest.TestCase):
         self.assertIn("/pulls/7", self.requests)
 
     def test_schema_v2_full_selection_prepares_only_when_merge_base_matches(self):
-        self.payload["selection"] = self.v2_selection()
+        self.bind_v2_merge()
         self.prepare()
         self.assertEqual(run(self.root / "analysis", "rev-parse", "HEAD"), self.head)
+
+    def add_coverage(self, name):
+        index = 3
+        existing = MODULE.one_zip(self.zips[index], "coverage.out", MODULE.MAX_COVERAGE)
+        self.zips[index] = zipped("coverage.out", existing + (
+            f"services/control-plane/internal/{name}:1.1,2.1 1 1\n".encode()
+        ))
+        self.metadata[index - 1]["size_in_bytes"] = len(self.zips[index])
+
+    def test_schema_v2_omits_proven_base_only_go_entries(self):
+        self.bind_v2_merge(base_changes=True)
+        self.add_coverage("base_only.go")
+        self.add_coverage("shared.go")
+        self.prepare()
+        output = (self.root / "analysis" / "services/control-plane/coverage.out").read_text()
+        self.assertEqual(output, "mode: atomic\nservices/control-plane/internal/x.go:1.1,2.1 1 1\n")
+
+    def test_schema_v2_requires_pr_touched_go_sources_to_match(self):
+        self.bind_v2_merge(base_changes=True, head_changes=True)
+        self.add_coverage("shared.go")
+        with self.assertRaisesRegex(MODULE.Reject, "Go coverage source differs on PR head"):
+            self.prepare()
+
+    def test_schema_v2_rejects_signed_first_parent_mismatch(self):
+        self.bind_v2_merge(base_changes=True)
+        self.payload["selection"]["merge_base_sha"] = self.base
+        with self.assertRaisesRegex(MODULE.Reject, "merge parents differ from signed proof"):
+            self.prepare()
+
+    def test_schema_v2_rejects_coverage_path_absent_from_signed_merge(self):
+        self.bind_v2_merge(base_changes=True)
+        self.add_coverage("unknown.go")
+        with self.assertRaisesRegex(MODULE.Reject, "Go coverage source not in signed merge tree"):
+            self.prepare()
+
+    def test_schema_v2_rejects_caller_event_mismatch_and_moved_merge(self):
+        signed = self.bind_v2_merge()
+        self.verified["claims"]["event_sha"] = self.head
+        with self.assertRaisesRegex(MODULE.Reject, "merge revision differs from caller event"):
+            self.prepare()
+        self.verified["claims"]["event_sha"] = signed
+        run(self.upstream, "update-ref", "refs/pull/7/merge", self.head)
+        with self.assertRaisesRegex(MODULE.Reject, "Go coverage merge revision moved"):
+            self.prepare()
 
     def test_schema_v2_rejects_missing_malformed_or_extra_merge_base_fields(self):
         mutations = (

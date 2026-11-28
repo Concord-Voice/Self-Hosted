@@ -1,6 +1,12 @@
-# Generate Go coverage from the protected analysis source tree implementation plan
+# Match protected Go coverage to the source it describes
 
-1. Confirm the affected source contract on the current default branch.
-2. Retain merge integration tests. For same-repo PRs use their coverage when the source trees agree. If they differ, verify the linked PR head and regenerate coverage from it before the existing shard upload. Stage the selected profile outside both checkouts and pass its path explicitly to the shard upload. Partial profiles from that tree remain available for diagnostics. Failed shards cannot feed the coverage aggregate. Preserve the artifact names and strict consumer checks.
-3. Use a disposable Git merge fixture to verify same-tree reuse, separate head coverage on divergence, and revision mismatch refusal. Lint the workflow. After the producer lands, use a separate reviewed change to update the Required PR build workflow reference to the merged producer revision. Confirm the active protected child accepts the exact artifact.
-4. Run the applicable independent reviews and required CI. Request merge approval for the reviewed head.
+1. Keep the synthetic-merge coverage producer and its fixtures.
+2. Bind importer projection to the verified caller event SHA, signed merge,
+   and ordered parents.
+3. Keep only records for identical regular Git entries in the analysis tree.
+   Omit records only for proven base-side drift. Fail closed on unknown or
+   PR-side mismatches.
+4. Run the focused Python and Go tests, independent review, and required CI.
+   Seek merge approval for the reviewed head.
+5. After approval and merge, verify a fresh protected Sonar run with actual
+   base-side drift.

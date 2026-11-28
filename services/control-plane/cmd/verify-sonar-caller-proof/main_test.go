@@ -86,6 +86,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 		"repository_id": repositoryID, "repository": repository,
 		"event_name": "pull_request", "run_id": "12345", "run_attempt": "2",
 		"workflow_ref": workflowRef, "workflow_sha": strings.Repeat("c", 40),
+		"sha": strings.Repeat("d", 40),
 	}
 	return fixture
 }
@@ -122,6 +123,7 @@ func TestVerifyProofAcceptsSignedCanonicalPayload(t *testing.T) {
 	require.Equal(t, "12345", got.Claims.RunID)
 	require.Equal(t, workflowRef, got.Claims.WorkflowRef)
 	require.Equal(t, strings.Repeat("c", 40), got.Claims.WorkflowSHA)
+	require.Equal(t, strings.Repeat("d", 40), got.Claims.EventSHA)
 }
 
 func TestVerifyProofRejectsBadProofs(t *testing.T) {
@@ -130,6 +132,10 @@ func TestVerifyProofRejectsBadProofs(t *testing.T) {
 		name   string
 		mutate func(*testing.T, map[string]any, *[]byte) *rsa.PrivateKey
 	}{
+		{"missing event SHA", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {
+			delete(c, "sha")
+			return f.key
+		}},
 		{"signature", func(t *testing.T, _ map[string]any, _ *[]byte) *rsa.PrivateKey {
 			key, err := rsa.GenerateKey(rand.Reader, 2048)
 			require.NoError(t, err)

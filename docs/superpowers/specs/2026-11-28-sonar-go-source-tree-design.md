@@ -1,9 +1,20 @@
-# Generate Go coverage from the protected analysis source tree
+# Match protected Go coverage to the source it describes
 
-The control-plane integration build runs on the synthetic merge. Protected Sonar imports its coverage against the PR head. A base-only file produced a valid coverage record for a source outside the analyzer tree.
+The integration build tests the synthetic merge, while protected Sonar scans
+the PR head. New files on the base branch can appear in Go coverage even when
+they are absent from the PR head. Running the tests again on the head in the
+same job would reuse a database template migrated from the merge checkout.
 
-Retain merge integration tests. For same-repo PRs use their coverage when the source trees agree. If they differ, verify the linked PR head and regenerate coverage from it before the existing shard upload. Stage the selected profile outside both checkouts and pass its path explicitly to the shard upload. Partial profiles from that tree remain available for diagnostics. Failed shards cannot feed the coverage aggregate. Preserve the artifact names and strict consumer checks.
+Keep the existing build and fixtures. Tie the v2 coverage provenance to the
+verified caller event and exact signed merge, then compare each covered path
+with the protected PR head. Keep identical regular files. Omit only a net
+base-side difference established by Git. Reject unknown files and differing
+PR-side changes.
 
 ## Acceptance criteria
 
-Use a disposable Git merge fixture to verify same-tree reuse, separate head coverage on divergence, and revision mismatch refusal. Lint the workflow. After the producer lands, use a separate reviewed change to update the Required PR build workflow reference to the merged producer revision. Confirm the active protected child accepts the exact artifact.
+Use local Git fixtures for identical coverage, base-only additions, same-path
+base edits, PR-side differences, unknown paths, and stale revision evidence.
+Test the verified event claim. The existing protected workflow loads the
+importer from main. Use a fresh protected run after merge to verify the live
+claim and a base-only mismatch.

@@ -16,6 +16,14 @@ The protected final verifier requires schema v2's parent to match the locally in
 
 The protected Sonar caller and child accept the existing v1 envelope and the exact v2 envelope with a required, well-formed `merge_base_sha`. That field remains inside the canonical payload and its OIDC audience digest. The child also requires the v2 merge base on protected main's first-parent history before preparing source; all existing caller identity, job, coverage, and current-PR checks still apply. The final verifier retains its narrowly bounded v1 policy compatibility and independently checks actual merge-parent equality.
 
+For v2 Go coverage, the protected importer also checks the caller's authenticated
+OIDC event SHA against the selected merge SHA. It fetches that merge and verifies
+its ordered parents before comparing regular Go files with the PR head. It drops
+a differing record only when the merge file matches its trusted first parent
+and the head matches the historical branch point at that path. Other differences
+stop the analysis and require a refreshed PR. The build still tests the synthetic
+merge and uses its existing database fixtures.
+
 Protected fork PRs follow the same checkout checks. The upstream SARIF upload action can retain event attribution for forks despite explicit ref and SHA overrides. A mismatched fork upload remains rejected by the verifier; this change makes no new fork attribution guarantee. Green offline fixtures establish the workflow contract, not successful live uploads.
 
 For non-enforcement PR CI, `pr-ci.yml` also runs `semgrep-lock-compatibility` after IOC succeeds when any of `.github/semgrep/`, `.github/scripts/tests/test_semgrep_dependency_compatibility.py`, `.github/workflows/semgrep.yml`, `.github/workflows/pr-ci.yml`, or `.semgrep/` changes. This separate job has `contents: read` only, installs the PR's lock with hash verification, and runs the focused compatibility test; it does not upload SARIF or contribute to the protected verdict. It is not a required check and does not prove complete Semgrep compatibility. The current `wcmatch==11.2` override remains outside Semgrep's declared `~=8.3` constraint, so the test provides limited evidence only.
