@@ -81,5 +81,157 @@
       "head_verdict_pattern": "\\*\\*Completed\\*\\*[^|\\n]*\\|\\s*`([0-9a-f]{7,40})`",
       "decline_pattern": "codex usage limit|usage limits? (have|has) been reached|reached your (codex )?usage limit|Codex Review: Something went wrong"
     }
-  ]
+  ],
+  "weekly_deps": {
+    "risk_policy": "evidence-v1",
+    "tiers": {
+      "A": {
+        "Workspace lint and formatting": {
+          "ecosystems": [
+            "npm"
+          ],
+          "directories": [
+            ".",
+            "client/admin",
+            "services/media-plane"
+          ],
+          "packages": [
+            "@eslint-react/eslint-plugin",
+            "eslint",
+            "prettier",
+            "typescript-eslint"
+          ],
+          "dependency_type": "development",
+          "max_bump": "minor"
+        },
+        "Workspace test tools": {
+          "ecosystems": [
+            "npm"
+          ],
+          "directories": [
+            ".",
+            "client/admin",
+            "packages/e2ee-client",
+            "packages/protocol"
+          ],
+          "packages": [
+            "@testing-library/user-event",
+            "jsdom",
+            "msw"
+          ],
+          "dependency_type": "development",
+          "max_bump": "minor"
+        },
+        "Admin icons": {
+          "ecosystems": [
+            "npm"
+          ],
+          "directories": [
+            "client/admin"
+          ],
+          "packages": [
+            "lucide-react"
+          ],
+          "dependency_type": "production",
+          "max_bump": "minor"
+        },
+        "Shared service client patch": {
+          "ecosystems": [
+            "gomod"
+          ],
+          "directories": [
+            "services/control-plane"
+          ],
+          "packages": [
+            "github.com/nats-io/nats.go",
+            "github.com/gorilla/websocket",
+            "github.com/redis/go-redis/v9"
+          ],
+          "max_bump": "patch"
+        }
+      },
+      "B": {
+        "Workspace lint and formatting major": {
+          "ecosystems": [
+            "npm"
+          ],
+          "directories": [
+            ".",
+            "client/admin",
+            "services/media-plane"
+          ],
+          "packages": [
+            "@eslint-react/eslint-plugin",
+            "eslint",
+            "prettier",
+            "typescript-eslint"
+          ],
+          "dependency_type": "development",
+          "max_bump": "major"
+        },
+        "Workspace test tools major": {
+          "ecosystems": [
+            "npm"
+          ],
+          "directories": [
+            ".",
+            "client/admin",
+            "packages/e2ee-client",
+            "packages/protocol"
+          ],
+          "packages": [
+            "@testing-library/user-event",
+            "jsdom",
+            "msw"
+          ],
+          "dependency_type": "development",
+          "max_bump": "major"
+        },
+        "Admin icons major": {
+          "ecosystems": [
+            "npm"
+          ],
+          "directories": [
+            "client/admin"
+          ],
+          "packages": [
+            "lucide-react"
+          ],
+          "dependency_type": "production",
+          "max_bump": "major"
+        },
+        "Shared service client minor": {
+          "ecosystems": [
+            "gomod"
+          ],
+          "directories": [
+            "services/control-plane"
+          ],
+          "packages": [
+            "github.com/nats-io/nats.go",
+            "github.com/gorilla/websocket",
+            "github.com/redis/go-redis/v9"
+          ],
+          "max_bump": "minor"
+        }
+      }
+    },
+    "critical_packages": [
+      "github.com/nats-io/nats.go",
+      "github.com/gorilla/websocket",
+      "github.com/redis/go-redis/v9",
+      "mediasoup-client",
+      "modernc.org/sqlite",
+      "github.com/pion/*"
+    ],
+    "bundled_engines": [
+      "electron",
+      "@playwright/test",
+      "playwright",
+      "playwright-core",
+      "mediasoup",
+      "workerd",
+      "miniflare"
+    ]
+  }
 }
