@@ -395,6 +395,97 @@ jobs:
                   f.write('\n')
           PY
 
+      - name: Strip in-source-suppressed results from SARIF
+        if: (inputs.run-custom || inputs.run-community) && (inputs.external-verdict || github.event_name != 'pull_request')
+        # Semgrep marks a `// nosemgrep:` match with a `suppressions` array, which
+        # GitHub Code Scanning ignores, so a suppressed match opens an alert. Under
+        # --baseline-commit that happens whenever a PR edits the text of an already
+        # annotated match, and the protected verifier then blocks on the open alert
+        # (PR 399, alert 517). Same fix as eslint-sarif.yml: drop results carrying
+        # a suppression before upload; unsuppressed results are untouched. Falls
+        # back to the unfiltered upload with a warning. A suppression the PR
+        # itself adds is NOT dropped: a suppressed result is dropped only when an
+        # annotation sits on its lines, the diff against the base added none there,
+        # and the file is a regular file at HEAD; anything else (a new, moved or
+        # edited annotation, a symlink, no base) is kept, so a PR cannot silence
+        # its own finding. Inline on purpose: the protected run
+        # checks out the PR merge SHA, so a script file in the checkout would be
+        # PR-controlled; this workflow comes from main. Every dropped or kept
+        # result is listed in the log. The self-test runs the block between the
+        # BEGIN/END markers.
+        run: |
+          # BEGIN strip-suppressed-sarif
+          # Reads `git diff -U0 BASE HEAD -- file` of a file that CHANGED; exits 1 when
+          # a line in the window [s,e] (HEAD numbering) carries an annotation that is
+          # not the same text on the removed line at the SAME position in its hunk (the
+          # k-th removed line pairs with the k-th added line), or when the diff has no
+          # hunk at all. Case-insensitive, and the whole text after `nosem` is
+          # compared, so `NOSEMGREP`, `nosem=rule` and an edited rule id all count as
+          # added; an annotation that moves, even within one hunk, counts as added; an
+          # annotation that rides along unchanged on an edited line does not.
+          # shellcheck disable=SC2016  # $0 and $3 are awk fields, not shell variables
+          added_annotation='
+            /^@@/ { inh = 1; hunks++; nr = 0; na = 0; delete rt; split($3, p, ","); ln = substr(p[1], 2) + 0; next }
+            !inh { next }
+            /^-/ { nr++; l = tolower(substr($0, 2)); i = index(l, "nosem"); rt[nr] = i ? substr(l, i) : ""; next }
+            /^\+/ { na++; l = tolower(substr($0, 2)); i = index(l, "nosem")
+                    if (i && ln >= s && ln <= e && substr(l, i) != rt[na]) bad = 1
+                    ln++; next }
+            END { exit (bad || !hunks) }'
+          base_ok=false
+          if [[ "${BASELINE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "${BASELINE_COMMIT}^{commit}" 2>/dev/null; then base_ok=true; fi
+          for f in semgrep-custom.sarif semgrep-community.sarif; do
+            [ -f "$f" ] || continue
+            before=$(jq '[.runs[]?.results[]?] | length' "$f" 2>/dev/null) || before='?'
+            # [uri, startLine, endLine] of every suppressed result the PR must still
+            # answer for. A result is DROPPED only if all of these hold, so every
+            # other case fails closed: a base exists; the path is a regular file at
+            # HEAD (not a symlink); an annotation really sits on the match or the
+            # line above it; and the diff added no annotation on those lines.
+            gained='[]'
+            if jq -e . "$f" >/dev/null 2>&1; then
+              while IFS= read -r t; do
+                uri=$(printf '%s' "$t" | jq -r '.[0]')
+                s=$(printf '%s' "$t" | jq -r '.[1]')
+                e=$(printf '%s' "$t" | jq -r '.[2]')
+                lo=$((s - 1))
+                [ "$lo" -ge 1 ] || lo=1
+                entry=$(git ls-tree HEAD -- "$uri" 2>/dev/null | head -n1)
+                if [ "$base_ok" = true ] && [ -n "$uri" ] && [ "$s" -gt 0 ] && [ "$e" -ge "$s" ] \
+                   && [[ "$entry" =~ ^100(644|755)\ blob\  ]] && [ "${entry#*$'\t'}" = "$uri" ] \
+                   && git show "HEAD:$uri" | awk -v s="$lo" -v e="$e" 'NR >= s && NR <= e && index(tolower($0), "nosem") { f = 1 } END { exit !f }' \
+                   && { git diff --quiet --no-ext-diff --no-renames "$BASELINE_COMMIT" HEAD -- "$uri" \
+                        || GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null diff -U0 --text --no-textconv --no-ext-diff --no-renames --no-color "$BASELINE_COMMIT" HEAD -- "$uri" \
+                           | awk -v s="$lo" -v e="$e" "$added_annotation"; }; then
+                  continue
+                fi
+                gained=$(printf '%s' "$gained" | jq -c --argjson t "$t" '. + [$t]')
+              done < <(jq -c '[.runs[]?.results[]? | select((.suppressions | length // 0) > 0)
+                | [(.locations[0].physicalLocation.artifactLocation.uri // ""),
+                   (.locations[0].physicalLocation.region.startLine // 0),
+                   (.locations[0].physicalLocation.region.endLine // .locations[0].physicalLocation.region.startLine // 0)]] | unique[]' "$f")
+            fi
+            # Match on PRESENCE of a suppression, not suppressions[].state: raw
+            # scanner output sets no state. `. // []` tolerates a run without results.
+            if jq --argjson g "$gained" '(.runs[]?.results) |= ((. // []) | map(select(((.suppressions | length // 0) == 0) or ([(.locations[0].physicalLocation.artifactLocation.uri // ""), (.locations[0].physicalLocation.region.startLine // 0), (.locations[0].physicalLocation.region.endLine // .locations[0].physicalLocation.region.startLine // 0)] as $k | $g | any(. == $k)))))' \
+                 "$f" > "$f.filtered"; then
+              # @json escapes control characters: the file URI is a PR-controlled
+              # filename, and a raw newline plus `::` would forge a workflow command.
+              jq -r --argjson g "$gained" '.runs[]?.results[]? | select((.suppressions | length // 0) > 0)
+                | [(.locations[0].physicalLocation.artifactLocation.uri // ""), (.locations[0].physicalLocation.region.startLine // 0), (.locations[0].physicalLocation.region.endLine // .locations[0].physicalLocation.region.startLine // 0)] as $k
+                | ([.ruleId, (if $k[0] == "" then "?" else $k[0] end), $k[1]] | @json) as $w
+                | if ($g | any(. == $k)) then "::warning::nosemgrep added by this PR or not verifiable against the base, result kept: " + $w
+                  else "  dropped suppressed: " + $w end' "$f" || true
+              after=$(jq '[.runs[]?.results[]?] | length' "$f.filtered")
+              mv "$f.filtered" "$f"
+              echo "SARIF results in $f: ${before} -> ${after} (dropped in-source-suppressed)"
+            else
+              echo "::warning::SARIF suppression filter failed for $f; uploading unfiltered SARIF"
+              rm -f "$f.filtered"
+            fi
+          done
+          # END strip-suppressed-sarif
+
       - name: Upload custom-rules SARIF to Code Scanning
         if: inputs.run-custom && (inputs.external-verdict || github.event_name != 'pull_request')
         # Ordinary PR runs scan but do not upload: the protected run owns these
@@ -404,7 +495,7 @@ jobs:
         # Keep the trailing version comment bare: dependabot only rewrites that
         # exact shape, so an annotated one silently rots on every bump (#2309).
         id: upload-custom
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: semgrep-custom.sarif
           category: semgrep-custom
@@ -417,7 +508,7 @@ jobs:
         # Keep the trailing version comment bare: dependabot only rewrites that
         # exact shape, so an annotated one silently rots on every bump (#2309).
         id: upload-community
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: semgrep-community.sarif
           category: semgrep-community

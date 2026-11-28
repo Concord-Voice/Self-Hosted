@@ -1566,6 +1566,33 @@ func TestDownloadAttachmentSuccess(t *testing.T) {
 	assert.Equal(t, "ciphertext", w.Body.String())
 }
 
+// A DM-scoped download names the conversation as its candidate scope, and a
+// legacy row with no stored format sends no format header at all.
+func TestDownloadAttachmentDMScopeHeaders(t *testing.T) {
+	ts := setupMediaTest(t)
+	uploader := ts.createTestUser(t, "dmscopeuploader")
+	peer := ts.createTestUser(t, "dmscopepeer")
+	convID := ts.createTestDMConversation(t, uploader, peer)
+	fileID, _ := insertDMDownloadFixture(t, ts, uploader, convID, []byte("dm-bytes"))
+	download := func() *httptest.ResponseRecorder {
+		return ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, peer, gin.Params{{Key: "file_id", Value: fileID}})
+	}
+
+	w := download()
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, uploader, w.Header().Get(middleware.FileUploaderIDHeader))
+	assert.Equal(t, "dm", w.Header().Get(middleware.FileScopeHeader))
+	assert.Equal(t, convID, w.Header().Get(middleware.FileScopeIDHeader))
+	_, present := w.Header()[http.CanonicalHeaderKey(middleware.FileE2EEFormatHeader)]
+	assert.False(t, present, "a legacy row must not send a format header")
+
+	_, err := ts.db.Exec(`UPDATE media_files SET e2ee_format = 'attachment-v4' WHERE id = $1`, fileID)
+	require.NoError(t, err)
+	w = download()
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "attachment-v4", w.Header().Get(middleware.FileE2EEFormatHeader))
+}
+
 func insertDMDownloadFixture(t *testing.T, ts *testSetup, uploader, conversationID string, payload []byte) (fileID, messageID string) {
 	t.Helper()
 	fileID = uuid.New().String()

@@ -86,8 +86,8 @@ func setCORSHeaders(c *gin.Context, origin string) {
 	c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 	c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Refresh-Token, X-Session-ID, X-Machine-Id, X-Device-Name, X-Request-ID, X-Attestation-Token, "+ClientVersionHeader+", "+ClientPlatformHeader+", X-Concord-SSO-Client-Binding")
 	// All attachment headers are exposed: a cross-origin renderer (the remote
-	// SPA mode) cannot READ a response header that is not on this list, and both
-	// carry metadata that only exists here because the body is ciphertext.
+	// SPA mode) cannot READ a response header that is not on this list, and each
+	// carries metadata that only exists here because the body is ciphertext.
 	c.Writer.Header().Set("Access-Control-Expose-Headers",
 		SessionIssuedHeader+", "+SessionIDHeader+", "+RateLimitResetHeader+", "+
 			RateLimitLimitHeader+", "+RetryAfterHeader+", "+FileMimeTypeHeader+", "+

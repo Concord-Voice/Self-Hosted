@@ -15,7 +15,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
-	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats/natstest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,10 +38,7 @@ func newCanonicalSpellingVoiceHandler(t *testing.T, ts *testhelpers.TestServer, 
 	if configured := os.Getenv("NATS_URL"); configured != "" {
 		url = configured
 	}
-	bus, err := natsclient.Connect(url)
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live DM enforcement test", err)
-	}
+	bus := natstest.Connect(t, url)
 	t.Cleanup(func() { _ = bus.Close() })
 	return dm.NewHandler(dm.HandlerDeps{
 		DB:                   ts.DB,
