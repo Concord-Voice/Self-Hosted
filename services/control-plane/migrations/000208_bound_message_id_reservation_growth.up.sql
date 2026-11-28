@@ -93,7 +93,7 @@ AS $$
 DECLARE
     account_limit BIGINT;
     start_shard INTEGER;
-    attempt INTEGER;
+    candidate_shard SMALLINT;
 BEGIN
     -- The reservation BEFORE INSERT trigger has already claimed NEW.id. An
     -- AFTER ROW trigger runs only for an actual insert, not a same-ID retry
@@ -129,14 +129,25 @@ BEGIN
     END IF;
 
     -- Spread independent accounts over 64 row locks. The random start is
-    -- server-selected, not derived from a client-controlled message ID. Scan
-    -- the other shards if this one is full, so no headroom is stranded.
+    -- server-selected, not derived from a client-controlled message ID.
+    -- On a full shard, read the remaining candidates before updating them;
+    -- an exhausted budget must not run 64 failed UPDATE statements per send.
     start_shard := floor(random() * 64)::INTEGER;
-    FOR attempt IN 0..63 LOOP
+    UPDATE message_id_reservation_quota
+    SET issued = issued + 1
+    WHERE shard = start_shard AND issued < max_issued;
+    IF FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    FOR candidate_shard IN
+        SELECT shard FROM message_id_reservation_quota
+        WHERE shard <> start_shard AND issued < max_issued
+        ORDER BY ((shard::INTEGER - start_shard + 64) % 64)
+    LOOP
         UPDATE message_id_reservation_quota
         SET issued = issued + 1
-        WHERE shard = ((start_shard + attempt) % 64)
-          AND issued < max_issued;
+        WHERE shard = candidate_shard AND issued < max_issued;
         IF FOUND THEN
             RETURN NEW;
         END IF;
