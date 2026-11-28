@@ -124,7 +124,7 @@ jobs:
       # Both paths need the go.mod toolchain, not the runner image's Go: the
       # caller-proof verifier is Go, and the main-branch scan's dependency
       # analysis (SCA) resolves services/control-plane/go.mod with it.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: services/control-plane/go.mod
           cache: false
@@ -203,7 +203,7 @@ jobs:
         # build tools in this job, which holds SONAR_TOKEN, and must never
         # resolve PR-controlled manifests. OSV-Scanner and Dependabot check
         # dependencies at PR time; the main-branch scan keeps SCA on.
-        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
         with:
           args: ${{ !inputs.reusable-analysis && format('-Dsonar.projectBaseDir={0}/protected-sonar-analysis -Dsonar.qualitygate.wait=true -Dsonar.sca.enabled=false', runner.temp) || (inputs.require-quality-gate && '-Dsonar.qualitygate.wait=true' || '') }}
         env:

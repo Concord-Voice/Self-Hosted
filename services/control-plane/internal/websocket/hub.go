@@ -4240,14 +4240,15 @@ func (h *Hub) fetchRepliedToSummary(replyToID string) map[string]interface{} {
 	var id, userID, username, content string
 	var displayName *string
 	var keyVer int
+	var format *string
 	err := h.db.QueryRow(`
-		SELECT m.id, m.user_id, u.username, u.display_name, m.content, m.key_version
+		SELECT m.id, m.user_id, u.username, u.display_name, m.content, m.key_version, m.e2ee_format
 		FROM messages m INNER JOIN users u ON m.user_id = u.id WHERE m.id = $1
-	`, replyToID).Scan(&id, &userID, &username, &displayName, &content, &keyVer)
+	`, replyToID).Scan(&id, &userID, &username, &displayName, &content, &keyVer, &format)
 	if err != nil {
 		return nil
 	}
-	return map[string]interface{}{
+	summary := map[string]interface{}{
 		"id":           id,
 		"user_id":      userID,
 		"username":     username,
@@ -4255,6 +4256,11 @@ func (h *Hub) fetchRepliedToSummary(replyToID string) map[string]interface{} {
 		"content":      content,
 		"key_version":  keyVer,
 	}
+	// Passive read metadata, omitted for legacy rows like the HTTP summary.
+	if format != nil {
+		summary["e2ee_format"] = *format
+	}
+	return summary
 }
 
 // messageBroadcastCtx holds the data needed to build a channel message broadcast payload.

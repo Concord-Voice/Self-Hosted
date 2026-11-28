@@ -353,6 +353,9 @@ type lastMessageResponse struct {
 	// client can only try the current key, which cannot open a pre-rotation
 	// preview once a group member has left.
 	KeyVersion int64 `json:"key_version,omitempty"`
+	// Passive stored-format metadata for the preview ciphertext; omitted for
+	// legacy rows.
+	E2EEFormat *string `json:"e2ee_format,omitempty"`
 	// Attachment metadata for the conversation-list preview (#2364). Both are
 	// display-only: mime_type is sender-asserted (spec §3.3) and must never gate
 	// rendering, download, or any authorization decision. Two scalars only — no
@@ -392,7 +395,7 @@ func (h *Handler) queryConversations(userID string) ([]conversationResponse, []s
 		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.icon_url, dc.created_by,
 		       dc.expiration_window_seconds, dc.expiration_updated_at, dc.expiration_revision, dc.expiration_backfill_mode IS NOT NULL,
 		       dc.expiration_window_seconds IS NOT NULL AND dc.expiration_include_pinned, dc.created_at,
-		       dm.content, dm.expires_at, dm.created_at, dm.user_id, dm.type, dm.call_event_payload, dm.key_version,
+		       dm.content, dm.expires_at, dm.created_at, dm.user_id, dm.type, dm.call_event_payload, dm.key_version, dm.e2ee_format,
 		       att.file_type, att.mime_type,
 		       (SELECT COUNT(*) FROM dm_messages m
 		        WHERE m.conversation_id = dc.id
@@ -404,7 +407,7 @@ func (h *Handler) queryConversations(userID string) ([]conversationResponse, []s
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $1 AND dp.hidden_at IS NULL
 		LEFT JOIN dm_read_states drs ON drs.conversation_id = dc.id AND drs.user_id = $1
 		LEFT JOIN LATERAL (
-		    SELECT m.id, m.content, m.expires_at, m.created_at, m.user_id, m.type, m.call_event_payload, m.key_version FROM dm_messages m
+		    SELECT m.id, m.content, m.expires_at, m.created_at, m.user_id, m.type, m.call_event_payload, m.key_version, m.e2ee_format FROM dm_messages m
 		    WHERE m.conversation_id = dc.id ` + hiddenRangeFilter(1) + `
 		    ORDER BY m.created_at DESC LIMIT 1
 		) dm ON TRUE
@@ -448,7 +451,7 @@ func (h *Handler) scanConversationRow(rows *sql.Rows) (conversationResponse, err
 	if err := rows.Scan(
 		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IconURL, &conv.CreatedBy,
 		&conv.ExpirationWindowSeconds, &conv.ExpirationUpdatedAt, &conv.ExpirationRevision, &conv.ExpirationBackfillPending, &conv.ExpirationIncludePinned, &conv.CreatedAt,
-		&lm.content, &lm.expiresAt, &lm.createdAt, &lm.userID, &lm.msgType, &lm.callEventPayload, &lm.keyVersion,
+		&lm.content, &lm.expiresAt, &lm.createdAt, &lm.userID, &lm.msgType, &lm.callEventPayload, &lm.keyVersion, &lm.e2eeFormat,
 		&lm.attachmentType, &lm.attachmentMime,
 		&conv.UnreadCount,
 	); err != nil {
@@ -482,6 +485,7 @@ type lastMessageRow struct {
 	msgType          sql.NullString
 	callEventPayload []byte
 	keyVersion       sql.NullInt64
+	e2eeFormat       sql.NullString
 	attachmentType   sql.NullString
 	attachmentMime   sql.NullString
 }
@@ -503,6 +507,7 @@ func newLastMessageResponse(row lastMessageRow) *lastMessageResponse {
 		Type:             row.msgType.String,
 		CallEventPayload: json.RawMessage(row.callEventPayload),
 		KeyVersion:       row.keyVersion.Int64,
+		E2EEFormat:       nullStringPointer(row.e2eeFormat),
 		AttachmentType:   row.attachmentType.String,
 		AttachmentMime:   row.attachmentMime.String,
 	}
@@ -3358,11 +3363,11 @@ func (h *Handler) fetchConversationResponse(convID, viewerID string) *conversati
 		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.icon_url, dc.created_by,
 		       dc.expiration_window_seconds, dc.expiration_updated_at, dc.expiration_revision, dc.expiration_backfill_mode IS NOT NULL,
 		       dc.expiration_window_seconds IS NOT NULL AND dc.expiration_include_pinned, dc.created_at,
-		       dm.content, dm.expires_at, dm.created_at, dm.user_id, dm.type, dm.call_event_payload, dm.key_version,
+		       dm.content, dm.expires_at, dm.created_at, dm.user_id, dm.type, dm.call_event_payload, dm.key_version, dm.e2ee_format,
 		       att.file_type, att.mime_type
 		FROM dm_conversations dc
 		LEFT JOIN LATERAL (
-		    SELECT m.id, m.content, m.expires_at, m.created_at, m.user_id, m.type, m.call_event_payload, m.key_version FROM dm_messages m
+		    SELECT m.id, m.content, m.expires_at, m.created_at, m.user_id, m.type, m.call_event_payload, m.key_version, m.e2ee_format FROM dm_messages m
 		    WHERE m.conversation_id = dc.id `+hiddenRangeFilter(2)+`
 		    ORDER BY m.created_at DESC LIMIT 1
 		) dm ON TRUE
@@ -3378,7 +3383,7 @@ func (h *Handler) fetchConversationResponse(convID, viewerID string) *conversati
 	`, convID, viewerID).Scan(
 		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IconURL, &conv.CreatedBy,
 		&conv.ExpirationWindowSeconds, &conv.ExpirationUpdatedAt, &conv.ExpirationRevision, &conv.ExpirationBackfillPending, &conv.ExpirationIncludePinned, &conv.CreatedAt,
-		&lm.content, &lm.expiresAt, &lm.createdAt, &lm.userID, &lm.msgType, &lm.callEventPayload, &lm.keyVersion,
+		&lm.content, &lm.expiresAt, &lm.createdAt, &lm.userID, &lm.msgType, &lm.callEventPayload, &lm.keyVersion, &lm.e2eeFormat,
 		&lm.attachmentType, &lm.attachmentMime,
 	)
 	if err != nil {
@@ -3468,6 +3473,7 @@ type updateDMMessageRequest struct {
 type updateDMMessageResult struct {
 	Content    string  `json:"content"`
 	KeyVersion int     `json:"key_version"`
+	E2EEFormat *string `json:"e2ee_format,omitempty"`
 	EditedAt   *string `json:"edited_at"`
 	ExpiresAt  *string `json:"expires_at"`
 	CreatedAt  string  `json:"created_at"`
@@ -3583,8 +3589,8 @@ func (h *Handler) writeDMMessageCiphertext(c *gin.Context, tx *sql.Tx, convID, m
 		      SELECT 1 FROM dm_key_revocations
 		      WHERE conversation_id = $4 AND revoked_epoch = $2
 		  )`+hiddenRangeFilter(5)+`
-		RETURNING key_version, edited_at, expires_at, created_at
-	`, req.Content, req.KeyVersion, messageID, convID, userID).Scan(&result.KeyVersion, &result.EditedAt, &result.ExpiresAt, &result.CreatedAt)
+		RETURNING key_version, e2ee_format, edited_at, expires_at, created_at
+	`, req.Content, req.KeyVersion, messageID, convID, userID).Scan(&result.KeyVersion, &result.E2EEFormat, &result.EditedAt, &result.ExpiresAt, &result.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		if !h.enforceDMMessageEpoch(c, tx, convID, req.KeyVersion) {
 			return updateDMMessageResult{}, false
@@ -3712,17 +3718,18 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		return
 	}
 
-	msg := websocket.OutgoingMessage{
-		Type: "dm_message_update",
-		Data: map[string]interface{}{
-			"id":              messageID,
-			"conversation_id": convID,
-			"content":         req.Content,
-			"key_version":     result.KeyVersion,
-			"edited_at":       result.EditedAt,
-			"expires_at":      result.ExpiresAt,
-		},
+	update := map[string]interface{}{
+		"id":              messageID,
+		"conversation_id": convID,
+		"content":         req.Content,
+		"key_version":     result.KeyVersion,
+		"edited_at":       result.EditedAt,
+		"expires_at":      result.ExpiresAt,
 	}
+	if result.E2EEFormat != nil {
+		update["e2ee_format"] = *result.E2EEFormat
+	}
+	msg := websocket.OutgoingMessage{Type: "dm_message_update", Data: update}
 	if h.hub != nil {
 		h.hub.BroadcastToDMMessageAllParticipants(
 			conversationUUID,

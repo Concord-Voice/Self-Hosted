@@ -54,7 +54,7 @@ readonly CHECKOUT_ACTION='actions/checkout@3d3c42e5aac5ba805825da76410c181273ba9
 readonly LOGIN_ACTION='docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550' # pragma: allowlist secret -- public action commit (v4.8.0)
 readonly BUILDX_ACTION='docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003' # pragma: allowlist secret -- public action commit
 readonly BUILD_PUSH_ACTION='docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc' # pragma: allowlist secret -- public action commit
-readonly ORAS_ACTION='oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63' # pragma: allowlist secret -- public action commit
+readonly ORAS_ACTION='oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128' # pragma: allowlist secret -- public action commit
 readonly PROBE_RUNTIME_REF='example.invalid/minio-contract-probe:invalid'
 
 REQUIRE_COMPOSE=0
