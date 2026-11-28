@@ -2858,6 +2858,27 @@ paths:
                 properties:
                   channel:
                     $ref: '#/components/schemas/Channel'
+        '400':
+          description: 'Invalid channel ID (not a UUID): `{"error": "Invalid channel ID"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 'The channel does not exist, the caller is not a member of its server,
+            or the caller lacks the channel''s view permission. All of these cases return the
+            same body: `{"error": "Channel not found or access denied"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The channel or its permissions could not be read: `{"error": "Failed
+            to fetch channel"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     patch:
       tags:
       - Channels
@@ -3805,6 +3826,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SuccessMessage'
+        '400':
+          description: 'Invalid channel ID (not a UUID): `{"error": "Invalid channel ID"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'The channel does not exist, the caller is not a member of its server,
+            or the caller lacks the channel''s view permission. All of these cases return the
+            same body: `{"error": "Not a member of this server"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The read state could not be written: `{"error": "Failed to mark
+            channel read"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /channels/{id}/rotate-key:
     post:
       tags:
@@ -4526,8 +4568,24 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/VoiceParticipant'
+        '400':
+          description: 'Invalid channel ID (not a UUID): `{"error": "Invalid channel ID"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '403':
-          description: Not a member of this channel's server
+          description: 'The channel does not exist, the caller is not a member of its server,
+            it is not a voice channel, or the caller lacks the voice-channel view permission.
+            All of these cases return the same body: `{"error": "Not a member of this server"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'Participants could not be read: `{"error": "Failed to fetch
+            participants"}`. A failure while reading any participant row returns this
+            error; the endpoint never returns a partial list.'
           content:
             application/json:
               schema:
@@ -9114,7 +9172,11 @@ paths:
       operationId: mediaDownloadAttachment
       description: 'Proxies the encrypted blob through the control plane (object storage is not client-reachable).
 
-        Requires membership in the owning channel or DM conversation. The body is opaque ciphertext;
+        Access to a channel attachment requires server membership plus the channel type''s
+        view permission and `read_message_history` in that channel. Access to a DM attachment
+        requires participation in the conversation, and the file must be attached to a message
+        in that conversation outside any range the caller has cleared, or be the caller''s own
+        upload not yet attached to any message. The body is opaque ciphertext;
 
         the original MIME type hint is returned in the X-File-Mime-Type header, and the CSK epoch
 
@@ -9197,20 +9259,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '403':
-          description: Not a member of the owning channel/conversation
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '404':
-          description: File not found (unknown, deleted, or not a Tier 2 attachment)
+          description: 'File not found: unknown, deleted, not a Tier 2 attachment, or not
+            accessible to the caller (see the access rules above). All of these cases return
+            the same body, `{"error": "File not found"}`, with no `X-File-*` or `Cache-Control`
+            headers. A file whose metadata exists but whose object is missing from storage,
+            after access is granted, returns `{"error": "File not found in storage"}`.'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/RateLimited'
+        '500':
+          description: 'The file metadata, the access check or the storage read failed:
+            `{"error": "Failed to fetch file"}`, `{"error": "Failed to verify access"}` or
+            `{"error": "Failed to download file"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
           description: Media storage not configured
           content:
@@ -13961,7 +14029,8 @@ paths:
         permission AND `read_message_history` in it — an unread count is message-content
         disclosure. A channel the caller can see but not read is absent from `channels`
         and does not raise its server in `server_ids`; it still appears in the server''s
-        channel list.
+        channel list. A channel the caller cannot view is likewise absent from both
+        `channels` and `server_ids`.
 
         Rate limit: 30 requests per minute.
 
@@ -13998,6 +14067,14 @@ paths:
                         unread_count:
                           type: integer
                           example: 3
+        '500':
+          description: 'Unread status could not be read: `{"error": "Failed to fetch
+            server unread status"}`. A failure while reading any channel''s row returns
+            this error; the endpoint never returns a partial list.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /servers/{id}/messages:
     delete:
       tags:
@@ -16612,7 +16689,9 @@ paths:
       tags:
       - Channels
       summary: Mark all channels as read
-      description: 'Mark all channels in a server as read.
+      description: 'Mark all channels in a server as read. Only channels the caller
+        can view are marked; channels hidden from the caller are skipped and their read
+        state is not written.
 
         Rate limit: 30 requests per minute.
 
@@ -16628,6 +16707,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SuccessMessage'
+        '400':
+          description: 'Invalid server ID (not a UUID): `{"error": "Invalid server ID"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Not a member of this server, or the server does not exist. Both
+            cases return the same body: `{"error": "Not a member of this server"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'The read state could not be written: `{"error": "Failed to mark
+            server read"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /servers/{id}/roles:
     get:
       tags:
@@ -17276,7 +17375,7 @@ paths:
         caller may read: a count is returned only where the caller holds BOTH the
         type-appropriate view permission AND `read_message_history`. Channels the caller
         can see but not read are absent from `unreads` while remaining in the channel
-        list.
+        list. Channels the caller cannot view are left out of `unreads` entirely.
 
         Rate limit: 30 requests per minute.
 
@@ -17297,6 +17396,27 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/ChannelUnreadCount'
+        '400':
+          description: 'Invalid server ID (not a UUID): `{"error": "Invalid server ID"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 'Not a member of this server, or the server does not exist. Both
+            cases return the same body: `{"error": "Not a member of this server"}`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'Unread counts could not be read: `{"error": "Failed to fetch
+            unread counts"}`. A failure while reading any channel''s count returns this
+            error; the endpoint never returns a partial list.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /servers/{id}/voice/{userId}/deafen:
     post:
       tags:
