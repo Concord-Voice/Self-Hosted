@@ -72,7 +72,7 @@ approval and an out-of-band alert destination configured by host root.
 
 ### Fixed
 
-- **Accounts:** Verifying your email after requesting account erasure now returns a stale-confirmation message so compatible Desktop clients can clear the old link and retry.
+- **Accounts:** If you verify your email while an erasure link is pending, the server rejects the old link with a stale-confirmation response. Desktop v0.4.0 can clear that link and prompt you to start again.
 - **Host agent:** The 202 response to an action (`POST /v1/actions/<name>`) now always reports the job it just started as `running`; a job that finished quickly could be reported as `succeeded` in that response.
 
 ## [0.4.0] - 2026-11-23
