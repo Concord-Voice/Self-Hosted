@@ -344,6 +344,10 @@ def validate_evidence(candidate, verified, run, pr, jobs):
             or any(v not in ("success", "skipped") for v in verdicts.values())
             or set(coverage) != set(COMPONENTS) or not all(isinstance(v, bool) for v in coverage.values())):
         raise Reject("signed scan selection or verdict invalid")
+    event_sha = claims.get("event_sha")
+    if (version == 2 and coverage["control_plane"] and event_sha is not None
+            and event_sha != selection["merge_sha"]):
+        raise Reject("Go coverage merge revision differs from caller event")
     if any(selection["coverage_required"][c] and not coverage[c] for c in COMPONENTS):
         raise Reject("selected coverage was not uploaded")
     selected = selection["selected"]
@@ -390,6 +394,50 @@ def validate_evidence(candidate, verified, run, pr, jobs):
     return payload, claims
 
 
+def go_coverage_sources(repo, merge, base, head, *, allow_base_omission):
+    """Classify paths using verified Git objects, never coverage-provided metadata."""
+    parents = git(repo, "rev-list", "--parents", "-n", "1", merge, limit=200).decode().split()
+    if parents != [merge, base, head]:
+        raise Reject("Go coverage merge parents differ from signed proof")
+    directory = COMPONENTS["control_plane"][3]
+
+    def entries(ref):
+        result = {}
+        tree = git(repo, "ls-tree", "-r", "-t", "-z", "--full-tree", ref, "--", directory,
+                   limit=8 * 1024 * 1024)
+        for entry in tree.split(b"\0"):
+            if entry.endswith(b".go"):
+                header, path = entry.split(b"\t", 1)
+                mode, kind, oid = header.decode("ascii").split(" ")
+                result[safe_path(path)] = (mode, kind, oid)
+        return result
+
+    def regular_blob(entry):
+        if entry is not None and entry[0] in ("100644", "100755") and entry[1] == "blob" and sha(entry[2]):
+            return entry[2]
+        return None
+
+    merge_entries, head_entries = entries(merge), entries(head)
+    merged = {path for path, entry in merge_entries.items() if regular_blob(entry) is not None}
+    # Executable bits do not affect covered source bytes. Keep exact Git entries
+    # below when proving that the PR side did not change a differing path.
+    different = {path for path in merged
+                 if regular_blob(merge_entries[path]) != regular_blob(head_entries.get(path))}
+    if not different or not allow_base_omission:
+        return merged, different, set()
+    common = git(repo, "merge-base", "--all", base, head, limit=4096).decode().split()
+    if len(common) != 1 or not sha(common[0]):
+        # Still keep identical sources. There is no unique branch point
+        # to prove that a differing path belongs to the base side.
+        return merged, different, set()
+    base_entries, common_entries = entries(base), entries(common[0])
+    # Typed entries distinguish absence from a directory or symlink
+    # replacing a file at the same path.
+    omit = {path for path in different if merge_entries[path] == base_entries.get(path)
+            and head_entries.get(path) == common_entries.get(path)}
+    return merged, different, omit
+
+
 def prepare_git(repo, claims, payload, candidate, token):
     subprocess.run(["git", "init", "-q", str(repo)], env=GIT_ENV, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL, timeout=30, check=True)
@@ -419,6 +467,19 @@ def prepare_git(repo, claims, payload, candidate, token):
     git(repo, "update-ref", "refs/heads/analysis", head)
     git(repo, "symbolic-ref", "HEAD", "refs/heads/analysis")
     git(repo, "read-tree", "HEAD")
+
+    selection = payload["selection"]
+    if selection["version"] == 1 or not payload["coverage"]["control_plane"]:
+        return None
+    git(repo, "fetch", "--no-tags", "origin", f"+refs/pull/{candidate['pr_number']}/merge:refs/remotes/origin/merge",
+        limit=1024, env=fetch_env)
+    merge = git(repo, "rev-parse", "refs/remotes/origin/merge").decode().strip()
+    if merge != selection["merge_sha"]:
+        raise Reject("Go coverage merge revision moved")
+    # The signed selection suffices to compare source. Omitting a differing
+    # source additionally requires the verified caller event to name the merge.
+    return go_coverage_sources(repo, merge, selection["merge_base_sha"], head,
+                               allow_base_omission=claims.get("event_sha") == merge)
 
 
 def materialize(repo):
@@ -478,7 +539,7 @@ def trusted_support(repo):
         destination.chmod(0o644)
 
 
-def validate_report(content, component, repo=None):
+def validate_report(content, component, repo=None, go_sources=None):
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -515,6 +576,14 @@ def validate_report(content, component, repo=None):
                     break
             if not path.startswith(prefix + "/") or not path.endswith(".go"):
                 raise Reject("Go coverage source outside component")
+            if go_sources is not None:
+                merged, different, omit = go_sources
+                if path not in merged:
+                    raise Reject("Go coverage source not in signed merge tree")
+                if path in omit:
+                    continue
+                if path in different:
+                    raise Reject("Go coverage source differs on PR head; refresh the branch")
             if repo is not None and not (repo / path).is_file():
                 raise Reject("Go coverage source not in PR tree")
             output.append(path + tail)
@@ -639,14 +708,14 @@ def prepare(candidate, directory, api):
         jobs = settled_jobs(api, f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
         payload, claims = validate_evidence(candidate, verified, run, pr, jobs)
         repo = temp / "analysis"
-        prepare_git(repo, claims, payload, candidate, api.token)
+        go_sources = prepare_git(repo, claims, payload, candidate, api.token)
         materialize(repo)
         trusted_support(repo)
         for component, (artifact_name, report_name, report_path, _) in COMPONENTS.items():
             if not payload["coverage"][component]:
                 continue
             archive = api.artifact(inventory, artifact_name, run_id, started, MAX_COVERAGE_ZIP)
-            report = validate_report(one_zip(archive, report_name, MAX_COVERAGE), component, repo)
+            report = validate_report(one_zip(archive, report_name, MAX_COVERAGE), component, repo, go_sources)
             destination = repo / report_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(report)

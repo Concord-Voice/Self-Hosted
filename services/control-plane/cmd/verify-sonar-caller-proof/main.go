@@ -66,6 +66,7 @@ type signedClaims struct {
 	RunAttempt   string `json:"run_attempt"`
 	WorkflowRef  string `json:"workflow_ref"`
 	WorkflowSHA  string `json:"workflow_sha"`
+	EventSHA     string `json:"sha"`
 	Subject      string `json:"sub"`
 	NotBefore    int64  `json:"nbf"`
 }
@@ -78,6 +79,7 @@ type verifiedClaims struct {
 	RunAttempt   string `json:"run_attempt"`
 	WorkflowRef  string `json:"workflow_ref"`
 	WorkflowSHA  string `json:"workflow_sha"`
+	EventSHA     string `json:"event_sha,omitempty"`
 	Subject      string `json:"subject"`
 }
 
@@ -173,6 +175,7 @@ func verifyProof(ctx context.Context, raw []byte, issuer string, now func() time
 			RunAttempt:   claims.RunAttempt,
 			WorkflowRef:  claims.WorkflowRef,
 			WorkflowSHA:  claims.WorkflowSHA,
+			EventSHA:     claims.EventSHA,
 			Subject:      claims.Subject,
 		},
 	})
@@ -234,7 +237,8 @@ func validClaims(token *oidc.IDToken, c signedClaims, p payload, now time.Time) 
 	if c.RepositoryID != repositoryID || c.Repository != repository || c.EventName != "pull_request" ||
 		c.RunID != strconv.FormatInt(p.CallerRunID, 10) ||
 		c.RunAttempt != strconv.FormatInt(p.CallerRunAttempt, 10) ||
-		c.WorkflowRef != workflowRef || !shaPattern.MatchString(c.WorkflowSHA) || c.Subject == "" {
+		c.WorkflowRef != workflowRef || !shaPattern.MatchString(c.WorkflowSHA) ||
+		(c.EventSHA != "" && !shaPattern.MatchString(c.EventSHA)) || c.Subject == "" {
 		return false
 	}
 	if token.IssuedAt.IsZero() || token.Expiry.IsZero() || c.NotBefore <= 0 {
