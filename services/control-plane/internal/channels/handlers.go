@@ -2025,7 +2025,8 @@ func (h *Handler) GetUnreadCounts(c *gin.Context) {
 		var entry unreadEntry
 		if err := rows.Scan(&entry.ChannelID, &entry.UnreadCount); err != nil {
 			h.log.Error("Failed to scan unread count", "error", err)
-			continue
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchUnreadCounts})
+			return
 		}
 		unreads = append(unreads, entry)
 	}
@@ -2093,7 +2094,8 @@ func (h *Handler) GetServerUnreadStatus(c *gin.Context) {
 		var row channelUnread
 		if err := rows.Scan(&row.ChannelID, &row.ServerID, &row.UnreadCount); err != nil {
 			h.log.Error("Failed to scan channel unread row", "error", err)
-			continue
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchServerUnread})
+			return
 		}
 		channels = append(channels, row)
 		if _, ok := seenServers[row.ServerID]; !ok {

@@ -659,12 +659,14 @@ func (h *Handler) GetParticipants(c *gin.Context) {
 		return
 	}
 
-	// Verify the user has access to this channel's server
+	// Verify the user has access to this channel's server. A channel that is
+	// not a voice channel takes the same no-row branch as a missing one, so a
+	// text channel's ID (hidden or not) cannot be told apart from an unknown ID.
 	var serverID string
 	err := h.db.QueryRow(`
 		SELECT c.server_id FROM channels c
 		INNER JOIN server_members sm ON sm.server_id = c.server_id AND sm.user_id = $2
-		WHERE c.id = $1
+		WHERE c.id = $1 AND c.type = 'voice'
 	`, channelID, userID).Scan(&serverID)
 
 	if err == sql.ErrNoRows {
@@ -719,7 +721,8 @@ func (h *Handler) GetParticipants(c *gin.Context) {
 			&p.ServerMuted, &p.ServerDeafened,
 		); err != nil {
 			h.log.Error("Failed to scan voice participant", "error", err)
-			continue
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFetchParticipants})
+			return
 		}
 		participants = append(participants, p)
 	}
