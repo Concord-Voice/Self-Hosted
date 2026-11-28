@@ -128,7 +128,7 @@ func insertDMMessage(t *testing.T, ts *testhelpers.TestServer, convID, userID, c
 	t.Helper()
 	msgID := uuid.New().String()
 	_, err := ts.DB.Exec(
-		`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version) VALUES ($1, $2, $3, $4, 'text', 1)`,
+		`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version) VALUES ($1, $2, $3, $4, 'user', 1)`,
 		msgID, convID, userID, content,
 	)
 	require.NoError(t, err, "failed to insert DM message")
@@ -2038,6 +2038,36 @@ func TestUpdateMessage_Success(t *testing.T) {
 	assert.NotNil(t, msg["edited_at"], "edited_at should be set")
 }
 
+// Pins: server-authored DM rows (system, call_event) are never user-editable,
+// even when they record the participant as user_id.
+func TestUpdateMessage_RefusesSystemRows(t *testing.T) {
+	for _, rowType := range []string{"system", "call_event"} {
+		t.Run(rowType, func(t *testing.T) {
+			ts := setupTS(t)
+			user1 := ts.CreateTestUser(t, "updmsgsys1"+rowType[:3])
+			user2 := ts.CreateTestUser(t, "updmsgsys2"+rowType[:3])
+			ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+			convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+			msgID := uuid.New().String()
+			_, err := ts.DB.Exec(`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version) VALUES ($1, $2, $3, 'server row', $4, 1)`,
+				msgID, convID, user1.ID, rowType)
+			require.NoError(t, err)
+
+			w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{
+				"content":     testhelpers.ValidCiphertext(),
+				"key_version": 1,
+			}, testhelpers.AuthHeaders(user1.AccessToken))
+			assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+
+			var content string
+			var editedAt *string
+			require.NoError(t, ts.DB.QueryRow(`SELECT content, edited_at::text FROM dm_messages WHERE id = $1`, msgID).Scan(&content, &editedAt))
+			assert.Equal(t, "server row", content)
+			assert.Nil(t, editedAt)
+		})
+	}
+}
+
 func TestUpdateMessage_StoresKeyVersion(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "updatemsgkeyversion1")
@@ -2048,7 +2078,7 @@ func TestUpdateMessage_StoresKeyVersion(t *testing.T) {
 	msgID := uuid.New().String()
 	_, err := ts.DB.Exec(`
 		INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version)
-		VALUES ($1, $2, $3, $4, 'text', 1)
+		VALUES ($1, $2, $3, $4, 'user', 1)
 	`, msgID, convID, user1.ID, originalCiphertext)
 	require.NoError(t, err)
 	editedCiphertext := testhelpers.ValidCiphertext()

@@ -44,6 +44,7 @@ approval and an out-of-band alert destination configured by host root.
 
 ### Security
 
+- **Messages:** Editing a message now requires `PermManageOwnMessages` itself inside the edit transaction; only delete still accepts `PermManageAllMessages` for your own message. Channel and DM edits refuse server-authored rows, such as expiration-policy events, even when they record the editing user as author ([#450](https://github.com/Concord-Voice/Self-Hosted/pull/450)).
 - **Accounts:** Removing a TOTP or WebAuthn factor now requires a fresh, route-bound second-factor proof whenever the account has inline MFA; a password alone cannot remove the factor ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
 - **Accounts:** Unlinking an SSO identity and enabling SSO security trust now require a fresh, route-bound proof inside the protected transaction. Disabling that trust remains an ungated strengthening ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
 - **Accounts:** Erasing an account now requires fresh proof and explicit confirmation of any owned servers with other members. An unverified email address also requires a one-use confirmation link ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).

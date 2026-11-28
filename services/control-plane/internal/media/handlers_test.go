@@ -1672,7 +1672,7 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 		convID := ts.createTestDMConversation(t, actor, peer)
 		fileID, oldMessageID := insertDMDownloadFixture(t, ts, actor, convID, []byte("shared-bytes"))
 		laterMessageID := uuid.New().String()
-		_, err := ts.db.Exec(`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version, created_at) VALUES ($1, $2, $3, 'later', 'text', 1, NOW() + INTERVAL '1 minute')`, laterMessageID, convID, peer)
+		_, err := ts.db.Exec(`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version, created_at) VALUES ($1, $2, $3, 'later', 'user', 1, NOW() + INTERVAL '1 minute')`, laterMessageID, convID, peer)
 		require.NoError(t, err)
 		var oldCreated time.Time
 		require.NoError(t, ts.db.QueryRow(`SELECT created_at FROM dm_messages WHERE id = $1`, oldMessageID).Scan(&oldCreated))
@@ -1748,7 +1748,7 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 		_, err := ts.db.Exec(`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, conversation_id) VALUES ($1, $2, 'file', 2, 'application/octet-stream', 5, $3, 1, $4)`, fileID, uploader, storageKey, convID)
 		require.NoError(t, err)
 		otherMessageID := uuid.New().String()
-		_, err = ts.db.Exec(`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version) VALUES ($1, $2, $3, 'other conversation', 'text', 1)`, otherMessageID, otherConvID, uploader)
+		_, err = ts.db.Exec(`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, key_version) VALUES ($1, $2, $3, 'other conversation', 'user', 1)`, otherMessageID, otherConvID, uploader)
 		require.NoError(t, err)
 		_, err = ts.db.Exec(`INSERT INTO dm_message_attachments (message_id, file_id, position) VALUES ($1, $2, 0)`, otherMessageID, fileID)
 		require.NoError(t, err)

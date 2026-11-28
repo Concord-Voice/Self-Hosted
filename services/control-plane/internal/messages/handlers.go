@@ -116,6 +116,10 @@ type messageChannelAuthorization struct {
 	userID     string
 	required   rbac.Permission
 	genericMsg string
+	// manageAllCoversOwn lets PermManageAllMessages satisfy a
+	// PermManageOwnMessages requirement. Only delete sets it; edit must hold
+	// ManageOwn itself, matching its preflight.
+	manageAllCoversOwn bool
 }
 
 // NewHandler creates a new message handler. purgeEngine backs the bulk-purge
@@ -759,8 +763,9 @@ func (h *Handler) authorizeMessageChannelTx(
 	}
 	hasRequired := perms.Has(authorization.required)
 	// Moderators may delete their own messages through ManageAll even when a
-	// custom role removed ManageOwn; the preflight has always allowed that.
-	if authorization.required == rbac.PermManageOwnMessages {
+	// custom role removed ManageOwn; the delete preflight has always allowed
+	// that. Edit does not opt in, so it requires ManageOwn strictly.
+	if authorization.manageAllCoversOwn && authorization.required == rbac.PermManageOwnMessages {
 		hasRequired = hasRequired || perms.Has(rbac.PermManageAllMessages)
 	}
 	viewPerm, viewable := channelViewPermission(channelType)
@@ -986,10 +991,10 @@ func (h *Handler) authorizeMessageUpdate(c *gin.Context, messageID, userID strin
 // false: 404 when the message is gone from that channel, 403 when someone
 // else wrote it, 500 when the read fails.
 func (h *Handler) lockOwnMessageForEditTx(c *gin.Context, tx *sql.Tx, messageID, channelID, userID string) bool {
-	var authorID string
+	var authorID, messageType string
 	err := tx.QueryRowContext(c.Request.Context(),
-		`SELECT user_id FROM messages WHERE id = $1 AND channel_id = $2 FOR SHARE`, messageID, channelID,
-	).Scan(&authorID)
+		`SELECT user_id, type FROM messages WHERE id = $1 AND channel_id = $2 FOR SHARE`, messageID, channelID,
+	).Scan(&authorID, &messageType)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
@@ -998,7 +1003,9 @@ func (h *Handler) lockOwnMessageForEditTx(c *gin.Context, tx *sql.Tx, messageID,
 		h.log.Error("Failed to lock message update", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
 		return false
-	case authorID != userID:
+	// System rows (type != 'user') are server-authored and never user-editable,
+	// even though an expiration_event row records the acting user as user_id.
+	case authorID != userID || messageType != "user":
 		c.JSON(http.StatusForbidden, gin.H{"error": "You can only edit your own messages"})
 		return false
 	}
@@ -1275,7 +1282,7 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 // response and returns false.
 func (h *Handler) authorizeMessageDeleteTx(c *gin.Context, tx *sql.Tx, messageID, userID string, locked *messageDeletePreflight) bool {
 	ctx := c.Request.Context()
-	channelID, serverID, channelType, allowed := h.lockChannelMessageMutationTx(c, tx, messageID, userID, rbac.PermManageOwnMessages, errMsgFailedDeleteMessage)
+	channelID, serverID, channelType, allowed := h.lockChannelMessageMutationWithOptionsTx(c, tx, messageID, userID, rbac.PermManageOwnMessages, errMsgFailedDeleteMessage, true)
 	if !allowed {
 		return false
 	}

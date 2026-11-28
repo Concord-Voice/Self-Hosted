@@ -3558,12 +3558,12 @@ func (h *Handler) prepareDMMessageCiphertextAttempt(c *gin.Context, tx *sql.Tx, 
 }
 
 func (h *Handler) lockDMMessageForCiphertextUpdate(c *gin.Context, tx *sql.Tx, convID, messageID, userID string) bool {
-	var authorID string
+	var authorID, messageType string
 	//nolint:gosec // G202: the filter is a compile-time constant; all values are parameterized.
 	if err := tx.QueryRowContext(c.Request.Context(),
-		`SELECT m.user_id FROM dm_messages m WHERE m.id = $1 AND m.conversation_id = $2`+hiddenRangeFilter(3)+` FOR UPDATE`,
+		`SELECT m.user_id, m.type FROM dm_messages m WHERE m.id = $1 AND m.conversation_id = $2`+hiddenRangeFilter(3)+` FOR UPDATE`,
 		messageID, convID, userID,
-	).Scan(&authorID); errors.Is(err, sql.ErrNoRows) {
+	).Scan(&authorID, &messageType); errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
 		return false
 	} else if err != nil {
@@ -3571,7 +3571,9 @@ func (h *Handler) lockDMMessageForCiphertextUpdate(c *gin.Context, tx *sql.Tx, c
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
 		return false
 	}
-	if authorID != userID {
+	// System rows (type != 'user') are server-authored and never user-editable,
+	// even when they record the acting user as user_id.
+	if authorID != userID || messageType != "user" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "You can only edit your own messages"})
 		return false
 	}
