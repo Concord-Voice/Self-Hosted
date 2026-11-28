@@ -6,7 +6,7 @@
 # the default tag (`node:latest`, currently Debian-based `node:26`). PR #2800
 # did exactly that -- swapping this stage to a 443 MB Debian image with nothing
 # in the diff to show it. Keep tag+digest together on every bump.
-FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS admin-ui-builder
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS admin-ui-builder
 
 WORKDIR /src
 COPY --from=admin_ui package.json package-lock.json ./
@@ -24,7 +24,7 @@ RUN npm run build && test -f dist/index.html
 # the shipped stdlib directly, without a GOTOOLCHAIN build-time download.
 # The `go` directive separately controls the module's compatibility defaults.
 # scripts/check-go-toolchain.py enforces alignment with Dockerfile.ops-agent.
-FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS builder
+FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS builder
 
 WORKDIR /app
 
@@ -50,7 +50,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       ./cmd/server ./cmd/migrate-media ./cmd/mfa-rekey
 
 # Final stage. Tracks the supported Alpine line -- 3.21 reaches EOL 2026-11-01.
-FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 LABEL org.opencontainers.image.source="https://github.com/Concord-Voice/Self-Hosted"
 LABEL org.opencontainers.image.description="Concord Voice control-plane service"

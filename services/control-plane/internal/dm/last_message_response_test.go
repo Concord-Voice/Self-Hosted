@@ -28,6 +28,7 @@ func TestLastMessageResponse_JSONTags(t *testing.T) {
 		"Type":             "type,omitempty",
 		"CallEventPayload": "call_event_payload,omitempty",
 		"KeyVersion":       "key_version,omitempty",
+		"E2EEFormat":       "e2ee_format,omitempty",
 		"AttachmentType":   "attachment_type,omitempty",
 		"AttachmentMime":   "attachment_mime,omitempty",
 	}

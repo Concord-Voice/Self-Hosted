@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/auto-format.sh"
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/auto-format.sh"
           }
         ]
       },
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/test-reminder.sh"
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/test-reminder.sh"
           }
         ]
       }
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/destructive-commands.sh"
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/destructive-commands.sh"
           }
         ]
       },
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/protect-env-files.sh"
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/protect-env-files.sh"
           }
         ]
       },
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/protect-sensitive.sh"
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/protect-sensitive.sh"
           }
         ]
       },
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/protect-applied-migrations.sh"
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/protect-applied-migrations.sh"
           }
         ]
       }
@@ -74,7 +74,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/detect-secrets.sh"
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/detect-secrets.sh"
           }
         ]
       },
@@ -83,7 +83,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/issue-creation-nudge.sh"
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/issue-creation-nudge.sh"
           }
         ]
       }

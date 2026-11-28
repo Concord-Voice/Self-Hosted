@@ -42,7 +42,7 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 | `bots[].ack_pattern` / `.decline_pattern` / `.head_verdict_pattern` | string (regex) | unset → no special handling | dev-lifecycle Step 7.5.2, enhanced-pr-review: tell a real verdict apart from an acknowledgement, a refusal, or an in-place-edited verdict |
 | `review_agents.mandatory` | string[] | unset (floor is `["security-reviewer","code-reviewer","docs-reviewer"]`) | review-pr / enhanced-pr-review. Replaces the always-run floor. Read from the merge base of the head with the **default branch**, never the checkout or a PR-chosen base, so a PR cannot shrink its own floor. Must be a non-empty array of names matching `^[a-z0-9][a-z0-9-]*$`. A malformed value, a non-object `review_agents`, or a config that is not a regular file stops the review. |
 | `review_agents.base` | string[] | `[]` | review-pr / enhanced-pr-review. Extra always-run agents, added to the floor; it can never remove one. |
-| `review_agents.patterns[]` | `{glob\|label\|content, agent}` | `[]` | specialist dispatch; each entry declares exactly ONE condition — `glob` (changed-file match; no `\|` alternation; `dir/**` any depth, `dir/*` one level), `label` (exact PR label), or `content` (literal substring in the full diff — catches semantic changes made from off-glob files). Repeat the agent for multiple conditions (dispatchers de-dupe by agent, so it runs once). |
+| `review_agents.patterns[]` | `{glob\|label\|content, agent}` | `[]` | specialist dispatch; each entry declares exactly ONE condition — `glob` (changed-file match; no `\| ` alternation; `dir/**` any depth, `dir/*` one level), `label` (exact PR label), or `content` (literal substring in the full diff — catches semantic changes made from off-glob files). Repeat the agent for multiple conditions (dispatchers de-dupe by agent, so it runs once). |
 | `release_signal` | object\|null | null → Phase 2.6 / release-classification skipped | enhanced-pr-review, dev-lifecycle |
 | `release_signal.shippable_globs` | string[] | `[]` | "shippable code changed" gate |
 | `release_signal.marker` | string | — | enhanced-pr-review, release-classification |
@@ -70,7 +70,8 @@ Read it with `scripts/repo-config.sh` (`rc_get '<jq-filter>' [default]`, `rc_has
 | `weekly_deps.tiers` | `{A,B,C}` → map(rule name → rule) | `{}` → every bump treated Tier C (manual) | weekly-deps Phase 2 |
 | `weekly_deps.tiers.<T>.<rule>` | `{groups[],ungrouped,packages[],ecosystems[],directories[],dependency_type,max_bump}` | — ; all given fields must hold; a PR that no rule matches is Tier C | weekly-deps Phase 2 |
 | `weekly_deps.label_rules[]` | `{label,tier,demote_to,demote_max_packages}` | `[]` → no label reclassification | weekly-deps Phase 2 |
-| `weekly_deps.bundled_engines` | string[] (package globs or Dependabot group names) | `[]` (added to the built-in bundled-engine class; always Tier C) | weekly-deps Phase 2 |
+| `weekly_deps.bundled_engines` | string[] (package globs, plus Dependabot group names in legacy mode) | `[]` (always Tier C on match) | weekly-deps Phase 2 |
+| `weekly_deps.bundled_engine_groups` | string[] (Dependabot group globs, evidence-v1 only) | `[]` (always Tier C on match) | weekly-deps Phase 2 |
 | `weekly_deps.lockstep_sets` | string[][] (package globs per set) | `[]` → only the same-version heuristic flags split pairs | weekly-deps Phase 2 |
 | `weekly_deps.security_sensitive_extra` | string[] | `[]` (merged over shared default list) | weekly-deps |
 | `weekly_deps.signal3_repo_map` | map | `{}` | weekly-deps community signal |
@@ -132,6 +133,8 @@ Tier data is per repository. The shared skill ships none, and `/weekly-deps --or
 | `packages` | Globs. Every bumped package must match one. |
 | `ecosystems` / `directories` | Limit the rule to these ecosystems / manifest directories (globs). |
 | `dependency_type` | `development` or `production`: every bumped package must be of that type, read from the PR diff. |
-| `max_bump` | `patch` or `minor` (default `minor`). Ignored in tier C. |
+| `max_bump` | Defaults to `minor`. Legacy A/B rules accept `patch` and `minor`. Evidence-based Tier B rules for routine dependencies also accept `major`. Tier C ignores this field. |
 
-Rules that cannot be switched off by this data: a major bump is Tier C; a bundled-engine package (including every `docker` bump) is Tier C; a package on the security-sensitive list is LOW confidence; a PR that no rule matches is Tier C. If rules of two tiers match one PR, the higher-risk tier wins. A tier A or B rule with none of `groups`, `ungrouped` and `packages` is ignored.
+For the legacy classifier, major bumps and unmatched PRs route to Tier C. Bundled-engine changes (including every Docker bump) also route to Tier C. Sensitive packages carry LOW confidence and the higher-risk rule wins when several rules match. A Tier A/B rule without a package, group, or ungrouped-single scope is ignored.
+
+Repositories can set `weekly_deps.risk_policy` to `"evidence-v1"` to opt into [evidence-based dependency tiers](../plugins/release-ops/skills/weekly-deps/references/risk-policy.md). The policy calculates risk independently of CI, review, and mergeability. A rule in the computed tier authorizes that package scope only. The opt-in supports `max_bump: "major"` for Tier B routine updates and a `weekly_deps.critical_packages` list of package globs. The bundled-engine, confirmed-risk, and sensitive review requirements still apply.

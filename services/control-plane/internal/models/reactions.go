@@ -34,4 +34,6 @@ type RepliedToSummary struct {
 	DisplayName *string `json:"display_name,omitempty"`
 	Content     string  `json:"content"`
 	KeyVersion  int     `json:"key_version"`
+	// E2EEFormat is passive read metadata, omitted for legacy rows.
+	E2EEFormat *string `json:"e2ee_format,omitempty"`
 }

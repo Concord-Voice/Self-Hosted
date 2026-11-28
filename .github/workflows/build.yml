@@ -376,7 +376,7 @@ jobs:
         id: ci-services
         run: bash scripts/ci/start-control-plane-services.sh
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: services/control-plane/go.mod
           cache-dependency-path: services/control-plane/go.sum
@@ -953,7 +953,7 @@ jobs:
       # Tier-1 cache-WARM job ONLY - never add it to the cache-cold sibling
       # job below, whose value depends on a genuinely cold builder (ADR-0016).
       - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@06dd9c83a5d541274d2e3ac67625560979275267 # v2.3.0
+        uses: useblacksmith/setup-docker-builder@9657a6e02ca6445e6d6ce5ffaf370f4828dea50d # v2.4.0
         with:
           cache-key: services/media-plane/Dockerfile
           nofallback: true
