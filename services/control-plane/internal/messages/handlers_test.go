@@ -172,6 +172,9 @@ func TestSendMessageReservationQuotaReturnsStorageCapacity(t *testing.T) {
 	user := ts.CreateTestUser(t, "sendmsgquota")
 	serverID := ts.CreateTestServer(t, user.ID, "Quota Server")
 	channelID := ts.CreateTestChannel(t, serverID, "general")
+	var messagesBefore, reservationsBefore int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM messages`).Scan(&messagesBefore))
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM message_id_reservations`).Scan(&reservationsBefore))
 
 	_, err := ts.DB.Exec(`UPDATE message_id_reservation_quota
 		SET max_issued = issued`)
@@ -187,8 +190,8 @@ func TestSendMessageReservationQuotaReturnsStorageCapacity(t *testing.T) {
 	var messages, reservations int
 	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM messages`).Scan(&messages))
 	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM message_id_reservations`).Scan(&reservations))
-	assert.Zero(t, messages)
-	assert.Zero(t, reservations)
+	assert.Equal(t, messagesBefore, messages)
+	assert.Equal(t, reservationsBefore, reservations)
 }
 
 func TestSendMessageTimedOutMemberForbidden(t *testing.T) {
