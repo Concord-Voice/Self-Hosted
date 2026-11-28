@@ -21,6 +21,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/purge"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/requestid"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
@@ -921,6 +922,13 @@ func (h *Handler) persistMessage(c *gin.Context, serverID string, membershipInca
 	if err != nil {
 		if isFKViolation(err) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Reply target message not found"})
+			return
+		}
+		if reservationquota.IsExhausted(err) {
+			h.log.Warn("Message ID issuance quota exhausted", "error", err)
+			c.JSON(http.StatusInsufficientStorage, gin.H{
+				"error": reservationquota.Message, "code": reservationquota.Code,
+			})
 			return
 		}
 		h.log.Error("Failed to create message", "error", err)

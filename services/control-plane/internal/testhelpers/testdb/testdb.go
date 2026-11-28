@@ -364,6 +364,15 @@ func truncateAllTablesOnce(db *sql.DB) error {
 	if _, err := ExecReplica(db, `TRUNCATE message_id_reservations`); err != nil {
 		return err
 	}
+	// The prospective quota is one-way in production. Each isolated test case
+	// starts with an empty reservation namespace and the migration defaults.
+	if _, err := ExecReplica(db, `
+		UPDATE message_id_reservation_quota
+		SET issued = 0, max_issued = 5000000, max_per_account = 250000
+		WHERE singleton = TRUE
+	`); err != nil {
+		return err
+	}
 	if _, err := db.Exec(`
 		INSERT INTO message_id_reservation_rollout (singleton, backfill_complete)
 		VALUES (TRUE, FALSE)

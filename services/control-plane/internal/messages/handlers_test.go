@@ -14,6 +14,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/messages"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -164,6 +165,30 @@ func TestSendMessageSuccess(t *testing.T) {
 	msg := body["message"].(map[string]interface{})
 	assert.Equal(t, ciphertext, msg["content"])
 	assert.Equal(t, user.ID, msg["user_id"])
+}
+
+func TestSendMessageReservationQuotaReturnsStorageCapacity(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "sendmsgquota")
+	serverID := ts.CreateTestServer(t, user.ID, "Quota Server")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+
+	_, err := ts.DB.Exec(`UPDATE message_id_reservation_quota
+		SET max_issued = issued WHERE singleton = TRUE`)
+	require.NoError(t, err)
+	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
+		"channel_id": channelID, "content": testhelpers.ValidCiphertext(), "key_version": 1,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusInsufficientStorage, w.Code, w.Body.String())
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, reservationquota.Code, body["code"])
+	assert.Equal(t, reservationquota.Message, body["error"])
+	var messages, reservations int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM messages`).Scan(&messages))
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM message_id_reservations`).Scan(&reservations))
+	assert.Zero(t, messages)
+	assert.Zero(t, reservations)
 }
 
 func TestSendMessageTimedOutMemberForbidden(t *testing.T) {

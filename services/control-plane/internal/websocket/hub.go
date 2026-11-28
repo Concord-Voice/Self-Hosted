@@ -25,6 +25,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presencehistory"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -2247,6 +2248,12 @@ func (h *Hub) respondPersistMessageError(msg IncomingMessage, persistErr string,
 	if persistErr == "" {
 		return false
 	}
+	if persistErr == reservationquota.Code {
+		h.sendErrorWithData(msg.ClientID, reservationquota.Code, map[string]interface{}{
+			keyMessage: reservationquota.Message,
+		})
+		return true
+	}
 	h.sendError(msg.ClientID, persistErr)
 	return true
 }
@@ -4179,6 +4186,10 @@ func (h *Hub) persistMessageWithExpiry(p persistMessageParams) (uuid.UUID, time.
 		return messageID, createdAt, updatedAt, expiresAt, nil, "Reply target message not found", nil
 	}
 	if err != nil {
+		if reservationquota.IsExhausted(err) {
+			log.Printf("Message ID issuance quota exhausted: %v", err)
+			return messageID, createdAt, updatedAt, expiresAt, nil, reservationquota.Code, nil
+		}
 		log.Printf("Failed to persist message: %v", err)
 		return messageID, createdAt, updatedAt, expiresAt, nil, errMsgFailedSaveMessage, nil
 	}
@@ -6005,6 +6016,13 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		if errors.Is(err, errDMNotParticipant) {
 			h.removeFromSubscriptionMap(h.dmSubscriptions, convUUID, client.ID)
 			h.sendError(msg.ClientID, "Not a participant of this conversation")
+			return
+		}
+		if reservationquota.IsExhausted(err) {
+			log.Printf("Message ID issuance quota exhausted: %v", err)
+			h.sendErrorWithData(msg.ClientID, reservationquota.Code, map[string]interface{}{
+				keyMessage: reservationquota.Message,
+			})
 			return
 		}
 		// Any guard/store failure logs and returns the retryable save error (a

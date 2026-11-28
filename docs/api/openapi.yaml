@@ -10731,6 +10731,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '507':
+          description: The permanent message-ID issuance quota is exhausted.
+            The account and global ceilings use the same response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageStorageCapacityError'
   /messages/{id}:
     patch:
       tags:
@@ -20301,7 +20308,8 @@ paths:
 
         | `channel_purged` | `channel_id`, `purged_by`, `deleted_count`, `range` | Channel purge event, including scoped invalidations from a server purge. Never uses the expiry variant. |
 
-        | `error` | `message` | Error |
+        | `error` | `message`; optional `code` | Error. A channel or DM send refused by
+        the permanent message-ID quota has `code: message_storage_capacity`. |
 
         Both legacy and expiry purge `data` objects are strict. Expiry data
         requires `reason: expiry`, `purged_by: null`, and an ISO date-time
@@ -22193,6 +22201,18 @@ components:
           type: string
       required:
       - error
+    MessageStorageCapacityError:
+      type: object
+      required:
+      - error
+      - code
+      properties:
+        error:
+          type: string
+          example: Message storage is at capacity
+        code:
+          type: string
+          enum: [message_storage_capacity]
     UnissuedKeyEpochError:
       type: object
       description: A key_version above the scope's newest issued epoch. The client

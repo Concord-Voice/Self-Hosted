@@ -49,6 +49,12 @@ write contention in an isolated database before promotion. If it is material,
 replace the singleton with bounded shards in a separately reviewed change;
 do not omit the global cap to improve throughput.
 
+The cap converts unlimited disk growth into an explicit availability limit:
+multiple abusive accounts can still spend the global headroom and stop new
+sends until an operator adds capacity and raises the ceiling. This residual
+denial risk is visible in quota usage; it is not represented as a permanent
+solution to all message-flood abuse.
+
 Quota errors should be distinguishable from transient database errors in
 server logs and consistently reported to clients as storage capacity refusal,
 without exposing whether the account or global ceiling was reached. Update
