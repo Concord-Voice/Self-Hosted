@@ -404,12 +404,14 @@ def go_coverage_sources(repo, merge, base, head):
         for entry in tree.split(b"\0"):
             if entry.endswith(b".go"):
                 header, path = entry.split(b"\t", 1)
-                result[safe_path(path)] = tuple(header.decode("ascii").split(" "))
+                mode, kind, oid = header.decode("ascii").split(" ")
+                # Go source bytes are independent of the executable bit.
+                entry_type = "file" if mode in ("100644", "100755") and kind == "blob" else mode
+                result[safe_path(path)] = (entry_type, oid)
         return result
 
     merge_entries, head_entries = entries(merge), entries(head)
-    merged = {path for path, (mode, kind, oid) in merge_entries.items()
-              if mode in ("100644", "100755") and kind == "blob" and sha(oid)}
+    merged = {path for path, (kind, oid) in merge_entries.items() if kind == "file" and sha(oid)}
     different = {path for path in merged if merge_entries[path] != head_entries.get(path)}
     if not different:
         return merged, different, set()

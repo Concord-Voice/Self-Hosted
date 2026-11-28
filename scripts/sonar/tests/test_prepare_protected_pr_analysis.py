@@ -247,7 +247,7 @@ class PrepareTest(unittest.TestCase):
                 "changed_files": 1, "hotfix": False, "advisory": {}, "workers": [],
                 "npm_workspaces": [], "license_go": False, "codeql_matrix": '{"include":[]}'}
 
-    def bind_v2_merge(self, base_changes=False, head_changes=False):
+    def bind_v2_merge(self, base_changes=False, head_changes=False, executable=False):
         shared = self.upstream / "services/control-plane/internal/shared.go"
         if head_changes:
             run(self.upstream, "checkout", "--detach", self.head)
@@ -268,6 +268,9 @@ class PrepareTest(unittest.TestCase):
             (shared.parent / "base_only.go").write_text("package x\n")
             run(self.upstream, "add", ".")
             run(self.upstream, "commit", "-qm", "new default branch source")
+        if executable:
+            run(self.upstream, "update-index", "--chmod=+x", str(shared.relative_to(self.upstream)))
+            run(self.upstream, "commit", "-qm", "change mode only")
         first = run(self.upstream, "rev-parse", "HEAD")
         run(self.upstream, "update-ref", "refs/heads/main", first)
         run(self.upstream, "merge", "--no-ff", "-qm", "fixture merge", self.head)
@@ -315,6 +318,13 @@ class PrepareTest(unittest.TestCase):
         self.prepare()
         output = (self.root / "analysis" / "services/control-plane/coverage.out").read_text()
         self.assertEqual(output, "mode: atomic\nservices/control-plane/internal/x.go:1.1,2.1 1 1\n")
+
+    def test_schema_v2_retains_go_coverage_with_mode_only_difference(self):
+        self.bind_v2_merge(executable=True)
+        self.add_coverage("shared.go")
+        self.prepare()
+        output = (self.root / "analysis" / "services/control-plane/coverage.out").read_text()
+        self.assertIn("services/control-plane/internal/shared.go:1.1,2.1 1 1", output)
 
     def test_schema_v2_requires_pr_touched_go_sources_to_match(self):
         self.bind_v2_merge(base_changes=True, head_changes=True)
