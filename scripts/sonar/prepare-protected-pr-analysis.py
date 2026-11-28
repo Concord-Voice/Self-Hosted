@@ -344,7 +344,9 @@ def validate_evidence(candidate, verified, run, pr, jobs):
             or any(v not in ("success", "skipped") for v in verdicts.values())
             or set(coverage) != set(COMPONENTS) or not all(isinstance(v, bool) for v in coverage.values())):
         raise Reject("signed scan selection or verdict invalid")
-    if version == 2 and coverage["control_plane"] and claims.get("event_sha") != selection["merge_sha"]:
+    event_sha = claims.get("event_sha")
+    if (version == 2 and coverage["control_plane"] and event_sha is not None
+            and event_sha != selection["merge_sha"]):
         raise Reject("Go coverage merge revision differs from caller event")
     if any(selection["coverage_required"][c] and not coverage[c] for c in COMPONENTS):
         raise Reject("selected coverage was not uploaded")
@@ -467,8 +469,10 @@ def prepare_git(repo, claims, payload, candidate, token):
     git(repo, "read-tree", "HEAD")
 
     selection = payload["selection"]
-    # A legacy v1 report stays on the original strict PR-tree import path.
-    if selection["version"] == 1 or not payload["coverage"]["control_plane"]:
+    # Only v2 evidence bound to the caller's merge can omit base-side entries.
+    # Other reports stay on the original strict PR-tree import path.
+    if (selection["version"] == 1 or "event_sha" not in claims
+            or not payload["coverage"]["control_plane"]):
         return None
     git(repo, "fetch", "--no-tags", "origin", f"+refs/pull/{candidate['pr_number']}/merge:refs/remotes/origin/merge",
         limit=1024, env=fetch_env)

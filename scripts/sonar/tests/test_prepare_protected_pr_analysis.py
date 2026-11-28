@@ -354,14 +354,24 @@ class PrepareTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.Reject, "Go coverage source not in signed merge tree"):
             self.prepare()
 
+    def test_schema_v2_without_caller_event_keeps_the_strict_pr_tree_path(self):
+        self.bind_v2_merge(base_changes=True)
+        self.verified["claims"].pop("event_sha")
+        run(self.upstream, "update-ref", "-d", "refs/pull/7/merge")
+        self.prepare()
+
+    def test_schema_v2_without_caller_event_cannot_omit_base_only_coverage(self):
+        self.bind_v2_merge(base_changes=True)
+        self.verified["claims"].pop("event_sha")
+        self.add_coverage("base_only.go")
+        with self.assertRaisesRegex(MODULE.Reject, "Go coverage source not in PR tree"):
+            self.prepare()
+
     def test_schema_v2_rejects_caller_event_mismatch_and_moved_merge(self):
         signed = self.bind_v2_merge()
-        self.verified["claims"].pop("event_sha")
-        with patch.object(MODULE, "prepare_git", side_effect=AssertionError("Git accessed before event validation")), self.assertRaisesRegex(
-                MODULE.Reject, "merge revision differs from caller event"):
-            self.prepare()
         self.verified["claims"]["event_sha"] = self.head
-        with self.assertRaisesRegex(MODULE.Reject, "merge revision differs from caller event"):
+        with (patch.object(MODULE, "prepare_git", side_effect=AssertionError("Git accessed before event validation")),
+              self.assertRaisesRegex(MODULE.Reject, "merge revision differs from caller event")):
             self.prepare()
         self.verified["claims"]["event_sha"] = signed
         run(self.upstream, "update-ref", "refs/pull/7/merge", self.head)
