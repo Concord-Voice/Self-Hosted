@@ -343,6 +343,11 @@ make migrate-version
 make migrate-create NAME=add_user_status
 ```
 
+Migration 000208 deliberately refuses rollback after any message or permanent
+message-ID reservation exists. Do not use `make migrate-down` to remove that
+security bound from a used installation. Keep the migration and use a compatible
+server binary; see the [message-ID reservation operator procedure](../../docs/design/message-id-reservation-baseline.md#prospective-issuance-quota-migration-000208).
+
 ### How Migrations Work
 
 - Migrations run automatically when the server starts
