@@ -44,6 +44,7 @@ approval and an out-of-band alert destination configured by host root.
 
 ### Security
 
+- **Channels:** A channel or attachment you cannot see now answers exactly as one that does not exist. `GET /channels/:id/voice/participants` answers 403 for any channel that is not a voice channel, hidden or not, as it does for an unknown ID, instead of an empty list; a member removed mid-request gets the same 403 instead of 500. `GET /media/attachments/:file_id` answers 404 `File not found` for every refusal, the same as a missing file, instead of 403; uploads still answer 403. The participants list, channel unread counts and server unread status answer 500 when a row cannot be read, instead of returning an incomplete list ([#446](https://github.com/Concord-Voice/Self-Hosted/pull/446)).
 - **Accounts:** Removing a TOTP or WebAuthn factor now requires a fresh, route-bound second-factor proof whenever the account has inline MFA; a password alone cannot remove the factor ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
 - **Accounts:** Unlinking an SSO identity and enabling SSO security trust now require a fresh, route-bound proof inside the protected transaction. Disabling that trust remains an ungated strengthening ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).
 - **Accounts:** Erasing an account now requires fresh proof and explicit confirmation of any owned servers with other members. An unverified email address also requires a one-use confirmation link ([#297](https://github.com/Concord-Voice/Self-Hosted/pull/297)).

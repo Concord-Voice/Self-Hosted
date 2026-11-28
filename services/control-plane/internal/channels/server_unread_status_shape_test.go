@@ -55,6 +55,35 @@ func TestServerUnreadStatusExcludesNonVisibleChannel(t *testing.T) {
 	assert.NotContains(t, listed, hidden)
 }
 
+// Only the hidden channel of a server has unread messages: the server must not
+// surface. A second server holds a channel the member can see with an unread
+// message, so the endpoint demonstrably reports unread state and an empty
+// response cannot satisfy the exclusion assertions. Fails if the view-bit
+// exclusion is removed: the hidden channel and its server would then appear.
+func TestServerUnreadStatusOnlyHiddenChannelUnread(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "shapevisonlyowner")
+	member := ts.CreateTestUser(t, "shapevisonlymember")
+	serverID := ts.CreateTestServer(t, owner.ID, "Shape Hidden Only")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+	ts.CreateTestChannel(t, serverID, "shape-only-visible") // quiet
+	hidden := ts.CreateTestChannel(t, serverID, "shape-only-hidden")
+	ts.CreateChannelOverride(t, hidden, "user", member.ID, 0, int64(rbac.PermViewTextChannels))
+	insertUnreadMessage(t, ts, hidden, owner.ID)
+
+	controlServerID := ts.CreateTestServer(t, owner.ID, "Shape Hidden Only Control")
+	ts.AddMemberToServer(t, controlServerID, member.ID, roleMember)
+	control := ts.CreateTestChannel(t, controlServerID, "shape-only-control")
+	insertUnreadMessage(t, ts, control, owner.ID)
+
+	statusChannels, statusServers := serverUnreadStatus(t, ts, member)
+	assert.Contains(t, statusChannels, control, "control: a readable unread channel is reported")
+	assert.Contains(t, statusServers, controlServerID, "control: its server is reported")
+	assert.NotContains(t, statusChannels, hidden)
+	assert.NotContains(t, statusServers, serverID,
+		"a server whose only unread channel is hidden must not appear in server_ids")
+}
+
 // Both empty responses emit `[]` for BOTH arrays, never `null`.
 //
 // Asserted against the RAW JSON on purpose. Go unmarshals `[]` and `null` into

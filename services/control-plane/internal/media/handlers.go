@@ -540,7 +540,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	err := h.db.QueryRow(query, fileID).
 		Scan(&storageKey, &mimeType, &fileSize, &channelID, &conversationID, &keyVersion, &storageBackend, &uploaderID, &e2eeFormat)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+		writeAttachmentNotFound(c)
 		return
 	} else if err != nil {
 		h.log.Error("Failed to fetch file metadata", "error", err)
@@ -563,7 +563,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "File not found in storage"})
 			return
 		}
-		h.log.Error("Failed to fetch attachment from storage", "error", err, "file_id", fileID)
+		h.log.Error("Failed to fetch attachment from storage", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to download file"})
 		return
 	}
@@ -610,19 +610,37 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	c.Status(http.StatusOK)
 
 	if _, err := io.Copy(c.Writer, obj); err != nil {
-		h.log.Warn("Failed to stream attachment to client", "error", err, "file_id", fileID)
+		h.log.Warn("Failed to stream attachment to client", "error", err)
 	}
 }
 
+// writeAttachmentNotFound is the only answer DownloadAttachment gives for a
+// file the caller may not have: a missing file and every access denial both
+// return through it, so a caller cannot tell a hidden attachment from one that
+// does not exist. It sets no X-File-* or Cache-Control header; those are
+// written only after access is granted.
+func writeAttachmentNotFound(c *gin.Context) {
+	c.JSON(http.StatusNotFound, gin.H{"error": errMsgFileNotFound})
+}
+
+// userCanDownloadAttachment writes the response for every refusal itself.
+// Each denial answers writeAttachmentNotFound and logs nothing, matching the
+// missing-file path. Each lookup or resolver error logs a fixed message and
+// answers 500, so an outage never looks like a missing file.
 func (h *Handler) userCanDownloadAttachment(c *gin.Context, userID, uploaderID, fileID string, channelID, conversationID *string) bool {
 	switch {
 	case channelID != nil:
-		// CV-CAN-003: downloading a channel attachment requires both the
-		// type-appropriate VIEW bit (userHasChannelAccess) and the ability to
-		// READ HISTORY in the channel, matching messages.checkChannelAccess. The
-		// short-circuit ensures only one error response is written on denial.
-		return h.userHasChannelAccess(c, userID, *channelID) &&
-			h.checkReadHistoryPermission(c, userID, *channelID)
+		allowed, err := h.channelAccessAllowed(c.Request.Context(), userID, *channelID, rbac.PermReadMessageHistory)
+		if err != nil {
+			h.log.Error("Failed to verify channel attachment access", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
+			return false
+		}
+		if !allowed {
+			writeAttachmentNotFound(c)
+			return false
+		}
+		return true
 	case conversationID != nil:
 		var hasAccess bool
 		if err := h.db.QueryRow(dmAttachmentDownloadAccessQuery, fileID, userID, *conversationID, uploaderID).Scan(&hasAccess); err != nil {
@@ -631,14 +649,58 @@ func (h *Handler) userCanDownloadAttachment(c *gin.Context, userID, uploaderID, 
 			return false
 		}
 		if !hasAccess {
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
+			writeAttachmentNotFound(c)
 			return false
 		}
 		return true
 	default:
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
+		// Unreachable for a tier-2 row, which carries a channel or a DM scope.
+		writeAttachmentNotFound(c)
 		return false
 	}
+}
+
+// channelAccessAllowed is the one channel-attachment access decision, shared by
+// download (required = PermReadMessageHistory) and upload (required = 0). It
+// allows userID iff they are a member of channelID's server and their effective
+// permissions in channelID, read in one resolver call, hold the channel type's
+// view bit and the bit in required; required 0 asks for no bit beyond the
+// view bit. A missing channel, a non-member, an unknown channel type and a
+// member removed before the resolver runs are denials, returned as (false,
+// nil); a lookup or resolver error is returned wrapped. With no resolver
+// configured (tests), membership alone allows. It writes no response and logs
+// nothing; callers own both. A later shared view predicate replaces it.
+func (h *Handler) channelAccessAllowed(ctx context.Context, userID, channelID string, required rbac.Permission) (bool, error) {
+	var serverID, channelType string
+	err := h.db.QueryRowContext(ctx, `
+		SELECT ch.server_id, ch.type FROM channels ch
+		JOIN server_members sm ON sm.server_id = ch.server_id AND sm.user_id = $2
+		WHERE ch.id = $1
+	`, channelID, userID).Scan(&serverID, &channelType)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("look up attachment channel membership: %w", err)
+	}
+
+	if h.resolver == nil {
+		return true, nil
+	}
+	viewPerm, ok := channelViewPermission(channelType)
+	if !ok {
+		return false, nil
+	}
+	perms, err := h.resolver.GetEffectivePermissions(ctx, serverID, userID, channelID)
+	if errors.Is(err, rbac.ErrNotMember) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve attachment channel permissions: %w", err)
+	}
+	// ponytail: required is 0 or one bit. Has(0) is false for a non-administrator,
+	// so 0 is tested here; a multi-bit required would need its own check.
+	return perms.Has(viewPerm) && (required == 0 || perms.Has(required)), nil
 }
 
 // ProxyAvatar serves a user's avatar image through the control plane.
@@ -2393,50 +2455,18 @@ func serveInviteIconFallback(c *gin.Context) {
 	c.Data(http.StatusOK, "image/svg+xml; charset=utf-8", []byte(invitecodes.PublicInviteIconSVG))
 }
 
-// userHasChannelAccess checks that a user can view the channel that owns an
-// attachment: server membership AND the channel's type-appropriate VIEW
-// permission (CV-CAN-003/004). Falls back to membership-only when no RBAC
-// resolver is configured (tests).
+// userHasChannelAccess is the upload path's HTTP wrapper around
+// channelAccessAllowed, asking for the channel's view bit alone. It writes the
+// response for every refusal: a denial answers 403 errMsgAccessDenied, and a
+// lookup or resolver error logs a fixed message and answers 500.
 func (h *Handler) userHasChannelAccess(c *gin.Context, userID, channelID string) bool {
-	// Membership check (resolves the channel's server + type; a non-member yields no row).
-	var serverID, channelType string
-	err := h.db.QueryRow(`
-		SELECT ch.server_id, ch.type FROM channels ch
-		JOIN server_members sm ON sm.server_id = ch.server_id AND sm.user_id = $2
-		WHERE ch.id = $1
-	`, channelID, userID).Scan(&serverID, &channelType)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
-		return false
-	}
+	allowed, err := h.channelAccessAllowed(c.Request.Context(), userID, channelID, 0)
 	if err != nil {
 		h.log.Error("Failed to check channel access", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
 		return false
 	}
-
-	if h.resolver == nil {
-		return true
-	}
-	// Require the channel's type-appropriate VIEW bit, matching the websocket
-	// channel/message auth path (channelContext.viewPermission): text/bulletin
-	// use PermViewTextChannels, voice uses PermViewVoiceChannels. A member denied
-	// visibility must not read (download) or write (upload) a hidden channel's
-	// attachments by UUID; a voice member without the text-view bit must not be
-	// wrongly blocked from that voice channel's attachments.
-	viewPerm, ok := channelViewPermission(channelType)
-	if !ok {
-		// Unknown / non-viewable channel type: deny, mirroring viewPermission().
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
-		return false
-	}
-	canView, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, viewPerm)
-	if permErr != nil {
-		h.log.Error("Failed to check channel view permission", "error", permErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
-		return false
-	}
-	if !canView {
+	if !allowed {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
 		return false
 	}
@@ -2511,44 +2541,6 @@ func (h *Handler) checkSendPermission(c *gin.Context, userID, channelID string) 
 	}
 	if !hasPerm {
 		c.JSON(http.StatusForbidden, gin.H{"error": "You don't have permission to send messages in this channel"})
-		return false
-	}
-	return true
-}
-
-// checkReadHistoryPermission requires the READ_MESSAGE_HISTORY RBAC permission
-// for a channel. Used to gate attachment DOWNLOAD (CV-CAN-003): a member who can
-// see a channel but cannot read its history must not fetch that channel's
-// attachments by file UUID, mirroring the message-read path
-// (messages.checkChannelAccess). Applied only on the download path (not upload),
-// after userHasChannelAccess has verified membership and the type-appropriate
-// VIEW bit. Falls back to allow when no RBAC resolver is configured (tests).
-func (h *Handler) checkReadHistoryPermission(c *gin.Context, userID, channelID string) bool {
-	if h.resolver == nil {
-		return true
-	}
-	var serverID string
-	if err := h.db.QueryRowContext(c.Request.Context(),
-		`SELECT server_id FROM channels WHERE id = $1`, channelID,
-	).Scan(&serverID); err != nil {
-		// A missing channel is a client-facing condition, not a server fault;
-		// report 403 (matching userHasChannelAccess) and avoid leaking existence.
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
-			return false
-		}
-		h.log.Error(logMsgChannelServerLookup, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPerms})
-		return false
-	}
-	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermReadMessageHistory)
-	if err != nil {
-		h.log.Error("Failed to check read history permission", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPerms})
-		return false
-	}
-	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
 		return false
 	}
 	return true

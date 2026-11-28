@@ -75,6 +75,13 @@ func mediaTestRedis(t *testing.T) *redis.Client {
 // internal/testhelpers import cycle described above.
 func mediaBrokenResolver(t *testing.T, rdb *redis.Client) *rbac.Resolver {
 	t.Helper()
+	return rbac.NewResolver(closedTestDB(t), rbac.NewPermissionCache(rdb), logger.New("test"))
+}
+
+// closedTestDB returns a *sql.DB that has already been closed, so every query
+// on it fails. Used to force the database-error branches.
+func closedTestDB(t *testing.T) *sql.DB {
+	t.Helper()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = defaultTestDatabaseURL // existing package var (assembled from parts)
@@ -82,7 +89,7 @@ func mediaBrokenResolver(t *testing.T, rdb *redis.Client) *rbac.Resolver {
 	closed, err := sql.Open("postgres", dbURL)
 	require.NoError(t, err)
 	require.NoError(t, closed.Close())
-	return rbac.NewResolver(closed, rbac.NewPermissionCache(rdb), logger.New("test"))
+	return closed
 }
 
 // freeTierStub satisfies entitlements.TierResolver and always returns TierFree.
@@ -1217,6 +1224,30 @@ func TestUploadAttachment_Resolver_OwnerSucceeds(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
 }
 
+// A member holding only view+send+attach (no administrator bit, not the owner)
+// uploads successfully with a real resolver. This is the lock on the upload
+// path's `required == 0` arm in channelAccessAllowed: Has(0) is false for a
+// non-administrator, so dropping that arm answers every such upload 403.
+func TestUploadAttachment_Resolver_NonAdminMemberSucceeds(t *testing.T) {
+	ts := resolverTestSetup(t)
+	owner := ts.createTestUser(t, "attach_res_nonadmin_owner")
+	member := ts.createTestUser(t, "attach_res_nonadmin_member")
+	serverID := ts.createTestServer(t, owner, "Attach NonAdmin Server")
+	channelID := ts.createTestChannel(t, serverID, "res-nonadmin")
+	addMember(t, ts, serverID, member)
+	ts.createTestRoleWithPerms(t, serverID, member, "uploader", rbac.PermViewTextChannels|rbac.PermSendMessages|rbac.PermAttachFiles)
+
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("ciphertext"), map[string]string{
+		"channel_id":  channelID,
+		"file_type":   "file",
+		"mime_type":   mimeOctetStream,
+		"key_version": "1",
+	})
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, member, body, ct)
+
+	assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+}
+
 // CV-CAN-004: with a real resolver, a member with no RBAC role (no SEND) is
 // rejected — exercises the `!hasPerm` 403 branch of checkSendPermission.
 func TestUploadAttachment_Resolver_NoSendPermission403(t *testing.T) {
@@ -1535,7 +1566,7 @@ func TestDownloadAttachmentMembershipRequired(t *testing.T) {
 	// Outsider tries to download
 	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, outsider, gin.Params{{Key: "file_id", Value: fileID}})
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	requireDeniedAsMissing(t, ts, outsider, w)
 }
 
 func TestDownloadAttachmentSuccess(t *testing.T) {
@@ -1644,7 +1675,7 @@ func TestDownloadAttachmentDMVisibility_PinnedMessageUnderClearRange(t *testing.
 	_, err = ts.db.Exec(`UPDATE dm_messages SET pinned_at = NULL, pinned_by = NULL WHERE id = $1`, messageID)
 	require.NoError(t, err)
 	unpinned := download()
-	assert.Equal(t, http.StatusForbidden, unpinned.Code)
+	requireDeniedAsMissing(t, ts, actor, unpinned)
 	assert.False(t, bytes.Contains(unpinned.Body.Bytes(), []byte("pinned-bytes")))
 }
 
@@ -1658,7 +1689,7 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 		hideDMMessageForDownload(t, ts, actor, convID, time.Unix(0, 0), time.Now().Add(time.Minute), true)
 
 		actorResponse := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, actor, gin.Params{{Key: "file_id", Value: fileID}})
-		assert.Equal(t, http.StatusForbidden, actorResponse.Code)
+		requireDeniedAsMissing(t, ts, actor, actorResponse)
 		assert.False(t, bytes.Contains(actorResponse.Body.Bytes(), []byte("dm-secret")))
 		peerResponse := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, peer, gin.Params{{Key: "file_id", Value: fileID}})
 		assert.Equal(t, http.StatusOK, peerResponse.Code)
@@ -1679,7 +1710,7 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 		hideDMMessageForDownload(t, ts, actor, convID, oldCreated.Add(-time.Second), time.Now().Add(30*time.Second), true)
 
 		beforeLaterLink := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, actor, gin.Params{{Key: "file_id", Value: fileID}})
-		require.Equal(t, http.StatusForbidden, beforeLaterLink.Code)
+		requireDeniedAsMissing(t, ts, actor, beforeLaterLink)
 		_, err = ts.db.Exec(`INSERT INTO dm_message_attachments (message_id, file_id, position) VALUES ($1, $2, 1)`, laterMessageID, fileID)
 		require.NoError(t, err)
 		response := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, actor, gin.Params{{Key: "file_id", Value: fileID}})
@@ -1707,11 +1738,11 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 		assert.Equal(t, http.StatusOK, after.Code)
 		assert.Equal(t, []byte("preview"), after.Body.Bytes())
 		peerResponse := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, peer, gin.Params{{Key: "file_id", Value: fileID}})
-		assert.Equal(t, http.StatusForbidden, peerResponse.Code)
+		requireDeniedAsMissing(t, ts, peer, peerResponse)
 		_, err = ts.db.Exec(`DELETE FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, uploader)
 		require.NoError(t, err)
 		removedUploader := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, uploader, gin.Params{{Key: "file_id", Value: fileID}})
-		assert.Equal(t, http.StatusForbidden, removedUploader.Code)
+		requireDeniedAsMissing(t, ts, uploader, removedUploader)
 	})
 
 	t.Run("unlinked group DM uploader preview requires current membership", func(t *testing.T) {
@@ -1732,7 +1763,7 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 		_, err = ts.db.Exec(`DELETE FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, uploader)
 		require.NoError(t, err)
 		removed := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, uploader, gin.Params{{Key: "file_id", Value: fileID}})
-		assert.Equal(t, http.StatusForbidden, removed.Code)
+		requireDeniedAsMissing(t, ts, uploader, removed)
 	})
 
 	t.Run("bridge outside conversation blocks preview fallback", func(t *testing.T) {
@@ -1753,7 +1784,7 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 		_, err = ts.db.Exec(`INSERT INTO dm_message_attachments (message_id, file_id, position) VALUES ($1, $2, 0)`, otherMessageID, fileID)
 		require.NoError(t, err)
 		response := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, uploader, gin.Params{{Key: "file_id", Value: fileID}})
-		assert.Equal(t, http.StatusForbidden, response.Code)
+		requireDeniedAsMissing(t, ts, uploader, response)
 	})
 
 	t.Run("channel-only bridge blocks DM preview fallback", func(t *testing.T) {
@@ -1774,7 +1805,7 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 		_, err = ts.db.Exec(`INSERT INTO message_attachments (message_id, file_id, position) VALUES ($1, $2, 0)`, messageID, fileID)
 		require.NoError(t, err)
 		response := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, uploader, gin.Params{{Key: "file_id", Value: fileID}})
-		assert.Equal(t, http.StatusForbidden, response.Code)
+		requireDeniedAsMissing(t, ts, uploader, response)
 	})
 }
 
@@ -1783,8 +1814,8 @@ func TestDownloadAttachmentDMVisibility(t *testing.T) {
 // file UUID. This is the endpoint-level regression guard for the core download
 // fix — membership alone is insufficient once view is denied. The owner
 // (OwnerPermissions) download of the same file is asserted as a positive control
-// so the member's 403 is provably the VIEW gate, not a broken fixture.
-func TestDownloadAttachment_Resolver_NoViewPermission403(t *testing.T) {
+// so the member's 404 (identical to a missing file) is provably the VIEW gate, not a broken fixture.
+func TestDownloadAttachment_Resolver_NoViewPermissionNotFound(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	t.Cleanup(cleanup)
 	rdb := mediaTestRedis(t)
@@ -1795,9 +1826,11 @@ func TestDownloadAttachment_Resolver_NoViewPermission403(t *testing.T) {
 	member := ts.createTestUser(t, "dl_res_member")
 	serverID := ts.createTestServer(t, owner, "DL Resolver Server")
 	channelID := ts.createTestChannel(t, serverID, "hidden")
-	// Member is in the server but has no RBAC role -> zero permissions -> no VIEW.
+	// Member is in the server and holds read-history ONLY: the view bit is the
+	// sole gate that can deny, so a 404 pins the view check and not the history one.
 	_, err := ts.db.Exec(`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'member')`, serverID, member)
 	require.NoError(t, err)
+	ts.createTestRoleWithPerms(t, serverID, member, "history-only", rbac.PermReadMessageHistory)
 
 	// Owner-uploaded attachment living in the (member-hidden) channel.
 	fileID := uuid.New().String()
@@ -1812,7 +1845,7 @@ func TestDownloadAttachment_Resolver_NoViewPermission403(t *testing.T) {
 
 	// Member with membership but no VIEW is blocked at the endpoint (CV-CAN-003).
 	wMember := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, member, gin.Params{{Key: "file_id", Value: fileID}})
-	assert.Equal(t, http.StatusForbidden, wMember.Code, "body: %s", wMember.Body.String())
+	requireDeniedAsMissing(t, ts, member, wMember)
 	assert.NotEqual(t, "ciphertext", wMember.Body.String(), "ciphertext must not be streamed on a VIEW-deny")
 
 	// Positive control: the owner can download the same file.
@@ -1861,11 +1894,12 @@ func TestDownloadAttachment_Resolver_VoiceChannelUsesVoiceViewBit(t *testing.T) 
 
 // CV-CAN-003: a member who can VIEW a channel but lacks READ_MESSAGE_HISTORY
 // must not download that channel's attachments by file UUID. The download path
-// requires read-history in addition to the type-appropriate VIEW bit, mirroring
-// the message-read path (messages.checkChannelAccess). The owner (all
-// permissions) download of the same file is a positive control so the member's
-// 403 is provably the read-history gate, not a broken fixture.
-func TestDownloadAttachment_Resolver_NoReadHistory403(t *testing.T) {
+// requires read-history in addition to the type-appropriate VIEW bit; it does
+// not share code with messages.checkChannelAccess, so this test pins the rule
+// itself. The denial answers the same 404 as a missing file. The owner (all
+// permissions) download of the same file is a positive control so the 404 is
+// provably the read-history gate, not a broken fixture.
+func TestDownloadAttachment_Resolver_NoReadHistoryNotFound(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	t.Cleanup(cleanup)
 	rdb := mediaTestRedis(t)
@@ -1878,8 +1912,8 @@ func TestDownloadAttachment_Resolver_NoReadHistory403(t *testing.T) {
 	channelID := ts.createTestChannel(t, serverID, "rh-hidden")
 	_, err := ts.db.Exec(`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'member')`, serverID, member)
 	require.NoError(t, err)
-	// VIEW but deliberately NO read-history: passes userHasChannelAccess, fails
-	// the download-only read-history gate.
+	// VIEW but deliberately NO read-history: download requires read-history on
+	// top of the view bit (channelAccessAllowed), so this member is denied.
 	ts.createTestRoleWithPerms(t, serverID, member, "viewer-no-history", rbac.PermViewTextChannels)
 
 	fileID := uuid.New().String()
@@ -1892,9 +1926,9 @@ func TestDownloadAttachment_Resolver_NoReadHistory403(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Member has VIEW but not read-history -> blocked at the endpoint (CV-CAN-003).
+	// Member has VIEW but not read-history -> answered as a missing file.
 	wMember := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, member, gin.Params{{Key: "file_id", Value: fileID}})
-	assert.Equal(t, http.StatusForbidden, wMember.Code, "body: %s", wMember.Body.String())
+	requireDeniedAsMissing(t, ts, member, wMember)
 	assert.NotEqual(t, "ciphertext", wMember.Body.String(), "ciphertext must not be streamed on a read-history deny")
 
 	// Positive control: the owner (all perms) can download the same file.

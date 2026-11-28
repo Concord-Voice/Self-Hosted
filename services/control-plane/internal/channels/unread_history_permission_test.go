@@ -156,6 +156,35 @@ func TestServerUnreadStatusDropsServerWhenOnlyChannelIsHistoryDenied(t *testing.
 		"a history-denied channel must not raise the server's unread dot")
 }
 
+// View granted but history denied, and that channel is the only unread one in
+// its server. A second server holds a channel the member can read with an unread
+// message, so the endpoint demonstrably reports unread state and an empty
+// response cannot satisfy the exclusion assertions. Fails if the read-history
+// exclusion is removed: the sealed channel and its server would then appear.
+func TestServerUnreadStatusOnlyHistoryDeniedChannelUnread(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "shapehistowner")
+	member := ts.CreateTestUser(t, "shapehistmember")
+	serverID := ts.CreateTestServer(t, owner.ID, "Shape History Only")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+	ts.CreateTestChannel(t, serverID, "shape-hist-visible") // quiet
+	sealed := ts.CreateTestChannel(t, serverID, "shape-hist-sealed")
+	ts.CreateChannelOverride(t, sealed, "user", member.ID, 0, int64(rbac.PermReadMessageHistory))
+	insertUnreadMessage(t, ts, sealed, owner.ID)
+
+	controlServerID := ts.CreateTestServer(t, owner.ID, "Shape History Only Control")
+	ts.AddMemberToServer(t, controlServerID, member.ID, roleMember)
+	control := ts.CreateTestChannel(t, controlServerID, "shape-hist-control")
+	insertUnreadMessage(t, ts, control, owner.ID)
+
+	statusChannels, statusServers := serverUnreadStatus(t, ts, member)
+	assert.Contains(t, statusChannels, control, "control: a readable unread channel is reported")
+	assert.Contains(t, statusServers, controlServerID, "control: its server is reported")
+	assert.NotContains(t, statusChannels, sealed)
+	assert.NotContains(t, statusServers, serverID,
+		"a server whose only unread channel denies history must not appear in server_ids")
+}
+
 // The owner and administrator fast paths deliberately keep bypassing the history
 // requirement, because the enforcement path they mirror does the same: the owner
 // short-circuits to OwnerPermissions before SBAC is consulted, and
