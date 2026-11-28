@@ -28,8 +28,8 @@ Self-Hosted PR #403, which has already merged.
 ## Design
 
 Add migration 000208, leaving the committed 000206 migration untouched. Create
-64 fixed issuance budget rows with an aggregate ceiling, a read-only account
-limit policy row, and a per-account counter with `ON DELETE CASCADE`. Initial
+64 fixed issuance budget rows with an aggregate ceiling, a separately stored
+account-limit policy row, and a per-account counter with `ON DELETE CASCADE`. Initial
 ceilings are **5,000,000 new reservations globally** (78,125 per shard) and
 **250,000 per active account** after this
 migration. The finite global headroom is a default, not a promise about host

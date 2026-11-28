@@ -20308,8 +20308,7 @@ paths:
 
         | `channel_purged` | `channel_id`, `purged_by`, `deleted_count`, `range` | Channel purge event, including scoped invalidations from a server purge. Never uses the expiry variant. |
 
-        | `error` | `message`; optional `code` | Error. A channel or DM send refused by
-        the permanent message-ID quota has `code: message_storage_capacity`. |
+        | `error` | `message`; optional `code` | Error. A channel or DM send refused by the permanent message-ID quota has `data.code: message_storage_capacity`. |
 
         Both legacy and expiry purge `data` objects are strict. Expiry data
         requires `reason: expiry`, `purged_by: null`, and an ISO date-time

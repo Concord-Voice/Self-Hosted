@@ -120,9 +120,10 @@ SET max_issued = 93750
 WHERE max_issued < 93750;
 ```
 
-This example raises all 64 shard ceilings evenly, making the aggregate limit
-6,000,000. Raising the account limit is a separate explicit update to
-`message_id_reservation_policy.max_per_account`.
+From the initial 78,125-per-shard default, this example raises all 64 shard
+ceilings evenly, making the aggregate limit 6,000,000. Inspect the current
+per-shard ceilings before applying it. Raising the account limit is a separate
+explicit update to `message_id_reservation_policy.max_per_account`.
 
 No automatic increase or counter reset occurs. The down migration refuses on
 a populated installation; retain this migration and use a compatible binary
