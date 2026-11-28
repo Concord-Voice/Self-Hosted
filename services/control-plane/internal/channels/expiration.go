@@ -96,21 +96,7 @@ func (h *Handler) UpdateExpiration(c *gin.Context) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
-		// A deadlock or lock timeout PostgreSQL reports AT commit (deferred
-		// work waiting on a lock) is a refused COMMIT, so the transaction rolled
-		// back. It gets the same retryable lock_conflict 503 as a lock conflict
-		// on any earlier statement in this gated transaction, as WithGateTx
-		// gives the other gated routes (Codex review of #3454). It settles
-		// nothing.
-		if mfaenforce.IsLockConflict(err) {
-			mfaenforce.WriteError(c, h.log, err, nil)
-			return
-		}
-		// Any other commit failure is answered as ambiguous, with the
-		// candidate policy and no error key, and settles nothing.
-		h.log.Error("Channel expiration commit outcome is ambiguous", "error", err)
-		c.JSON(http.StatusServiceUnavailable, policy)
+	if !h.commitChannelExpirationTx(c, tx, policy) {
 		return
 	}
 	// After a clean commit, in this order (#3459 §8): settle the gate, announce
@@ -131,11 +117,38 @@ func (h *Handler) UpdateExpiration(c *gin.Context) {
 	answerCtx, cancel := context.WithDeadline(c.Request.Context(), h.responseDeadline(started))
 	defer cancel()
 	h.expireDuePinnedMessages(answerCtx, channelID, serverID, transition)
+	h.respondChannelExpirationResult(answerCtx, c, service, channelID, policy)
+}
+
+func (h *Handler) commitChannelExpirationTx(c *gin.Context, tx *sql.Tx, policy expiration.Policy) bool {
+	if err := tx.Commit(); err != nil {
+		// A deadlock or lock timeout PostgreSQL reports AT commit (deferred
+		// work waiting on a lock) is a refused COMMIT, so the transaction rolled
+		// back. It gets the same retryable lock_conflict 503 as a lock conflict
+		// on any earlier statement in this gated transaction, as WithGateTx
+		// gives the other gated routes (Codex review of #3454). It settles
+		// nothing.
+		if mfaenforce.IsLockConflict(err) {
+			mfaenforce.WriteError(c, h.log, err, nil)
+			return false
+		}
+		// Any other commit failure is answered as ambiguous, with the
+		// candidate policy and no error key, and settles nothing.
+		h.log.Error("Channel expiration commit outcome is ambiguous", "error", err)
+		c.JSON(http.StatusServiceUnavailable, policy)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) respondChannelExpirationResult(
+	ctx context.Context, c *gin.Context, service *expiration.Service, channelID string, policy expiration.Policy,
+) {
 	if !policy.BackfillPending {
 		c.JSON(http.StatusOK, policy)
 		return
 	}
-	h.respondChannelExpirationBackfill(answerCtx, c, service, channelID, policy)
+	h.respondChannelExpirationBackfill(ctx, c, service, channelID, policy)
 }
 
 // resolveChannelExpirationServer reads the channel's server WITHOUT a lock, so
