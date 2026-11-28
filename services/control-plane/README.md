@@ -333,7 +333,7 @@ This service uses [golang-migrate](https://github.com/golang-migrate/migrate) fo
 # Apply all pending migrations
 make migrate-up
 
-# Rollback last migration
+# Rollback last migration, only when its down guard permits
 make migrate-down
 
 # Check current version

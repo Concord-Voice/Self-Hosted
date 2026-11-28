@@ -56,8 +56,8 @@ make migrate-version
 
 ## Migration Best Practices
 
-1. **Always create both UP and DOWN migrations** - Every migration must be reversible
-2. **Test rollbacks** - Make sure your down migration properly reverses the up migration
+1. **Always create both UP and DOWN migrations** - A guarded down may refuse when reversing a used installation would discard data or remove a security bound
+2. **Test rollbacks** - Check both an unused round trip and the guard that refuses unsafe rollback
 3. **One logical change per migration** - Do not mix unrelated schema changes
 4. **Know the runner's transaction boundary** - The runner uses golang-migrate v4 (version pinned in `services/control-plane/go.mod`) with the default PostgreSQL driver configuration. Each file is sent as one simple-query `Exec`; PostgreSQL wraps a multi-statement query in one implicit transaction. Put each `CREATE INDEX CONCURRENTLY` in its own one-statement file, because it cannot run inside a transaction block.
 5. **Avoid data migrations in schema migrations** - Consider separate data migration scripts
