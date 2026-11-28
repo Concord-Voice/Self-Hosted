@@ -8,9 +8,9 @@
    account erasure, backfill coexistence, and guarded down behavior. Use a
    dedicated scratch `DATABASE_URL`; never run against the shared `concord`
    database or private Go caches.
-3. Trace HTTP and WebSocket send error handling. Map both quota constraints to
-   one stable client capacity response and operator log signal. Add only the
-   response tests needed to verify the two ingress paths.
+3. Trace HTTP and WebSocket send error handling and expiration-policy event
+   writes. Map both quota constraints to one stable client capacity response
+   and operator log signal. Verify rollback for policy changes at capacity.
 4. Update `docs/design/message-id-reservation-baseline.md`, migration runbook,
    API contract, and `CHANGELOG.md` with default ceilings, read-only
    utilization query, refusal semantics, and rollback restriction.

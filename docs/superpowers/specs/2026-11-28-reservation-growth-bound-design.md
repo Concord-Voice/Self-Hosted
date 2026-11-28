@@ -64,6 +64,9 @@ server logs and consistently reported to clients as storage capacity refusal,
 without exposing whether the account or global ceiling was reached. Update
 the public API documentation and operator runbook with the response and a
 read-only utilization query. The service must not silently auto-raise a cap.
+Channel and DM expiration-policy changes insert durable event messages in the
+same transaction; at the ceiling they must roll back the policy and return the
+same capacity code.
 
 ## Rollout and rollback
 
