@@ -334,6 +334,9 @@ func (r *rewriteRows) Next(dest []driver.Value) error {
 	if err := r.Rows.Next(dest); err != nil {
 		return err
 	}
+	if r.column < 0 || r.column >= len(dest) {
+		return fmt.Errorf("stmthook: row-value column %d out of range for %d columns", r.column, len(dest))
+	}
 	dest[r.column] = r.value
 	r.hook.mu.Lock()
 	r.hook.rowHits++

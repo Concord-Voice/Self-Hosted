@@ -67,3 +67,13 @@ func TestArmRowValue_CountsRewrittenRows(t *testing.T) {
 
 	assert.Equal(t, 3, hook.RowValueHits())
 }
+
+func TestArmRowValue_OutOfRangeColumnFailsTheQuery(t *testing.T) {
+	hook, db := stmthook.Open(t)
+	hook.ArmRowValue("row-value-range", 5, "injected")
+
+	var got string
+	err := db.QueryRowContext(context.Background(), `SELECT 'real' /* row-value-range */`).Scan(&got)
+	require.ErrorContains(t, err, "out of range")
+	assert.Zero(t, hook.RowValueHits())
+}

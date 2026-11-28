@@ -683,6 +683,11 @@ func (h *Handler) GetParticipants(c *gin.Context) {
 	// mute/deafen/video/screen-share state) by channel UUID. Server membership
 	// alone is insufficient; the WS subscribe path already enforces ViewVoice.
 	effectivePerms, permErr := h.resolver.ResolveEffectivePermissionsUncached(c.Request.Context(), serverID, userID, channelID)
+	if errors.Is(permErr, rbac.ErrNotMember) {
+		// Removed from the server after the lookup above: refused like a missing channel.
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMember})
+		return
+	}
 	if permErr != nil {
 		h.log.Error("Failed to check voice view permission", "error", permErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFetchParticipants})

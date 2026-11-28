@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -76,4 +77,50 @@ func TestGetParticipants_ScanErrorAnswers500(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
 		assert.Equal(t, failed.Body.String(), w.Body.String())
 	})
+}
+
+// A member removed between the channel lookup and the permission read is
+// refused exactly as a missing channel is, not reported as an outage.
+func TestGetParticipants_MemberRemovedMidCheckAnswersAsMissing(t *testing.T) {
+	ts := setupTS(t)
+	hook, hookedDB := stmthook.Open(t)
+
+	owner := ts.CreateTestUser(t, "vpmidowner")
+	member := ts.CreateTestUser(t, "vpmidmember")
+	serverID := ts.CreateTestServer(t, owner.ID, "VP Mid Check")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+	channelID := ts.CreateVoiceChannel(t, serverID, "voice-mid-check")
+
+	// Handler and resolver share the hooked pool so both statements are seen.
+	h := voice.NewHandler(voice.HandlerDeps{
+		DB:       hookedDB,
+		Log:      logger.New("test"),
+		Hub:      ts.Hub,
+		Cfg:      &config.Config{},
+		Resolver: rbac.NewResolver(hookedDB, rbac.NewPermissionCache(ts.Redis), logger.New("test")),
+	})
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set("user_id", member.ID); c.Next() })
+	router.GET("/api/v1/channels/:id/voice/participants", h.GetParticipants)
+	get := func(id string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, pathChannelsPrefix+id+pathVoiceParticipants, nil))
+		return w
+	}
+
+	hook.Arm(
+		[]string{"INNER JOIN server_members sm ON sm.server_id = c.server_id", "SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id"},
+		func() error {
+			_, err := ts.DB.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, member.ID)
+			return err
+		}, nil)
+	w := get(channelID)
+
+	seen, betweenErr := hook.Report()
+	require.NoError(t, betweenErr)
+	require.Equal(t, 2, seen, "both statements must have been reached")
+	missing := get(uuid.NewString())
+	assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, missing.Code, w.Code)
+	assert.Equal(t, missing.Body.String(), w.Body.String())
 }
