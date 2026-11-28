@@ -2,7 +2,7 @@
 
 The control-plane integration build runs on the synthetic merge. Protected Sonar imports its coverage against the PR head. A base-only file produced a valid coverage record for a source outside the analyzer tree.
 
-Retain merge integration tests. For same-repo PRs use their coverage when the source trees agree. If they differ, verify the linked PR head and regenerate coverage from it before the existing shard upload. Preserve the artifact and strict consumer checks.
+Retain merge integration tests. For same-repo PRs use their coverage when the source trees agree. If they differ, verify the linked PR head and regenerate coverage from it before the existing shard upload. Stage the selected profile outside both checkouts and pass its path explicitly to the shard upload. Partial profiles from that tree remain available for diagnostics. Failed shards cannot feed the coverage aggregate. Preserve the artifact names and strict consumer checks.
 
 ## Acceptance criteria
 
