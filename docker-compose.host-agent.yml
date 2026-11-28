@@ -4,7 +4,10 @@
 # is mounted so the container keeps seeing the live socket across agent restarts.
 services:
   control-plane:
+    environment:
+      HOST_AGENT_AUTHORIZER_PROJECTION: "1"
     group_add:
       - "${CONCORD_AGENT_GID:?CONCORD_AGENT_GID is set by concord-selfhost}"
     volumes:
       - /run/concord-agent:/run/concord-agent:ro
+      - /etc/concord-voice/agent-authorizers:/etc/concord-voice/agent-authorizers:ro

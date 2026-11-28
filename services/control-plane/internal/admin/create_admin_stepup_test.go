@@ -209,10 +209,9 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 		as = actingID
 		refused(t, proof(handle, assertion), "stepup_failed")
 	})
-	t.Run("server action handle", func(t *testing.T) {
-		handle, challenge := stepUpBegin(t, engine, "/server/stepup", map[string]string{"action": "stop"})
-		refused(t, proof(handle, signStepUp(t, va, challenge, flagUP|flagUV)), "stepup_failed")
-	})
+	// No "server action handle" case: since #295 a server action's handle is
+	// minted and held by the Host Agent, not by this handler's step-up store,
+	// so it cannot be presented here at all.
 	t.Run("handle begun in another session of this admin", func(t *testing.T) {
 		session = "other-session-binding"
 		handle, challenge := stepUpBegin(t, engine, "/admin/api/v1/admins/stepup", nil)
@@ -221,7 +220,7 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 	})
 
 	assert.Equal(t, 1, adminCreatedRows(t, db, actingID, admin.AuditSuccess))
-	assert.Equal(t, 8, adminCreatedRows(t, db, actingID, admin.AuditDenied), "one denied row per refusal above")
+	assert.Equal(t, 7, adminCreatedRows(t, db, actingID, admin.AuditDenied), "one denied row per refusal above")
 	// Each refusal records why, in the order of the subtests above; the
 	// response stays a uniform stepup_failed.
 	assert.Equal(t, []string{
@@ -231,7 +230,6 @@ func TestCreateAdmin_StepUpMisuse_RefusedAndCreatesNoRow(t *testing.T) {
 		"stepup_assertion_rejected", // tampered signature
 		"stepup_clone_warning",      // counter did not advance
 		"stepup_unknown_handle",     // another admin's handle is not reachable
-		"stepup_unknown_handle",     // server-action handle, other prefix
 		"stepup_wrong_session",      // another session of this admin
 	}, reasonsOf(createAuditRows(t, db, actingID), admin.AuditDenied))
 }

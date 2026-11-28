@@ -214,6 +214,20 @@ ${prerotate_body}
         [ ! -e ${root}/media-plane/events.jsonl.1 ] || { chown root:root ${root}/media-plane/events.jsonl.1 && chmod 0600 ${root}/media-plane/events.jsonl.1; } || exit 1
     endscript
 }
+
+# The Host Agent writes this stream as root and refuses to append past 20 MiB, so
+# an unrotated file eventually disables every root write. It is root:root 0600
+# in a root-only directory (audit.go requires exactly that), never group-writable.
+${root}/host-agent/events.jsonl {
+    size 19M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    su root root
+    create 0600 root root
+}
 EOF
   cat > "$staged_service" <<EOF || return 1
 [Unit]

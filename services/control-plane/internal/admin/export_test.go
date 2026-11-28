@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -47,14 +49,18 @@ func RunAdminCtlForTest(
 	enrollBaseURL string,
 	args []string,
 ) int {
+	u, _ := url.Parse(enrollBaseURL)
 	deps := adminCtlDeps{
 		repo:          NewAdminRepo(db),
 		audit:         NewAuditLog(db),
 		enroll:        NewEnrollmentStore(rdb),
 		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: enrollBaseURL,
+		rpID:          u.Hostname(),
+		rpOrigins:     []string{enrollBaseURL},
 		stdin:         stdin,
 		stdout:        stdout,
+		stderr:        io.Discard,
 	}
 	return runAdminCtl(ctx, deps, args)
 }
@@ -62,14 +68,18 @@ func RunAdminCtlForTest(
 // RunAdminCtlWithWriterForTest exercises the production entry ordering with a
 // controllable security-event writer opener.
 func RunAdminCtlWithWriterForTest(ctx context.Context, db *sql.DB, rdb *redis.Client, stdin io.Reader, stdout io.Writer, baseURL string, args []string, open func() (securityevent.Emitter, io.Closer, error)) int {
+	u, _ := url.Parse(baseURL)
 	deps := adminCtlDeps{
 		repo:          NewAdminRepo(db),
 		audit:         NewAuditLog(db),
 		enroll:        NewEnrollmentStore(rdb),
 		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: baseURL,
+		rpID:          u.Hostname(),
+		rpOrigins:     []string{baseURL},
 		stdin:         stdin,
 		stdout:        stdout,
+		stderr:        io.Discard,
 	}
 	return runAdminCtlWithSecurityEvents(ctx, deps, args, open)
 }
@@ -79,8 +89,24 @@ func UseServerAgentForTest(h *Handler, sock string) {
 	h.server.agent = unixClient(sock)
 }
 
-// ServerStepUpPrefix exposes the step-up handle key prefix for the ACL manifest test.
-const ServerStepUpPrefix = serverStepUpPrefix
+// RunAdminCtlWithStderrForTest is RunAdminCtlForTest with the operator-facing
+// stderr captured instead of discarded.
+func RunAdminCtlWithStderrForTest(ctx context.Context, db *sql.DB, rdb *redis.Client, stdout, stderr io.Writer, baseURL string, args []string) int {
+	u, _ := url.Parse(baseURL)
+	deps := adminCtlDeps{
+		repo:          NewAdminRepo(db),
+		audit:         NewAuditLog(db),
+		enroll:        NewEnrollmentStore(rdb),
+		lockout:       NewLockout(rdb, nil),
+		enrollBaseURL: baseURL,
+		rpID:          u.Hostname(),
+		rpOrigins:     []string{baseURL},
+		stdin:         strings.NewReader(""),
+		stdout:        stdout,
+		stderr:        stderr,
+	}
+	return runAdminCtl(ctx, deps, args)
+}
 
 // SignInNoticeLockKeyForTest is the advisory key that orders admin creations
 // against sign-in notice reads.

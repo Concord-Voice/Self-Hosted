@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApiContractError, ApiError, type SignInNotice, api } from "./api";
-import { decodeRequestOptions, encodeAssertion } from "./webauthn";
+import {
+  KEY_NOT_USED,
+  decodeRequestOptions,
+  encodeAssertion,
+  keyNotUsed,
+} from "./webauthn";
 
 interface AuthScreenProps {
   // notice is what the sign-in response says about admins added since this
@@ -60,16 +65,16 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
       setCeremony(null);
       onAuthenticated(notice);
     } catch (cause) {
-      if (cause instanceof DOMException && cause.name === "NotAllowedError") {
-        setError("Security key verification was canceled.");
+      if (keyNotUsed(cause)) {
+        setError(KEY_NOT_USED);
         return;
       }
       setCeremony(null);
-      setError(
-        cause instanceof ApiContractError
-          ? UNREADABLE_RESPONSE
-          : "Sign-in failed. Check your credentials and try again.",
-      );
+      if (cause instanceof ApiContractError) {
+        setError(UNREADABLE_RESPONSE);
+      } else {
+        setError("Sign-in failed. Check your credentials and try again.");
+      }
     } finally {
       markBusy(false);
     }

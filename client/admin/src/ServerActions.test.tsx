@@ -3,7 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
-import { parseServerBackups, parseServerJob, parseServerJobs } from "./server";
+import { ApiError } from "./api";
+import {
+  ServerRequestError,
+  parseServerBackups,
+  parseServerJob,
+  parseServerJobs,
+  serverWriteApi,
+} from "./server";
 import { ServerActions } from "./ServerActions";
 import { server } from "./test/server";
 
@@ -24,6 +31,10 @@ function lists(jobs: unknown[] = [], backups: unknown[] = []) {
   server.use(
     http.get(`${base}/jobs`, () => HttpResponse.json({ jobs })),
     http.get(`${base}/backups`, () => HttpResponse.json({ backups })),
+    http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
+  );
+  vi.spyOn(navigator.credentials, "get").mockResolvedValue(
+    assertionCredential(),
   );
 }
 
@@ -61,11 +72,16 @@ const stepUpOptions = {
 };
 
 describe("ServerActions", () => {
-  it("backs up without a security key and follows the job", async () => {
+  it("binds a backup proof before starting and follows the job", async () => {
     lists();
     const bodies: unknown[] = [];
+    const stepUpBodies: unknown[] = [];
     let polls = 0;
     server.use(
+      http.post(`${base}/stepup`, async ({ request }) => {
+        stepUpBodies.push(await request.json());
+        return HttpResponse.json(stepUpOptions);
+      }),
       http.post(`${base}/actions/backup`, async ({ request }) => {
         bodies.push(await request.json());
         return HttpResponse.json(job("running"), { status: 202 });
@@ -83,7 +99,9 @@ describe("ServerActions", () => {
         );
       }),
     );
-    const get = vi.spyOn(navigator.credentials, "get");
+    const get = vi
+      .spyOn(navigator.credentials, "get")
+      .mockResolvedValue(assertionCredential());
     renderActions();
     await userEvent
       .setup()
@@ -98,8 +116,16 @@ describe("ServerActions", () => {
     expect(screen.getByRole("textbox", { name: "Back up output" })).toHaveValue(
       "done\n",
     );
-    expect(bodies).toEqual([{}]);
-    expect(get).not.toHaveBeenCalled();
+    expect(stepUpBodies).toEqual([{ action: "backup" }]);
+    expect(bodies).toEqual([
+      {
+        stepup: {
+          handle: stepUpOptions.handle,
+          assertion: expect.any(Object),
+        },
+      },
+    ]);
+    expect(get).toHaveBeenCalledOnce();
   });
 
   it("locks the buttons while its own job runs and rides out a rate limit", async () => {
@@ -192,12 +218,16 @@ describe("ServerActions", () => {
   it("turns read-only when a write finds an appliance", async () => {
     lists();
     server.use(
+      http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
       http.post(`${base}/actions/start`, () =>
         HttpResponse.json(
           { error: "appliance_managed", appliance: "truenas" },
           { status: 409 },
         ),
       ),
+    );
+    vi.spyOn(navigator.credentials, "get").mockResolvedValue(
+      assertionCredential(),
     );
     renderActions();
     await userEvent
@@ -237,7 +267,7 @@ describe("ServerActions", () => {
     expect(
       await screen.findByText("The action failed. Its output is below."),
     ).toBeVisible();
-    expect(stepUpBody).toEqual({ action: "restore" });
+    expect(stepUpBody).toEqual({ action: "restore", archive });
     expect(actionBody.archive).toBe(archive);
     expect((actionBody.stepup as { handle: string }).handle).toBe(
       stepUpOptions.handle,
@@ -265,7 +295,178 @@ describe("ServerActions", () => {
     expect(onSessionError).not.toHaveBeenCalled();
   });
 
-  it("reports a canceled security key", async () => {
+  it.each([
+    ["start", "Start"],
+    ["stop", "Stop"],
+    ["restart", "Restart"],
+  ])("asks for the security key before %s", async (action, label) => {
+    lists();
+    let stepUpBody: unknown;
+    let actionBody: Record<string, unknown> | undefined;
+    server.use(
+      http.post(`${base}/stepup`, async ({ request }) => {
+        stepUpBody = await request.json();
+        return HttpResponse.json(stepUpOptions);
+      }),
+      http.post(`${base}/actions/${action}`, async ({ request }) => {
+        actionBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(job("running", { action }), { status: 202 });
+      }),
+      http.get(`${base}/jobs/${id}`, () =>
+        HttpResponse.json(job("failed", { action, output: "no\n" })),
+      ),
+    );
+    const get = vi
+      .spyOn(navigator.credentials, "get")
+      .mockResolvedValue(assertionCredential());
+    renderActions();
+    await userEvent
+      .setup()
+      .click(await screen.findByRole("button", { name: label }));
+    await waitFor(() => expect(actionBody).toBeDefined());
+    expect(stepUpBody).toEqual({ action });
+    expect(get).toHaveBeenCalledOnce();
+    expect((actionBody?.stepup as { handle: string }).handle).toBe(
+      stepUpOptions.handle,
+    );
+  });
+
+  it.each([
+    [409, "appliance_managed", "An appliance runs this server"],
+    [409, "unknown_archive", "no longer in the backups folder"],
+    [409, "untrusted_backups", "not owned by root"],
+    [400, "invalid_authorization", "did not accept this authorization request"],
+    [
+      429,
+      "authorization_busy",
+      "Too many security key requests are still open on the host. A request you did not finish, such as a cancelled key prompt, expires after 2 minutes. Wait, then try again.",
+    ],
+    [503, "stepup_unavailable", "could not start a security key check"],
+    [400, "invalid_tag", "Enter a release tag such as v0.3.1."],
+    [400, "invalid_archive", "Choose a backup from the list."],
+    [400, "invalid_request", "its action or arguments were not valid"],
+    [500, "internal_error", "failed before it reached the host agent"],
+    [502, "agent_error", "an answer the server could not use"],
+  ])(
+    "shows begin refusal %s %s without a key failure",
+    async (status, code, text) => {
+      lists();
+      server.use(
+        http.post(`${base}/stepup`, () =>
+          HttpResponse.json({ error: code }, { status }),
+        ),
+      );
+      renderActions();
+      await userEvent
+        .setup()
+        .click(await screen.findByRole("button", { name: "Stop" }));
+      expect(await screen.findByText(new RegExp(text))).toBeVisible();
+      expect(
+        screen.queryByText("The security key check failed. Try again."),
+      ).toBeNull();
+    },
+  );
+
+  it.each([
+    [403, "authorization_denied", "concord-agent authorizer import"],
+    [
+      403,
+      "authorization_denied",
+      "key added since the last import must be exported and imported again",
+    ],
+    [503, "authorizer_unavailable", "cannot load its trusted authorizers"],
+    [403, "peer_forbidden", "agent socket permissions"],
+    [
+      429,
+      "authorization_busy",
+      "cancelled key prompt, expires after 2 minutes",
+    ],
+    [400, "invalid_authorization", "did not accept this authorization request"],
+    [429, "backup_rate_limited", "one attempt per hour"],
+    [409, "update_downgrade_refused", "older than the one this server runs"],
+    [
+      409,
+      "running_version_unknown",
+      "cannot read which release this server runs",
+    ],
+    [503, "job_unavailable", "could not start the action, so nothing ran"],
+    [503, "alerts_not_configured", "no out-of-band alert set up"],
+    [503, "alerts_not_configured", "configure the agent alert"],
+    [404, "unknown_action", "does not know this action"],
+    [400, "unexpected_argument", "an argument this action does not take"],
+    [400, "invalid_body", "could not read the request"],
+    [503, "agent_unavailable", "may still run, so check the jobs list"],
+    [409, "write_in_progress", "Another action is still running"],
+    [409, "security_log_boundary_missing", "security log folder is missing"],
+    [409, "unknown_job", "no longer knows that action"],
+    [409, "appliance_managed", "this console only reads"],
+    [503, "writes_disabled", "Host writes are switched off"],
+    [500, "internal_error", "so nothing ran. Try again."],
+    [
+      502,
+      "agent_error",
+      "may still run, so check the jobs list, then try again",
+    ],
+    [502, "agent_error", "check the host agent's journal"],
+  ])("explains agent refusal %s %s", async (status, code, guidance) => {
+    lists();
+    server.use(
+      http.post(`${base}/actions/backup`, () =>
+        HttpResponse.json({ error: code }, { status }),
+      ),
+    );
+    const { onSessionError } = renderActions();
+
+    await userEvent
+      .setup()
+      .click(await screen.findByRole("button", { name: "Back up now" }));
+
+    expect(await screen.findByText(new RegExp(guidance))).toBeVisible();
+    expect(onSessionError).not.toHaveBeenCalled();
+  });
+
+  // Only the table's own keys are refusals. Before the own-key lookup these
+  // names read Object.prototype members and crashed or garbled the notice.
+  it.each(["constructor", "__proto__", "toString", "hasOwnProperty"])(
+    "treats the inherited name %s as an unknown code",
+    async (code) => {
+      lists();
+      server.use(
+        http.post(`${base}/actions/backup`, () =>
+          HttpResponse.json({ error: code }, { status: 409 }),
+        ),
+      );
+      const { onSessionError } = renderActions();
+
+      await userEvent
+        .setup()
+        .click(await screen.findByRole("button", { name: "Back up now" }));
+
+      expect(await screen.findByText("session error")).toBeVisible();
+      expect(onSessionError).toHaveBeenCalledWith(
+        expect.objectContaining({ code, status: 409 }),
+      );
+    },
+  );
+
+  it("keeps a refusal code on ApiError alone", async () => {
+    server.use(
+      http.post(`${base}/stepup`, () =>
+        HttpResponse.json({ error: "write_in_progress" }, { status: 409 }),
+      ),
+    );
+    const error: unknown = await serverWriteApi
+      .stepUp("stop", {})
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ServerRequestError);
+    // Read through the base class, the way any ApiError consumer reads it.
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("write_in_progress");
+    expect((error as ApiError).status).toBe(409);
+  });
+
+  it("reports a canceled or timed-out security key", async () => {
     lists();
     server.use(
       http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
@@ -278,16 +479,22 @@ describe("ServerActions", () => {
       .setup()
       .click(await screen.findByRole("button", { name: "Restart" }));
     expect(
-      await screen.findByText("Security key verification was canceled."),
+      await screen.findByText(
+        "Your security key was not used in time, or the request was canceled. Start again and tap your key within the time limit.",
+      ),
     ).toBeVisible();
   });
 
   it("passes other errors to the session handler", async () => {
     lists();
     server.use(
+      http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
       http.post(`${base}/actions/start`, () =>
         HttpResponse.json({}, { status: 401 }),
       ),
+    );
+    vi.spyOn(navigator.credentials, "get").mockResolvedValue(
+      assertionCredential(),
     );
     const { onSessionError } = renderActions();
     await userEvent
@@ -316,6 +523,42 @@ describe("ServerActions", () => {
       "v0.3.1",
     );
     expect(update).toBeEnabled();
+  });
+
+  it("binds the selected release tag before updating", async () => {
+    lists();
+    let stepUpBody: unknown;
+    let actionBody: Record<string, unknown> = {};
+    server.use(
+      http.post(`${base}/stepup`, async ({ request }) => {
+        stepUpBody = await request.json();
+        return HttpResponse.json(stepUpOptions);
+      }),
+      http.post(`${base}/actions/update`, async ({ request }) => {
+        actionBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(job("running", { action: "update" }), {
+          status: 202,
+        });
+      }),
+      http.get(`${base}/jobs/${id}`, () =>
+        HttpResponse.json(
+          job("succeeded", { action: "update", finished: started }),
+        ),
+      ),
+    );
+    renderActions();
+    const user = userEvent.setup();
+    await user.type(
+      await screen.findByRole("textbox", { name: "Update to release tag" }),
+      "v0.3.1",
+    );
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    await screen.findByText("Update: succeeded");
+    expect(stepUpBody).toEqual({ action: "update", tag: "v0.3.1" });
+    expect(actionBody.tag).toBe("v0.3.1");
+    expect((actionBody.stepup as { handle: string }).handle).toBe(
+      stepUpOptions.handle,
+    );
   });
 
   it("locks the buttons while a job runs elsewhere", async () => {

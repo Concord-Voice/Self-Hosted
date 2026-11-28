@@ -3,16 +3,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiContractError, ApiError } from "./api";
 import {
   APPLIANCES,
-  STEP_UP_ACTIONS,
   ServerRequestError,
   UPDATE_TAG,
   serverWriteApi,
   type Appliance,
+  type ServerActionArguments,
   type ServerBackup,
   type ServerJob,
   type WriteAction,
 } from "./server";
-import { decodeRequestOptions, encodeAssertion } from "./webauthn";
+import {
+  KEY_NOT_USED,
+  decodeRequestOptions,
+  encodeAssertion,
+  keyNotUsed,
+} from "./webauthn";
 
 // The Server routes share 30 requests a minute; the runbook says poll a job
 // no faster than every 5 seconds. The jobs list is checked every 30 seconds
@@ -30,17 +35,51 @@ const ACTION_LABELS: Record<WriteAction, string> = {
 };
 
 // What each refusal means to the operator. Unknown codes fall back to the
-// generic line.
+// generic line, and only the table's own keys count, so a code such as
+// "constructor" or "__proto__" is unknown too.
 const REFUSALS: Record<string, string> = {
   write_in_progress: "Another action is still running. Wait for it to finish.",
   stepup_required: "This action needs your security key.",
   stepup_failed: "The security key check failed. Try again.",
+  authorization_denied:
+    "The host agent rejected this admin's security key proof. Touch a key a host-root operator has imported with concord-agent authorizer import; a key added since the last import must be exported and imported again. If this persists, ask a host-root operator to check the import.",
+  authorizer_unavailable:
+    "The host agent cannot load its trusted authorizers. Ask a host-root operator to check the authorizer file and import it with concord-agent authorizer import.",
+  peer_forbidden:
+    "The host agent rejected the control-plane connection. Check the service identity and agent socket permissions on the host.",
+  authorization_busy:
+    "Too many security key requests are still open on the host. A request you did not finish, such as a cancelled key prompt, expires after 2 minutes. Wait, then try again.",
+  invalid_authorization:
+    "The host agent did not accept this authorization request. Reload the console and start again.",
+  backup_rate_limited:
+    "Backups and updates are limited to one attempt per hour, because an update takes a backup first. Wait until the hour has passed before trying again.",
+  update_downgrade_refused:
+    "That release is older than the one this server runs. The host agent does not move a server back to an older release.",
+  running_version_unknown:
+    "The host agent cannot read which release this server runs, so it refused the update. Ask a host-root operator to check the VERSION file in the install folder.",
   stepup_unavailable:
-    "Your account has no security key this server can check, so this action is not available.",
+    "The host agent could not start a security key check. Try again shortly. If this keeps happening, ask a host operator to check that the agent is running.",
   audit_unavailable:
     "The audit log is not writable right now, so the action was refused.",
   agent_unavailable:
-    "The host agent is not reachable. Install and start it, then try again.",
+    "The host agent did not answer. Check that it is installed and running. An action you just started may still run, so check the jobs list before you start it again.",
+  job_unavailable:
+    "The host agent could not start the action, so nothing ran. Try again shortly. If this keeps happening, ask a host operator to check the agent log.",
+  alerts_not_configured:
+    "Host actions are off because this host has no out-of-band alert set up. Ask a host operator to configure the agent alert as the host agent runbook describes.",
+  unknown_action:
+    "The host agent does not know this action. Ask a host operator to update the agent to this server's release.",
+  unexpected_argument:
+    "The host agent refused an argument this action does not take. Reload the console and start again.",
+  invalid_body:
+    "The host agent could not read the request. Reload the console and start again.",
+  // The control plane's own codes, for failures around the agent call.
+  agent_error:
+    "The host agent sent an answer the server could not use. An action you just started may still run, so check the jobs list, then try again. If this keeps happening, ask a host operator to check the host agent's journal.",
+  internal_error:
+    "The server failed before it reached the host agent, so nothing ran. Try again. If this keeps happening, ask a host operator to check the control plane log.",
+  invalid_request:
+    "The server refused this request because its action or arguments were not valid. Reload the console and try again. If this keeps happening, ask a host operator to check the control plane log.",
   agent_busy: "The host agent is busy. Try again shortly.",
   security_log_boundary_missing:
     "The security log folder is missing on the host. Restart refused before stopping anything.",
@@ -53,6 +92,10 @@ const REFUSALS: Record<string, string> = {
   rate_limited: "Too many requests. Wait a minute, then try again.",
   invalid_tag: "Enter a release tag such as v0.3.1.",
   invalid_archive: "Choose a backup from the list.",
+  writes_disabled:
+    "Host writes are switched off because the agent has no audit log or no trusted authorizer. Ask a host-root operator to check the agent log and import this admin's authorizer.",
+  stepup_binding_mismatch:
+    "The request changed after your security key was requested. Start the action again.",
 };
 
 interface ServerActionsProps {
@@ -66,13 +109,11 @@ function describe(
   error: unknown,
   onSessionError: ServerActionsProps["onSessionError"],
 ): string | null {
-  if (error instanceof DOMException && error.name === "NotAllowedError") {
-    return "Security key verification was canceled.";
-  }
+  if (keyNotUsed(error)) return KEY_NOT_USED;
   if (
     error instanceof ServerRequestError &&
-    error.code &&
-    REFUSALS[error.code]
+    error.code !== null &&
+    Object.hasOwn(REFUSALS, error.code)
   ) {
     return REFUSALS[error.code];
   }
@@ -214,28 +255,23 @@ export function ServerActions({
     }
   }, [running, current, follow]);
 
-  const run = async (
-    action: WriteAction,
-    args: Record<string, string> = {},
-  ) => {
+  const run = async (action: WriteAction, args: ServerActionArguments = {}) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
       const body: Record<string, unknown> = { ...args };
-      if (STEP_UP_ACTIONS.has(action)) {
-        setStatus("Touch your security key to confirm");
-        const challenge = await serverWriteApi.stepUp(action);
-        const credential = await navigator.credentials.get({
-          publicKey: decodeRequestOptions(challenge.publicKey),
-        });
-        if (!credential)
-          throw new DOMException("no credential", "NotAllowedError");
-        body.stepup = {
-          handle: challenge.handle,
-          assertion: encodeAssertion(credential as PublicKeyCredential),
-        };
-      }
+      setStatus("Touch your security key to confirm");
+      const challenge = await serverWriteApi.stepUp(action, args);
+      const credential = await navigator.credentials.get({
+        publicKey: decodeRequestOptions(challenge.publicKey),
+      });
+      if (!credential)
+        throw new DOMException("no credential", "NotAllowedError");
+      body.stepup = {
+        handle: challenge.handle,
+        assertion: encodeAssertion(credential as PublicKeyCredential),
+      };
       setStatus(`${ACTION_LABELS[action]} started`);
       const job = await serverWriteApi.run(action, body);
       setCurrent(job);
@@ -290,11 +326,17 @@ export function ServerActions({
         <div>
           <h2 id="server-actions-title">Actions</h2>
           <p>
-            One action runs at a time. Stop, restart, update and restore ask for
-            your security key. Every attempt is audited.
+            One action runs at a time. Every action asks for your security key
+            and is audited.
           </p>
         </div>
       </div>
+      {/* Above the controls: a refusal can come from any of them, so it must
+          not sit under the restore form. */}
+      {status && (
+        <output className="resource-notice resource-loading">{status}</output>
+      )}
+      {error && <output className="resource-notice">{error}</output>}
       <div className="server-action-row">
         {(["start", "stop", "restart", "backup"] as const).map((action) => (
           <button
@@ -365,10 +407,6 @@ export function ServerActions({
           Restore
         </button>
       </form>
-      {status && (
-        <output className="resource-notice resource-loading">{status}</output>
-      )}
-      {error && <output className="resource-notice">{error}</output>}
       {current && (
         <>
           <p className="server-logs-caption">

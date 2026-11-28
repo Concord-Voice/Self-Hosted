@@ -88,6 +88,10 @@ const (
 	// the step-up is missing or fails. Successes are what other admins are told
 	// about at their next sign-in.
 	EventAdminCreated = "admin_created"
+	// EventCredentialAdded marks a signed-in admin registering another
+	// hardware key for themselves: a success once it is stored, a denial when
+	// the step-up, the cap or the attestation refuses it.
+	EventCredentialAdded = "credential_added" // #nosec G101 -- event-type label, not a secret
 	// EventSignInNoticeAck marks an admin session acknowledging the sign-in
 	// notice it displayed; its detail holds the acknowledged cursor.
 	EventSignInNoticeAck = "signin_notice_ack"
