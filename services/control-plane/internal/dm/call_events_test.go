@@ -7,17 +7,37 @@
 package dm
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCallEventFailureLogsCapacityDistinctly(t *testing.T) {
+	var output bytes.Buffer
+	h := &Handler{log: logger.NewWithWriter(&output)}
+	h.logCallEventFailure("Failed to insert missed call_event row", &pq.Error{
+		Code: "23514", Constraint: "message_id_reservation_global_quota",
+	}, "conversation_id", "test-conversation")
+	assert.Contains(t, output.String(), "level=WARN")
+	assert.Contains(t, output.String(), "failure_class=capacity")
+	assert.Contains(t, output.String(), "conversation_id=test-conversation")
+
+	output.Reset()
+	h.logCallEventFailure("Failed to insert missed call_event row", errors.New("database unavailable"))
+	assert.Contains(t, output.String(), "level=ERROR")
+	assert.Contains(t, output.String(), "Failed to insert missed call_event row")
+	assert.NotContains(t, output.String(), "failure_class=capacity")
+}
 
 func TestCallEventMissed(t *testing.T) {
 	convID := uuid.New()
