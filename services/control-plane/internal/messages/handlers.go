@@ -1050,7 +1050,7 @@ func (h *Handler) updateMessageCiphertext(
 		      SELECT 1 FROM key_revocations
 		      WHERE channel_id = $4 AND revoked_epoch = $2
 		  )
-		RETURNING channel_id, key_version, embeds_suppressed, edited_at, expires_at, created_at, updated_at
+		RETURNING channel_id, key_version, e2ee_format, embeds_suppressed, edited_at, expires_at, created_at, updated_at
 	`
 
 	var message models.Message
@@ -1061,6 +1061,7 @@ func (h *Handler) updateMessageCiphertext(
 	err = tx.QueryRowContext(c.Request.Context(), updateQuery, req.Content, req.KeyVersion, messageID, channelID).Scan(
 		&message.ChannelID,
 		&message.KeyVersion,
+		&message.E2EEFormat,
 		&message.EmbedsSuppressed,
 		&message.EditedAt,
 		&message.ExpiresAt,
@@ -1133,20 +1134,30 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	if err == nil {
 		h.hub.BroadcastToChannelAuthorized(channelUUID, websocket.OutgoingMessage{
 			Type: "message_update",
-			Data: map[string]interface{}{
-				"id":                messageID,
-				"channel_id":        message.ChannelID,
-				"content":           message.Content,
-				"key_version":       message.KeyVersion,
-				"embeds_suppressed": message.EmbedsSuppressed,
-				"edited_at":         message.EditedAt,
-				"expires_at":        message.ExpiresAt,
-				"updated_at":        message.UpdatedAt,
-			},
+			Data: messageUpdatePayload(messageID, message),
 		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+// messageUpdatePayload builds the message_update broadcast. e2ee_format is
+// passive read metadata and is omitted for legacy rows, matching the HTTP body.
+func messageUpdatePayload(messageID string, message models.Message) map[string]interface{} {
+	payload := map[string]interface{}{
+		"id":                messageID,
+		"channel_id":        message.ChannelID,
+		"content":           message.Content,
+		"key_version":       message.KeyVersion,
+		"embeds_suppressed": message.EmbedsSuppressed,
+		"edited_at":         message.EditedAt,
+		"expires_at":        message.ExpiresAt,
+		"updated_at":        message.UpdatedAt,
+	}
+	if message.E2EEFormat != nil {
+		payload["e2ee_format"] = *message.E2EEFormat
+	}
+	return payload
 }
 
 // DeleteMessage deletes a message.

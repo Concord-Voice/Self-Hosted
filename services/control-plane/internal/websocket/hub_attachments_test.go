@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -524,6 +525,58 @@ func TestBuildMessageBroadcastWithReply(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, replyID, summary["id"])
 	assert.Equal(t, 2, summary["key_version"])
+	assert.NotContains(t, summary, "e2ee_format", "a legacy reply target carries no format")
+}
+
+func TestBuildMessageBroadcastReplyCarriesStoredFormat(t *testing.T) {
+	setup := setupMessageTest(t)
+	chID := uuid.MustParse(setup.convID)
+	replyID := uuid.New().String()
+	_, err := setup.db.Exec(`
+		INSERT INTO messages (id, channel_id, user_id, content, key_version, e2ee_format, request_fingerprint, created_at, updated_at)
+		VALUES ($1, $2, $3, 'original', 2, 'message-v1', $4, NOW(), NOW())
+	`, replyID, chID, setup.user1, bytes.Repeat([]byte{0x61}, 32))
+	require.NoError(t, err)
+
+	data := setup.hub.buildMessageBroadcast(messageBroadcastCtx{
+		messageID:   uuid.New(),
+		channelUUID: chID,
+		userID:      setup.user1,
+		client:      setup.client,
+		input:       &messageInput{content: "replying", keyVersion: 1},
+		createdAt:   testTimestamp,
+		updatedAt:   testTimestamp,
+		replyToID:   &replyID,
+	})
+
+	summary, ok := data["replied_to"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "message-v1", summary["e2ee_format"])
+	assert.NotContains(t, summary, "request_fingerprint")
+}
+
+func TestLinkChannelAttachmentsSummaryCarriesChannelScope(t *testing.T) {
+	setup := setupMessageTest(t)
+	messageID := seedChannelMessage(t, setup)
+	fileID := seedChannelMediaFile(t, setup)
+	_, err := setup.db.Exec(`UPDATE media_files SET e2ee_format = 'attachment-v4' WHERE id = $1`, fileID)
+	require.NoError(t, err)
+	tx := beginAttachmentTx(t, setup)
+
+	summaries, err := setup.hub.linkChannelAttachments(context.Background(), tx, messageID, setup.user1.String(), []string{fileID}, setup.convID)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	require.Len(t, summaries, 1)
+	summary := summaries[0]
+	assert.Equal(t, setup.user1.String(), summary.UploaderID)
+	require.NotNil(t, summary.ChannelID)
+	assert.Equal(t, setup.convID, *summary.ChannelID)
+	assert.Nil(t, summary.ConversationID)
+	require.NotNil(t, summary.KeyVersion)
+	assert.Equal(t, 1, *summary.KeyVersion)
+	require.NotNil(t, summary.E2EEFormat)
+	assert.Equal(t, "attachment-v4", *summary.E2EEFormat)
 }
 
 // --- sendMessageAck with attachments ---
