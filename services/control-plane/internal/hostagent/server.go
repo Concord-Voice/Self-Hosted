@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -33,7 +34,10 @@ const (
 	followMaxRuntime = 10 * time.Minute
 )
 
-const contentType = "Content-Type"
+const (
+	contentType               = "Content-Type"
+	maxAuthorizationBeginBody = 1 << 10
+)
 
 // Services the agent will read logs for. Compose service names.
 var logServices = map[string]bool{
@@ -54,11 +58,17 @@ type Runner interface {
 
 // Server serves the agent's HTTP API on the unix socket.
 type Server struct {
-	run       Runner
-	inFlight  chan struct{}
-	followers chan struct{}
-	writes    *jobs  // nil unless EnableWrites was called
-	managedBy string // an appliance that owns writes; see SetManagedBy
+	run             Runner
+	expectedPeerUID int
+	authorizations  *AuthorizationStore
+	audit           *Audit
+	inFlight        chan struct{}
+	followers       chan struct{}
+	writes          *jobs  // nil unless EnableWrites was called
+	managedBy       string // an appliance that owns writes; see SetManagedBy
+	writesDisabled  bool   // writes are off because audit or trust is missing
+	denials         denialLimiter
+	alerts          *Alerter // nil when no alert destination is configured; writes are then refused
 	// writeGrace is how long past an action's budget a response may take to
 	// write before the connection is cut.
 	writeGrace time.Duration
@@ -68,50 +78,195 @@ type Server struct {
 // NewServer returns a Server that runs actions through r.
 func NewServer(r Runner) *Server {
 	return &Server{
-		run:        r,
-		inFlight:   make(chan struct{}, maxInFlight),
-		followers:  make(chan struct{}, maxFollowers),
-		followMax:  followMaxRuntime,
-		writeGrace: 5 * time.Second,
+		run:             r,
+		expectedPeerUID: 10006,
+		inFlight:        make(chan struct{}, maxInFlight),
+		followers:       make(chan struct{}, maxFollowers),
+		followMax:       followMaxRuntime,
+		writeGrace:      5 * time.Second,
 	}
+}
+
+// SetExpectedPeerUID accepts only an unprivileged numeric control-plane UID.
+func (s *Server) SetExpectedPeerUID(uid int) error {
+	if uid <= 0 || uint64(uid) > uint64(^uint32(0)) {
+		return errors.New("invalid control-plane peer UID")
+	}
+	s.expectedPeerUID = uid
+	return nil
+}
+
+// SetAuthorizationStore binds ceremonies to the same closed job parser used
+// for execution. It is configured before the socket starts serving.
+func (s *Server) SetAuthorizationStore(store *AuthorizationStore) error {
+	if store == nil {
+		return errors.New("authorizer unavailable")
+	}
+	store.jobs = s.writes
+	s.authorizations = store
+	return nil
+}
+
+// SetAudit installs the root-local durable audit before the listener serves.
+func (s *Server) SetAudit(audit *Audit) error {
+	if audit == nil {
+		return errors.New("host-agent audit unavailable")
+	}
+	s.audit = audit
+	if s.writes != nil {
+		s.writes.audit = audit
+		s.writes.admission = backupAdmissionPath(audit)
+	}
+	return nil
+}
+
+// DisableWrites makes every write-side route answer writes_disabled instead of
+// unknown_action, so the console can say why. It is set before serving.
+func (s *Server) DisableWrites() {
+	s.writes = nil
+	s.writesDisabled = true
+}
+
+// WritesEnabled reports whether write actions are being served.
+func (s *Server) WritesEnabled() bool { return s.writes != nil }
+
+// WritesDisabled reports whether write routes answer writes_disabled.
+func (s *Server) WritesDisabled() bool { return s.writesDisabled }
+
+// SetAlerter installs the out-of-band alert destination before serving.
+func (s *Server) SetAlerter(alerts *Alerter) {
+	s.alerts = alerts
+	if s.writes != nil {
+		s.writes.alerts = alerts
+	}
+}
+
+// auditDenial records a denial through recordDenial, logging a failure.
+func (s *Server) auditDenial(event AuditEvent) {
+	if err := s.recordDenial(event, 0); err != nil {
+		// The audit's errors are fixed strings and the fixed stream path.
+		log.Printf("concord-agent: host-agent audit write failed: reason=%s: %v", event.Reason, err)
+	}
+}
+
+// recordDenial coalesces denials: each (reason, action, admin, peer) key gets
+// at most one audit record and one alert per window, and that record counts
+// the denials dropped before it. It returns an error only when a due record
+// could not be written; a coalesced denial returns nil.
+func (s *Server) recordDenial(event AuditEvent, uid int) error {
+	record, suppressed := s.denials.admit(denialKey{reason: event.Reason, action: event.Action, adminID: event.AdminID, uid: uid})
+	if !record {
+		return nil
+	}
+	event.Suppressed = suppressed
+	var err error
+	if s.audit == nil {
+		err = errors.New("host-agent audit unavailable")
+	} else {
+		err = s.audit.Write(event)
+	}
+	s.alerts.Enqueue(AlertEvent{Outcome: "denied", Reason: event.Reason, Action: event.Action, AdminID: event.AdminID, JobID: event.JobID, Suppressed: suppressed})
+	return err
+}
+
+const (
+	denialWindow   = time.Minute
+	maxDenialKeys  = 256
+	unknownPeerUID = -1
+	overflowDenial = -2
+)
+
+// denialKey identifies one kind of denial. Its fields come from the closed
+// audit vocabulary, a canonical admin UUID and a peer UID.
+type denialKey struct {
+	reason  string
+	action  string
+	adminID string
+	uid     int
+}
+
+// denialLimiter keeps any caller that can reach the socket from filling the
+// bounded audit with denial records: each key gets at most one record per
+// window. Keys past maxDenialKeys share one overflow key per reason, and the
+// reasons are a closed list, so the map stays bounded.
+type denialLimiter struct {
+	mu      sync.Mutex
+	now     func() time.Time
+	entries map[denialKey]*denialEntry
+}
+
+type denialEntry struct {
+	windowStart time.Time
+	suppressed  int
+}
+
+// admit reports whether a denial for key is recorded now and how many denials
+// for it were dropped since its last record.
+func (l *denialLimiter) admit(key denialKey) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if l.now != nil {
+		now = l.now()
+	}
+	if l.entries == nil {
+		l.entries = make(map[denialKey]*denialEntry)
+	}
+	entry, ok := l.entries[key]
+	if !ok {
+		for k, e := range l.entries {
+			if now.Sub(e.windowStart) >= denialWindow && e.suppressed == 0 {
+				delete(l.entries, k)
+			}
+		}
+		if len(l.entries) >= maxDenialKeys {
+			key = denialKey{reason: key.reason, uid: overflowDenial}
+			if entry, ok = l.entries[key]; ok {
+				return l.step(entry, now)
+			}
+		}
+		l.entries[key] = &denialEntry{windowStart: now}
+		return true, 0
+	}
+	return l.step(entry, now)
+}
+
+func (l *denialLimiter) step(entry *denialEntry, now time.Time) (bool, int) {
+	if now.Sub(entry.windowStart) < denialWindow {
+		entry.suppressed++
+		return false, 0
+	}
+	suppressed := entry.suppressed
+	entry.windowStart, entry.suppressed = now, 0
+	return true, suppressed
 }
 
 // ServeHTTP routes three GET reads and, once enabled, the write actions and
 // their jobs; everything else is refused here, whatever the proxy in front
 // allowed.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.managedBy != "" && writePath(r.URL.Path) {
-		s.refuseManaged(w)
+	peer, ok := peerFromContext(r.Context())
+	if !ok || peer.UID != s.expectedPeerUID {
+		uid := unknownPeerUID
+		if ok {
+			uid = peer.UID
+		}
+		event := AuditEvent{Action: requestAction(r.URL.Path), Outcome: "denied", Reason: "peer_forbidden"}
+		if err := s.recordDenial(event, uid); err != nil {
+			log.Printf("concord-agent: host-agent audit write failed: reason=%s: %v", event.Reason, err)
+		}
+		refuse(w, http.StatusForbidden, "peer_forbidden")
 		return
 	}
-	if s.writes != nil {
-		if r.URL.Path == "/v1/backups" {
-			s.handleBackups(w, r)
-			return
-		}
-		if action, ok := strings.CutPrefix(r.URL.Path, "/v1/actions/"); ok && !strings.Contains(action, "/") {
-			s.handleWrite(w, r, action)
-			return
-		}
-		if r.URL.Path == "/v1/jobs" {
-			s.handleJobs(w, r, "")
-			return
-		}
-		if id, ok := strings.CutPrefix(r.URL.Path, "/v1/jobs/"); ok && id != "" {
-			s.handleJobs(w, r, id)
-			return
-		}
+	if r.URL.Path == "/v1/authorizers/login-assertion" {
+		s.handleLoginAssertion(w, r)
+		return
 	}
-	var handle func(http.ResponseWriter, *http.Request) string
-	var action string
-	switch r.URL.Path {
-	case "/v1/status":
-		handle, action = s.status, "status"
-	case "/v1/health":
-		handle, action = s.health, "health"
-	case "/v1/logs":
-		handle, action = s.logs, "logs"
-	default:
+	if s.refuseWriteGate(w, r.URL.Path) || s.handleWriteRoute(w, r) {
+		return
+	}
+	handle, action := s.readRoute(r.URL.Path)
+	if handle == nil {
 		refuse(w, http.StatusNotFound, "unknown_action")
 		log.Printf("concord-agent: refused unknown action")
 		return
@@ -132,6 +287,125 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(healthTimeout + s.writeGrace))
 	outcome := handle(w, r)
 	log.Printf("concord-agent: action=%s outcome=%s", action, outcome)
+}
+
+const authorizationsPath = "/v1/authorizations"
+
+// refuseWriteGate refuses a write route, or the authorization begin that
+// precedes one, when this agent cannot run writes. It reports whether it
+// refused.
+func (s *Server) refuseWriteGate(w http.ResponseWriter, path string) bool {
+	if !writePath(path) && path != authorizationsPath {
+		return false
+	}
+	switch {
+	case s.managedBy != "":
+		s.refuseManaged(w)
+	case s.writes == nil && s.writesDisabled:
+		refuse(w, http.StatusServiceUnavailable, "writes_disabled")
+	case s.writes != nil && s.alerts == nil:
+		// With one key for login and host actions, the out-of-band alert is
+		// the only detection control for a control plane that spends a
+		// harvested login tap on a host action: no write, and no key tap for
+		// one, without it.
+		refuse(w, http.StatusServiceUnavailable, "alerts_not_configured")
+	default:
+		return false
+	}
+	return true
+}
+
+func requestAction(path string) string {
+	action, _ := strings.CutPrefix(path, "/v1/actions/")
+	return actionName(action)
+}
+
+func (s *Server) handleWriteRoute(w http.ResponseWriter, r *http.Request) bool {
+	if s.writes == nil {
+		return false
+	}
+	switch r.URL.Path {
+	case authorizationsPath:
+		s.handleAuthorizationBegin(w, r)
+	case "/v1/backups":
+		s.handleBackups(w, r)
+	case "/v1/jobs":
+		s.handleJobs(w, r, "")
+	default:
+		if action, ok := strings.CutPrefix(r.URL.Path, "/v1/actions/"); ok && !strings.Contains(action, "/") {
+			s.handleWrite(w, r, action)
+		} else if id, ok := strings.CutPrefix(r.URL.Path, "/v1/jobs/"); ok && id != "" {
+			s.handleJobs(w, r, id)
+		} else {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) readRoute(path string) (func(http.ResponseWriter, *http.Request) string, string) {
+	switch path {
+	case "/v1/status":
+		return s.status, "status"
+	case "/v1/health":
+		return s.health, "health"
+	case "/v1/logs":
+		return s.logs, "logs"
+	default:
+		return nil, ""
+	}
+}
+
+func (s *Server) handleAuthorizationBegin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		refuse(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if s.authorizations == nil {
+		s.auditDenial(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
+		return
+	}
+	var body struct {
+		AdminID   string        `json:"admin_id"`
+		Action    string        `json:"action"`
+		Arguments actionRequest `json:"arguments"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthorizationBeginBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		s.auditDenial(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		refuse(w, http.StatusBadRequest, "invalid_authorization")
+		return
+	}
+	if dec.Decode(new(any)) != io.EOF {
+		s.auditDenial(AuditEvent{Outcome: "denied", Reason: "begin_denied"})
+		refuse(w, http.StatusBadRequest, "invalid_authorization")
+		return
+	}
+	handle, options, err := s.authorizations.Begin(body.AdminID, body.Action, body.Arguments)
+	if err != nil {
+		reason := "begin_denied"
+		if errors.Is(err, errNoActionCredential) {
+			reason = "no_action_credential"
+		}
+		s.auditDenial(AuditEvent{Action: actionName(body.Action), Outcome: "denied", Reason: reason, AdminID: canonicalAuditAdminID(body.AdminID)})
+		var no *refusal
+		switch {
+		case errors.As(err, &no):
+			// The request itself was refused (bad arguments, missing archive,
+			// untrusted backups): pass its own status and reason through.
+			refuse(w, no.code, no.reason)
+		case errors.Is(err, ErrAuthorizationBusy):
+			refuse(w, http.StatusTooManyRequests, "authorization_busy")
+		case errors.Is(err, ErrAuthorizerUnavailable):
+			refuse(w, http.StatusServiceUnavailable, "authorizer_unavailable")
+		default:
+			refuse(w, http.StatusForbidden, "authorization_denied")
+		}
+		return
+	}
+	writeJSON(w, map[string]any{"handle": handle, "options": options})
 }
 
 func refuse(w http.ResponseWriter, code int, reason string) {

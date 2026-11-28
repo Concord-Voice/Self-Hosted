@@ -789,7 +789,8 @@ Every attempt that reaches the step-up check writes an `admin_created` row: a re
 | Verb | What it does |
 |---|---|
 | `bootstrap --username <handle>` | Creates a pending admin and prints a one-time enrollment URL and token. |
-| `reset-enrollment --username <handle>` | Revokes the admin's hardware keys and sessions, invalidates in-flight enrollment, returns the admin to pending, and prints a new enrollment token. It does not change the password. |
+| `reset-enrollment --username <handle>` | Revokes the admin's hardware keys and sessions, invalidates in-flight enrollment, returns the admin to pending, and prints a new enrollment token. It does not change the password. It refuses while the admin is still in the Host Agent's authorizer store; on a self-hosted install use `concord-selfhost admin reset-enrollment --username <handle> [--admin-id <uuid>]`, which revokes that trust first and needs `--admin-id` when it has no terminal to confirm on. |
+| `export-agent-authorizer --username <handle>` | Prints an active admin's public keys and sign counters as the Host Agent import file, with its SHA-256 on standard error. Host root imports it with `concord-agent authorizer import`. |
 | `unlock [--] <username>` | Clears the admin's sign-in lock, failed attempts and escalation level, so the next correct sign-in succeeds. A `--` ends the options, so a legacy name that begins with `-` is unlocked with `unlock -- <username>`; `reset-enrollment` takes such a name as `--username=<username>`. It does not touch the IP lock, which expires within an hour. It writes one audit row. |
 
 After upgrading to the release that adds enrollment and session generations, every admin signs in once again, and enrollment tokens issued before the upgrade fail closed; reissue them with `reset-enrollment`. Do not run `reset-enrollment` or finish an enrollment while containers from an earlier release still serve, because they do not check the generations.
@@ -816,6 +817,8 @@ Durable administrator session generations must be positive: legacy Redis session
 
 **Hosted edge-gating:** Cloudflare Access wraps hosted admin traffic (identity allowlist + hardware-key requirement) before origin, then nginx serves the codename vhost with a Cloudflare Origin Certificate, and the Go `/admin` route group verifies `Cf-Access-Jwt-Assertion` against the Access JWKS/audience before any admin handler runs. The origin firewall helper restricts `:443` to Cloudflare IP ranges. The codename hostname is not the access control. Protected administration and metrics requests pass both Cloudflare Access and local admin-session gates. The SPA shell, auth, and enrollment routes pass the hosted outer gate without requiring a local session.
 
+**Access JWKS refresh:** the verifier refreshes the Access JWKS at most once per second. A failed lookup for an unknown key is cached negatively (256 entries, 1 minute). The response body is limited to 1 MiB. Keys are refreshed ahead of expiry, 10 minutes before their TTL ends, and a key past its TTL is never served without a successful refresh. The policy fails closed: a cached key verifies only while its key set is under 1 hour old, and after that never without a successful refresh. A failed lookup caused by an unavailable key set returns 503 `jwks_unavailable` and is logged; it is distinct from the 403 returned when a fresh key set does not hold the key. During a Cloudflare certs outage that outlasts the refresh-ahead window, Access-gated admin sign-in fails with `jwks_unavailable` until a refresh succeeds. The host-root path on the machine still works.
+
 **Self-hosted Server area (#186):** `GET /admin/api/v1/server/status`,
 `/server/health`, and `/server/logs` run behind the local admin-session gate and
 proxy to the root Concord Host Agent over `/run/concord-agent/agent.sock`, which
@@ -833,15 +836,26 @@ fixed `concord-selfhost` run, one at a time, returned as an in-memory job that
 restore to a CLI-named regular file in a root-only `backups/`; a marker file
 held during a job stops the package scripts restarting the agent mid-run. The
 console reaches them through `POST /admin/api/v1/server/actions/<action>` and
-`GET /server/jobs[/<id>]`. Stop, restart, update and restore also need a fresh
-user-verified WebAuthn assertion from `POST /server/stepup`, bound to the admin
-and the action and usable once within 2 minutes. Every attempt writes a
-`server_write` audit row and a privileged-action security event; the row asking
-for the action is written before the agent is called, and the call is refused
-if it cannot be. `GET /server/backups` lists the archives restore accepts. The Server
-page's Actions panel drives all of this. With `CONCORD_AGENT_MANAGED_BY=truenas`
-the agent refuses writes, jobs and backups with 409 `appliance_managed`, and
-the panel points to the appliance's UI instead.
+`GET /server/jobs[/<id>]`. The agent itself requires an expected peer UID and
+a fresh user-verified WebAuthn assertion for all six actions, signed by one of
+the admin's own keys (the same keys used to sign in, sharing one root-owned
+sign counter per key). It refuses every write with 503
+`alerts_not_configured` until host root configures an out-of-band alert
+webhook (`/etc/concord-voice/agent-alert.json`), and then reports each
+admitted action and refusal there; that alert is the detection control for a
+compromised control plane spending a sign-in tap on a host action. `update`
+refuses an older release (409 `update_downgrade_refused`). Its root-owned
+authorizer store verifies a one-use, two-minute handle bound to the exact
+normalized action arguments, persists the authenticator counter, then appends
+a durable `host-agent-audit.v1` admission record before job creation. This
+root-side stream is independent of the control-plane audit and Nightwatch
+ingestion remains unverified. Every attempt also writes a `server_write` audit
+row and a privileged-action security event; the row asking for the action is
+written before the agent is called, and the call is refused if it cannot be.
+`GET /server/backups` lists the archives restore accepts. The Server page's
+Actions panel drives all of this. With `CONCORD_AGENT_MANAGED_BY=truenas` the
+agent refuses writes, jobs and backups with 409 `appliance_managed`, and the
+panel points to the appliance's UI instead.
 
 **Self-hosted setup wizard (#187):** on a host with no `.env`, the Concord Host
 Agent also listens on TCP 9443 with a fresh self-signed ECDSA P-384 certificate
@@ -851,7 +865,19 @@ and serves a separate wizard build of `client/admin` (`setup/`,
 root-only file `/run/concord-agent/setup-token`, run `install-selfhost.sh --preflight-only --json` and
 `--env-file` respectively. Setup closes for good after the first install that
 writes `.env`, or after 60 minutes until the agent restarts with a new token.
-Control-plane is not involved: it is not running yet.
+Control-plane is not involved: it is not running yet. The setup listener admits
+at most four connections per source (an IPv6 source is keyed by its /64), on
+top of the global 16-connection cap. The install route's response has an
+11-minute write deadline: the 10-minute install budget plus time to serialize
+the result.
+
+**Backup admission:** the agent admits one `backup` or `update` job (update
+takes a backup first) per rolling hour and refuses another with 429
+`backup_rate_limited`. The last admission time lives in the agent's root-only
+audit directory, so a restart does not reset it, and the check runs before the
+admin's approval is spent. `selfhost-backup.sh` refuses
+when the target already holds 24 archives or when free space is below twice
+the source size plus 1 GiB. It never prunes old backups.
 
 The `concord-selfhost` `.deb` (`scripts/release/build-selfhost-deb.sh`) owns
 the agent (`/usr/libexec/concord-agent`), its unit and the wizard pages, and

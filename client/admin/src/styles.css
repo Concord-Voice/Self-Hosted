@@ -525,7 +525,23 @@ code,
 }
 
 .admins-added-notice h2 {
-  font-size: 14px;
+  font-size: 17px;
+}
+
+/* Two columns fit a phone; the global 760px table floor would scroll it. */
+.security-keys-table {
+  min-width: 0;
+  margin-bottom: 14px;
+}
+
+/* The <p> these replaced had a 1em block margin; keep the messages apart. */
+.security-key-message {
+  margin-block: 1em;
+}
+
+.security-keys-table caption {
+  padding-bottom: 8px;
+  text-align: start;
 }
 
 .resource-loading {

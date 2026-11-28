@@ -7,22 +7,32 @@ package admin
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/database"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/hostagent"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/managedredis"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/config"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/logger"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -38,7 +48,9 @@ const (
 const verbUnlock = "unlock"
 
 // adminCtlUsage is the one verb list shown for a missing or unknown verb.
-const adminCtlUsage = "bootstrap|reset-enrollment|unlock"
+const adminCtlUsage = "bootstrap|reset-enrollment|unlock|lookup-id|export-agent-authorizer"
+
+const agentAuthorizerProjectionPath = "/etc/concord-voice/agent-authorizers/authorizers.json"
 
 // adminCtlDeps bundles the injected collaborators an adminctl verb operates on.
 // Tests construct this against the isolated PG/Redis stack and an in-memory
@@ -52,8 +64,14 @@ type adminCtlDeps struct {
 	// enrollBaseURL is the console origin the printed enrollment URL points at
 	// (e.g. https://admin.example.org). Derived from the admin RP origins.
 	enrollBaseURL string
+	rpID          string
+	rpOrigins     []string
 	stdin         io.Reader
 	stdout        io.Writer
+	stderr        io.Writer
+	// Empty outside the Host Agent compose overlay; a reset then uses the legacy path.
+	authorizerProjectionPath string
+	listAuthorizers          func(string) ([]hostagent.AuthorizerListing, error)
 }
 
 type discardSecurityEvents struct{}
@@ -133,10 +151,27 @@ func RunAdminCtl(args []string) int {
 		enroll:        NewEnrollmentStore(rdb),
 		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: enrollBaseURL(cfg),
+		rpID:          cfg.AdminWebAuthnRPID,
+		rpOrigins:     cfg.AdminWebAuthnRPOrigins,
 		stdin:         os.Stdin,
 		stdout:        os.Stdout,
+		stderr:        os.Stderr,
+	}
+	if hostAgentProjectionEnabled(filepath.Dir(agentAuthorizerProjectionPath)) {
+		deps.authorizerProjectionPath = agentAuthorizerProjectionPath
 	}
 	return runAdminCtlWithSecurityEvents(context.Background(), deps, args, openSecurityEvents)
+}
+
+// hostAgentProjectionEnabled detects the root-owned mount even when an operator
+// overrides the process environment. Any Lstat error other than absence enables
+// the guard so the authorizer loader can reject unsafe or unreadable paths.
+func hostAgentProjectionEnabled(dir string) bool {
+	if os.Getenv("HOST_AGENT_AUTHORIZER_PROJECTION") == "1" {
+		return true
+	}
+	_, err := os.Lstat(dir)
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 func adminCtlSecurityEventLogger(environment string) *logger.Logger {
@@ -192,10 +227,147 @@ func runAdminCtl(ctx context.Context, deps adminCtlDeps, args []string) int {
 			return 1
 		}
 		return 0
+	case "lookup-id":
+		if err := runLookupAdminID(ctx, deps, rest); err != nil {
+			outf(deps.stderr, "admin lookup-id failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case "export-agent-authorizer":
+		if err := runExportAgentAuthorizer(ctx, deps, rest); err != nil {
+			outf(deps.stderr, "admin export-agent-authorizer failed: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
 		outf(deps.stdout, "admin: unknown verb %q (want %s)\n", verb, adminCtlUsage)
 		return 2
 	}
+}
+
+// runLookupAdminID gives the host-root reset wrapper the UUID to revoke before
+// the database reset. It has no mutation and emits only the UUID on success.
+func runLookupAdminID(ctx context.Context, deps adminCtlDeps, args []string) error {
+	fs := flag.NewFlagSet("lookup-id", flag.ContinueOnError)
+	fs.SetOutput(deps.stderr)
+	username := fs.String("username", "", "admin handle (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *username == "" || fs.NArg() != 0 {
+		return errors.New("--username is required and no positional arguments are allowed")
+	}
+	adminUser, err := deps.repo.GetByUsername(ctx, *username)
+	if err != nil {
+		return fmt.Errorf("look up admin: %w", err)
+	}
+	id, err := uuid.Parse(adminUser.ID)
+	if err != nil {
+		return errors.New("admin ID is invalid")
+	}
+	_, err = fmt.Fprintln(deps.stdout, id.String())
+	return err
+}
+
+func listAgentAuthorizers(path string) ([]hostagent.AuthorizerListing, error) {
+	store, err := hostagent.LoadAuthorizers(path)
+	if err != nil {
+		return nil, err
+	}
+	return store.List()
+}
+
+func ensureAgentAuthorizerRevoked(deps adminCtlDeps, adminID string) error {
+	if deps.authorizerProjectionPath == "" {
+		return nil
+	}
+	list := deps.listAuthorizers
+	if list == nil {
+		list = listAgentAuthorizers
+	}
+	authorizers, err := list(deps.authorizerProjectionPath)
+	if errors.Is(err, os.ErrNotExist) {
+		// LoadAuthorizers checked the root-owned directory before opening the file.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("host-agent authorizer projection unavailable: %w", err)
+	}
+	for _, authorizer := range authorizers {
+		if authorizer.AdminID == adminID && !authorizer.Revoked {
+			return errors.New("host-agent authorizer still trusted; revoke it on the host first")
+		}
+	}
+	return nil
+}
+
+// runExportAgentAuthorizer emits a public-key bundle for explicit host-root import.
+func runExportAgentAuthorizer(ctx context.Context, deps adminCtlDeps, args []string) error {
+	fs := flag.NewFlagSet("export-agent-authorizer", flag.ContinueOnError)
+	fs.SetOutput(deps.stderr)
+	username := fs.String("username", "", "active admin handle (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *username == "" || fs.NArg() != 0 {
+		return errors.New("--username is required and no positional arguments are allowed")
+	}
+	adminUser, err := deps.repo.GetByUsername(ctx, *username)
+	if err != nil {
+		return fmt.Errorf("look up admin: %w", err)
+	}
+	if adminUser.Status != StatusActive {
+		return errors.New("admin is not active")
+	}
+	credentials, err := deps.repo.ListCredentials(ctx, adminUser.ID)
+	if err != nil {
+		return fmt.Errorf("list credentials: %w", err)
+	}
+	if len(credentials) == 0 || len(credentials) > 64 {
+		return errors.New("admin needs between 1 and 64 active credentials")
+	}
+	// The digest should be stable even when rows share a creation timestamp.
+	sort.Slice(credentials, func(i, j int) bool {
+		return bytes.Compare(credentials[i].CredentialID, credentials[j].CredentialID) < 0
+	})
+	doc := hostagent.AuthorizerImport{Schema: 1, RPID: deps.rpID, Origins: deps.rpOrigins, AdminID: adminUser.ID}
+	for _, credential := range credentials {
+		if credential.SignCount < 0 || credential.SignCount > int64(^uint32(0)) {
+			return errors.New("invalid credential counter")
+		}
+		doc.Credentials = append(doc.Credentials, hostagent.AuthorizerCredentialImport{
+			CredentialID: base64.RawURLEncoding.EncodeToString(credential.CredentialID),
+			PublicKey:    base64.RawURLEncoding.EncodeToString(credential.PublicKey),
+			SignCount:    uint32(credential.SignCount), //nolint:gosec // range checked above
+			Label:        credential.CredentialName,
+		})
+	}
+	data, err := json.Marshal(doc)
+	if err != nil || len(data) > 1<<20 {
+		return errors.New("invalid authorizer export")
+	}
+	if _, err := deps.stdout.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write authorizer export: %w", err)
+	}
+	digest := sha256.Sum256(data)
+	outf(deps.stderr, "Authorizer export SHA-256: %s\n", hex.EncodeToString(digest[:]))
+	// List each key so host root can see what the import will trust.
+	for _, credential := range doc.Credentials {
+		outf(deps.stderr, "%s  %s\n", credential.CredentialID, printableLabel(credential.Label))
+	}
+	outf(deps.stderr, "import trusts every key listed; each one both logs in and authorizes host writes\n")
+	return nil
+}
+
+// printableLabel replaces control characters in an operator-chosen key label
+// so it cannot drive the terminal it is printed to.
+func printableLabel(label string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, label)
 }
 
 // outf writes to an operator-facing stdout, discarding the non-actionable write
@@ -296,6 +468,9 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 	adminUser, err := deps.repo.GetByUsername(ctx, *username)
 	if err != nil {
 		return fmt.Errorf("look up admin: %w", err)
+	}
+	if err := ensureAgentAuthorizerRevoked(deps, adminUser.ID); err != nil {
+		return err
 	}
 
 	// One transaction advances both fences before removing credentials. A stale

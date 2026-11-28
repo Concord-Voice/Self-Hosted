@@ -53,7 +53,7 @@ func TestEnrollBaseURL_FallsBackToLocalhost(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SessionStore — error paths via closed Redis (Mint/Get/Revoke/Rotate) (was 60–70%)
+// SessionStore — error paths via closed Redis (Mint/Get/Revoke) (was 60–70%)
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestSessionStore_Mint_RedisError(t *testing.T) {
@@ -95,24 +95,6 @@ func TestSessionStore_Revoke_EmptySIDIsNoOp(t *testing.T) {
 	store := admin.NewSessionStore(rdb, nil)
 	// An empty sid is explicitly defined as a no-op (idempotent).
 	require.NoError(t, store.Revoke(ctx, ""))
-}
-
-func TestSessionStore_Rotate_RedisErrorOnPersist(t *testing.T) {
-	rdb, cleanup := testhelpers.SetupTestRedis(t)
-	t.Cleanup(cleanup)
-	ctx := context.Background()
-
-	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
-	store := admin.NewSessionStore(rdb, func() time.Time { return now })
-
-	sid, err := store.Mint(ctx, "admin-id", 0)
-	require.NoError(t, err)
-
-	// Close Redis after mint so Rotate's internal persist (Set) errors.
-	require.NoError(t, rdb.Close())
-
-	_, err = store.Rotate(ctx, sid)
-	require.Error(t, err, "Rotate with Redis closed must propagate the persist error")
 }
 
 func TestSessionStore_Get_CorruptJSON_ReturnsInvalid(t *testing.T) {

@@ -18,6 +18,8 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly retryAfter: number | null,
+    // The server's stable error code, when its error body names one.
+    public readonly code: string | null = null,
   ) {
     super("Admin Portal request failed");
     this.name = "ApiError";
@@ -54,6 +56,19 @@ export function retryAfter(value: string | null): number | null {
   return Number.isSafeInteger(seconds) && seconds <= 3600 ? seconds : null;
 }
 
+async function errorCode(response: Response): Promise<string | null> {
+  try {
+    const value: unknown = await response.json();
+    if (typeof value === "object" && value !== null && "error" in value) {
+      const { error } = value as { error: unknown };
+      return typeof error === "string" ? error : null;
+    }
+  } catch {
+    // An error without a JSON body carries no code.
+  }
+  return null;
+}
+
 async function request<T>(
   path: string,
   parser: (value: unknown) => T,
@@ -83,6 +98,7 @@ async function request<T>(
     throw new ApiError(
       response.status,
       retryAfter(response.headers.get("Retry-After")),
+      await errorCode(response),
     );
   }
 
@@ -213,6 +229,81 @@ function statusResponse(expected: string): (value: unknown) => void {
   };
 }
 
+// One of the signed-in admin's own security keys. The server never sends a
+// credential ID or public key here.
+export interface SecurityKey {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface SecurityKeyList {
+  keys: SecurityKey[];
+  max: number;
+}
+
+// The server caps an admin at a handful of keys; anything past this is a
+// shape this console rejects.
+const MAX_SECURITY_KEYS = 16;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+
+function securityKey(value: unknown): SecurityKey {
+  const data = record(value);
+  exactKeys(data, ["id", "name", "created_at"]);
+  const { id, name, created_at: createdAt } = data;
+  if (typeof id !== "string" || !UUID_PATTERN.test(id)) {
+    throw new ContractError();
+  }
+  // A label of at most 128 bytes with no control characters, as the server
+  // stores it.
+  if (
+    typeof name !== "string" ||
+    new TextEncoder().encode(name).length > 128 ||
+    /\p{Cc}/u.test(name)
+  ) {
+    throw new ContractError();
+  }
+  if (
+    typeof createdAt !== "string" ||
+    !TIMESTAMP_PATTERN.test(createdAt) ||
+    !Number.isFinite(Date.parse(createdAt))
+  ) {
+    throw new ContractError();
+  }
+  return { id, name, createdAt };
+}
+
+function securityKeyList(value: unknown): SecurityKeyList {
+  const data = record(value);
+  exactKeys(data, ["credentials", "max"]);
+  const { credentials, max } = data;
+  if (
+    !Array.isArray(credentials) ||
+    credentials.length > MAX_SECURITY_KEYS ||
+    typeof max !== "number" ||
+    !Number.isSafeInteger(max) ||
+    max < 1 ||
+    max > MAX_SECURITY_KEYS
+  ) {
+    throw new ContractError();
+  }
+  const keys = credentials.map(securityKey);
+  if (new Set(keys.map((key) => key.id)).size !== keys.length) {
+    throw new ContractError();
+  }
+  return { keys, max };
+}
+
+function registeredKey(value: unknown): SecurityKey {
+  const data = record(value);
+  exactKeys(data, ["status", "credential"]);
+  if (data.status !== "registered") throw new ContractError();
+  return securityKey(data.credential);
+}
+
 export const api = {
   getHealth(options?: RequestOptions): Promise<AdminHealthResponse> {
     return request("/admin/api/v1/health", parseHealth, options);
@@ -292,6 +383,41 @@ export const api = {
     options?: RequestOptions,
   ): Promise<void> {
     return request("/admin/api/v1/enroll/finish", statusResponse("enrolled"), {
+      ...options,
+      body: { handle, attestation, credential_name: credentialName },
+    });
+  },
+  listSecurityKeys(options?: RequestOptions): Promise<SecurityKeyList> {
+    return request("/admin/api/v1/credentials", securityKeyList, options);
+  },
+  // A fresh assertion with an existing key authorises one registration.
+  securityKeyStepUp(
+    options?: RequestOptions,
+  ): Promise<CredentialOptionsResponse> {
+    return request(
+      "/admin/api/v1/credentials/stepup",
+      credentialOptionsResponse,
+      { ...options, body: {} },
+    );
+  },
+  securityKeyRegisterBegin(
+    handle: string,
+    assertion: unknown,
+    options?: RequestOptions,
+  ): Promise<CredentialOptionsResponse> {
+    return request(
+      "/admin/api/v1/credentials/register/begin",
+      credentialOptionsResponse,
+      { ...options, body: { stepup: { handle, assertion } } },
+    );
+  },
+  securityKeyRegisterFinish(
+    handle: string,
+    attestation: unknown,
+    credentialName: string,
+    options?: RequestOptions,
+  ): Promise<SecurityKey> {
+    return request("/admin/api/v1/credentials/register/finish", registeredKey, {
       ...options,
       body: { handle, attestation, credential_name: credentialName },
     });

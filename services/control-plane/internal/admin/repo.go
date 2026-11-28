@@ -22,6 +22,9 @@ var (
 	ErrDuplicateCredential = errors.New("admin: credential already registered")
 	// ErrEnrollmentStateChanged is returned when an enrollment ceremony is stale.
 	ErrEnrollmentStateChanged = errors.New("admin: enrollment state changed")
+	// ErrCredentialLimit is returned when an admin already holds
+	// MaxAdminCredentials keys.
+	ErrCredentialLimit = errors.New("admin: credential limit reached")
 	// ErrAdminAuthenticationStateChanged is returned when login state is stale.
 	ErrAdminAuthenticationStateChanged = errors.New("admin: authentication state changed")
 )
@@ -209,6 +212,22 @@ func (r *AdminRepo) ActiveSessionGeneration(ctx context.Context, adminID string)
 	return generation, nil
 }
 
+// ActiveCredentialGeneration returns the credential generation of an active
+// admin. A reset-enrollment advances it, so a ceremony bound to the old value
+// can never add a key afterwards.
+func (r *AdminRepo) ActiveCredentialGeneration(ctx context.Context, adminID string) (int64, error) {
+	const q = `SELECT credential_generation FROM admin_users WHERE id = $1 AND status = $2`
+	var generation int64
+	err := r.db.QueryRowContext(ctx, q, adminID, string(StatusActive)).Scan(&generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrAdminNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get active admin credential generation: %w", err)
+	}
+	return generation, nil
+}
+
 // SetStatus updates an admin's status (and touches updated_at). Returns
 // ErrAdminNotFound when no row matches the id.
 func (r *AdminRepo) SetStatus(ctx context.Context, adminID string, status AdminStatus) error {
@@ -305,6 +324,53 @@ func (r *AdminRepo) CompleteEnrollment(ctx context.Context, expectedGeneration i
 	}
 	if err := tx.Commit(); err != nil {
 		return AdminCredential{}, fmt.Errorf("commit complete admin enrollment: %w", err)
+	}
+	return stored, nil
+}
+
+// MaxAdminCredentials caps the keys one admin may hold: a primary, a backup
+// and room to rotate either without removing one first.
+const MaxAdminCredentials = 4
+
+// AddAdditionalCredential adds a key to an already active admin. Under the
+// admin row lock it requires the admin to be active at expectedGeneration (a
+// reset-enrollment since the ceremony began makes it stale) and to hold fewer
+// than MaxAdminCredentials keys, so concurrent ceremonies cannot exceed it.
+func (r *AdminRepo) AddAdditionalCredential(ctx context.Context, expectedGeneration int64, c AdminCredential) (stored AdminCredential, retErr error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AdminCredential{}, fmt.Errorf("begin add admin credential: %w", err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			retErr = errors.Join(retErr, fmt.Errorf("rollback add admin credential: %w", rollbackErr))
+		}
+	}()
+	var status string
+	var generation int64
+	err = tx.QueryRowContext(ctx, `SELECT status, credential_generation FROM admin_users WHERE id = $1 FOR UPDATE`, c.AdminID).Scan(&status, &generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AdminCredential{}, ErrAdminNotFound
+	}
+	if err != nil {
+		return AdminCredential{}, fmt.Errorf("lock admin credential state: %w", err)
+	}
+	if AdminStatus(status) != StatusActive || generation != expectedGeneration {
+		return AdminCredential{}, ErrEnrollmentStateChanged
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_webauthn_credentials WHERE admin_id = $1`, c.AdminID).Scan(&count); err != nil {
+		return AdminCredential{}, fmt.Errorf("count admin credentials: %w", err)
+	}
+	if count >= MaxAdminCredentials {
+		return AdminCredential{}, ErrCredentialLimit
+	}
+	stored, err = addCredential(ctx, tx, c)
+	if err != nil {
+		return AdminCredential{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AdminCredential{}, fmt.Errorf("commit add admin credential: %w", err)
 	}
 	return stored, nil
 }

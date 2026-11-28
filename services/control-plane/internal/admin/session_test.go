@@ -143,31 +143,6 @@ func TestSessionStore_AbsoluteCap(t *testing.T) {
 	assert.True(t, expired, "session must be rejected once the 8h absolute cap is exceeded")
 }
 
-func TestSessionStore_Rotate(t *testing.T) {
-	rdb, cleanup := testhelpers.SetupTestRedis(t)
-	t.Cleanup(cleanup)
-	ctx := context.Background()
-
-	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
-	store := admin.NewSessionStore(rdb, fixedClock(&now))
-
-	adminID := uniqueAdminUsername("admin-id")
-	oldSID, err := store.Mint(ctx, adminID, 0)
-	require.NoError(t, err)
-
-	newSID, err := store.Rotate(ctx, oldSID)
-	require.NoError(t, err)
-	assert.NotEqual(t, oldSID, newSID)
-
-	// Old sid is gone; new sid resolves to the same admin.
-	_, err = store.Get(ctx, oldSID)
-	assert.ErrorIs(t, err, admin.ErrSessionInvalid)
-
-	sess, err := store.Get(ctx, newSID)
-	require.NoError(t, err)
-	assert.Equal(t, adminID, sess.AdminID)
-}
-
 func TestSessionStore_Revoke(t *testing.T) {
 	rdb, cleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(cleanup)

@@ -629,6 +629,7 @@ invoke "$COPY" security-event-logging
 [[ "$output" != *stream-private-sentinel* ]] || fail "bootstrap output emitted sensitive stream content"
 [[ $(grep -c '^groupadd ' "$FIXTURE_CALLS") == 1 ]] || fail "repeat bootstrap recreated group"
 grep -qF 'create 0620 root concord-security-writers' "$TMP/direct.rotate" || fail "rotation creates wrong stream identity"
+grep -A9 -F 'host-agent/events.jsonl {' "$TMP/direct.rotate" | grep -qF 'create 0600 root root' && grep -A9 -F 'host-agent/events.jsonl {' "$TMP/direct.rotate" | grep -qF 'size 19M' || fail "host-agent audit stream is not rotated below the agent cap"
 grep -qF 'OnCalendar=*-*-* *:*:00' "$TMP/direct.timer" || fail "rotation cadence differs"
 grep -qF 'Persistent=true' "$TMP/direct.timer" || fail "timer is not persistent"
 grep -qxF 'systemctl daemon-reload' "$FIXTURE_CALLS" || fail "missing daemon-reload"

@@ -15,6 +15,7 @@ esac
 
 if [ "$1" = configure ]; then
   getent group concord-agent >/dev/null || groupadd --system concord-agent
+  install -d -o root -g root -m 0755 /etc/concord-voice/agent-authorizers
 
   # The release goes to /opt/concord once. After that the directory holds the
   # operator's .env and certificates, so the package never touches it again.

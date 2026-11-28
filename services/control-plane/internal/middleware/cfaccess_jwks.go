@@ -1,34 +1,56 @@
 package middleware
 
 import (
+	"bytes"
 	"crypto/rsa"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/sync/singleflight"
 )
 
+// Stale-key policy: a cached key verifies only while its key set is younger
+// than jwksTTL. An expired key is never served without a successful refresh,
+// whether that refresh failed or was throttled behind a failure, because the
+// issuer may have withdrawn it. Availability comes from refreshing ahead of
+// expiry instead: inside the last jwksRefreshAhead of the TTL a still-valid
+// key keeps verifying while one background refresh runs, so a transient
+// outage near the hour gets retries without extending any key's maximum age.
 const (
-	jwksTTL   = time.Hour
-	clockSkew = 60 * time.Second
+	jwksTTL             = time.Hour
+	jwksRefreshAhead    = 10 * time.Minute
+	jwksRefreshInterval = time.Second
+	jwksRefreshKey      = "jwks"
+	negativeKIDTTL      = time.Minute
+	maxNegativeKIDs     = 256
+	maxJWKSBody         = 1 << 20
+	clockSkew           = 60 * time.Second
 )
 
 var (
 	errMalformed    = errors.New("malformed")
 	errBadSignature = errors.New("bad_signature")
 	errUnknownKID   = errors.New("unknown_kid")
-	errBadAlg       = errors.New("bad_alg")
-	errAudMismatch  = errors.New("aud_mismatch")
-	errExpired      = errors.New("expired")
-	errBadIssuer    = errors.New("bad_issuer")
+	// errJWKSUnavailable means the key set could not vouch for the KID: it is
+	// expired or unknown and the refresh failed or was throttled behind a
+	// failure. Callers map it to 503 jwks_unavailable, not to a rejected token.
+	errJWKSUnavailable = errors.New("jwks_unavailable")
+	errBadAlg          = errors.New("bad_alg")
+	errAudMismatch     = errors.New("aud_mismatch")
+	errExpired         = errors.New("expired")
+	errBadIssuer       = errors.New("bad_issuer")
 
 	nowFunc = time.Now
 )
@@ -63,20 +85,36 @@ type accessVerifier struct {
 	issuer  string
 	aud     string
 	client  *http.Client
+	log     *slog.Logger
 
-	mu        sync.RWMutex
-	keys      map[string]*rsa.PublicKey
-	fetchedAt time.Time
+	mu             sync.RWMutex
+	keys           map[string]*rsa.PublicKey
+	fetchedAt      time.Time
+	lastAttempt    time.Time
+	lastRefreshErr error
+	negativeKIDs   map[string]time.Time
+	refreshGroup   singleflight.Group
+}
+
+// cachedKey is one consistent read of the cache for a KID.
+type cachedKey struct {
+	key       *rsa.PublicKey
+	known     bool
+	age       time.Duration
+	negative  bool
+	throttled bool
 }
 
 func newAccessVerifier(teamDomain, aud string) *accessVerifier {
 	td := strings.TrimRight(teamDomain, "/")
 	return &accessVerifier{
-		jwksURL: td + "/cdn-cgi/access/certs",
-		issuer:  td,
-		aud:     aud,
-		client:  &http.Client{Timeout: 5 * time.Second},
-		keys:    map[string]*rsa.PublicKey{},
+		jwksURL:      td + "/cdn-cgi/access/certs",
+		issuer:       td,
+		aud:          aud,
+		client:       &http.Client{Timeout: 5 * time.Second},
+		log:          slog.Default(),
+		keys:         map[string]*rsa.PublicKey{},
+		negativeKIDs: map[string]time.Time{},
 	}
 }
 
@@ -148,47 +186,119 @@ func (v *accessVerifier) lookupKey(kid string) (*rsa.PublicKey, error) {
 		return nil, errUnknownKID
 	}
 
-	v.mu.RLock()
-	k, ok := v.keys[kid]
-	fresh := nowFunc().Sub(v.fetchedAt) < jwksTTL
-	hadKeys := len(v.keys) > 0
-	v.mu.RUnlock()
-	if ok && fresh {
-		return k, nil
-	}
-
-	if err := v.refresh(); err != nil {
-		if hadKeys {
-			return nil, errUnknownKID
+	c := v.cached(kid, nowFunc())
+	if c.known && c.age < jwksTTL {
+		if c.age >= jwksTTL-jwksRefreshAhead && !c.throttled {
+			// Refresh ahead without blocking this still-valid key. DoChan joins an
+			// in-flight refresh, and its buffered result needs no reader.
+			v.refreshGroup.DoChan(jwksRefreshKey, v.refreshResult)
 		}
-		return nil, fmt.Errorf("%w: jwks unavailable", errUnknownKID)
+		return c.key, nil
 	}
-
-	v.mu.RLock()
-	k, ok = v.keys[kid]
-	v.mu.RUnlock()
-	if !ok {
+	if !c.known && c.negative {
 		return nil, errUnknownKID
 	}
-	return k, nil
+
+	fetched, err := v.refresh()
+	c = v.cached(kid, nowFunc())
+	switch {
+	case c.known && c.age < jwksTTL:
+		return c.key, nil
+	case err != nil:
+		// The refresh failed, or was throttled behind a failure, and the cached
+		// set cannot vouch for this KID: fail closed, distinctly from a bad KID.
+		return nil, errors.Join(errJWKSUnavailable, err)
+	case c.known:
+		// The key set is still expired and nothing refreshed it: fail closed.
+		return nil, errors.Join(errJWKSUnavailable, errors.New("key set expired"))
+	case fetched:
+		// A completed fetch confirmed the issuer does not publish this KID.
+		v.cacheNegativeKID(kid, nowFunc())
+		return nil, errUnknownKID
+	default:
+		// The refresh was throttled and fetched nothing for this KID, so it is
+		// not negatively cached; the next permitted refresh may find it.
+		return nil, errUnknownKID
+	}
 }
 
-func (v *accessVerifier) refresh() error {
+func (v *accessVerifier) cached(kid string, now time.Time) cachedKey {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	key, known := v.keys[kid]
+	negativeUntil, negative := v.negativeKIDs[kid]
+	return cachedKey{
+		key:       key,
+		known:     known,
+		age:       now.Sub(v.fetchedAt),
+		negative:  negative && now.Before(negativeUntil),
+		throttled: now.Sub(v.lastAttempt) < jwksRefreshInterval,
+	}
+}
+
+// refresh reports whether a fetch completed successfully for this call or the
+// singleflight call it joined. A throttled call fetches nothing and returns the
+// previous attempt's error, so a failure is not masked during the interval.
+func (v *accessVerifier) refresh() (bool, error) {
+	result, err, _ := v.refreshGroup.Do(jwksRefreshKey, v.refreshResult)
+	fetched, _ := result.(bool)
+	return fetched, err
+}
+
+func (v *accessVerifier) refreshResult() (any, error) {
+	return v.refreshOnce()
+}
+
+func (v *accessVerifier) refreshOnce() (bool, error) {
+	now := nowFunc()
+	v.mu.Lock()
+	if now.Sub(v.lastAttempt) < jwksRefreshInterval {
+		err := v.lastRefreshErr
+		v.mu.Unlock()
+		return false, err
+	}
+	v.lastAttempt = now
+	v.mu.Unlock()
+
+	next, err := v.fetchKeys()
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if nowFunc().Sub(v.fetchedAt) < time.Second {
-		return nil
+	v.lastRefreshErr = err
+	if err != nil {
+		// One line per real attempt: throttled calls returned above and never log.
+		attrs := []any{"error_class", jwksErrorClass(err), "has_cached_set", !v.fetchedAt.IsZero()}
+		var statusErr *jwksStatusError
+		if errors.As(err, &statusErr) {
+			attrs = append(attrs, "http_status", statusErr.code)
+		}
+		if !v.fetchedAt.IsZero() {
+			attrs = append(attrs, "cached_set_age", nowFunc().Sub(v.fetchedAt).Round(time.Second).String())
+		}
+		v.log.Warn("cf-access: jwks refresh failed", attrs...)
+		return false, err
 	}
+	v.keys = next
+	v.fetchedAt = nowFunc()
+	return true, nil
+}
 
+func (v *accessVerifier) fetchKeys() (map[string]*rsa.PublicKey, error) {
 	resp, err := v.client.Get(v.jwksURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("jwks status %d", resp.StatusCode)
+		return nil, &jwksStatusError{code: resp.StatusCode}
 	}
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("read jwks: %w", err)
+	}
+	if len(body) > maxJWKSBody {
+		return nil, errors.New("jwks response too large")
+	}
 	var doc struct {
 		Keys []struct {
 			Kid string `json:"kid"`
@@ -198,23 +308,76 @@ func (v *accessVerifier) refresh() error {
 			E   string `json:"e"`
 		} `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return err
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("decode jwks: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("jwks has trailing data")
 	}
 
 	next := make(map[string]*rsa.PublicKey, len(doc.Keys))
 	for _, jwk := range doc.Keys {
 		pub, ok := rsaPublicKeyFromJWK(jwk.Kty, jwk.Alg, jwk.N, jwk.E)
-		if ok {
+		if ok && jwk.Kid != "" {
 			next[jwk.Kid] = pub
+			continue
 		}
+		v.log.Warn("cf-access: jwks key skipped", "kid", logKID(jwk.Kid))
 	}
 	if len(next) == 0 {
-		return errors.New("jwks empty")
+		return nil, errors.New("jwks empty")
 	}
-	v.keys = next
-	v.fetchedAt = nowFunc()
-	return nil
+	return next, nil
+}
+
+type jwksStatusError struct{ code int }
+
+func (e *jwksStatusError) Error() string { return fmt.Sprintf("jwks status %d", e.code) }
+
+// jwksErrorClass names a failure without carrying URLs or response content.
+func jwksErrorClass(err error) string {
+	var statusErr *jwksStatusError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &statusErr):
+		return "http_status"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout"
+	case errors.As(err, &netErr):
+		return "network"
+	default:
+		return "invalid_response"
+	}
+}
+
+// logKID bounds an issuer-supplied KID before it reaches a log line.
+func logKID(kid string) string {
+	if kid == "" {
+		return "<none>"
+	}
+	const maxLen = 64
+	if len(kid) > maxLen {
+		return kid[:maxLen] + "..."
+	}
+	return kid
+}
+
+func (v *accessVerifier) cacheNegativeKID(kid string, now time.Time) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for cachedKID, until := range v.negativeKIDs {
+		if !now.Before(until) {
+			delete(v.negativeKIDs, cachedKID)
+		}
+	}
+	if len(v.negativeKIDs) >= maxNegativeKIDs {
+		for cachedKID := range v.negativeKIDs {
+			delete(v.negativeKIDs, cachedKID)
+			break
+		}
+	}
+	v.negativeKIDs[kid] = now.Add(negativeKIDTTL)
 }
 
 func rsaPublicKeyFromJWK(kty, alg, n, e string) (*rsa.PublicKey, bool) {

@@ -86,6 +86,22 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 				adminRoutes.POST("", h.CreateAdmin)
 				adminRoutes.POST("/stepup", h.CreateAdminStepUpBegin)
 			}
+			// The signed-in admin's own keys: list them, or add a backup
+			// after a fresh step-up with an existing key.
+			credentialRoutes := gated.Group("/credentials")
+			credentialRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
+				rdb,
+				adminAuthRateLimit,
+				adminAuthRateWindow,
+				adminRateLimited,
+				adminRateLimitUnavailable,
+			))
+			{
+				credentialRoutes.GET("", h.ListOwnCredentials)
+				credentialRoutes.POST("/stepup", h.CredentialStepUpBegin)
+				credentialRoutes.POST("/register/begin", h.CredentialRegisterBegin)
+				credentialRoutes.POST("/register/finish", h.CredentialRegisterFinish)
+			}
 			noticeRoutes := gated.Group("/signin-notice")
 			noticeRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
 				rdb,
