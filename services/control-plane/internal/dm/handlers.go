@@ -4880,8 +4880,7 @@ func (h *Handler) onRingTimeout(convUUID uuid.UUID, ring *PendingCall) {
 	// Insert missed-call event row (best-effort per spec §6.1 edge cases;
 	// failure logged but doesn't block the ring-timeout cleanup).
 	if err := h.insertCallEvent(context.Background(), convUUID, callEventMissed(ring)); err != nil {
-		h.log.Error("Failed to insert missed call_event row",
-			"error", err,
+		h.logCallEventFailure("Failed to insert missed call_event row", err,
 			"conversation_id", convUUID.String(),
 			"ring_id", ring.RingID.String(),
 		)
@@ -5011,8 +5010,7 @@ func (h *Handler) DeclineDMCall(c *gin.Context) {
 		defer ring.finalizeTerminal()
 		// Insert declined-call event row (best-effort).
 		if err := h.insertCallEvent(c.Request.Context(), convUUID, callEventDeclined(ring)); err != nil {
-			h.log.Error("Failed to insert declined call_event row",
-				"error", err,
+			h.logCallEventFailure("Failed to insert declined call_event row", err,
 				"conversation_id", convUUID.String(),
 				"ring_id", ring.RingID.String(),
 			)
@@ -5076,8 +5074,7 @@ func (h *Handler) CancelDMCall(c *gin.Context) {
 	defer ring.finalizeTerminal()
 
 	if err := h.insertCallEvent(c.Request.Context(), convUUID, callEventCanceled(ring)); err != nil {
-		h.log.Error("Failed to insert canceled call_event row",
-			"error", err,
+		h.logCallEventFailure("Failed to insert canceled call_event row", err,
 			"conversation_id", convUUID.String(),
 			"ring_id", ring.RingID.String(),
 		)
@@ -5546,8 +5543,7 @@ func (h *Handler) HandleUserDisconnect(userID uuid.UUID) {
 		}
 		defer ring.finalizeTerminal()
 		if err := h.insertCallEvent(context.Background(), convUUID, callEventCanceled(ring)); err != nil {
-			h.log.Error("Failed to insert canceled call_event row on WS disconnect",
-				"error", err,
+			h.logCallEventFailure("Failed to insert canceled call_event row on WS disconnect", err,
 				"conversation_id", convUUID.String(),
 				"ring_id", ring.RingID.String(),
 				"user_id", userID.String(),

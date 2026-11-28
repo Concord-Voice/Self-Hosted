@@ -784,6 +784,10 @@ cd services/control-plane
 make migrate-down
 ```
 
+Migration 000208 refuses rollback on an installation with messages or permanent
+message-ID reservations. Keep that migration and use a compatible server binary;
+see the [reservation operator procedure](./docs/design/message-id-reservation-baseline.md#prospective-issuance-quota-migration-000208).
+
 **If migrations fail**, ensure PostgreSQL is running and accessible:
 
 ```bash

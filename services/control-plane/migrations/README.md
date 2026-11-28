@@ -48,6 +48,11 @@ This is automatically run when the control-plane server starts.
 make migrate-down
 ```
 
+Migration 000208 refuses this command on a used installation because removing
+its quota would restore unbounded permanent reservation growth. Keep that
+migration and use a compatible server binary; see the
+[reservation operator procedure](../../../docs/design/message-id-reservation-baseline.md#prospective-issuance-quota-migration-000208).
+
 ### Check Current Version
 
 ```bash
@@ -56,8 +61,8 @@ make migrate-version
 
 ## Migration Best Practices
 
-1. **Always create both UP and DOWN migrations** - Every migration must be reversible
-2. **Test rollbacks** - Make sure your down migration properly reverses the up migration
+1. **Always create both UP and DOWN migrations** - A guarded down may refuse when reversing a used installation would discard data or remove a security bound
+2. **Test rollbacks** - Check both an unused round trip and the guard that refuses unsafe rollback
 3. **One logical change per migration** - Do not mix unrelated schema changes
 4. **Know the runner's transaction boundary** - The runner uses golang-migrate v4 (version pinned in `services/control-plane/go.mod`) with the default PostgreSQL driver configuration. Each file is sent as one simple-query `Exec`; PostgreSQL wraps a multi-statement query in one implicit transaction. Put each `CREATE INDEX CONCURRENTLY` in its own one-statement file, because it cannot run inside a transaction block.
 5. **Avoid data migrations in schema migrations** - Consider separate data migration scripts
@@ -84,7 +89,7 @@ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000207)
+## Existing Migrations (000001–000208)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -315,6 +320,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000204 | admin_audit_event_result_ts_index | One-statement `CREATE INDEX CONCURRENTLY` on `admin_audit_log (event_type, result, ts)` for the notice's count of `admin_created` successes since the previous sign-in. Same merge order as 000203. Down drops the index concurrently. |
 | 000206 | message_id_reservations | Adds a dormant global ID-only reservation namespace for channel and DM message UUIDs, plus the online baseline gate; no message-v1 writer is enabled. |
 | 000207 | prefix_legacy_backup_code_hashes | Rewrites each bare lowercase 64-hex SHA-256 element of `user_mfa_totp.backup_codes_hash` to `v1$` plus the same digest, keeping array order and `backup_codes_used`; other elements are untouched. Run only after every serving replica reads bare, v1 and v2 hashes. The down strips `v1$` under a `SHARE ROW EXCLUSIVE` lock and refuses while any element is neither bare nor v1, such as a generated v2 code. |
+| 000208 | bound_message_id_reservation_growth | Adds 64 bounded issuance shards and a lifetime active-account limit for new channel, DM, and attributed system messages. Deletion or expiry does not restore quota; historical backfill remains outside the counters. The down refuses after any message or reservation exists. See `docs/design/message-id-reservation-baseline.md` for capacity checks and operator procedure. |
 
 If 000199 finds a zero-generation administrator, keep that account inactive. Purge Redis admin sessions or wait for the 8-hour absolute session cap before assigning a positive generation and re-enrolling; setting zero directly to one while older sessions exist could restore a generation-one session.
 

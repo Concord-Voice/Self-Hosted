@@ -26,6 +26,7 @@ import (
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/roomplacement"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/websocket"
@@ -6911,8 +6912,7 @@ func (s *NATSSubscriber) persistDMRoomEmptySummary(
 		// from the replacement lifecycle.
 		respawned, insertErr := dm.InsertCompletedCallEvent(ctx, s.db, conversationID, summary)
 		if insertErr != nil {
-			s.log.Error("Failed to insert completed call_event row",
-				"failure_class", "state_write")
+			s.logDMCallEventFailure(insertErr)
 		}
 		s.publishDMRespawn(ctx, conversationID, respawned)
 	default:
@@ -6924,6 +6924,14 @@ func (s *NATSSubscriber) persistDMRoomEmptySummary(
 			"failure_class", "legacy_event")
 	}
 	return hasSummary, err
+}
+
+func (s *NATSSubscriber) logDMCallEventFailure(err error) {
+	if reservationquota.IsExhausted(err) {
+		s.log.Warn("DM call history omitted at message storage capacity", "failure_class", "capacity")
+		return
+	}
+	s.log.Error("Failed to insert DM call_event row", "failure_class", "state_write")
 }
 
 func parseDMRoomEmptyCallID(rawCallID string) (uuid.UUID, error) {
@@ -7372,8 +7380,7 @@ func (s *NATSSubscriber) persistDMRoomEmptyFallback(
 	if event.CallID == "" {
 		respawned, err := dm.InsertCompletedCallEventForDMRoom(ctx, s.db, conversationID)
 		if err != nil {
-			s.log.Error("Failed to insert legacy completed call_event row",
-				"failure_class", "state_write")
+			s.logDMCallEventFailure(err)
 		}
 		s.publishDMRespawn(ctx, conversationID, respawned)
 		return
@@ -7401,8 +7408,7 @@ func (s *NATSSubscriber) persistDMRoomEmptyFallback(
 		ctx, s.db, conversationID, callID, ringID, callerUserID, endedAt,
 	)
 	if err != nil {
-		s.log.Error("Failed to insert exact heartbeat completed call_event row",
-			"failure_class", "state_write")
+		s.logDMCallEventFailure(err)
 	}
 	s.publishDMRespawn(ctx, conversationID, respawned)
 }

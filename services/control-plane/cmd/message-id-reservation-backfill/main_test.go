@@ -26,8 +26,13 @@ func TestReservationBackfillCompletesVerifiedBaseline(t *testing.T) {
 	// reservations to model rows that existed before the schema migration.
 	_, err := testdb.ExecReplica(db, `DELETE FROM message_id_reservations WHERE message_id IN ($1, $2)`, messageID, dmMessageID)
 	require.NoError(t, err)
+	var issuedBefore int
+	require.NoError(t, db.QueryRow(`SELECT sum(issued) FROM message_id_reservation_quota`).Scan(&issuedBefore))
 
 	require.NoError(t, (&reservationBackfill{db: db, batchSize: 1}).run(context.Background()))
+	var issuedAfter int
+	require.NoError(t, db.QueryRow(`SELECT sum(issued) FROM message_id_reservation_quota`).Scan(&issuedAfter))
+	assert.Equal(t, issuedBefore, issuedAfter, "historical reservation backfill must not spend new issuance")
 
 	var complete bool
 	require.NoError(t, db.QueryRow(`

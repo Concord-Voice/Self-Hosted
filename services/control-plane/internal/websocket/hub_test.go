@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/opsmetrics"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/securityevent"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -2276,6 +2277,18 @@ func TestRespondPersistMessageError(t *testing.T) {
 		response := readClientMsg(t, client)
 		data := response["data"].(map[string]interface{})
 		assert.Equal(t, errMsgFailedSaveMessage, data[keyMessage])
+	})
+
+	t.Run("reservation quota gets a structured capacity error", func(t *testing.T) {
+		hub := newMinimalHub()
+		client := newTestClient(hub, uuid.New())
+		hub.clients[client.ID] = client
+
+		assert.True(t, hub.respondPersistMessageError(IncomingMessage{ClientID: client.ID}, reservationquota.Code, nil))
+		response := readClientMsg(t, client)
+		data := response["data"].(map[string]interface{})
+		assert.Equal(t, reservationquota.Code, data["code"])
+		assert.Equal(t, reservationquota.Message, data[keyMessage])
 	})
 
 	t.Run("empty result continues", func(t *testing.T) {

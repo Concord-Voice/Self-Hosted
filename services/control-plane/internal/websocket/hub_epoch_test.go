@@ -100,6 +100,29 @@ func setupHubTestDB(t *testing.T) *sql.DB {
 		if _, err := db.Exec(`TRUNCATE users, dm_conversations, dm_participants, dm_channel_keys, dm_key_revocations, dm_messages CASCADE`); err != nil {
 			t.Errorf("hub_epoch_test: failed to truncate tables: %v", err)
 		}
+		// This package owns its database reset without importing testhelpers.
+		// Restore the one-way quota only in the disposable scratch database,
+		// using the same superuser-only replica exception as the shared helper.
+		tx, err := db.Begin()
+		if err != nil {
+			t.Errorf("hub_epoch_test: begin quota reset: %v", err)
+		} else {
+			defer func() { _ = tx.Rollback() }()
+			if _, err = tx.Exec(`SET LOCAL session_replication_role = replica`); err == nil {
+				_, err = tx.Exec(`UPDATE message_id_reservation_quota
+					SET issued = 0, max_issued = 78125`)
+			}
+			if err == nil {
+				_, err = tx.Exec(`UPDATE message_id_reservation_policy
+					SET max_per_account = 250000 WHERE singleton = TRUE`)
+			}
+			if err == nil {
+				err = tx.Commit()
+			}
+			if err != nil {
+				t.Errorf("hub_epoch_test: reset quota: %v", err)
+			}
+		}
 		_ = db.Close()
 	})
 	return db

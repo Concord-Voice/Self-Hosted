@@ -333,7 +333,7 @@ This service uses [golang-migrate](https://github.com/golang-migrate/migrate) fo
 # Apply all pending migrations
 make migrate-up
 
-# Rollback last migration
+# Rollback last migration, only when its down guard permits
 make migrate-down
 
 # Check current version
@@ -342,6 +342,11 @@ make migrate-version
 # Create new migration
 make migrate-create NAME=add_user_status
 ```
+
+Migration 000208 deliberately refuses rollback after any message or permanent
+message-ID reservation exists. Do not use `make migrate-down` to remove that
+security bound from a used installation. Keep the migration and use a compatible
+server binary; see the [message-ID reservation operator procedure](../../docs/design/message-id-reservation-baseline.md#prospective-issuance-quota-migration-000208).
 
 ### How Migrations Work
 
@@ -370,7 +375,7 @@ make migrate-create NAME=add_user_status
 ### Migration Best Practices
 
 - Always create both UP and DOWN migrations
-- Test rollbacks to confirm they properly reverse changes
+- Test unused rollbacks and any guard that refuses an unsafe rollback
 - One logical change per migration
 - Never modify committed migrations (create new ones instead)
 - Migrations run in transactions automatically

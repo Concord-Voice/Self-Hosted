@@ -1074,6 +1074,54 @@ func TestHandleSubscribeDMMissingConversationID(t *testing.T) {
 
 // --- handleDMMessage additional tests ---
 
+func TestHandleMessageReservationQuotaReturnsCapacityError(t *testing.T) {
+	setup := setupMessageTest(t)
+	var reservationsBefore int
+	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM message_id_reservations`).Scan(&reservationsBefore))
+	_, err := setup.db.Exec(`UPDATE message_id_reservation_quota
+		SET max_issued = issued`)
+	require.NoError(t, err)
+
+	setup.hub.handleMessage(setup.live(t, IncomingMessage{
+		Type: "message", UserID: setup.user1, ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			keyChannelID: setup.convID, keyContent: "ciphertext", keyKeyVersion: float64(1),
+		},
+	}))
+	response := readClientMsg(t, setup.client)
+	require.Equal(t, "error", response["type"])
+	data := presenceFrameData(t, response)
+	assert.Equal(t, "message_storage_capacity", data["code"])
+	assert.Equal(t, "Message storage is at capacity", data[keyMessage])
+	var reservations int
+	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM message_id_reservations`).Scan(&reservations))
+	assert.Equal(t, reservationsBefore, reservations)
+}
+
+func TestHandleDMMessageReservationQuotaReturnsCapacityError(t *testing.T) {
+	setup := setupEpochTest(t, false, false)
+	var reservationsBefore int
+	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM message_id_reservations`).Scan(&reservationsBefore))
+	_, err := setup.db.Exec(`UPDATE message_id_reservation_quota
+		SET max_issued = issued`)
+	require.NoError(t, err)
+
+	setup.hub.handleDMMessage(setup.live(t, IncomingMessage{
+		Type: "dm_message", UserID: setup.user1, ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			keyConversationID: setup.convID, keyContent: "ciphertext", keyKeyVersion: float64(1),
+		},
+	}))
+	response := readClientMsg(t, setup.client)
+	require.Equal(t, "error", response["type"])
+	data := presenceFrameData(t, response)
+	assert.Equal(t, "message_storage_capacity", data["code"])
+	assert.Equal(t, "Message storage is at capacity", data[keyMessage])
+	var reservations int
+	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM message_id_reservations`).Scan(&reservations))
+	assert.Equal(t, reservationsBefore, reservations)
+}
+
 func TestHandleDMMessageEmptyContent(t *testing.T) {
 	setup := setupEpochTest(t, false, false)
 

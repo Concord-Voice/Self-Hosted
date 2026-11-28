@@ -57,3 +57,88 @@ PR intentionally ships neither that writer nor a client capability gate.
 The down migration is intentionally restrictive: it takes locks before its
 checks and refuses once any message, reservation, or verified baseline exists.
 It never drops retained reservation state just to make a downgrade succeed.
+
+## Prospective issuance quota (migration 000208)
+
+Migration 000208 bounds the growth identified after the baseline merged. It
+does not remove or rewrite any reservation. It counts actual new channel and
+DM message inserts after installation across 64 permanent budget rows totaling
+5,000,000, plus an active-account lifetime ceiling of 250,000. Each new insert uses a
+server-selected starting shard and probes remaining shards if that row is full.
+Every inserted system message, including expiration-policy events and DM call
+events, spends the attributed user's account budget. Deleting or expiring a
+message never restores that budget. A long-lived active account can reach its
+lifetime ceiling through ordinary use and then cannot send messages or create
+new durable system events until an operator raises the account ceiling. Account
+counters are removed on account deletion. Both ceilings can be raised
+by an operator only after checking free space. The initial limits are
+operational headroom, not a claim that every self-hosted disk can hold that
+many rows.
+
+Historical backfill and temporary delete/truncate capture do not spend this
+prospective budget. Their possible new rows are bounded by the finite set of
+pre-migration message IDs. The total reservation count can therefore exceed
+the prospective ceiling; inspect the actual baseline before promotion.
+
+An `AFTER INSERT` trigger charges only a message row that was really inserted.
+A same-ID `ON CONFLICT` retry does not spend the budget. At either ceiling, a
+new channel or DM send fails and its transaction rolls back the attempted
+reservation. HTTP `POST /messages` returns 507 with
+`code: message_storage_capacity`; WebSocket channel and DM sends emit an
+`error` frame with the same code. No response distinguishes the account and
+global ceilings. Deleting messages never returns quota.
+Channel and DM expiration-policy changes that require a durable event row also
+return 507 at the ceiling and roll back the policy change.
+DM call-event history is best effort: at the ceiling the call lifecycle still
+completes, but the event row and its same-transaction conversation respawn are
+omitted. The server logs this as a capacity warning; a later call event is not
+automatically retried against a permanently full budget.
+
+Before deployment, record current size and disk headroom:
+
+```sql
+SELECT count(*) AS reserved_ids,
+       pg_total_relation_size('message_id_reservations') AS reservation_bytes
+FROM message_id_reservations;
+```
+
+The exact count scans the reservation table; run it during a quiet period on
+large installations.
+
+Monitor the prospective budget with this read-only query:
+
+```sql
+SELECT sum(issued) AS issued, sum(max_issued) AS maximum,
+       sum(max_issued - issued) AS remaining
+FROM message_id_reservation_quota;
+```
+
+For the active accounts nearest their individual ceiling:
+
+```sql
+SELECT usage.user_id, usage.issued,
+       policy.max_per_account - usage.issued AS remaining
+FROM message_id_reservation_account_usage AS usage
+CROSS JOIN message_id_reservation_policy AS policy
+WHERE policy.singleton = TRUE
+ORDER BY usage.issued DESC
+LIMIT 20;
+```
+
+If the host has capacity for more reservations, the operator may raise a
+ceiling explicitly, for example:
+
+```sql
+UPDATE message_id_reservation_quota
+SET max_issued = 93750
+WHERE max_issued < 93750;
+```
+
+From the initial 78,125-per-shard default, this example raises all 64 shard
+ceilings evenly, making the aggregate limit 6,000,000. Inspect the current
+per-shard ceilings before applying it. Raising the account limit is a separate
+explicit update to `message_id_reservation_policy.max_per_account`.
+
+No automatic increase or counter reset occurs. The down migration refuses on
+a populated installation; retain this migration and use a compatible binary
+instead of dropping history or undoing a security bound.

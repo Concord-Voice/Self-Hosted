@@ -6,11 +6,45 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/reservationquota"
 	dbtest "github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers/testdb"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCallEventQuotaRefusalIsExplicitAndAtomic(t *testing.T) {
+	db, _ := dbtest.SetupTestDB(t)
+	convID, caller, _ := seedHiddenConv(t, db)
+	convUUID := uuid.MustParse(convID)
+	callerUUID := uuid.MustParse(caller)
+	now := time.Now().UTC()
+	_, err := db.Exec(`UPDATE dm_participants SET hidden_at = $1 WHERE conversation_id = $2`, now.Add(-time.Minute), convID)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE message_id_reservation_quota SET max_issued = issued`)
+	require.NoError(t, err)
+
+	payload := CallEventPayload{
+		RingID: uuid.New(), CallerUserID: callerUUID, ParticipantUserIDs: []uuid.UUID{callerUUID},
+		StartedAt: now.Add(-time.Minute), EndedAt: now, Status: CallEventCanceled,
+	}
+	h := &Handler{db: db}
+	err = h.insertCallEvent(context.Background(), convUUID, payload)
+	require.Error(t, err)
+	assert.True(t, reservationquota.IsExhausted(err), "ordinary call event must expose the durable capacity condition")
+	_, err = InsertCompletedCallEvent(context.Background(), db, convUUID, CompletedCallSummary{
+		CallID: uuid.New(), CallerUserID: callerUUID, ParticipantUserIDs: []uuid.UUID{callerUUID},
+		StartedAt: payload.StartedAt, EndedAt: now,
+	})
+	require.Error(t, err)
+	assert.True(t, reservationquota.IsExhausted(err), "completed call event must expose the durable capacity condition")
+
+	var events, hidden int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM dm_messages WHERE conversation_id = $1 AND type = 'call_event'`, convID).Scan(&events))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM dm_participants WHERE conversation_id = $1 AND hidden_at IS NOT NULL`, convID).Scan(&hidden))
+	assert.Zero(t, events, "capacity refusal cannot leave a call-event row")
+	assert.Equal(t, 2, hidden, "capacity refusal cannot respawn participants without durable history")
+}
 
 func TestInsertCallEvent_UsesDatabaseClockAndSharedExpiry(t *testing.T) {
 	db, _ := dbtest.SetupTestDB(t)
