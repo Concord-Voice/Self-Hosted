@@ -546,6 +546,98 @@ func TestUpdateMessage_RequiresManageOwnMessages(t *testing.T) {
 	assert.Equal(t, 1, storedKeyVersion)
 }
 
+// Pins: an author who still holds ManageOwn but is denied view of the channel
+// cannot edit; the in-transaction view gate refuses what the preflight allows.
+func TestUpdateMessage_DeniedWhenAuthorCannotViewChannel(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "updmsgviewowner")
+	author := ts.CreateTestUser(t, "updmsgviewauthor")
+	serverID := ts.CreateTestServer(t, owner.ID, "Update View Gate Server")
+	channelID := ts.CreateTestChannel(t, serverID, "viewgate")
+	ts.AddMemberToServer(t, serverID, author.ID, "member")
+
+	originalCiphertext := testhelpers.ValidCiphertext()
+	msgID := ts.CreateTestMessage(t, channelID, author, originalCiphertext)
+	ts.CreateChannelOverride(t, channelID, "user", author.ID, 0, int64(rbac.PermViewTextChannels))
+
+	w := ts.DoRequest("PATCH", pathAPIMsgSlash+msgID, map[string]interface{}{
+		"content":     testhelpers.ValidCiphertext(),
+		"key_version": 2,
+	}, testhelpers.AuthHeaders(author.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var storedContent string
+	var storedKeyVersion int
+	err := ts.DB.QueryRow(
+		`SELECT content, key_version FROM messages WHERE id = $1`, msgID,
+	).Scan(&storedContent, &storedKeyVersion)
+	require.NoError(t, err)
+	assert.Equal(t, originalCiphertext, storedContent)
+	assert.Equal(t, 1, storedKeyVersion)
+}
+
+// Pins: an author whose membership row is gone cannot edit their old message.
+// Status and content only: two code paths can refuse depending on cache state.
+func TestUpdateMessage_DeniedAfterAuthorLeavesServer(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "updmsgleaveowner")
+	author := ts.CreateTestUser(t, "updmsgleaveauthor")
+	serverID := ts.CreateTestServer(t, owner.ID, "Update Leave Server")
+	channelID := ts.CreateTestChannel(t, serverID, "leave")
+	ts.AddMemberToServer(t, serverID, author.ID, "member")
+
+	originalCiphertext := testhelpers.ValidCiphertext()
+	msgID := ts.CreateTestMessage(t, channelID, author, originalCiphertext)
+	_, err := ts.DB.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, author.ID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("PATCH", pathAPIMsgSlash+msgID, map[string]interface{}{
+		"content":     testhelpers.ValidCiphertext(),
+		"key_version": 2,
+	}, testhelpers.AuthHeaders(author.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var storedContent string
+	err = ts.DB.QueryRow(`SELECT content FROM messages WHERE id = $1`, msgID).Scan(&storedContent)
+	require.NoError(t, err)
+	assert.Equal(t, originalCiphertext, storedContent)
+}
+
+// Pins: denying ManageOwn blocks both edit and delete of a plain member's own
+// message. Alignment holds for plain members; ManageAll holders can delete but
+// not edit their own message when ManageOwn is denied (intentional, out of scope).
+func TestManageOwnDenied_BlocksBothEditAndDelete(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "manageowndenyowner")
+	author := ts.CreateTestUser(t, "manageowndenyauthor")
+	serverID := ts.CreateTestServer(t, owner.ID, "ManageOwn Denied Server")
+	channelID := ts.CreateTestChannel(t, serverID, "manageowndeny")
+	ts.AddMemberToServer(t, serverID, author.ID, "member")
+
+	originalCiphertext := testhelpers.ValidCiphertext()
+	msgID := ts.CreateTestMessage(t, channelID, author, originalCiphertext)
+	ts.CreateChannelOverride(t, channelID, "user", author.ID, 0, int64(rbac.PermManageOwnMessages))
+
+	w := ts.DoRequest("PATCH", pathAPIMsgSlash+msgID, map[string]interface{}{
+		"content":     testhelpers.ValidCiphertext(),
+		"key_version": 2,
+	}, testhelpers.AuthHeaders(author.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var storedContent string
+	err := ts.DB.QueryRow(`SELECT content FROM messages WHERE id = $1`, msgID).Scan(&storedContent)
+	require.NoError(t, err)
+	assert.Equal(t, originalCiphertext, storedContent)
+
+	w = ts.DoRequest("DELETE", pathAPIMsgSlash+msgID, nil, testhelpers.AuthHeaders(author.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var count int
+	err = ts.DB.QueryRow(`SELECT COUNT(*) FROM messages WHERE id = $1`, msgID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
 func TestUpdateMessage_RejectsRevokedEpoch(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "updmsgrevoked")
