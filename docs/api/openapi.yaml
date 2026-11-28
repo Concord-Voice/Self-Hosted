@@ -3841,8 +3841,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '500':
-          description: 'The read state could not be written: `{"error": "Failed to mark
-            channel read"}`.'
+          description: 'Membership, the view permission or the read-state write could not be
+            completed: `{"error": "Failed to mark channel read"}`.'
           content:
             application/json:
               schema:
@@ -4583,8 +4583,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '500':
-          description: 'Participants could not be read: `{"error": "Failed to fetch
-            participants"}`. A failure while reading any participant row returns this
+          description: 'The channel, permissions or participants could not be read:
+            `{"error": "Failed to fetch participants"}`. A failure while reading any participant row returns this
             error; the endpoint never returns a partial list.'
           content:
             application/json:
@@ -9175,8 +9175,10 @@ paths:
         Access to a channel attachment requires server membership plus the channel type''s
         view permission and `read_message_history` in that channel. Access to a DM attachment
         requires participation in the conversation, and the file must be attached to a message
-        in that conversation outside any range the caller has cleared, or be the caller''s own
-        upload not yet attached to any message. The body is opaque ciphertext;
+        in that conversation that the caller can still see, or be the caller''s own upload not
+        yet attached to any message. A range the caller cleared hides a message, unless the
+        message is pinned, or is the caller''s own and the range excludes the caller''s own
+        messages. The body is opaque ciphertext;
 
         the original MIME type hint is returned in the X-File-Mime-Type header, and the CSK epoch
 
@@ -16721,8 +16723,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '500':
-          description: 'The read state could not be written: `{"error": "Failed to mark
-            server read"}`.'
+          description: 'Membership, channel visibility or the read-state write could not be
+            completed: `{"error": "Failed to mark server read"}`.'
           content:
             application/json:
               schema:
@@ -17410,8 +17412,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '500':
-          description: 'Unread counts could not be read: `{"error": "Failed to fetch
-            unread counts"}`. A failure while reading any channel''s count returns this
+          description: 'Membership, readable channels or unread counts could not be read:
+            `{"error": "Failed to fetch unread counts"}`. A failure while reading any channel''s count returns this
             error; the endpoint never returns a partial list.'
           content:
             application/json:

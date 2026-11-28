@@ -2019,7 +2019,11 @@ func (h *Handler) GetUnreadCounts(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchUnreadCounts})
 		return
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			h.log.Warn("Failed to close unread count rows", "error", closeErr)
+		}
+	}()
 
 	for rows.Next() {
 		var entry unreadEntry
@@ -2085,7 +2089,11 @@ func (h *Handler) GetServerUnreadStatus(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchServerUnread})
 		return
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			h.log.Warn("Failed to close server unread status rows", "error", closeErr)
+		}
+	}()
 
 	channels := []channelUnread{}
 	seenServers := map[string]struct{}{}

@@ -1,6 +1,6 @@
 # Hidden-resource denial parity — Design
 
-**Status:** Proposed (Phase 2 reconciled) · **Date:** 2026-11-27 · **Base:** `main` at 818a41f8
+**Status:** Implemented · **Date:** 2026-11-27 · **Base:** `main` at 818a41f8
 **Paths:** relative to `services/control-plane/internal/` unless stated.
 
 ## Summary
@@ -22,10 +22,10 @@ Message history, bulk history, pins and reactions still check only read-history,
 | 1 | Scope | Ship only the residuals in this spec, using today's helpers, without waiting for the sibling | The sibling owns the shared predicate and the view-bit consolidation | Maintainer |
 | 2 | Attachment denial response | Every download denial answers `404 {"error":"File not found"}`, byte-identical to a missing file | Removes the file-existence oracle | Maintainer |
 | 3 | How participants rejects non-voice channels | Add `AND c.type = 'voice'` to the existing lookup's WHERE clause (`voice/handlers.go:664-668`) | A non-voice ID then takes the existing `sql.ErrNoRows` branch: same query, same work, same response as a nonexistent ID. Selecting the type and comparing it afterwards would add a branch that produces the same answer | System engineer, parent |
-| 4 | Shape of the download check | One download-only function that writes no response. It runs the membership-and-type lookup, calls media's existing `channelViewPermission`, makes **one** `GetEffectivePermissions` call, and requires the view bit and `PermReadMessageHistory` on that bitfield. `rbac.ErrNotMember` maps to deny | Changes the approach's two `HasPermission` calls to one call. `HasPermission` is just `GetEffectivePermissions` plus `Has` (`rbac/resolver.go:122-131`), so the semantics are the same. This also leaves one error branch to test and narrows the work gap. The ErrNotMember mapping keeps `HasPermission`'s behaviour for a member removed mid-request (`resolver.go:125-127`) | Architect, refining the parent's position |
+| 4 | Shape of the download check | One media-local function, `channelAccessAllowed`, that writes no response. It runs the membership-and-type lookup, calls media's existing `channelViewPermission`, makes **one** `GetEffectivePermissions` call, and requires the view bit and the caller's `required` permission on that bitfield. Download passes `PermReadMessageHistory`. `rbac.ErrNotMember` maps to deny | Changes the approach's two `HasPermission` calls to one call. `HasPermission` is just `GetEffectivePermissions` plus `Has` (`rbac/resolver.go:122-131`), so the semantics are the same. This also leaves one error branch to test and narrows the work gap. The ErrNotMember mapping keeps `HasPermission`'s behaviour for a member removed mid-request (`resolver.go:125-127`) | Architect, refining the parent's position |
 | 5 | Keeping missing and denied identical | One unexported writer, `writeAttachmentNotFound(c)`, used for the missing-file answer (`media/handlers.go:543`) and for every denial | Identical by construction, not by convention. This is the friend-request gate precedent in `backend.md`, where both refusals return through the same call | Architect |
 | 6 | `checkReadHistoryPermission` | Delete it (`media/handlers.go:2519-2555`) | Its only caller (`:625`) is replaced | System engineer, parent |
-| 7 | Upload | Upload keeps its 403s; `userHasChannelAccess` and `checkSendPermission` are unchanged | Upload names a channel the caller chose, and those helpers sit in the region the sibling will rewrite | System engineer |
+| 7 | Upload | Upload keeps its 403s. `userHasChannelAccess` now wraps the shared `channelAccessAllowed` with `required` = 0; it still answers 403 for every denial and 500 on an error, so upload's wire behaviour is unchanged. `checkSendPermission` is unchanged | Upload names a channel the caller chose. One shared decision replaces two copies (Phase 8 review), so the sibling's shared predicate later replaces one helper, not two | System engineer, Phase 8 review |
 | 8 | Work parity | Parity in status, body, headers and logging. The difference in work and timing is accepted and recorded (Residual R1) | `backend.md` § Auth & Security requires equal work, response and logging for a refusal designed to be indistinguishable. Equal work is not reachable here. A missing file has no channel to resolve. The resolver reads its cache first, so timing differs between two denied callers depending on cache state. Padding the missing-file path with dummy resolver calls would load every 404 and still not equalise. This is a recorded deviation for the maintainer's review | Parent, architect |
 | 9 | Scan errors | Log, answer 500 with the endpoint's existing failure message, and return | A 200 with a missing row is a wrong answer, not a partial one | System engineer |
 | 10 | Test seam for scan errors | Add `ArmRowValue` (about 30 lines) to `testhelpers/stmthook`, with tests at each calling handler | Real Postgres cannot produce these scan errors: every scanned column is NOT NULL or wrapped in COALESCE. `stmthook` already wraps every pooled query (`stmthook.go:276`), and `testhelpers.SetupTestServerWithRouterDB` already builds the router on a hooked pool (`channels/channel_group_guard_probe_test.go:28-29`). Moving the scan loop into a testable helper was rejected: `.claude/rules/domains/tests.md` says a helper-level test proves a branch exists, and only a test at the caller proves it is reached | Parent, architect |
@@ -43,20 +43,20 @@ Message history, bulk history, pins and reactions still check only read-history,
 
 ### 2. Attachment download (`media/handlers.go:516-643`)
 
-Add this method beside `userCanDownloadAttachment`:
+Add this method to `media/handlers.go`. Download and upload both use it:
 
-`func (h *Handler) downloadChannelAccessAllowed(ctx context.Context, userID, channelID string) (bool, error)`
+`func (h *Handler) channelAccessAllowed(ctx context.Context, userID, channelID string, required rbac.Permission) (bool, error)`
 
-It writes no response and logs nothing. In order:
+Download passes `required` = `rbac.PermReadMessageHistory`. Upload calls it through `userHasChannelAccess` with `required` = 0, so upload needs only the view bit, as before. It writes no response and logs nothing. In order:
 
-1. Run the same membership-and-type lookup as `userHasChannelAccess` (2403-2407). No row means `(false, nil)`.
+1. Run the membership-and-type lookup that `userHasChannelAccess` ran before this change. No row means `(false, nil)`.
 2. If `h.resolver == nil`, return `(true, nil)` (allow on membership). Media tests depend on this mode.
 3. `viewPerm, ok := channelViewPermission(channelType)`. If `!ok`, return `(false, nil)`, so an unknown type fails closed.
-4. Call `h.resolver.GetEffectivePermissions(ctx, serverID, userID, channelID)`. If `errors.Is(err, rbac.ErrNotMember)`, return `(false, nil)`. Return any other error. Otherwise return `perms.Has(viewPerm) && perms.Has(rbac.PermReadMessageHistory), nil`.
+4. Call `h.resolver.GetEffectivePermissions(ctx, serverID, userID, channelID)`. If `errors.Is(err, rbac.ErrNotMember)`, return `(false, nil)`. Return any other error. Otherwise return `perms.Has(viewPerm) && perms.Has(required), nil`.
 
 `userCanDownloadAttachment` then writes every response itself:
 
-- **Channel file:** call `downloadChannelAccessAllowed`.
+- **Channel file:** call `channelAccessAllowed` with `rbac.PermReadMessageHistory`.
 - **DM file:** the existing `dmAttachmentDownloadAccessQuery`.
 - **No scope** (unreachable under the tier-2 rule that a file has a channel or a DM, never both): deny.
 - **Error:** `h.log.Error(...)` with a fixed message, then `500 {"error": errMsgFailedVerifyAccess}`.
@@ -69,7 +69,7 @@ It writes no response and logs nothing. In order:
 - Correct the comment at 620-623. It claims the check matches `messages.checkChannelAccess`, but that function has no view check.
 - Correct the same claim in `media/handlers_test.go:1862-1867`.
 
-**Dependency on the sibling:** this code calls media's `channelViewPermission`, which the sibling plans to remove. Whichever change lands second gets a compile error, so the conflict is loud, not silent. The fix is to call the sibling's shared predicate instead. Until then this is a temporary download-only copy of the view decision (Residual R2).
+**Dependency on the sibling:** this code calls media's `channelViewPermission`, which the sibling plans to remove. Whichever change lands second gets a compile error, so the conflict is loud, not silent. The fix is to call the sibling's shared predicate instead. Until then `channelAccessAllowed` is a media-local channel-access decision, shared by download and upload (Residual R2).
 
 **`404 "File not found in storage"` (563) is not an oracle.** It is reachable only after access is granted.
 
@@ -126,7 +126,7 @@ No endpoint flips between 403 and 404 globally. A distinct "you can see it but m
 | # | Residual | Why accepted |
 |---|---|---|
 | R1 | Work and timing differ. A missing file costs one query; a denied one costs metadata lookup, membership and one resolver call. The same pre-existing shape exists in GetChannel, MarkChannelRead, and participants on a view-denied voice channel | Decision 8 |
-| R2 | A temporary download-only copy of the view decision | Removed when the sibling's shared predicate lands |
+| R2 | A media-local channel-access decision shared by download and upload | Removed when the sibling's shared predicate lands |
 | R3 | The download check reads the permission cache first, so a revoked view can keep working until the cache TTL expires | Unchanged behaviour; `backend.md` does not list download among the reads that must bypass the cache |
 | R4 | History, pins and reactions still leak metadata for hidden channels | Until the sibling lands |
 | R5 | Mobile and Desktop handling of the unread 500 is unverified | Task 8 |
@@ -141,7 +141,7 @@ No endpoint flips between 403 and 404 globally. A distinct "you can see it but m
 | New blocker or critical issues | 0 |
 | New high-confidence security hotspots | 0 |
 | `docs/api/openapi.yaml` | Updated for all seven paths above |
-| Docs to update | openapi ships in the same PR; no other docs change |
+| Docs to update | openapi and CHANGELOG ship in the same PR |
 | Placeholder check from `internal-placeholders.md` | Prints nothing |
 | Migrations, routes, stores, new Go packages | None |
 
@@ -150,6 +150,6 @@ No endpoint flips between 403 and 404 globally. A distinct "you can see it but m
 - **Production:** `voice/handlers.go`; `channels/handlers.go` (scan loops only); `media/handlers.go`.
 - **Test infrastructure:** `testhelpers/stmthook/stmthook.go` and `stmthook_test.go`.
 - **Tests:** `voice/handlers_integration_2_test.go` and a new `voice/participants_scan_error_test.go`; a new `channels/unread_scan_error_test.go`, plus `channels/handlers_test.go` and `channels/server_unread_status_shape_test.go`; `media/handlers_test.go` and `media/handlers_integration_2_test.go`.
-- **Docs:** `docs/api/openapi.yaml`, this spec, and the plan.
+- **Docs:** `docs/api/openapi.yaml`, `CHANGELOG.md`, this spec, and the plan.
 
-**Text overlap with the sibling:** none in `channels/handlers.go` (the sibling edits 1102-1185). In `media/handlers.go` the only overlap is the call to `channelViewPermission`. `messages/*` is untouched.
+**Text overlap with the sibling:** none in `channels/handlers.go` (the sibling edits 1102-1185). In `media/handlers.go` the overlap is the call to `channelViewPermission` and the body of `userHasChannelAccess`, which now wraps `channelAccessAllowed`. `messages/*` is untouched.

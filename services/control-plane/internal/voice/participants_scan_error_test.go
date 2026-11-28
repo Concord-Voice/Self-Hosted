@@ -1,6 +1,7 @@
 package voice_test
 
 import (
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,6 +23,27 @@ import (
 // statement reads voice_participants.
 const participantsRowFragment = `vp.is_muted, vp.is_deafened`
 
+// participantsGetter serves GetParticipants as userID with the handler on
+// handlerDB and the permission resolver on resolverDB, and returns a function
+// that requests the participants of a channel.
+func participantsGetter(ts *testhelpers.TestServer, handlerDB, resolverDB *sql.DB, userID string) func(channelID string) *httptest.ResponseRecorder {
+	h := voice.NewHandler(voice.HandlerDeps{
+		DB:       handlerDB,
+		Log:      logger.New("test"),
+		Hub:      ts.Hub,
+		Cfg:      &config.Config{},
+		Resolver: rbac.NewResolver(resolverDB, rbac.NewPermissionCache(ts.Redis), logger.New("test")),
+	})
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set("user_id", userID); c.Next() })
+	router.GET("/api/v1/channels/:id/voice/participants", h.GetParticipants)
+	return func(channelID string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, pathChannelsPrefix+channelID+pathVoiceParticipants, nil))
+		return w
+	}
+}
+
 // A row the handler cannot scan must fail the request. Dropping it would
 // answer 200 with a participant list that silently omits someone.
 func TestGetParticipants_ScanErrorAnswers500(t *testing.T) {
@@ -39,21 +61,8 @@ func TestGetParticipants_ScanErrorAnswers500(t *testing.T) {
 
 	// The handler runs on the hooked pool; the resolver stays on the plain pool
 	// so its queries never pass through the hook.
-	h := voice.NewHandler(voice.HandlerDeps{
-		DB:       hookedDB,
-		Log:      logger.New("test"),
-		Hub:      ts.Hub,
-		Cfg:      &config.Config{},
-		Resolver: rbac.NewResolver(ts.DB, rbac.NewPermissionCache(ts.Redis), logger.New("test")),
-	})
-	router := gin.New()
-	router.Use(func(c *gin.Context) { c.Set("user_id", owner.ID); c.Next() })
-	router.GET("/api/v1/channels/:id/voice/participants", h.GetParticipants)
-	get := func() *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
-		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, pathChannelsPrefix+channelID+pathVoiceParticipants, nil))
-		return w
-	}
+	getParticipants := participantsGetter(ts, hookedDB, ts.DB, owner.ID)
+	get := func() *httptest.ResponseRecorder { return getParticipants(channelID) }
 
 	// The body the handler gives when the participants query itself fails.
 	hook.Arm([]string{participantsRowFragment}, nil, stmthook.ErrInjected)
@@ -92,21 +101,7 @@ func TestGetParticipants_MemberRemovedMidCheckAnswersAsMissing(t *testing.T) {
 	channelID := ts.CreateVoiceChannel(t, serverID, "voice-mid-check")
 
 	// Handler and resolver share the hooked pool so both statements are seen.
-	h := voice.NewHandler(voice.HandlerDeps{
-		DB:       hookedDB,
-		Log:      logger.New("test"),
-		Hub:      ts.Hub,
-		Cfg:      &config.Config{},
-		Resolver: rbac.NewResolver(hookedDB, rbac.NewPermissionCache(ts.Redis), logger.New("test")),
-	})
-	router := gin.New()
-	router.Use(func(c *gin.Context) { c.Set("user_id", member.ID); c.Next() })
-	router.GET("/api/v1/channels/:id/voice/participants", h.GetParticipants)
-	get := func(id string) *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
-		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, pathChannelsPrefix+id+pathVoiceParticipants, nil))
-		return w
-	}
+	get := participantsGetter(ts, hookedDB, hookedDB, member.ID)
 
 	hook.Arm(
 		[]string{"INNER JOIN server_members sm ON sm.server_id = c.server_id", "SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id"},

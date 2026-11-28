@@ -1,6 +1,6 @@
 # Hidden-resource denial parity — Implementation plan
 
-**Spec:** `docs/superpowers/specs/2026-11-27-68-hidden-channel-oracles-design.md`
+**Spec:** `docs/superpowers/specs/2026-11-27-hidden-channel-oracles-design.md`
 **Base:** `main` at 818a41f8. Paths are under `services/control-plane/internal/` unless stated; run commands from `services/control-plane`.
 
 **Applies to every task:**

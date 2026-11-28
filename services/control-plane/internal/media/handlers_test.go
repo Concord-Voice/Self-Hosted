@@ -75,6 +75,13 @@ func mediaTestRedis(t *testing.T) *redis.Client {
 // internal/testhelpers import cycle described above.
 func mediaBrokenResolver(t *testing.T, rdb *redis.Client) *rbac.Resolver {
 	t.Helper()
+	return rbac.NewResolver(closedTestDB(t), rbac.NewPermissionCache(rdb), logger.New("test"))
+}
+
+// closedTestDB returns a *sql.DB that has already been closed, so every query
+// on it fails. Used to force the database-error branches.
+func closedTestDB(t *testing.T) *sql.DB {
+	t.Helper()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = defaultTestDatabaseURL // existing package var (assembled from parts)
@@ -82,7 +89,7 @@ func mediaBrokenResolver(t *testing.T, rdb *redis.Client) *rbac.Resolver {
 	closed, err := sql.Open("postgres", dbURL)
 	require.NoError(t, err)
 	require.NoError(t, closed.Close())
-	return rbac.NewResolver(closed, rbac.NewPermissionCache(rdb), logger.New("test"))
+	return closed
 }
 
 // freeTierStub satisfies entitlements.TierResolver and always returns TierFree.
@@ -1217,6 +1224,30 @@ func TestUploadAttachment_Resolver_OwnerSucceeds(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
 }
 
+// A member holding only view+send+attach (no administrator bit, not the owner)
+// uploads successfully with a real resolver. This is the lock on the upload
+// path's `required == 0` arm in channelAccessAllowed: Has(0) is false for a
+// non-administrator, so dropping that arm answers every such upload 403.
+func TestUploadAttachment_Resolver_NonAdminMemberSucceeds(t *testing.T) {
+	ts := resolverTestSetup(t)
+	owner := ts.createTestUser(t, "attach_res_nonadmin_owner")
+	member := ts.createTestUser(t, "attach_res_nonadmin_member")
+	serverID := ts.createTestServer(t, owner, "Attach NonAdmin Server")
+	channelID := ts.createTestChannel(t, serverID, "res-nonadmin")
+	addMember(t, ts, serverID, member)
+	ts.createTestRoleWithPerms(t, serverID, member, "uploader", rbac.PermViewTextChannels|rbac.PermSendMessages|rbac.PermAttachFiles)
+
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("ciphertext"), map[string]string{
+		"channel_id":  channelID,
+		"file_type":   "file",
+		"mime_type":   mimeOctetStream,
+		"key_version": "1",
+	})
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, member, body, ct)
+
+	assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+}
+
 // CV-CAN-004: with a real resolver, a member with no RBAC role (no SEND) is
 // rejected — exercises the `!hasPerm` 403 branch of checkSendPermission.
 func TestUploadAttachment_Resolver_NoSendPermission403(t *testing.T) {
@@ -1881,8 +1912,8 @@ func TestDownloadAttachment_Resolver_NoReadHistoryNotFound(t *testing.T) {
 	channelID := ts.createTestChannel(t, serverID, "rh-hidden")
 	_, err := ts.db.Exec(`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'member')`, serverID, member)
 	require.NoError(t, err)
-	// VIEW but deliberately NO read-history: passes userHasChannelAccess, fails
-	// the download-only read-history gate.
+	// VIEW but deliberately NO read-history: download requires read-history on
+	// top of the view bit (channelAccessAllowed), so this member is denied.
 	ts.createTestRoleWithPerms(t, serverID, member, "viewer-no-history", rbac.PermViewTextChannels)
 
 	fileID := uuid.New().String()
@@ -1895,7 +1926,7 @@ func TestDownloadAttachment_Resolver_NoReadHistoryNotFound(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Member has VIEW but not read-history -> answered as a missing file (CV-CAN-003).
+	// Member has VIEW but not read-history -> answered as a missing file.
 	wMember := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, member, gin.Params{{Key: "file_id", Value: fileID}})
 	requireDeniedAsMissing(t, ts, member, wMember)
 	assert.NotEqual(t, "ciphertext", wMember.Body.String(), "ciphertext must not be streamed on a read-history deny")

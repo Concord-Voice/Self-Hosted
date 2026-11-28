@@ -297,7 +297,10 @@ func (c *hookConn) QueryContext(ctx context.Context, query string, args []driver
 
 // ArmRowValue makes the NEXT query whose text contains fragment return value in
 // place of column (zero-based) of every row it yields. It fires once, restarts
-// RowValueHits, and is independent of Arm and ArmCommit.
+// RowValueHits, and is independent of Arm and ArmCommit. The first matching
+// query sent to the driver consumes the arm even if that query fails; a query
+// that Arm's fault stops before it is sent does not. Arming with an empty
+// fragment disarms.
 func (h *Hook) ArmRowValue(fragment string, column int, value driver.Value) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -322,7 +325,11 @@ func (h *Hook) takeRowRewrite(query string) (column int, value driver.Value, ok 
 	return h.rowColumn, h.rowValue, true
 }
 
-// rewriteRows replaces one column of every row its inner Rows yields.
+// rewriteRows is the wrapper ArmRowValue installs: it rewrites one column of
+// each row of the next matching query. It embeds driver.Rows, so for that query
+// database/sql sees only the driver.Rows methods. Optional interfaces the
+// driver's rows implement, such as driver.RowsColumnTypeScanType and
+// driver.RowsNextResultSet, are hidden from it.
 type rewriteRows struct {
 	driver.Rows
 	hook   *Hook

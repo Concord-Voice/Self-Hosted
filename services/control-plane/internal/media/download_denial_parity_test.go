@@ -3,12 +3,10 @@ package media
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -183,19 +181,13 @@ func TestUserCanDownloadAttachment_NoScopeAnswersNotFound(t *testing.T) {
 func closedDBHandler(t *testing.T) *testSetup {
 	t.Helper()
 	rdb := mediaTestRedis(t)
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = defaultTestDatabaseURL
-	}
-	closed, err := sql.Open("postgres", dbURL)
-	require.NoError(t, err)
-	require.NoError(t, closed.Close())
+	closed := closedTestDB(t)
 	return mediaTestWithResolver(t, closed, rbac.NewResolver(closed, rbac.NewPermissionCache(rdb), logger.New("test")))
 }
 
 // A failed lookup is a server fault, never a denial: answering it 404 would
 // make an outage look like a missing file.
-func TestDownloadChannelAccessAllowed_LookupError_500(t *testing.T) {
+func TestUserCanDownloadAttachment_LookupError_500(t *testing.T) {
 	ts := closedDBHandler(t)
 	channelID := uuid.New().String()
 
@@ -207,7 +199,7 @@ func TestDownloadChannelAccessAllowed_LookupError_500(t *testing.T) {
 	assert.Equal(t, errMsgFailedVerifyAccess, errorField(t, w))
 }
 
-func TestDownloadChannelAccessAllowed_ResolverError_500(t *testing.T) {
+func TestUserCanDownloadAttachment_ResolverError_500(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	t.Cleanup(cleanup)
 	rdb := mediaTestRedis(t)

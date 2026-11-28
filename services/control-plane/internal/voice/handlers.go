@@ -715,7 +715,11 @@ func (h *Handler) GetParticipants(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFetchParticipants})
 		return
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			h.log.Warn("Failed to close voice participant rows", "error", closeErr)
+		}
+	}()
 
 	participants := []Participant{}
 	for rows.Next() {

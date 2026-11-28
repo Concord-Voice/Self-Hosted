@@ -119,10 +119,11 @@ func TestGetParticipants_NonVoiceChannelMatchesNonexistent(t *testing.T) {
 	voiceID := ts.CreateVoiceChannel(t, serverID, "plain-voice")
 
 	// Deny only the view bit for the default role; read-history stays granted,
-	// so the view bit is the sole reason the channel is hidden. Overrides are
-	// created before the member's first request so no cached result predates them.
+	// so the view bit is the sole reason the channel is hidden. The schema does not
+	// make is_default unique per server, so every default role is overridden.
 	rows, err := ts.DB.Query(`SELECT id FROM roles WHERE server_id = $1 AND is_default = TRUE`, serverID)
 	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
 	var defaultRoleIDs []string
 	for rows.Next() {
 		var id string
@@ -130,7 +131,6 @@ func TestGetParticipants_NonVoiceChannelMatchesNonexistent(t *testing.T) {
 		defaultRoleIDs = append(defaultRoleIDs, id)
 	}
 	require.NoError(t, rows.Err())
-	require.NoError(t, rows.Close())
 	require.NotEmpty(t, defaultRoleIDs)
 	for _, roleID := range defaultRoleIDs {
 		ts.CreateChannelOverride(t, hiddenText, "role", roleID, 0, int64(rbac.PermViewTextChannels))
