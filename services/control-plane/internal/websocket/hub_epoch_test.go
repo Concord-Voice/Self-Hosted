@@ -110,8 +110,11 @@ func setupHubTestDB(t *testing.T) *sql.DB {
 			defer func() { _ = tx.Rollback() }()
 			if _, err = tx.Exec(`SET LOCAL session_replication_role = replica`); err == nil {
 				_, err = tx.Exec(`UPDATE message_id_reservation_quota
-					SET issued = 0, max_issued = 5000000, max_per_account = 250000
-					WHERE singleton = TRUE`)
+					SET issued = 0, max_issued = 78125`)
+			}
+			if err == nil {
+				_, err = tx.Exec(`UPDATE message_id_reservation_policy
+					SET max_per_account = 250000 WHERE singleton = TRUE`)
 			}
 			if err == nil {
 				err = tx.Commit()

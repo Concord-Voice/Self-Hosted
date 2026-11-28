@@ -1077,7 +1077,7 @@ func TestHandleSubscribeDMMissingConversationID(t *testing.T) {
 func TestHandleMessageReservationQuotaReturnsCapacityError(t *testing.T) {
 	setup := setupMessageTest(t)
 	_, err := setup.db.Exec(`UPDATE message_id_reservation_quota
-		SET max_issued = issued WHERE singleton = TRUE`)
+		SET max_issued = issued`)
 	require.NoError(t, err)
 
 	setup.hub.handleMessage(setup.live(t, IncomingMessage{
@@ -1099,7 +1099,7 @@ func TestHandleMessageReservationQuotaReturnsCapacityError(t *testing.T) {
 func TestHandleDMMessageReservationQuotaReturnsCapacityError(t *testing.T) {
 	setup := setupEpochTest(t, false, false)
 	_, err := setup.db.Exec(`UPDATE message_id_reservation_quota
-		SET max_issued = issued WHERE singleton = TRUE`)
+		SET max_issued = issued`)
 	require.NoError(t, err)
 
 	setup.hub.handleDMMessage(setup.live(t, IncomingMessage{

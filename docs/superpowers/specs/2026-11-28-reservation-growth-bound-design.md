@@ -28,9 +28,10 @@ Self-Hosted PR #403, which has already merged.
 ## Design
 
 Add migration 000208, leaving the committed 000206 migration untouched. Create
-a singleton global budget with an issued count and adjustable ceiling, plus a
-per-account counter with `ON DELETE CASCADE`. Initial ceilings are **5,000,000
-new reservations globally** and **250,000 per active account** after this
+64 fixed issuance budget rows with an aggregate ceiling, a read-only account
+limit policy row, and a per-account counter with `ON DELETE CASCADE`. Initial
+ceilings are **5,000,000 new reservations globally** (78,125 per shard) and
+**250,000 per active account** after this
 migration. The finite global headroom is a default, not a promise about host
 disk capacity. Operators must compare it with free space and current reservation
 size before promotion; raising a ceiling requires an explicit database change.
@@ -38,16 +39,19 @@ size before promotion; raising a ceiling requires an explicit database change.
 Attach one `AFTER INSERT FOR EACH ROW` quota trigger to each message table,
 enabled `ALWAYS` like the reservation triggers. The existing `BEFORE INSERT`
 trigger first reserves the UUID. The new trigger atomically increments the
-global counter under its row lock and then the account counter. A missing
-singleton, reached ceiling, or account-counter failure raises a named
+account counter and then one server-selected random shard counter. When a
+shard is full, it probes the other 63 rows so free headroom remains usable.
+A missing policy row, reached ceiling, or account-counter failure raises a named
 check violation. PostgreSQL rolls back both the message and its reservation
 with the statement. `AFTER INSERT` does not run for an `ON CONFLICT` retry
 that inserts no row. Deletes and truncates never return quota.
 
-The global singleton serializes new message issuance. Measure this additional
-write contention in an isolated database before promotion. If it is material,
-replace the singleton with bounded shards in a separately reviewed change;
-do not omit the global cap to improve throughput.
+An initial singleton counter measured roughly 1,539 inserts/s versus 6,436
+inserts/s without its quota trigger under an isolated eight-client, eight-account
+microbenchmark. The shard design avoids that single write lock. The same
+microbenchmark against the sharded migration measured roughly 3,437
+inserts/s with no failed transactions. This local benchmark does not establish
+production throughput; promotion still needs capacity and latency observation.
 
 The cap converts unlimited disk growth into an explicit availability limit:
 multiple abusive accounts can still spend the global headroom and stop new

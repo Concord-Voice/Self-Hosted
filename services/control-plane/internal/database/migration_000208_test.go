@@ -17,14 +17,17 @@ func TestMigration000208_BoundsNewMessagesWithoutReopeningIDs(t *testing.T) {
 	defer cleanup()
 
 	channelMessageID, dmMessageID, channelID, userID, conversationID := migration000206Fixture(t, db)
-	_, err := db.Exec(`UPDATE message_id_reservation_quota SET issued = 0 WHERE singleton = TRUE`)
+	_, err := db.Exec(`UPDATE message_id_reservation_quota SET issued = 0 WHERE issued > 0`)
 	migrationRequirePQError(t, err, "23000", "message_id_reservation_quota_monotonic")
-	_, err = db.Exec(`DELETE FROM message_id_reservation_quota WHERE singleton = TRUE`)
+	_, err = db.Exec(`DELETE FROM message_id_reservation_quota`)
 	migrationRequirePQError(t, err, "23000", "message_id_reservation_quota_monotonic")
 	_, err = db.Exec(`TRUNCATE message_id_reservation_quota`)
 	migrationRequirePQError(t, err, "23000", "message_id_reservation_quota_monotonic")
-	_, err = db.Exec(`UPDATE message_id_reservation_quota
-		SET max_issued = 4, max_per_account = 3 WHERE singleton = TRUE`)
+	_, err = db.Exec(`UPDATE message_id_reservation_quota SET max_issued = issued`)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE message_id_reservation_quota SET max_issued = issued + 2 WHERE shard = 0`)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE message_id_reservation_policy SET max_per_account = 3 WHERE singleton = TRUE`)
 	require.NoError(t, err)
 
 	thirdID := uuid.New()
@@ -99,11 +102,14 @@ func TestMigration000208_ConcurrentGlobalCeiling(t *testing.T) {
 	defer cleanup()
 
 	_, _, channelID, userID, _ := migration000206Fixture(t, db)
-	_, err := db.Exec(`UPDATE message_id_reservation_quota
-		SET max_issued = 3 WHERE singleton = TRUE`)
+	otherUserID := testhelpers.CreateUser(t, db)
+	_, err := db.Exec(`UPDATE message_id_reservation_quota SET max_issued = issued`)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE message_id_reservation_quota SET max_issued = issued + 1 WHERE shard = 0`)
 	require.NoError(t, err)
 
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
+	users := []uuid.UUID{userID, otherUserID}
 	errors := make([]error, len(ids))
 	var workers sync.WaitGroup
 	for i, id := range ids {
@@ -111,7 +117,7 @@ func TestMigration000208_ConcurrentGlobalCeiling(t *testing.T) {
 		go func(i int, id uuid.UUID) {
 			defer workers.Done()
 			_, errors[i] = db.Exec(`INSERT INTO messages (id, channel_id, user_id, content, key_version)
-				VALUES ($1, $2, $3, 'concurrent', 1)`, id, channelID, userID)
+				VALUES ($1, $2, $3, 'concurrent', 1)`, id, channelID, users[i])
 		}(i, id)
 	}
 	workers.Wait()
@@ -126,7 +132,11 @@ func TestMigration000208_ConcurrentGlobalCeiling(t *testing.T) {
 		migration000208RequireAbsent(t, db, ids[i])
 	}
 	assert.Equal(t, 1, successes)
-	migration000208RequireUsage(t, db, userID, 3, 3)
+	var globalIssued, accountIssued int
+	require.NoError(t, db.QueryRow(`SELECT sum(issued) FROM message_id_reservation_quota`).Scan(&globalIssued))
+	require.NoError(t, db.QueryRow(`SELECT sum(issued) FROM message_id_reservation_account_usage`).Scan(&accountIssued))
+	assert.Equal(t, 3, globalIssued)
+	assert.Equal(t, 3, accountIssued)
 }
 
 func TestMigration000208_DownGuardAndUnusedRoundTrip(t *testing.T) {
@@ -153,7 +163,7 @@ func TestMigration000208_DownGuardAndUnusedRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	_, err = tx.Exec(`DELETE FROM message_id_reservation_account_usage`)
 	require.NoError(t, err)
-	_, err = tx.Exec(`UPDATE message_id_reservation_quota SET issued = 0 WHERE singleton = TRUE`)
+	_, err = tx.Exec(`UPDATE message_id_reservation_quota SET issued = 0`)
 	require.NoError(t, err)
 	_, err = tx.Exec(down)
 	require.NoError(t, err)
@@ -169,8 +179,7 @@ func TestMigration000208_DownGuardAndUnusedRoundTrip(t *testing.T) {
 func migration000208RequireUsage(t *testing.T, db *sql.DB, userID uuid.UUID, global, account int) {
 	t.Helper()
 	var globalIssued, accountIssued int
-	require.NoError(t, db.QueryRow(`SELECT issued FROM message_id_reservation_quota
-		WHERE singleton = TRUE`).Scan(&globalIssued))
+	require.NoError(t, db.QueryRow(`SELECT sum(issued) FROM message_id_reservation_quota`).Scan(&globalIssued))
 	require.NoError(t, db.QueryRow(`SELECT issued FROM message_id_reservation_account_usage
 		WHERE user_id = $1`, userID).Scan(&accountIssued))
 	assert.Equal(t, global, globalIssued)

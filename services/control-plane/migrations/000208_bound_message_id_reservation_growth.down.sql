@@ -4,7 +4,8 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
 LOCK TABLE messages, dm_messages, message_id_reservations,
-    message_id_reservation_account_usage, message_id_reservation_quota
+    message_id_reservation_account_usage, message_id_reservation_quota,
+    message_id_reservation_policy
     IN ACCESS EXCLUSIVE MODE;
 
 DO $$
@@ -31,3 +32,4 @@ DROP FUNCTION reject_message_id_reservation_quota_truncate();
 DROP FUNCTION protect_message_id_reservation_quota();
 DROP TABLE message_id_reservation_account_usage;
 DROP TABLE message_id_reservation_quota;
+DROP TABLE message_id_reservation_policy;

@@ -174,7 +174,7 @@ func TestSendMessageReservationQuotaReturnsStorageCapacity(t *testing.T) {
 	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	_, err := ts.DB.Exec(`UPDATE message_id_reservation_quota
-		SET max_issued = issued WHERE singleton = TRUE`)
+		SET max_issued = issued`)
 	require.NoError(t, err)
 	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
 		"channel_id": channelID, "content": testhelpers.ValidCiphertext(), "key_version": 1,

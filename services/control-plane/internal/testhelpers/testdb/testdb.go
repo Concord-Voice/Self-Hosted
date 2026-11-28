@@ -368,9 +368,12 @@ func truncateAllTablesOnce(db *sql.DB) error {
 	// starts with an empty reservation namespace and the migration defaults.
 	if _, err := ExecReplica(db, `
 		UPDATE message_id_reservation_quota
-		SET issued = 0, max_issued = 5000000, max_per_account = 250000
-		WHERE singleton = TRUE
+		SET issued = 0, max_issued = 78125
 	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE message_id_reservation_policy
+		SET max_per_account = 250000 WHERE singleton = TRUE`); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`

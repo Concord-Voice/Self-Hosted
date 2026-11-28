@@ -3,20 +3,29 @@
 SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE message_id_reservation_quota (
-    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
+    shard SMALLINT PRIMARY KEY,
     issued BIGINT NOT NULL DEFAULT 0,
-    max_issued BIGINT NOT NULL DEFAULT 5000000,
-    max_per_account BIGINT NOT NULL DEFAULT 250000,
-    CONSTRAINT message_id_reservation_quota_singleton CHECK (singleton),
+    max_issued BIGINT NOT NULL DEFAULT 78125,
+    CONSTRAINT message_id_reservation_quota_shard CHECK (shard BETWEEN 0 AND 63),
     CONSTRAINT message_id_reservation_quota_bounds CHECK (
-        issued >= 0 AND max_issued >= issued AND max_per_account >= 0
+        issued >= 0 AND max_issued >= issued
     )
 );
 
 COMMENT ON TABLE message_id_reservation_quota IS
-    'Prospective global new-message issuance budget; historical backfill is outside this counter.';
+    '64 fixed prospective issuance budgets totaling 5 million new messages; historical backfill is outside these counters.';
 
-INSERT INTO message_id_reservation_quota (singleton) VALUES (TRUE);
+INSERT INTO message_id_reservation_quota (shard)
+SELECT shard FROM generate_series(0, 63) AS shard;
+
+CREATE TABLE message_id_reservation_policy (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
+    max_per_account BIGINT NOT NULL DEFAULT 250000,
+    CONSTRAINT message_id_reservation_policy_singleton CHECK (singleton),
+    CONSTRAINT message_id_reservation_policy_account_bound CHECK (max_per_account >= 0)
+);
+
+INSERT INTO message_id_reservation_policy (singleton) VALUES (TRUE);
 
 CREATE TABLE message_id_reservation_account_usage (
     user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -82,19 +91,19 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     account_limit BIGINT;
+    start_shard INTEGER;
+    attempt INTEGER;
 BEGIN
     -- The reservation BEFORE INSERT trigger has already claimed NEW.id. An
     -- AFTER ROW trigger runs only for an actual insert, not a same-ID retry
     -- handled by ON CONFLICT. A raised error rolls both writes back.
-    UPDATE message_id_reservation_quota
-    SET issued = issued + 1
-    WHERE singleton AND issued < max_issued
-    RETURNING max_per_account INTO account_limit;
+    SELECT max_per_account INTO account_limit
+    FROM message_id_reservation_policy WHERE singleton = TRUE;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION USING
             ERRCODE = 'check_violation',
-            CONSTRAINT = 'message_id_reservation_global_quota',
+            CONSTRAINT = 'message_id_reservation_account_quota',
             MESSAGE = 'message storage capacity exhausted';
     END IF;
 
@@ -118,7 +127,24 @@ BEGIN
             MESSAGE = 'message storage capacity exhausted';
     END IF;
 
-    RETURN NEW;
+    -- Spread independent accounts over 64 row locks. The random start is
+    -- server-selected, not derived from a client-controlled message ID. Scan
+    -- the other shards if this one is full, so no headroom is stranded.
+    start_shard := floor(random() * 64)::INTEGER;
+    FOR attempt IN 0..63 LOOP
+        UPDATE message_id_reservation_quota
+        SET issued = issued + 1
+        WHERE shard = ((start_shard + attempt) % 64)
+          AND issued < max_issued;
+        IF FOUND THEN
+            RETURN NEW;
+        END IF;
+    END LOOP;
+
+    RAISE EXCEPTION USING
+        ERRCODE = 'check_violation',
+        CONSTRAINT = 'message_id_reservation_global_quota',
+        MESSAGE = 'message storage capacity exhausted';
 END;
 $$;
 

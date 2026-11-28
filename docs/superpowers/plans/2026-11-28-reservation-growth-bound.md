@@ -1,6 +1,6 @@
 # Reservation growth bound implementation plan
 
-1. Add migration 000208 with the singleton and active-account counters, named
+1. Add migration 000208 with bounded shard and active-account counters, named
    quota errors, `AFTER INSERT` triggers on both message tables, and a guarded
    down migration. Keep 000206 unchanged.
 2. Add database-backed tests for exact ceiling, cross-table accounting,
@@ -15,9 +15,9 @@
    API contract, and `CHANGELOG.md` with default ceilings, read-only
    utilization query, refusal semantics, and rollback restriction.
 5. Run focused isolated database and package tests, migration lint, change
-   counts, and the repository quality gate. Check a representative concurrent
-   send load for the singleton row contention. Record any unavailable runtime
-   coverage explicitly.
+   counts, and the repository quality gate. Compare concurrent send load with
+   and without the prospective quota trigger; revise the design if a single
+   write lock causes material contention. Record unavailable runtime coverage.
 6. Open a focused PR referencing the unresolved #403 finding and Security
    #154. Run bot arrival, exact-head independent and specialist reviews,
    disposition gate, and CI. Stop at the Phase 9 merge-approval checkpoint.

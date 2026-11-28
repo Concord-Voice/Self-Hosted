@@ -62,11 +62,13 @@ It never drops retained reservation state just to make a downgrade succeed.
 
 Migration 000208 bounds the growth identified after the baseline merged. It
 does not remove or rewrite any reservation. It counts actual new channel and
-DM message inserts after installation with a global ceiling of 5,000,000 and
-an active-account ceiling of 250,000. The global count is permanent; account
-counters are removed on account deletion. Both ceilings can be raised by an
-operator only after checking free space. The initial limits are operational
-headroom, not a claim that every self-hosted disk can hold that many rows.
+DM message inserts after installation across 64 permanent budget rows totaling
+5,000,000, plus an active-account ceiling of 250,000. Each new insert uses a
+server-selected starting shard and probes remaining shards if that row is full.
+Account counters are removed on account deletion. Both ceilings can be raised
+by an operator only after checking free space. The initial limits are
+operational headroom, not a claim that every self-hosted disk can hold that
+many rows.
 
 Historical backfill and temporary delete/truncate capture do not spend this
 prospective budget. Their possible new rows are bounded by the finite set of
@@ -92,19 +94,19 @@ FROM message_id_reservations;
 Monitor the prospective budget with this read-only query:
 
 ```sql
-SELECT issued, max_issued, max_issued - issued AS remaining,
-       max_per_account
-FROM message_id_reservation_quota WHERE singleton = TRUE;
+SELECT sum(issued) AS issued, sum(max_issued) AS maximum,
+       sum(max_issued - issued) AS remaining
+FROM message_id_reservation_quota;
 ```
 
 For the active accounts nearest their individual ceiling:
 
 ```sql
 SELECT usage.user_id, usage.issued,
-       quota.max_per_account - usage.issued AS remaining
+       policy.max_per_account - usage.issued AS remaining
 FROM message_id_reservation_account_usage AS usage
-CROSS JOIN message_id_reservation_quota AS quota
-WHERE quota.singleton = TRUE
+CROSS JOIN message_id_reservation_policy AS policy
+WHERE policy.singleton = TRUE
 ORDER BY usage.issued DESC
 LIMIT 20;
 ```
@@ -114,9 +116,13 @@ ceiling explicitly, for example:
 
 ```sql
 UPDATE message_id_reservation_quota
-SET max_issued = 6000000
-WHERE singleton = TRUE AND max_issued < 6000000;
+SET max_issued = 93750
+WHERE max_issued < 93750;
 ```
+
+This example raises all 64 shard ceilings evenly, making the aggregate limit
+6,000,000. Raising the account limit is a separate explicit update to
+`message_id_reservation_policy.max_per_account`.
 
 No automatic increase or counter reset occurs. The down migration refuses on
 a populated installation; retain this migration and use a compatible binary
