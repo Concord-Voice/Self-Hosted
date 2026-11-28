@@ -10,7 +10,7 @@ import (
 
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Self-Hosted/services/control-plane/internal/testhelpers"
-	natsclient "github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats"
+	"github.com/Concord-Voice/Self-Hosted/services/control-plane/pkg/nats/natstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,10 +33,7 @@ func rbacNATSTestURL() string {
 // voice.enforce.permissions payloads, skipping the test if NATS is down.
 func subscribeVoicePermissions(t *testing.T) chan map[string]interface{} {
 	t.Helper()
-	obsClient, err := natsclient.Connect(rbacNATSTestURL())
-	if err != nil {
-		t.Skipf("NATS unavailable (%v); skipping live enforcement test (runs in CI)", err)
-	}
+	obsClient := natstest.Connect(t, rbacNATSTestURL())
 	t.Cleanup(func() { _ = obsClient.Close() })
 
 	msgs := make(chan map[string]interface{}, 8)
