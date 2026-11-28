@@ -4,7 +4,7 @@ description: Groups supplied issue or feedback records by symptom and identifies
 model: haiku
 effort: low
 tools: []
-disallowedTools: mcp__*, Bash, Read, Write, Edit, NotebookEdit, Grep, Glob, WebFetch, WebSearch, Agent
+disallowedTools: mcp__*, Bash, BashOutput, KillShell, Read, Write, Edit, MultiEdit, NotebookEdit, NotebookRead, Grep, Glob, WebFetch, WebSearch, Agent, Task, Skill, SlashCommand, TodoWrite
 omitClaudeMd: true
 maxTurns: 3
 ---
