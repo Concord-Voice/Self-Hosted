@@ -616,18 +616,23 @@ jobs:
               -tags integration -coverprofile=coverage.out "${PKGS[@]}"
           }
 
-          run_control_plane_tests
           if [[ -n "$SONAR_PR_HEAD" ]]; then
-            merge_sha=$(git rev-parse HEAD)
             test "$(git rev-parse HEAD^2)" = "$SONAR_PR_HEAD"
-            # The protected analyzer imports coverage against the exact PR head.
-            # Reuse merge coverage only when both complete source trees match.
-            if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${SONAR_PR_HEAD}^{tree}")" ]]; then
-              trap 'git checkout --quiet --detach "$merge_sha"' EXIT
-              git checkout --quiet --detach "$SONAR_PR_HEAD"
+          fi
+          run_control_plane_tests
+          # Reuse merge coverage only when both complete source trees match.
+          if [[ -n "$SONAR_PR_HEAD" ]] && [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${SONAR_PR_HEAD}^{tree}")" ]]; then
+            # Do not leave merge-only coverage eligible for the shard upload if
+            # head coverage fails. Keep the merge checkout for later build steps.
+            rm coverage.out
+            head_checkout="$RUNNER_TEMP/sonar-go-pr-head"
+            git worktree add --quiet --detach "$head_checkout" "$SONAR_PR_HEAD"
+            (
+              cd "$head_checkout/services/control-plane"
               test "$(git rev-parse HEAD)" = "$SONAR_PR_HEAD"
               run_control_plane_tests
-            fi
+            )
+            mv "$head_checkout/services/control-plane/coverage.out" coverage.out
           fi
 
       - name: Upload coverage (shard ${{ matrix.shard }})
