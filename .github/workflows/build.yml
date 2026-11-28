@@ -356,7 +356,8 @@ jobs:
     # 37674608534), and run 37676463077 was cancelled at 20 min while still
     # testing. The headroom absorbs runner variance; it is not room for a slower
     # suite, and a shard routinely past 20 min means re-sharding (ADR-0016 note).
-    timeout-minutes: 25
+    # A PR whose merge and head trees differ also records coverage on the PR head.
+    timeout-minutes: 50
     strategy:
       # No fail-fast: let every shard report so a failure in one does not mask
       # results (and coverage) from the other. Mirrors the desktop shard matrix.
@@ -368,6 +369,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The protected PR artifact may need the merge commit's head parent.
+          fetch-depth: 2
 
       - name: Install and admit locked Docker Engine
         run: bash scripts/ci/install-docker-engine.sh
@@ -564,19 +567,12 @@ jobs:
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: '4'
           CI_PACKAGE_DB_ISOLATION: '1'
+          SONAR_PR_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.sha || '' }}
           PGHOST: localhost
           PGUSER: concord
           PGPASSWORD: test_password
         run: |
           set -euo pipefail
-          mapfile -t PKGS < <(bash scripts/ci-shard-packages.sh "$SHARD_INDEX" "$SHARD_TOTAL")
-          if [ "${#PKGS[@]}" -eq 0 ]; then
-            echo "::error::shard ${SHARD_INDEX}/${SHARD_TOTAL} resolved zero packages" >&2
-            exit 1
-          fi
-          echo "::group::Shard ${SHARD_INDEX}/${SHARD_TOTAL} packages (${#PKGS[@]})"
-          printf '  %s\n' "${PKGS[@]}"
-          echo "::endgroup::"
           # -tags integration is load-bearing (#2445 review). Without it the
           # //go:build integration files never compile, never run, and never
           # reach the coverage profile SonarQube consumes — so a suite can be
@@ -605,10 +601,34 @@ jobs:
           # shared GOCACHE.
           # -timeout 20m: on a 4 vCPU GitHub runner, authoritycontract's
           # differential prescan test runs past go test's 10-minute per-package
-          # default under -race with atomic coverage. 20m stays inside the
-          # job's 25-minute limit; a package needing more means re-sharding.
-          go test -v -count=1 -race -trimpath -p 2 -timeout 20m -exec "$PWD/scripts/ci-test-package-db.sh" \
-            -tags integration -coverprofile=coverage.out "${PKGS[@]}"
+          # default under -race with atomic coverage. A package needing more
+          # time means re-sharding.
+          run_control_plane_tests() {
+            mapfile -t PKGS < <(bash scripts/ci-shard-packages.sh "$SHARD_INDEX" "$SHARD_TOTAL")
+            if [ "${#PKGS[@]}" -eq 0 ]; then
+              echo "::error::shard ${SHARD_INDEX}/${SHARD_TOTAL} resolved zero packages" >&2
+              exit 1
+            fi
+            echo "::group::Shard ${SHARD_INDEX}/${SHARD_TOTAL} packages (${#PKGS[@]})"
+            printf '  %s\n' "${PKGS[@]}"
+            echo "::endgroup::"
+            go test -v -count=1 -race -trimpath -p 2 -timeout 20m -exec "$PWD/scripts/ci-test-package-db.sh" \
+              -tags integration -coverprofile=coverage.out "${PKGS[@]}"
+          }
+
+          run_control_plane_tests
+          if [[ -n "$SONAR_PR_HEAD" ]]; then
+            merge_sha=$(git rev-parse HEAD)
+            test "$(git rev-parse HEAD^2)" = "$SONAR_PR_HEAD"
+            # The protected analyzer imports coverage against the exact PR head.
+            # Reuse merge coverage only when both complete source trees match.
+            if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${SONAR_PR_HEAD}^{tree}")" ]]; then
+              trap 'git checkout --quiet --detach "$merge_sha"' EXIT
+              git checkout --quiet --detach "$SONAR_PR_HEAD"
+              test "$(git rev-parse HEAD)" = "$SONAR_PR_HEAD"
+              run_control_plane_tests
+            fi
+          fi
 
       - name: Upload coverage (shard ${{ matrix.shard }})
         # always() is load-bearing: upload this shard's partial coverage even
