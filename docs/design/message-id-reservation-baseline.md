@@ -23,14 +23,20 @@ turn reservation state into an oracle.
 
 1. Apply migration 000206. It performs DDL only; it intentionally does not
    scan existing message tables under an exclusive migration lock. It has a
-   five-second DDL lock timeout: resolve the conflicting transaction and rerun
-   the migration if the timeout is reached.
+   five-second DDL lock timeout. If the timeout is reached, resolve the
+   conflicting transaction and inspect the migration state. Migration 000206
+   can be marked dirty even if PostgreSQL rolled back its DDL. Verify the
+   actual schema and the last successfully applied migration. Follow the
+   [dirty migration recovery procedure](../../services/control-plane/migrations/README.md#dirty-migration-state)
+   to restore the verified clean version before retrying 000206. Confirm the
+   migration completed cleanly before starting the backfill.
 2. During a normal maintenance window, run `message-id-reservation-backfill`
    with the intended database URL and a bounded `--batch-size` (default 1,000).
    No total runtime deadline is imposed by default, so a large table can finish
    its keyset scan; `--timeout` supplies an explicit total deadline when an
    operator needs one. A timed-out or cancelled command leaves the gate closed
-   and may be rerun, but begins its keyset scan again. The command takes a
+   if it stops before the gate commits. A rerun in that state begins the
+   keyset scan again. The command takes a
    dedicated advisory lock, first rejects any pre-existing cross-table UUID
    collision, then keyset-scans each table in bounded batches.
 3. The command rechecks the cross-table collision condition and both
