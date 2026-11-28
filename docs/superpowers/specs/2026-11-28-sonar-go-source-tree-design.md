@@ -9,8 +9,8 @@ Keep the existing build and fixtures. Tie the v2 coverage provenance to the
 verified caller event and exact signed merge, then compare each covered path
 with the protected PR head. Keep identical regular files. Omit only a net
 base-side difference established by Git. Reject unknown files and differing
-PR-side changes. Evidence without a verified event SHA keeps the existing
-PR-tree importer and cannot omit coverage entries.
+PR-side changes. Evidence without a verified event SHA must match every covered
+file's source bytes and cannot omit coverage entries.
 
 ## Acceptance criteria
 

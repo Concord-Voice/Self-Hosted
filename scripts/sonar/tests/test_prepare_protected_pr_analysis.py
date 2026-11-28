@@ -354,17 +354,23 @@ class PrepareTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.Reject, "Go coverage source not in signed merge tree"):
             self.prepare()
 
-    def test_schema_v2_without_caller_event_keeps_the_strict_pr_tree_path(self):
+    def test_schema_v2_without_caller_event_keeps_matching_sources(self):
         self.bind_v2_merge(base_changes=True)
         self.verified["claims"].pop("event_sha")
-        run(self.upstream, "update-ref", "-d", "refs/pull/7/merge")
         self.prepare()
 
     def test_schema_v2_without_caller_event_cannot_omit_base_only_coverage(self):
         self.bind_v2_merge(base_changes=True)
         self.verified["claims"].pop("event_sha")
         self.add_coverage("base_only.go")
-        with self.assertRaisesRegex(MODULE.Reject, "Go coverage source not in PR tree"):
+        with self.assertRaisesRegex(MODULE.Reject, "Go coverage source differs on PR head"):
+            self.prepare()
+
+    def test_schema_v2_without_caller_event_rejects_same_path_in_different_trees(self):
+        self.bind_v2_merge(base_changes=True)
+        self.verified["claims"].pop("event_sha")
+        self.add_coverage("shared.go")
+        with self.assertRaisesRegex(MODULE.Reject, "Go coverage source differs on PR head"):
             self.prepare()
 
     def test_schema_v2_rejects_caller_event_mismatch_and_moved_merge(self):

@@ -394,7 +394,7 @@ def validate_evidence(candidate, verified, run, pr, jobs):
     return payload, claims
 
 
-def go_coverage_sources(repo, merge, base, head):
+def go_coverage_sources(repo, merge, base, head, *, allow_base_omission):
     """Classify paths using verified Git objects, never coverage-provided metadata."""
     parents = git(repo, "rev-list", "--parents", "-n", "1", merge, limit=200).decode().split()
     if parents != [merge, base, head]:
@@ -423,7 +423,7 @@ def go_coverage_sources(repo, merge, base, head):
     # below when proving that the PR side did not change a differing path.
     different = {path for path in merged
                  if regular_blob(merge_entries[path]) != regular_blob(head_entries.get(path))}
-    if not different:
+    if not different or not allow_base_omission:
         return merged, different, set()
     common = git(repo, "merge-base", "--all", base, head, limit=4096).decode().split()
     if len(common) != 1 or not sha(common[0]):
@@ -469,17 +469,17 @@ def prepare_git(repo, claims, payload, candidate, token):
     git(repo, "read-tree", "HEAD")
 
     selection = payload["selection"]
-    # Only v2 evidence bound to the caller's merge can omit base-side entries.
-    # Other reports stay on the original strict PR-tree import path.
-    if (selection["version"] == 1 or "event_sha" not in claims
-            or not payload["coverage"]["control_plane"]):
+    if selection["version"] == 1 or not payload["coverage"]["control_plane"]:
         return None
     git(repo, "fetch", "--no-tags", "origin", f"+refs/pull/{candidate['pr_number']}/merge:refs/remotes/origin/merge",
         limit=1024, env=fetch_env)
     merge = git(repo, "rev-parse", "refs/remotes/origin/merge").decode().strip()
     if merge != selection["merge_sha"]:
         raise Reject("Go coverage merge revision moved")
-    return go_coverage_sources(repo, merge, selection["merge_base_sha"], head)
+    # The signed selection suffices to compare source. Omitting a differing
+    # source additionally requires the verified caller event to name the merge.
+    return go_coverage_sources(repo, merge, selection["merge_base_sha"], head,
+                               allow_base_omission=claims.get("event_sha") == merge)
 
 
 def materialize(repo):
