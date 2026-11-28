@@ -95,8 +95,7 @@ type denialCell struct {
 	name string
 	// setup returns the harness, the denied caller, the file id, and a control
 	// caller who must receive the content (empty when the cell has none).
-	setup   func(t *testing.T) (ts *testSetup, denied, fileID, control string)
-	control string
+	setup func(t *testing.T) (ts *testSetup, denied, fileID, control string)
 }
 
 func TestDownloadAttachment_DenialsMatchNotFound(t *testing.T) {
@@ -124,7 +123,12 @@ func TestDownloadAttachment_DenialsMatchNotFound(t *testing.T) {
 		{name: "non-member", setup: channelCell("text", 0, false)},
 		{name: "view denied, history granted", setup: channelCell("text", rbac.PermReadMessageHistory, true)},
 		{name: "history denied, view granted", setup: channelCell("text", rbac.PermViewTextChannels, true)},
-		{name: "unknown channel type", setup: channelCell("forum", rbac.PermViewTextChannels|rbac.PermViewVoiceChannels|rbac.PermReadMessageHistory, true)},
+		// An unknown type fails closed for every caller, the owner included, so
+		// this cell has no control; the text cells above prove the fixture.
+		{name: "unknown channel type", setup: func(t *testing.T) (*testSetup, string, string, string) {
+			ts, denied, fileID, _ := channelCell("forum", rbac.PermViewTextChannels|rbac.PermViewVoiceChannels|rbac.PermReadMessageHistory, true)(t)
+			return ts, denied, fileID, ""
+		}},
 		{name: "DM non-participant", setup: func(t *testing.T) (*testSetup, string, string, string) {
 			ts := setupMediaTest(t)
 			u1 := ts.createTestUser(t, "dnm_dm1")
@@ -152,6 +156,9 @@ func TestDownloadAttachment_DenialsMatchNotFound(t *testing.T) {
 			w := downloadAs(ts, denied, fileID)
 			requireDenialIsMissingFile(t, w, downloadAs(ts, denied, uuid.New().String()))
 
+			if control == "" {
+				return
+			}
 			// Control: someone who may read the file gets the ciphertext, so the
 			// fixture is valid and the 404 above is the gate, not a broken file.
 			ok := downloadAs(ts, control, fileID)
