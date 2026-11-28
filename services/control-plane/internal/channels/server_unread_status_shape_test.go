@@ -53,6 +53,42 @@ func TestServerUnreadStatusExcludesNonVisibleChannel(t *testing.T) {
 	listed := listedChannelIDs(t, ts, serverID, member)
 	assert.Contains(t, listed, visible)
 	assert.NotContains(t, listed, hidden)
+
+	// Only the hidden channel has unread messages: the server must not surface.
+	t.Run("OnlyHiddenChannelUnread", func(t *testing.T) {
+		ts := setupTS(t)
+		owner := ts.CreateTestUser(t, "shapevisonlyowner")
+		member := ts.CreateTestUser(t, "shapevisonlymember")
+		serverID := ts.CreateTestServer(t, owner.ID, "Shape Hidden Only")
+		ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+		ts.CreateTestChannel(t, serverID, "shape-only-visible") // quiet
+		hidden := ts.CreateTestChannel(t, serverID, "shape-only-hidden")
+		ts.CreateChannelOverride(t, hidden, "user", member.ID, 0, int64(rbac.PermViewTextChannels))
+		insertUnreadMessage(t, ts, hidden, owner.ID)
+
+		statusChannels, statusServers := serverUnreadStatus(t, ts, member)
+		assert.NotContains(t, statusChannels, hidden)
+		assert.NotContains(t, statusServers, serverID,
+			"a server whose only unread channel is hidden must not appear in server_ids")
+	})
+
+	// View granted but history denied, and that channel is the only unread one.
+	t.Run("OnlyHistoryDeniedChannelUnread", func(t *testing.T) {
+		ts := setupTS(t)
+		owner := ts.CreateTestUser(t, "shapehistowner")
+		member := ts.CreateTestUser(t, "shapehistmember")
+		serverID := ts.CreateTestServer(t, owner.ID, "Shape History Only")
+		ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+		ts.CreateTestChannel(t, serverID, "shape-hist-visible") // quiet
+		sealed := ts.CreateTestChannel(t, serverID, "shape-hist-sealed")
+		ts.CreateChannelOverride(t, sealed, "user", member.ID, 0, int64(rbac.PermReadMessageHistory))
+		insertUnreadMessage(t, ts, sealed, owner.ID)
+
+		statusChannels, statusServers := serverUnreadStatus(t, ts, member)
+		assert.NotContains(t, statusChannels, sealed)
+		assert.NotContains(t, statusServers, serverID,
+			"a server whose only unread channel denies history must not appear in server_ids")
+	})
 }
 
 // Both empty responses emit `[]` for BOTH arrays, never `null`.

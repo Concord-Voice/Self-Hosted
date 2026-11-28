@@ -344,6 +344,11 @@ func TestGetChannel_HiddenChannelDeniedToMember(t *testing.T) {
 	w := ts.DoRequest("GET", pathChannelsPrefix+channelID, nil, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, http.StatusNotFound, w.Code, "view-denied member gets not-found (no existence oracle)")
 
+	// Same member, nonexistent channel: status and body must be identical.
+	missing := ts.DoRequest("GET", pathChannelsPrefix+uuid.NewString(), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, missing.Code, w.Code, "hidden and nonexistent channels answer with the same status")
+	assert.Equal(t, missing.Body.String(), w.Body.String(), "hidden and nonexistent channels answer with byte-equal bodies")
+
 	w = ts.DoRequest("GET", pathChannelsPrefix+channelID, nil, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code, "owner still sees the channel")
 }
@@ -591,6 +596,11 @@ func TestMarkChannelRead_ViewDeniedMemberBlocked(t *testing.T) {
 	w := ts.DoRequest("POST", pathChannelsPrefix+hiddenChan+"/read", nil, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 
+	// Same member, nonexistent channel: status and body must be identical.
+	missing := ts.DoRequest("POST", pathChannelsPrefix+uuid.NewString()+"/read", nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, missing.Code, w.Code, "hidden and nonexistent channels answer with the same status")
+	assert.Equal(t, missing.Body.String(), w.Body.String(), "hidden and nonexistent channels answer with byte-equal bodies")
+
 	// No read state was written for the hidden channel.
 	var exists bool
 	require.NoError(t, ts.DB.QueryRow(
@@ -609,6 +619,36 @@ func TestMarkServerReadSuccess(t *testing.T) {
 
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+"/read", nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestMarkServerRead_SkipsHiddenChannel: the bulk endpoint answers 200 but writes
+// read state only for channels the caller can view.
+func TestMarkServerRead_SkipsHiddenChannel(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "msrskipowner")
+	member := ts.CreateTestUser(t, "msrskipmember")
+	serverID := ts.CreateTestServer(t, owner.ID, "MarkServerRead Hidden")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
+	visibleChan := ts.CreateTestChannel(t, serverID, "msr-visible")
+	hiddenChan := ts.CreateTestChannel(t, serverID, "msr-hidden")
+
+	var allRoleID string
+	require.NoError(t, ts.DB.QueryRow(`SELECT id FROM roles WHERE server_id = $1 AND is_default = TRUE`, serverID).Scan(&allRoleID))
+	ts.CreateChannelOverride(t, hiddenChan, "role", allRoleID, 0, int64(rbac.PermViewTextChannels))
+
+	w := ts.DoRequest("POST", pathServersPrefix+serverID+"/read", nil, testhelpers.AuthHeaders(member.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	hasRow := func(channelID string) bool {
+		var exists bool
+		require.NoError(t, ts.DB.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM channel_read_states WHERE user_id = $1 AND channel_id = $2)`,
+			member.ID, channelID,
+		).Scan(&exists))
+		return exists
+	}
+	assert.True(t, hasRow(visibleChan), "read state is written for the visible channel")
+	assert.False(t, hasRow(hiddenChan), "no read state is written for the hidden channel")
 }
 
 // --- Unread Counts ---
